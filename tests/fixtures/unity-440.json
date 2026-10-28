@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "unity-440",
+  "sampleRate": 48000,
+  "bufferFrames": 256,
+  "channels": [
+    {
+      "id": 1,
+      "name": "ch1",
+      "sourceKind": "Hardware",
+      "sourceDeviceId": "hw-1",
+      "layout": "Mono",
+      "gainDb": 0.0,
+      "pan": 0.0,
+      "muted": false,
+      "soloed": false,
+      "inserts": []
+    }
+  ],
+  "outputs": [
+    {
+      "id": 1,
+      "name": "Main",
+      "kind": "Physical",
+      "deviceId": "out-1"
+    }
+  ],
+  "routes": [
+    {
+      "channelId": 1,
+      "outputId": 1,
+      "sendGainDb": 0.0
+    }
+  ]
+}
