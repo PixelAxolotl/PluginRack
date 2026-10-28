@@ -1,1 +1,5 @@
 .worktrees/n
+build/
+out/
+.vs/
+CMakeUserPresets.json
