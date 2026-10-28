@@ -2,11 +2,35 @@
 
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, AudioEngine& engine)
     : output(outputState), audioEngine(engine), meter(outputState.peak) {
-    nameLabel.setText(output.name, juce::dontSendNotification);
-    nameLabel.setJustificationType(juce::Justification::centred);
-    nameLabel.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
-    nameLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(nameLabel);
+    deviceControl.setTitle(output.name);
+    deviceControl.setDeviceName(output.outputDeviceName);
+    deviceControl.setError(output.outputError);
+
+    removeOutputButton.setFontSize(13.0f);
+    removeOutputButton.setClickAction([this] {
+        juce::Component::SafePointer<OutputStrip> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe == nullptr) return;
+            auto callback = safe->onRemoveRequested;
+            if (callback) callback();
+        });
+    });
+    removeOutputButton.setTooltip("Remove this output");
+    addAndMakeVisible(removeOutputButton);
+
+    deviceControl.setOnClick([this] {
+        DeviceMenu::showOutputMenu(deviceControl, output.outputDeviceName,
+                                   audioEngine.getAvailableOutputDevices(),
+                                   [this](juce::String chosen) {
+            const auto err = audioEngine.setOutputDevice(output.id, chosen);
+            deviceControl.setDeviceName(output.outputDeviceName);
+            deviceControl.setError(output.outputError);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+            }
+        });
+    });
+    addAndMakeVisible(deviceControl);
 
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
     gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 40, 14);
@@ -39,7 +63,12 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
 
 void MixerComponent::OutputStrip::resized() {
     auto area = getLocalBounds().reduced(4);
-    nameLabel.setBounds(area.removeFromTop(18));
+    auto headerRow = area.removeFromTop(22);
+    auto btnArea = headerRow.removeFromRight(22);
+    removeOutputButton.setBounds(btnArea);
+    area.removeFromTop(4);
+    deviceControl.setBounds(area.removeFromTop(46));
+    area.removeFromTop(4);
     auto mb = area.removeFromBottom(22);
     muteButton.setBounds(mb);
     area.removeFromBottom(4);
@@ -53,6 +82,8 @@ void MixerComponent::OutputStrip::resized() {
 void MixerComponent::OutputStrip::refresh() {
     gainSlider.setValue(output.gainDb.get(), juce::dontSendNotification);
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
+    deviceControl.setDeviceName(output.outputDeviceName);
+    deviceControl.setError(output.outputError);
 }
 
 MixerComponent::MixerComponent(AudioEngine& engine)
@@ -85,7 +116,7 @@ MixerComponent::MixerComponent(AudioEngine& engine)
     masterPanel.addAndMakeVisible(masterHeader);
 
     masterViewport.setViewedComponent(&masterContent, false);
-    masterViewport.setScrollBarsShown(true, false);
+    masterViewport.setScrollBarsShown(false, true);
     masterPanel.addAndMakeVisible(masterViewport);
     addAndMakeVisible(masterPanel);
 
@@ -100,29 +131,38 @@ void MixerComponent::resized() {
     addOutputButton.setBounds(toolbar.removeFromLeft(60));
     area.removeFromTop(4);
 
-    const int masterW = 360;
-    masterPanel.setBounds(area.removeFromRight(masterW));
+    const int masterW = juce::jlimit(0, area.getWidth(), 3 * (76 + 4) + 24);
+    masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
     area.removeFromRight(6);
     channelViewport.setBounds(area);
 
     // strip content size
     const int stripW = 148 + 6;
     const int contentW = juce::jmax(area.getWidth(), (int)strips.size() * stripW + 8);
-    stripContent.setSize(contentW, area.getHeight());
+    int stripH = area.getHeight();
+    if (contentW > channelViewport.getWidth()) {
+        stripH = juce::jmax(0, stripH - channelViewport.getScrollBarThickness());
+    }
+    stripContent.setSize(juce::jmax(0, contentW), juce::jmax(0, stripH));
     for (int i = 0; i < (int)strips.size(); ++i) {
-        strips[i]->setBounds(i * stripW + 4, 0, 148, area.getHeight());
+        strips[i]->setBounds(i * stripW + 4, 0, 148, stripH);
     }
 
     // master content
     auto ma = masterPanel.getLocalBounds();
     masterHeader.setBounds(ma.removeFromTop(24));
     masterViewport.setBounds(ma);
-    const int outW = 60;
+    const int outW = 76;
     const int outGap = 4;
     const int contentW2 = (int)outputStrips.size() * (outW + outGap) + 8;
-    masterContent.setSize(juce::jmax(masterViewport.getWidth(), contentW2), masterViewport.getHeight());
+    int masterH = masterViewport.getHeight();
+    if (contentW2 > masterViewport.getWidth()) {
+        masterH = juce::jmax(0, masterH - masterViewport.getScrollBarThickness());
+    }
+    masterContent.setSize(juce::jmax(0, juce::jmax(masterViewport.getWidth(), contentW2)),
+                         juce::jmax(0, masterH));
     for (int i = 0; i < (int)outputStrips.size(); ++i) {
-        outputStrips[i]->setBounds(i * (outW + outGap) + 4, 0, outW, masterViewport.getHeight());
+        outputStrips[i]->setBounds(i * (outW + outGap) + 4, 0, outW, masterH);
     }
 }
 
@@ -130,12 +170,28 @@ void MixerComponent::rebuild() {
     strips.clear();
     for (const auto& ch : audioEngine.getChannels()) {
         auto* s = strips.add(new ChannelStrip(*ch, audioEngine));
+        const std::uint32_t id = ch->id;
+        s->onRemoveRequested = [this, id] {
+            audioEngine.removeChannel(id);
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
         stripContent.addAndMakeVisible(*s);
     }
 
     outputStrips.clear();
     for (const auto& out : audioEngine.getOutputs()) {
         auto* s = outputStrips.add(new OutputStrip(*out, audioEngine));
+        const std::uint32_t id = out->id;
+        s->onRemoveRequested = [this, id] {
+            const auto err = audioEngine.removeOutput(id);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                return;
+            }
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
         masterContent.addAndMakeVisible(*s);
     }
     resized();

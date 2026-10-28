@@ -1,7 +1,116 @@
 #include "PluginHost.h"
 
+namespace {
+class PluginWindow final : public juce::DocumentWindow {
+public:
+    PluginWindow(PluginHost& ownerRef, juce::AudioProcessorEditor* editorRef)
+        : juce::DocumentWindow(editorRef != nullptr ? editorRef->getName() : juce::String("Plugin"),
+                               juce::Colours::lightgrey, juce::DocumentWindow::allButtons),
+          owner(ownerRef), editor(editorRef) {
+        setUsingNativeTitleBar(true);
+        setContentOwned(editorRef, true);
+        setResizable(true, true);
+        setResizeLimits(200, 150, 10000, 10000);
+
+        int width = 320;
+        int height = 240;
+        if (editorRef != nullptr) {
+            width = juce::jmax(240, editorRef->getWidth());
+            height = juce::jmax(180, editorRef->getHeight());
+        }
+        if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()) {
+            auto area = display->userBounds;
+            width = juce::jmin(width, juce::jmax(200, (int)area.getWidth() - 40));
+            height = juce::jmin(height, juce::jmax(150, (int)area.getHeight() - 40));
+        }
+        centreWithSize(width, height);
+        setVisible(true);
+    }
+
+    void closeButtonPressed() override {
+        // Deleting a window from inside its own close-button callback is fragile:
+        // defer so the button can finish dispatching first. The owner may destroy
+        // the window before the message arrives, so guard with a weak pointer.
+        juce::Component::SafePointer<PluginWindow> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr) safe->owner.closeEditorWindow(safe.getComponent());
+        });
+    }
+
+    ~PluginWindow() override {
+        owner.editorBeingDeleted(editor);
+        owner.clearEditorWindow(this);
+        editor = nullptr;
+    }
+
+private:
+    PluginHost& owner;
+    juce::AudioProcessorEditor* editor = nullptr;
+};
+} // namespace
+
 PluginHost::PluginHost() {
     formatManager.addFormat(std::make_unique<juce::VST3PluginFormat>());
+}
+
+PluginHost::~PluginHost() {
+    delete editorWindow;
+    editorWindow = nullptr;
+}
+
+bool PluginHost::hasPlugin() const {
+    const juce::ScopedLock lock(pluginLock);
+    return plugin != nullptr;
+}
+
+int PluginHost::getLatencySamples() const {
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin == nullptr) return 0;
+    return plugin->getLatencySamples();
+}
+
+void PluginHost::editorBeingDeleted(juce::AudioProcessorEditor* ed) {
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin != nullptr && ed != nullptr) {
+        plugin->editorBeingDeleted(ed);
+    }
+}
+
+void PluginHost::clearEditorWindow(juce::DocumentWindow* window) {
+    if (editorWindow == window) editorWindow = nullptr;
+}
+
+void PluginHost::closeEditorWindow(juce::DocumentWindow* window) {
+    if (window == nullptr || window != editorWindow) return;
+    auto* doomed = editorWindow;
+    editorWindow = nullptr;
+    delete doomed;
+}
+
+void PluginHost::showEditor() {
+    if (!hasPlugin()) return;
+
+    if (editorWindow != nullptr) {
+        editorWindow->toFront(true);
+        return;
+    }
+
+    juce::AudioProcessorEditor* ed = nullptr;
+    {
+        const juce::ScopedLock lock(pluginLock);
+        if (plugin != nullptr && plugin->hasEditor()) {
+            ed = plugin->createEditorAndMakeActive();
+        }
+    }
+
+    if (ed == nullptr) {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "PluginRack",
+                                              "This plugin has no editor.");
+        return;
+    }
+
+    auto* window = new PluginWindow(*this, ed);
+    editorWindow = window;
 }
 
 juce::String PluginHost::loadPlugin(const juce::File& file) {

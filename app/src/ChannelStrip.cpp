@@ -8,71 +8,99 @@ constexpr int kStripWidth = 148;
 
 ChannelStrip::InsertSlotComponent::InsertSlotComponent(ChannelStrip& ownerRef, int index)
     : owner(ownerRef), slotIndex(index) {
+    setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    setTooltip("Click to load a VST3 plugin");
+
     indexLabel.setText(juce::String(index + 1), juce::dontSendNotification);
     indexLabel.setJustificationType(juce::Justification::centred);
+    indexLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
     indexLabel.setColour(juce::Label::textColourId, theme::dim());
+    indexLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(indexLabel);
 
     nameLabel.setJustificationType(juce::Justification::centredLeft);
+    nameLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     nameLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(nameLabel);
 
-    bypassButton.setClickingTogglesState(true);
-    bypassButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    bypassButton.setColour(juce::TextButton::buttonOnColourId, theme::violet());
-    bypassButton.onClick = [this] {
+    bypassButton.setClickAction([this] {
         if (insert == nullptr) return;
-        owner.audioEngine.setPluginBypassed(owner.channel.id, insert->id, bypassButton.getToggleState());
-    };
+        const bool next = !bypassButton.getToggleState();
+        bypassButton.setToggleState(next);
+        owner.audioEngine.setPluginBypassed(owner.channel.id, insert->id, next);
+    });
+    bypassButton.setTooltip("Bypass this plugin");
     addAndMakeVisible(bypassButton);
 
-    removeButton.onClick = [this] {
+    removeButton.setClickAction([this] {
         if (insert == nullptr) return;
         owner.audioEngine.removePlugin(owner.channel.id, insert->id);
         juce::Component::SafePointer<ChannelStrip> safeOwner(&owner);
         juce::MessageManager::callAsync([safeOwner] {
             if (safeOwner != nullptr) safeOwner->refreshInserts();
         });
-    };
+    });
+    removeButton.setTooltip("Remove this plugin");
     addAndMakeVisible(removeButton);
 }
 
-void ChannelStrip::InsertSlotComponent::setInsert(const AudioEngine::InsertSlot* newInsert) {
+void ChannelStrip::InsertSlotComponent::setInsert(AudioEngine::InsertSlot* newInsert) {
     insert = newInsert;
     if (insert != nullptr) {
         nameLabel.setText(insert->pluginName.isNotEmpty() ? insert->pluginName
                                                           : juce::File(insert->pluginPath).getFileName(),
                           juce::dontSendNotification);
-        bypassButton.setToggleState(insert->bypassed.get(), juce::dontSendNotification);
-        bypassButton.setEnabled(true);
-        removeButton.setEnabled(true);
+        bypassButton.setToggleState(insert->bypassed.get());
+        bypassButton.setEnabledState(true);
+        removeButton.setEnabledState(true);
         nameLabel.setColour(juce::Label::textColourId, theme::text());
+        nameLabel.setTooltip(insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath);
+        setTooltip("Click to open the plugin editor");
     } else {
-        nameLabel.setText("empty \xe2\x80\x94 click to load", juce::dontSendNotification);
+        nameLabel.setText("empty", juce::dontSendNotification);
         nameLabel.setColour(juce::Label::textColourId, theme::dim());
-        bypassButton.setEnabled(false);
-        removeButton.setEnabled(false);
+        nameLabel.setTooltip("Click to load a VST3 plugin");
+        bypassButton.setToggleState(false);
+        bypassButton.setEnabledState(false);
+        removeButton.setEnabledState(false);
+        setTooltip("Click to load a VST3 plugin");
     }
     repaint();
 }
 
 void ChannelStrip::InsertSlotComponent::resized() {
-    auto area = getLocalBounds().reduced(2, 1);
-    indexLabel.setBounds(area.removeFromLeft(16));
+    auto area = getLocalBounds().reduced(3, 1);
+    indexLabel.setBounds(area.removeFromLeft(14));
     removeButton.setBounds(area.removeFromRight(18));
     area.removeFromRight(2);
-    bypassButton.setBounds(area.removeFromRight(16));
-    area.removeFromRight(2);
+    bypassButton.setBounds(area.removeFromRight(18));
+    area.removeFromRight(3);
     nameLabel.setBounds(area);
 }
 
 void ChannelStrip::InsertSlotComponent::mouseDown(const juce::MouseEvent&) {
-    if (insert == nullptr) owner.choosePlugin();
+    if (insert == nullptr) {
+        owner.choosePlugin();
+    } else {
+        insert->pluginHost.showEditor();
+    }
+}
+
+void ChannelStrip::InsertSlotComponent::mouseEnter(const juce::MouseEvent&) {
+    hovered = true;
+    repaint();
+}
+
+void ChannelStrip::InsertSlotComponent::mouseExit(const juce::MouseEvent&) {
+    hovered = false;
+    repaint();
 }
 
 void ChannelStrip::InsertSlotComponent::paint(juce::Graphics& g) {
     auto r = getLocalBounds().toFloat();
-    g.setColour(insert != nullptr ? theme::strip() : theme::control().withAlpha(0.5f));
+    juce::Colour face = insert != nullptr ? theme::strip() : theme::control().withAlpha(0.45f);
+    if (hovered && insert == nullptr) face = theme::control().withAlpha(0.75f);
+    g.setColour(face);
     g.fillRoundedRectangle(r, 3.0f);
     if (insert != nullptr) {
         g.setColour(theme::violet().withAlpha(0.6f));
@@ -87,18 +115,41 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     : channel(channelState),
       audioEngine(engine),
       levelMeter(channelState.peak) {
-    sourceNameLabel.setText(channel.name, juce::dontSendNotification);
-    sourceNameLabel.setJustificationType(juce::Justification::centred);
-    sourceNameLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-    sourceNameLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(sourceNameLabel);
+    deviceControl.setTitle(channel.name);
+    deviceControl.setDeviceName(channel.inputDeviceName);
+    deviceControl.setError(channel.inputError);
 
-    deviceCombo.addItem("Default Input", 1);
-    deviceCombo.setSelectedId(1, juce::dontSendNotification);
-    deviceCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
-    deviceCombo.setColour(juce::ComboBox::textColourId, theme::text());
-    deviceCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
-    addAndMakeVisible(deviceCombo);
+    channelLabel.setText("CH " + juce::String(channel.id), juce::dontSendNotification);
+    channelLabel.setJustificationType(juce::Justification::centredLeft);
+    channelLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
+    channelLabel.setColour(juce::Label::textColourId, theme::dim());
+    addAndMakeVisible(channelLabel);
+
+    removeChannelButton.setFontSize(13.0f);
+    removeChannelButton.setClickAction([this] {
+        juce::Component::SafePointer<ChannelStrip> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe == nullptr) return;
+            // Copy the callback: the strip is destroyed by the handler that runs it.
+            auto callback = safe->onRemoveRequested;
+            if (callback) callback();
+        });
+    });
+    removeChannelButton.setTooltip("Remove this channel");
+    addAndMakeVisible(removeChannelButton);
+    deviceControl.setOnClick([this] {
+        DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName,
+                                  audioEngine.getAvailableInputDevices(),
+                                  [this](juce::String chosen) {
+            const auto err = audioEngine.setChannelInputDevice(channel.id, chosen);
+            deviceControl.setDeviceName(channel.inputDeviceName);
+            deviceControl.setError(channel.inputError);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+            }
+        });
+    });
+    addAndMakeVisible(deviceControl);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -116,12 +167,12 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     addAndMakeVisible(addVstButton);
 
     levelLabel.setJustificationType(juce::Justification::centred);
-    levelLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
+    levelLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     levelLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(levelLabel);
 
     levelKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 40, 14);
+    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
     levelKnob.setRange(-12.0, 12.0, 0.1);
     levelKnob.setTextValueSuffix(" dB");
     levelKnob.setDoubleClickReturnValue(true, 0.0);
@@ -136,12 +187,12 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     addAndMakeVisible(levelKnob);
 
     panLabel.setJustificationType(juce::Justification::centred);
-    panLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
+    panLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     panLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(panLabel);
 
     panKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 40, 14);
+    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
     panKnob.setRange(-1.0, 1.0, 0.01);
     panKnob.setDoubleClickReturnValue(true, 0.0);
     panKnob.setValue(channel.pan.get(), juce::dontSendNotification);
@@ -154,27 +205,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     panKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     addAndMakeVisible(panKnob);
 
-    // routing buttons
-    const std::vector<juce::String> labels = {"A1","A2","A3","A4","A5","B1","B2","B3"};
-    for (const auto& lbl : labels) {
-        auto* btn = routingButtons.add(new juce::TextButton(lbl));
-        btn->setClickingTogglesState(true);
-        btn->setColour(juce::TextButton::buttonColourId, theme::control());
-        btn->setColour(juce::TextButton::buttonOnColourId, theme::green());
-        btn->setColour(juce::TextButton::textColourOffId, theme::text());
-        btn->setColour(juce::TextButton::textColourOnId, juce::Colour(0xff1b2229));
-        btn->onClick = [this, btn, lbl] {
-            // map label to output index
-            int idx = -1;
-            if (lbl.startsWith("A")) idx = lbl.substring(1).getIntValue() - 1;
-            else if (lbl.startsWith("B")) idx = 5 + lbl.substring(1).getIntValue() - 1;
-            const auto& outputs = audioEngine.getOutputs();
-            if (idx < 0 || idx >= (int)outputs.size()) return;
-            const auto outId = outputs[idx]->id;
-            audioEngine.setSendGain(channel.id, outId, btn->getToggleState() ? 0.0f : -60.0f);
-        };
-        addAndMakeVisible(*btn);
-    }
+    rebuildRoutingButtons();
 
     faderSlider.setSliderStyle(juce::Slider::LinearVertical);
     faderSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 44, 16);
@@ -219,13 +250,20 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
-    sourceNameLabel.setBounds(area.removeFromTop(22));
-    deviceCombo.setBounds(area.removeFromTop(20));
+
+    // header row
+    auto headerRow = area.removeFromTop(22);
+    auto btnArea = headerRow.removeFromRight(22);
+    channelLabel.setBounds(headerRow);
+    removeChannelButton.setBounds(btnArea);
+    area.removeFromTop(4);
+
+    deviceControl.setBounds(area.removeFromTop(40));
     area.removeFromTop(4);
 
     vstHeader.setBounds(area.removeFromTop(14));
     // slots
-    const int slotH = 18;
+    const int slotH = 22;
     for (int i = 0; i < slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
@@ -234,47 +272,39 @@ void ChannelStrip::resized() {
     area.removeFromTop(6);
 
     // knobs row
-    auto knobRow = area.removeFromTop(56);
-    auto leftKnob = knobRow.removeFromLeft(knobRow.getWidth() / 2);
-    levelLabel.setBounds(leftKnob.removeFromTop(12));
-    levelKnob.setBounds(leftKnob);
-    knobRow.removeFromLeft(4);
-    panLabel.setBounds(knobRow.removeFromTop(12));
-    panKnob.setBounds(knobRow);
+    auto knobRow = area.removeFromTop(88);
+    auto leftKnob = knobRow.removeFromLeft((knobRow.getWidth() - 8) / 2);
+    levelLabel.setBounds(leftKnob.removeFromTop(14));
+    levelKnob.setBounds(leftKnob.removeFromTop(72));
+    knobRow.removeFromLeft(8);
+    panLabel.setBounds(knobRow.removeFromTop(14));
+    panKnob.setBounds(knobRow.removeFromTop(72));
 
     area.removeFromTop(4);
-    // routing buttons: 2 rows of 4
-    const int btnH = 18;
+    // routing buttons grid
+    const int rows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
+    const int routingHeight = rows * 22;
+    auto routingArea = area.removeFromTop(routingHeight);
+    const int cellW = juce::jmax(1, routingArea.getWidth() / 4);
     for (int i = 0; i < (int)routingButtons.size(); ++i) {
-        if (i % 4 == 0) {
-            // new row
-        }
-    }
-    // layout in grid
-    {
-        int idx = 0;
-        for (int row = 0; row < 2; ++row) {
-            auto r = area.removeFromTop(btnH);
-            area.removeFromTop(2);
-            for (int col = 0; col < 4; ++col) {
-                if (idx < routingButtons.size()) {
-                    auto cell = r.removeFromLeft(r.getWidth() / (4 - col));
-                    routingButtons[idx]->setBounds(cell.reduced(1));
-                    ++idx;
-                }
-            }
-        }
+        const int row = i / 4;
+        const int col = i % 4;
+        routingButtons[i]->setBounds(routingArea.getX() + col * cellW + 1,
+                                    routingArea.getY() + row * 22,
+                                    juce::jmax(1, cellW - 2), 20);
     }
     area.removeFromTop(4);
 
     // fader + meter
     auto bottom = area.removeFromBottom(30); // mute/solo
     auto fm = area; // remaining for fader+meter
+    if (fm.getHeight() < 140) {
+        // keep minimum; area already consumed? leave as is
+    }
     const int meterW = 12;
     levelMeter.setBounds(fm.removeFromRight(meterW));
     fm.removeFromRight(4);
     faderSlider.setBounds(fm);
-    area.removeFromTop(0);
 
     muteButton.setBounds(bottom.removeFromLeft(bottom.getWidth() / 2));
     bottom.removeFromLeft(4);
@@ -284,7 +314,7 @@ void ChannelStrip::resized() {
 void ChannelStrip::refreshInserts() {
     // update slots
     for (int i = 0; i < slots.size(); ++i) {
-        const AudioEngine::InsertSlot* ins = nullptr;
+        AudioEngine::InsertSlot* ins = nullptr;
         if (i < (int)channel.inserts.size()) ins = channel.inserts[i].get();
         slots[i]->setInsert(ins);
     }
@@ -295,13 +325,13 @@ void ChannelStrip::refreshRouting() {
     const auto& outputs = audioEngine.getOutputs();
     for (int i = 0; i < (int)routingButtons.size(); ++i) {
         bool on = false;
-        if (i < (int)outputs.size()) {
-            const float g = audioEngine.getSendGain(channel.id, outputs[i]->id);
+        bool enabled = false;
+        if (i < (int)routingOutputIds.size() && i < (int)outputs.size()) {
+            const float g = audioEngine.getSendGain(channel.id, routingOutputIds[i]);
             on = g > -30.0f;
-            routingButtons[i]->setEnabled(true);
-        } else {
-            routingButtons[i]->setEnabled(false);
+            enabled = true;
         }
+        routingButtons[i]->setEnabled(enabled);
         routingButtons[i]->setToggleState(on, juce::dontSendNotification);
     }
 }
@@ -323,6 +353,35 @@ void ChannelStrip::choosePlugin() {
                                  }
                                  safeThis->refreshInserts();
                              });
+}
+
+void ChannelStrip::rebuildRoutingButtons() {
+    for (auto* btn : routingButtons) removeChildComponent(btn);
+    routingButtons.clear();
+    routingOutputIds.clear();
+
+    for (const auto& output : audioEngine.getOutputs()) {
+        juce::String label = output->name;
+        if (label.startsWithIgnoreCase("Output ")) {
+            label = label.substring(7).trim();
+        }
+
+        auto* btn = routingButtons.add(new juce::TextButton(label));
+        btn->setClickingTogglesState(true);
+        btn->setColour(juce::TextButton::buttonColourId, theme::control());
+        btn->setColour(juce::TextButton::buttonOnColourId, theme::green());
+        btn->setColour(juce::TextButton::textColourOffId, theme::text());
+        btn->setColour(juce::TextButton::textColourOnId, juce::Colour(0xff1b2229));
+
+        const std::uint32_t outputId = output->id;
+        routingOutputIds.push_back(outputId);
+        btn->onClick = [this, btn, outputId] {
+            audioEngine.setSendGain(channel.id, outputId, btn->getToggleState() ? 0.0f : -60.0f);
+        };
+        addAndMakeVisible(*btn);
+    }
+
+    refreshRouting();
 }
 
 void ChannelStrip::paint(juce::Graphics& g) {

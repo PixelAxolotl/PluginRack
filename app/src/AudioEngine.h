@@ -10,6 +10,7 @@
 #include <pluginrack/Scene.h>
 
 #include "PluginHost.h"
+#include "DeviceStream.h"
 
 class AudioEngine {
 public:
@@ -32,6 +33,9 @@ public:
         juce::Atomic<float> peak{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
+        juce::String inputDeviceName;
+        juce::String inputError;
+        std::unique_ptr<InputCapture> input;
     };
 
     struct Output {
@@ -41,6 +45,9 @@ public:
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
         juce::AudioBuffer<float> buffer;
+        juce::String outputDeviceName;
+        juce::String outputError;
+        std::unique_ptr<OutputPlayback> output;
     };
 
     struct Route {
@@ -49,14 +56,28 @@ public:
         juce::Atomic<float> sendGainDb{0.0f};
     };
 
+    struct LatencyReport {
+        double inputMs = 0.0;
+        double pluginMs = 0.0;
+        double outputMs = 0.0;
+        double totalMs = 0.0;
+        bool valid = false;
+    };
+
     AudioEngine();
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate);
-    void processBlock(const juce::AudioSourceChannelInfo& bufferToFill);
+    void render(int frames);
     void releaseResources();
 
     void addChannel();
+    void removeChannel(std::uint32_t channelId);
     void addOutput();
+    juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
+    juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
+    juce::String getClockDescription() const;
+    juce::StringArray getAvailableInputDevices() const;
+    juce::StringArray getAvailableOutputDevices() const;
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
@@ -74,6 +95,8 @@ public:
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
+
+    LatencyReport getLatencyReport() const;
 
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);
@@ -93,6 +116,7 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    std::uint32_t clockOutputId = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

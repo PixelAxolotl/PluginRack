@@ -15,6 +15,14 @@ target_sources(pluginrack_app PRIVATE
     src/AudioEngine.h
     src/ChannelStrip.cpp
     src/ChannelStrip.h
+    src/ConsoleLookAndFeel.cpp
+    src/ConsoleLookAndFeel.h
+    src/DeviceControl.cpp
+    src/DeviceControl.h
+    src/DeviceMenu.cpp
+    src/DeviceMenu.h
+    src/DeviceStream.cpp
+    src/DeviceStream.h
     src/LevelMeter.cpp
     src/LevelMeter.h
     src/Main.cpp

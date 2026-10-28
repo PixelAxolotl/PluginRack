@@ -6,7 +6,10 @@
 
 #include "AudioEngine.h"
 #include "ChannelStrip.h"
+#include "DeviceControl.h"
+#include "DeviceMenu.h"
 #include "LevelMeter.h"
+#include "MiniButton.h"
 #include "Theme.h"
 
 class MixerComponent final : public juce::Component {
@@ -25,10 +28,13 @@ private:
         void resized() override;
         void refresh();
 
+        std::function<void()> onRemoveRequested;
+
     private:
         AudioEngine::Output& output;
         AudioEngine& audioEngine;
-        juce::Label nameLabel;
+        DeviceControl deviceControl;
+        MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
