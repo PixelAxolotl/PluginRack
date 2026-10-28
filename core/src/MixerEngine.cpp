@@ -135,34 +135,41 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         const bool silenced = cache.muted || (anySolo_ && !cache.soloed);
         const bool isMono = input.numChannels == 1;
         const bool isStereo = input.numChannels == 2;
-        if (silenced || cache.gain == 0.0f || frames == 0 || input.channels == nullptr ||
-            (!isMono && !isStereo) || input.channels[0] == nullptr ||
-            (isStereo && input.channels[1] == nullptr)) {
+        const bool hasMono =
+            isMono && input.channels != nullptr && input.channels[0] != nullptr;
+        const bool hasStereo = isStereo && input.channels != nullptr &&
+                               input.channels[0] != nullptr && input.channels[1] != nullptr;
+        if (hasMono) {
+            // Mono-block upmix is intentional per spec section 3.2.
+            const float* mono = input.channels[0];
+            for (int i = 0; i < frames; ++i) {
+                scratchLeft[i] = mono[i];
+                scratchRight[i] = mono[i];
+            }
+        } else if (hasStereo) {
+            const float* inLeft = input.channels[0];
+            const float* inRight = input.channels[1];
+            for (int i = 0; i < frames; ++i) {
+                scratchLeft[i] = inLeft[i];
+                scratchRight[i] = inRight[i];
+            }
+        } else {
+            for (int i = 0; i < frames; ++i) {
+                scratchLeft[i] = 0.0f;
+                scratchRight[i] = 0.0f;
+            }
+        }
+        if (c < insertChains_.size() && insertChains_[c] != nullptr) {
+            float* scratchPtrs[2] = {scratchLeft, scratchRight};
+            AudioBlock scratchBlock{scratchPtrs, 2, frames};
+            insertChains_[c]->process(scratchBlock);
+        }
+        if (silenced || cache.gain == 0.0f) {
             for (int i = 0; i < frames; ++i) {
                 scratchLeft[i] = 0.0f;
                 scratchRight[i] = 0.0f;
             }
         } else {
-            if (isMono) {
-                // Mono-block upmix is intentional per spec section 3.2.
-                const float* mono = input.channels[0];
-                for (int i = 0; i < frames; ++i) {
-                    scratchLeft[i] = mono[i];
-                    scratchRight[i] = mono[i];
-                }
-            } else {
-                const float* inLeft = input.channels[0];
-                const float* inRight = input.channels[1];
-                for (int i = 0; i < frames; ++i) {
-                    scratchLeft[i] = inLeft[i];
-                    scratchRight[i] = inRight[i];
-                }
-            }
-            if (c < insertChains_.size() && insertChains_[c] != nullptr) {
-                float* scratchPtrs[2] = {scratchLeft, scratchRight};
-                AudioBlock scratchBlock{scratchPtrs, 2, frames};
-                insertChains_[c]->process(scratchBlock);
-            }
             const float leftScale = cache.gain * cache.panLeft;
             const float rightScale = cache.gain * cache.panRight;
             for (int i = 0; i < frames; ++i) {
