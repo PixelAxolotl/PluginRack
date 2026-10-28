@@ -91,6 +91,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     maxBlockFrames_ = maxFrames;
     outputCount_ = scene.outputs.size();
     anySolo_ = anySolo;
+    sampleRate_ = scene.sampleRate;
 
     const std::size_t stereoFrames = static_cast<std::size_t>(maxFrames) * 2;
     scratch_.assign(channels_.size() * stereoFrames, 0.0f);
@@ -106,6 +107,24 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     }
     stoppedChannels_.assign(channels_.size(), 0);
     disabledOutputs_.assign(outputCount_, 0);
+
+    channelIds_.clear();
+    channelIds_.reserve(scene.channels.size());
+    for (const Channel& channel : scene.channels) {
+        channelIds_.push_back(channel.id);
+    }
+    outputIds_.clear();
+    outputIds_.reserve(scene.outputs.size());
+    for (const Output& output : scene.outputs) {
+        outputIds_.push_back(output.id);
+    }
+    meters_.reset();
+    for (const std::uint32_t id : channelIds_) {
+        meters_.observeChannel(id, 0.0f);
+    }
+    for (const std::uint32_t id : outputIds_) {
+        meters_.observeOutput(id, 0.0f);
+    }
     return true;
 }
 
@@ -145,6 +164,21 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             accRight[i] = 0.0f;
         }
     }
+
+    int blockFrames = 0;
+    for (std::size_t c = 0; c < numChannels; ++c) {
+        const int frames = clampFrames(channelInputs[c].numFrames, maxFrames);
+        if (frames > blockFrames) {
+            blockFrames = frames;
+        }
+    }
+    for (std::size_t o = 0; o < numOutputs; ++o) {
+        const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
+        if (frames > blockFrames) {
+            blockFrames = frames;
+        }
+    }
+    meters_.advance(blockFrames, sampleRate_);
 
     for (std::size_t c = 0; c < numChannels; ++c) {
         const AudioBlock& input = channelInputs[c];
@@ -198,6 +232,20 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchRight[i] *= rightScale;
             }
         }
+        float channelPeak = 0.0f;
+        for (int i = 0; i < frames; ++i) {
+            const float left = std::fabs(scratchLeft[i]);
+            const float right = std::fabs(scratchRight[i]);
+            if (left > channelPeak) {
+                channelPeak = left;
+            }
+            if (right > channelPeak) {
+                channelPeak = right;
+            }
+        }
+        if (c < channelIds_.size()) {
+            meters_.observeChannel(channelIds_[c], channelPeak);
+        }
     }
 
     for (const RouteCache& route : routes_) {
@@ -234,6 +282,20 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         const float* accLeft =
             accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
         const float* accRight = accLeft + maxFrames;
+        float outputPeak = 0.0f;
+        for (int i = 0; i < frames; ++i) {
+            const float left = std::fabs(accLeft[i]);
+            const float right = std::fabs(accRight[i]);
+            if (left > outputPeak) {
+                outputPeak = left;
+            }
+            if (right > outputPeak) {
+                outputPeak = right;
+            }
+        }
+        if (o < outputIds_.size()) {
+            meters_.observeOutput(outputIds_[o], outputPeak);
+        }
         if (output.numChannels >= 1 && output.channels[0] != nullptr) {
             if (disabled) {
                 for (int i = 0; i < frames; ++i) {
@@ -262,5 +324,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
 int MixerEngine::channelCount() const noexcept { return static_cast<int>(channels_.size()); }
 
 int MixerEngine::outputCount() const noexcept { return static_cast<int>(outputCount_); }
+
+const MeterBank& MixerEngine::meters() const noexcept { return meters_; }
 
 } // namespace pluginrack
