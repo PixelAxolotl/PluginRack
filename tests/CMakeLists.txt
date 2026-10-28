@@ -1,7 +1,7 @@
 include(FetchContent)
 FetchContent_Declare(Catch2 GIT_REPOSITORY https://github.com/catchorg/Catch2.git GIT_TAG v3.7.1)
 FetchContent_MakeAvailable(Catch2)
-add_executable(pluginrack_tests test_version.cpp test_scene_codec.cpp test_scene_validator.cpp test_mixer_engine.cpp)
+add_executable(pluginrack_tests test_version.cpp test_scene_codec.cpp test_scene_validator.cpp test_mixer_engine.cpp test_insert_chain.cpp)
 target_include_directories(pluginrack_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pluginrack_tests PRIVATE pluginrack::core Catch2::Catch2WithMain)
 include(Catch)

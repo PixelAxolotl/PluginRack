@@ -1,17 +1,21 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "pluginrack/AudioBlock.h"
+#include "pluginrack/InsertChain.h"
+#include "pluginrack/PluginHost.h"
 #include "pluginrack/Scene.h"
 
 namespace pluginrack {
 
 class MixerEngine {
 public:
+    void setPluginFactory(IPluginFactory* factory) noexcept;
     // Returns false and fills *error when the scene is invalid or has no outputs.
     bool prepare(const Scene& scene, int maxBlockFrames, std::string* error);
     void render(std::span<const AudioBlock> channelInputs,
@@ -38,6 +42,8 @@ private:
     std::vector<RouteCache> routes_;
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
+    std::vector<std::unique_ptr<InsertChain>> insertChains_;
+    IPluginFactory* pluginFactory_ = nullptr;
     std::size_t outputCount_ = 0;
     int maxBlockFrames_ = 0;
     bool anySolo_ = false;
