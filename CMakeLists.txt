@@ -1,8 +1,21 @@
 cmake_minimum_required(VERSION 3.28)
-project(PluginRack VERSION 0.1.0 LANGUAGES CXX)
+project(PluginRack VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 add_subdirectory(core)
 add_subdirectory(tools)
 add_subdirectory(tests)
+
+option(PLUGINRACK_BUILD_APP "Build the JUCE desktop app when its SDKs are available" ON)
+set(JUCE_DIR "C:/Users/thorz/JUCE" CACHE PATH "Path to the JUCE source tree")
+set(VST3_SDK_DIR "C:/Users/thorz/vst3sdk" CACHE PATH "Path to the VST3 SDK")
+
+if(PLUGINRACK_BUILD_APP)
+    if(EXISTS "${JUCE_DIR}/CMakeLists.txt"
+       AND EXISTS "${VST3_SDK_DIR}/pluginterfaces/base/fplatform.h")
+        add_subdirectory(app)
+    else()
+        message(WARNING "Skipping pluginrack_app: set JUCE_DIR and VST3_SDK_DIR to valid SDK paths")
+    endif()
+endif()
