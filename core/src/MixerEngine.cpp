@@ -104,6 +104,26 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 channel.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
         }
     }
+    stoppedChannels_.assign(channels_.size(), 0);
+    disabledOutputs_.assign(outputCount_, 0);
+    return true;
+}
+
+bool MixerEngine::prepare(const Scene& scene, const SceneAvailability& availability,
+                          int maxBlockFrames, std::string* error) {
+    if (!prepare(scene, maxBlockFrames, error)) {
+        return false;
+    }
+    for (const std::uint32_t index : availability.stoppedChannels) {
+        if (index < stoppedChannels_.size()) {
+            stoppedChannels_[index] = 1;
+        }
+    }
+    for (const std::uint32_t index : availability.disabledOutputs) {
+        if (index < disabledOutputs_.size()) {
+            disabledOutputs_[index] = 1;
+        }
+    }
     return true;
 }
 
@@ -132,7 +152,8 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         const int frames = clampFrames(input.numFrames, maxFrames);
         float* scratchLeft = scratch_.data() + (c * 2) * static_cast<std::size_t>(maxFrames);
         float* scratchRight = scratchLeft + maxFrames;
-        const bool silenced = cache.muted || (anySolo_ && !cache.soloed);
+        const bool silenced = cache.muted || (anySolo_ && !cache.soloed) ||
+                                (c < stoppedChannels_.size() && stoppedChannels_[c] != 0);
         const bool isMono = input.numChannels == 1;
         const bool isStereo = input.numChannels == 2;
         const bool hasMono =
@@ -209,17 +230,30 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         if (output.channels == nullptr) {
             continue;
         }
+        const bool disabled = o < disabledOutputs_.size() && disabledOutputs_[o] != 0;
         const float* accLeft =
             accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
         const float* accRight = accLeft + maxFrames;
         if (output.numChannels >= 1 && output.channels[0] != nullptr) {
-            for (int i = 0; i < frames; ++i) {
-                output.channels[0][i] = accLeft[i];
+            if (disabled) {
+                for (int i = 0; i < frames; ++i) {
+                    output.channels[0][i] = 0.0f;
+                }
+            } else {
+                for (int i = 0; i < frames; ++i) {
+                    output.channels[0][i] = accLeft[i];
+                }
             }
         }
         if (output.numChannels >= 2 && output.channels[1] != nullptr) {
-            for (int i = 0; i < frames; ++i) {
-                output.channels[1][i] = accRight[i];
+            if (disabled) {
+                for (int i = 0; i < frames; ++i) {
+                    output.channels[1][i] = 0.0f;
+                }
+            } else {
+                for (int i = 0; i < frames; ++i) {
+                    output.channels[1][i] = accRight[i];
+                }
             }
         }
     }

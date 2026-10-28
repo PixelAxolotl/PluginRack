@@ -10,6 +10,7 @@
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/PluginHost.h"
 #include "pluginrack/Scene.h"
+#include "pluginrack/SceneAvailability.h"
 
 namespace pluginrack {
 
@@ -18,6 +19,10 @@ public:
     void setPluginFactory(IPluginFactory* factory) noexcept;
     // Returns false and fills *error when the scene is invalid or has no outputs.
     bool prepare(const Scene& scene, int maxBlockFrames, std::string* error);
+    // Availability overload: stopped channels render silence and disabled
+    // outputs are written as silence; the rest of the scene renders.
+    bool prepare(const Scene& scene, const SceneAvailability& availability,
+                 int maxBlockFrames, std::string* error);
     void render(std::span<const AudioBlock> channelInputs,
                 std::span<AudioBlock> outputBlocks) noexcept;
     int channelCount() const noexcept;
@@ -44,6 +49,8 @@ private:
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
     IPluginFactory* pluginFactory_ = nullptr;
+    std::vector<char> stoppedChannels_;
+    std::vector<char> disabledOutputs_;
     std::size_t outputCount_ = 0;
     int maxBlockFrames_ = 0;
     bool anySolo_ = false;
