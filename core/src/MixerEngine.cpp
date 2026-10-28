@@ -275,10 +275,6 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     for (std::size_t o = 0; o < numOutputs; ++o) {
         AudioBlock& output = outputBlocks[o];
         const int frames = clampFrames(output.numFrames, maxFrames);
-        if (output.channels == nullptr) {
-            continue;
-        }
-        const bool disabled = o < disabledOutputs_.size() && disabledOutputs_[o] != 0;
         const float* accLeft =
             accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
         const float* accRight = accLeft + maxFrames;
@@ -296,6 +292,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         if (o < outputIds_.size()) {
             meters_.observeOutput(outputIds_[o], outputPeak);
         }
+        if (output.channels == nullptr) {
+            continue;
+        }
+        const bool disabled = o < disabledOutputs_.size() && disabledOutputs_[o] != 0;
         if (output.numChannels >= 1 && output.channels[0] != nullptr) {
             if (disabled) {
                 for (int i = 0; i < frames; ++i) {

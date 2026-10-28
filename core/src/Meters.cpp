@@ -10,6 +10,9 @@ namespace {
 constexpr float kMaxMeterPeak = 8.0f; // +18 dB; the fader allows +12 dB.
 
 float clampPeak(float peak) noexcept {
+    if (!std::isfinite(peak)) {
+        return 0.0f;
+    }
     return std::clamp(peak, 0.0f, kMaxMeterPeak);
 }
 
