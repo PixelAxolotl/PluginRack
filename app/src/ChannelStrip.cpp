@@ -87,18 +87,20 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     : channel(channelState),
       audioEngine(engine),
       levelMeter(channelState.peak) {
-    sourceNameLabel.setText(channel.name, juce::dontSendNotification);
-    sourceNameLabel.setJustificationType(juce::Justification::centred);
-    sourceNameLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-    sourceNameLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(sourceNameLabel);
-
-    deviceCombo.addItem("Default Input", 1);
-    deviceCombo.setSelectedId(1, juce::dontSendNotification);
-    deviceCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
-    deviceCombo.setColour(juce::ComboBox::textColourId, theme::text());
-    deviceCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
-    addAndMakeVisible(deviceCombo);
+    deviceControl.setTitle(channel.name);
+    deviceControl.setDeviceName(channel.inputDeviceName);
+    deviceControl.setError(channel.inputError);
+    deviceControl.setOnClick([this] {
+        DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName, [this](juce::String chosen) {
+            const auto err = audioEngine.setChannelInputDevice(channel.id, chosen);
+            deviceControl.setDeviceName(channel.inputDeviceName);
+            deviceControl.setError(channel.inputError);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+            }
+        });
+    });
+    addAndMakeVisible(deviceControl);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -219,8 +221,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
-    sourceNameLabel.setBounds(area.removeFromTop(22));
-    deviceCombo.setBounds(area.removeFromTop(20));
+    deviceControl.setBounds(area.removeFromTop(40));
     area.removeFromTop(4);
 
     vstHeader.setBounds(area.removeFromTop(14));

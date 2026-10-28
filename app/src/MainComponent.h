@@ -7,14 +7,11 @@
 #include "RoutingMatrixComponent.h"
 #include "Theme.h"
 
-class MainComponent final : public juce::AudioAppComponent {
+class MainComponent final : public juce::Component {
 public:
     MainComponent();
-    ~MainComponent() override;
+    ~MainComponent() override = default;
 
-    void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override;
-    void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override;
-    void releaseResources() override;
     void resized() override;
     void paint(juce::Graphics& g) override;
 
@@ -26,7 +23,6 @@ private:
 
     AudioEngine audioEngine;
     MixerComponent mixer;
-    juce::AudioDeviceSelectorComponent deviceSelector;
     juce::TextButton saveButton{"Save"};
     juce::TextButton loadButton{"Load"};
     juce::TextButton menuButton{"Menu"};

@@ -8,6 +8,21 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
     nameLabel.setColour(juce::Label::textColourId, theme::text());
     addAndMakeVisible(nameLabel);
 
+    deviceControl.setTitle(output.name);
+    deviceControl.setDeviceName(output.outputDeviceName);
+    deviceControl.setError(output.outputError);
+    deviceControl.setOnClick([this] {
+        DeviceMenu::showOutputMenu(deviceControl, output.outputDeviceName, [this](juce::String chosen) {
+            const auto err = audioEngine.setOutputDevice(output.id, chosen);
+            deviceControl.setDeviceName(output.outputDeviceName);
+            deviceControl.setError(output.outputError);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+            }
+        });
+    });
+    addAndMakeVisible(deviceControl);
+
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
     gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 40, 14);
     gainSlider.setRange(-60.0, 12.0, 0.1);
@@ -40,6 +55,8 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
 void MixerComponent::OutputStrip::resized() {
     auto area = getLocalBounds().reduced(4);
     nameLabel.setBounds(area.removeFromTop(18));
+    deviceControl.setBounds(area.removeFromTop(46));
+    area.removeFromTop(4);
     auto mb = area.removeFromBottom(22);
     muteButton.setBounds(mb);
     area.removeFromBottom(4);
@@ -53,6 +70,8 @@ void MixerComponent::OutputStrip::resized() {
 void MixerComponent::OutputStrip::refresh() {
     gainSlider.setValue(output.gainDb.get(), juce::dontSendNotification);
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
+    deviceControl.setDeviceName(output.outputDeviceName);
+    deviceControl.setError(output.outputError);
 }
 
 MixerComponent::MixerComponent(AudioEngine& engine)
@@ -100,7 +119,7 @@ void MixerComponent::resized() {
     addOutputButton.setBounds(toolbar.removeFromLeft(60));
     area.removeFromTop(4);
 
-    const int masterW = 360;
+    const int masterW = 660;
     masterPanel.setBounds(area.removeFromRight(masterW));
     area.removeFromRight(6);
     channelViewport.setBounds(area);
@@ -117,7 +136,7 @@ void MixerComponent::resized() {
     auto ma = masterPanel.getLocalBounds();
     masterHeader.setBounds(ma.removeFromTop(24));
     masterViewport.setBounds(ma);
-    const int outW = 60;
+    const int outW = 76;
     const int outGap = 4;
     const int contentW2 = (int)outputStrips.size() * (outW + outGap) + 8;
     masterContent.setSize(juce::jmax(masterViewport.getWidth(), contentW2), masterViewport.getHeight());

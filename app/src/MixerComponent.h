@@ -6,6 +6,8 @@
 
 #include "AudioEngine.h"
 #include "ChannelStrip.h"
+#include "DeviceControl.h"
+#include "DeviceMenu.h"
 #include "LevelMeter.h"
 #include "Theme.h"
 
@@ -29,6 +31,7 @@ private:
         AudioEngine::Output& output;
         AudioEngine& audioEngine;
         juce::Label nameLabel;
+        DeviceControl deviceControl;
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};

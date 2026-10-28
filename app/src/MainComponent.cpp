@@ -3,12 +3,8 @@
 #include "SceneBridge.h"
 
 MainComponent::MainComponent()
-    : mixer(audioEngine),
-      deviceSelector(deviceManager, 0, 2, 0, 2, false, false, true, false) {
-    setAudioChannels(2, 2);
-
+    : mixer(audioEngine) {
     addAndMakeVisible(mixer);
-    addAndMakeVisible(deviceSelector);
     addAndMakeVisible(saveButton);
     addAndMakeVisible(loadButton);
     addAndMakeVisible(menuButton);
@@ -20,22 +16,6 @@ MainComponent::MainComponent()
 
     loadScene(false);
     setSize(1600, 900);
-}
-
-MainComponent::~MainComponent() {
-    shutdownAudio();
-}
-
-void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate) {
-    audioEngine.prepareToPlay(samplesPerBlockExpected, sampleRate);
-}
-
-void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) {
-    audioEngine.processBlock(bufferToFill);
-}
-
-void MainComponent::releaseResources() {
-    audioEngine.releaseResources();
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -53,13 +33,12 @@ void MainComponent::paint(juce::Graphics& g) {
     g.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     g.drawText("PluginRack", 20, 0, 200, 56, juce::Justification::centredLeft);
 
-    // hardware out + sample rate (right side, before menu)
-    double sr = 48000.0;
-    if (auto* dev = deviceManager.getCurrentAudioDevice()) sr = dev->getCurrentSampleRate();
-    juce::String info = "Hardware Out: Default    SR: " + juce::String((int)sr) + " Hz";
-    g.setColour(theme::dim());
+    // clock info
+    const auto desc = audioEngine.getClockDescription();
+    const bool noClock = desc.startsWith("No output");
+    g.setColour(noClock ? theme::amber() : theme::dim());
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
-    g.drawText(info, getWidth() - 420, 0, 260, 56, juce::Justification::centredRight);
+    g.drawText(desc, getWidth() - 460, 0, 220, 56, juce::Justification::centredRight);
 }
 
 void MainComponent::resized() {
@@ -69,17 +48,12 @@ void MainComponent::resized() {
     // header buttons right
     auto hr = header.reduced(12, 12);
     hr.removeFromLeft(220); // wordmark space
-    // right side buttons
     menuButton.setBounds(hr.removeFromRight(80));
     hr.removeFromRight(8);
     loadButton.setBounds(hr.removeFromRight(60));
     hr.removeFromRight(4);
     saveButton.setBounds(hr.removeFromRight(60));
 
-    area.removeFromTop(0);
-    // device selector bottom
-    deviceSelector.setBounds(area.removeFromBottom(90));
-    area.removeFromBottom(4);
     mixer.setBounds(area);
 }
 

@@ -5,6 +5,8 @@
 #include <functional>
 
 #include "AudioEngine.h"
+#include "DeviceControl.h"
+#include "DeviceMenu.h"
 #include "LevelMeter.h"
 #include "Theme.h"
 
@@ -42,8 +44,7 @@ private:
 
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
-    juce::Label sourceNameLabel;
-    juce::ComboBox deviceCombo;
+    DeviceControl deviceControl;
     juce::Label vstHeader{"", "VST RACK"};
 
     juce::OwnedArray<InsertSlotComponent> slots;
