@@ -4,7 +4,7 @@
 #include <cmath>
 
 AudioEngine::AudioEngine() {
-    addOutput();
+    for (int i = 0; i < 8; ++i) addOutput();
     addChannel();
 }
 
@@ -63,7 +63,7 @@ void AudioEngine::processBlock(const juce::AudioSourceChannelInfo& bufferToFill)
         }
 
         const bool silent = channel->muted.get() || (anySolo && !channel->soloed.get());
-        const float gain = silent ? 0.0f : decibelsToGain(channel->gainDb.get());
+        const float gain = silent ? 0.0f : decibelsToGain(channel->gainDb.get() + channel->trimDb.get());
         const float theta = (channel->pan.get() + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
         channel->buffer.applyGain(0, 0, frames, gain * std::cos(theta));
         channel->buffer.applyGain(1, 0, frames, gain * std::sin(theta));
@@ -98,6 +98,14 @@ void AudioEngine::processBlock(const juce::AudioSourceChannelInfo& bufferToFill)
     }
 
     for (auto& output : outputs) {
+        const float outGain = output->muted.get() ? 0.0f : decibelsToGain(output->gainDb.get());
+        if (outGain != 1.0f) {
+            output->buffer.applyGain(0, 0, frames, outGain);
+            output->buffer.applyGain(1, 0, frames, outGain);
+        }
+        if (output->muted.get()) {
+            output->buffer.clear(0, frames);
+        }
         const float peak = juce::jmax(output->buffer.getMagnitude(0, 0, frames),
                                       output->buffer.getMagnitude(1, 0, frames));
         meters.observeOutput(output->id, peak);
@@ -143,7 +151,9 @@ void AudioEngine::addOutput() {
     const juce::ScopedLock lock(stateLock);
     auto output = std::make_unique<Output>();
     output->id = nextOutputId++;
-    output->name = output->id == 1 ? "Main" : "Output " + juce::String(output->id);
+    if (output->id <= 5) output->name = "A" + juce::String(output->id);
+    else if (output->id <= 8) output->name = "B" + juce::String(output->id - 5);
+    else output->name = "Output " + juce::String(output->id);
     output->buffer.setSize(2, currentBufferSize);
     output->buffer.clear();
     meters.observeOutput(output->id, 0.0f);
@@ -203,6 +213,12 @@ void AudioEngine::setChannelGain(std::uint32_t channelId, float gainDb) {
     }
 }
 
+void AudioEngine::setChannelTrim(std::uint32_t channelId, float trimDb) {
+    if (auto* channel = findChannel(channelId)) {
+        channel->trimDb = trimDb;
+    }
+}
+
 void AudioEngine::setChannelPan(std::uint32_t channelId, float pan) {
     if (auto* channel = findChannel(channelId)) {
         channel->pan = pan;
@@ -227,6 +243,18 @@ void AudioEngine::setSendGain(std::uint32_t channelId, std::uint32_t outputId, f
             route->sendGainDb = gainDb;
             return;
         }
+    }
+}
+
+void AudioEngine::setOutputGain(std::uint32_t outputId, float gainDb) {
+    for (auto& output : outputs) {
+        if (output->id == outputId) { output->gainDb = gainDb; return; }
+    }
+}
+
+void AudioEngine::setOutputMuted(std::uint32_t outputId, bool muted) {
+    for (auto& output : outputs) {
+        if (output->id == outputId) { output->muted = muted; return; }
     }
 }
 

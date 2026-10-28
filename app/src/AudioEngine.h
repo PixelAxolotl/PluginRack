@@ -25,6 +25,7 @@ public:
         std::uint32_t id = 0;
         juce::String name;
         juce::Atomic<float> gainDb{0.0f};
+        juce::Atomic<float> trimDb{0.0f};
         juce::Atomic<float> pan{0.0f};
         juce::Atomic<bool> muted{false};
         juce::Atomic<bool> soloed{false};
@@ -37,6 +38,8 @@ public:
         std::uint32_t id = 0;
         juce::String name;
         juce::Atomic<float> peak{0.0f};
+        juce::Atomic<float> gainDb{0.0f};
+        juce::Atomic<bool> muted{false};
         juce::AudioBuffer<float> buffer;
     };
 
@@ -59,11 +62,14 @@ public:
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
 
     void setChannelGain(std::uint32_t channelId, float gainDb);
+    void setChannelTrim(std::uint32_t channelId, float trimDb);
     void setChannelPan(std::uint32_t channelId, float pan);
     void setChannelMuted(std::uint32_t channelId, bool muted);
     void setChannelSoloed(std::uint32_t channelId, bool soloed);
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
+    void setOutputGain(std::uint32_t outputId, float gainDb);
+    void setOutputMuted(std::uint32_t outputId, bool muted);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

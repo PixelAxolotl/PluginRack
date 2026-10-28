@@ -5,6 +5,7 @@
 #include "AudioEngine.h"
 #include "MixerComponent.h"
 #include "RoutingMatrixComponent.h"
+#include "Theme.h"
 
 class MainComponent final : public juce::AudioAppComponent {
 public:
@@ -25,11 +26,10 @@ private:
 
     AudioEngine audioEngine;
     MixerComponent mixer;
-    RoutingMatrixComponent routingMatrix;
-    juce::TabbedComponent tabs{juce::TabbedButtonBar::TabsAtTop};
     juce::AudioDeviceSelectorComponent deviceSelector;
-    juce::TextButton saveButton{"Save Scene"};
-    juce::TextButton loadButton{"Load Scene"};
+    juce::TextButton saveButton{"Save"};
+    juce::TextButton loadButton{"Load"};
+    juce::TextButton menuButton{"Menu"};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

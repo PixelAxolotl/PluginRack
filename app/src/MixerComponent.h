@@ -6,6 +6,8 @@
 
 #include "AudioEngine.h"
 #include "ChannelStrip.h"
+#include "LevelMeter.h"
+#include "Theme.h"
 
 class MixerComponent final : public juce::Component {
 public:
@@ -17,15 +19,33 @@ public:
     std::function<void()> onStructureChanged;
 
 private:
+    class OutputStrip final : public juce::Component {
+    public:
+        OutputStrip(AudioEngine::Output& output, AudioEngine& engine);
+        void resized() override;
+        void refresh();
+
+    private:
+        AudioEngine::Output& output;
+        AudioEngine& audioEngine;
+        juce::Label nameLabel;
+        juce::Slider gainSlider;
+        LevelMeter meter;
+        juce::TextButton muteButton{"Mute"};
+    };
+
     AudioEngine& audioEngine;
-    juce::TextButton addChannelButton{"Add channel"};
-    juce::TextButton addOutputButton{"Add output"};
+    juce::TextButton addChannelButton{"+ Ch"};
+    juce::TextButton addOutputButton{"+ Out"};
     juce::Viewport channelViewport;
     juce::Component stripContent;
     juce::OwnedArray<ChannelStrip> strips;
-    juce::Component outputsPanel;
-    juce::Label outputsHeader{"", "Outputs"};
-    juce::OwnedArray<juce::Label> outputLabels;
+
+    juce::Component masterPanel;
+    juce::Label masterHeader{"", "MASTER"};
+    juce::Viewport masterViewport;
+    juce::Component masterContent;
+    juce::OwnedArray<OutputStrip> outputStrips;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixerComponent)
 };

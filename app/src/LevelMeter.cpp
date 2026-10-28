@@ -1,17 +1,26 @@
 #include "LevelMeter.h"
 
+#include "Theme.h"
+
 LevelMeter::LevelMeter(juce::Atomic<float>& peakSource)
     : source(peakSource) {
     startTimerHz(30);
 }
 
 void LevelMeter::paint(juce::Graphics& g) {
-    g.fillAll(juce::Colour(0xff202020));
+    g.fillAll(theme::strip());
     auto bounds = getLocalBounds().reduced(1);
-    const int meterHeight = juce::roundToInt(static_cast<float>(bounds.getHeight()) * displayedPeak);
-    g.setColour(displayedPeak >= 1.0f ? juce::Colour(0xffe05252) : juce::Colour(0xff56b870));
-    g.fillRect(bounds.removeFromBottom(meterHeight));
-    g.setColour(juce::Colours::grey);
+    const int totalH = bounds.getHeight();
+    const int meterHeight = juce::roundToInt(static_cast<float>(totalH) * displayedPeak);
+
+    juce::ColourGradient grad(theme::green(), (float)bounds.getX(), (float)bounds.getBottom(),
+                             theme::red(), (float)bounds.getX(), (float)bounds.getY(), false);
+    grad.addColour(0.7, theme::green());
+    grad.addColour(0.85, theme::amber());
+    g.setGradientFill(grad);
+    g.fillRect(bounds.getX(), bounds.getBottom() - meterHeight, bounds.getWidth(), meterHeight);
+
+    g.setColour(theme::border());
     g.drawRect(getLocalBounds());
 }
 
