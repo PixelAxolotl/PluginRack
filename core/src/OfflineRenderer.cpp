@@ -23,9 +23,6 @@ std::vector<std::vector<float>> renderSine(const Scene& scene,
                                            const SceneAvailability& availability,
                                            float toneHz, float amplitude,
                                            int numFrames) {
-    if (numFrames <= 0) {
-        return {};
-    }
     MixerEngine engine;
     std::string error;
     if (!engine.prepare(scene, availability, kBlockFrames, &error)) {
@@ -34,6 +31,9 @@ std::vector<std::vector<float>> renderSine(const Scene& scene,
     const std::size_t numChannels = scene.channels.size();
     const std::size_t numOutputs = scene.outputs.size();
     std::vector<std::vector<float>> result(numOutputs);
+    if (numFrames <= 0) {
+        return result;
+    }
     for (auto& buffer : result) {
         buffer.reserve(static_cast<std::size_t>(numFrames) * 2);
     }
