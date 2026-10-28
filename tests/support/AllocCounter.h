@@ -96,35 +96,35 @@ inline void freeAlignedCounting(void* ptr, std::size_t alignment) noexcept {
     std::free(*(reinterpret_cast<void**>(ptr) - 1));
 }
 
-void* operator new(std::size_t size) { return allocCounting(size); }
-void* operator new[](std::size_t size) { return allocCounting(size); }
-void operator delete(void* ptr) noexcept { freeCounting(ptr); }
-void operator delete[](void* ptr) noexcept { freeCounting(ptr); }
-void operator delete(void* ptr, std::size_t) noexcept { freeCounting(ptr); }
-void operator delete[](void* ptr, std::size_t) noexcept { freeCounting(ptr); }
-void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+inline void* operator new(std::size_t size) { return allocCounting(size); }
+inline void* operator new[](std::size_t size) { return allocCounting(size); }
+inline void operator delete(void* ptr) noexcept { freeCounting(ptr); }
+inline void operator delete[](void* ptr) noexcept { freeCounting(ptr); }
+inline void operator delete(void* ptr, std::size_t) noexcept { freeCounting(ptr); }
+inline void operator delete[](void* ptr, std::size_t) noexcept { freeCounting(ptr); }
+inline void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
     return allocCountingNothrow(size);
 }
-void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+inline void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
     return allocCountingNothrow(size);
 }
-void operator delete(void* ptr, const std::nothrow_t&) noexcept { freeCounting(ptr); }
-void operator delete[](void* ptr, const std::nothrow_t&) noexcept { freeCounting(ptr); }
-void* operator new(std::size_t size, std::align_val_t alignment) {
+inline void operator delete(void* ptr, const std::nothrow_t&) noexcept { freeCounting(ptr); }
+inline void operator delete[](void* ptr, const std::nothrow_t&) noexcept { freeCounting(ptr); }
+inline void* operator new(std::size_t size, std::align_val_t alignment) {
     return allocAlignedCounting(size, static_cast<std::size_t>(alignment));
 }
-void* operator new[](std::size_t size, std::align_val_t alignment) {
+inline void* operator new[](std::size_t size, std::align_val_t alignment) {
     return allocAlignedCounting(size, static_cast<std::size_t>(alignment));
 }
-void operator delete(void* ptr, std::align_val_t alignment) noexcept {
+inline void operator delete(void* ptr, std::align_val_t alignment) noexcept {
     freeAlignedCounting(ptr, static_cast<std::size_t>(alignment));
 }
-void operator delete[](void* ptr, std::align_val_t alignment) noexcept {
+inline void operator delete[](void* ptr, std::align_val_t alignment) noexcept {
     freeAlignedCounting(ptr, static_cast<std::size_t>(alignment));
 }
-void operator delete(void* ptr, std::size_t, std::align_val_t alignment) noexcept {
+inline void operator delete(void* ptr, std::size_t, std::align_val_t alignment) noexcept {
     freeAlignedCounting(ptr, static_cast<std::size_t>(alignment));
 }
-void operator delete[](void* ptr, std::size_t, std::align_val_t alignment) noexcept {
+inline void operator delete[](void* ptr, std::size_t, std::align_val_t alignment) noexcept {
     freeAlignedCounting(ptr, static_cast<std::size_t>(alignment));
 }
