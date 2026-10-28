@@ -9,7 +9,7 @@ public:
     juce::String loadPlugin(const juce::File& file);
     void prepareToPlay(double sampleRate, int samplesPerBlock);
     void releaseResources();
-    void processBlock(juce::AudioBuffer<float>& buffer);
+    void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed = false);
 
     juce::String getPluginPath() const;
     juce::String getPluginName() const;

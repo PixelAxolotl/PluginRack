@@ -11,11 +11,21 @@ juce_add_gui_app(pluginrack_app
 juce_generate_juce_header(pluginrack_app)
 
 target_sources(pluginrack_app PRIVATE
+    src/AudioEngine.cpp
+    src/AudioEngine.h
+    src/ChannelStrip.cpp
+    src/ChannelStrip.h
+    src/LevelMeter.cpp
+    src/LevelMeter.h
     src/Main.cpp
     src/MainComponent.cpp
     src/MainComponent.h
+    src/MixerComponent.cpp
+    src/MixerComponent.h
     src/PluginHost.cpp
     src/PluginHost.h
+    src/RoutingMatrixComponent.cpp
+    src/RoutingMatrixComponent.h
     src/SceneBridge.cpp
     src/SceneBridge.h)
 

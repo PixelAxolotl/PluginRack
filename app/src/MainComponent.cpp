@@ -2,43 +2,26 @@
 
 #include "SceneBridge.h"
 
-MainComponent::PeakMeter::PeakMeter(juce::Atomic<float>& source)
-    : levelSource(source) {
-    startTimerHz(30);
-}
-
-void MainComponent::PeakMeter::paint(juce::Graphics& g) {
-    auto bounds = getLocalBounds();
-    g.fillAll(juce::Colour(0xff202020));
-    g.setColour(juce::Colour(0xff56b870));
-    g.fillRect(bounds.removeFromLeft(juce::roundToInt(bounds.getWidth() * displayedLevel)));
-    g.setColour(juce::Colours::grey);
-    g.drawRect(getLocalBounds());
-}
-
-void MainComponent::PeakMeter::timerCallback() {
-    const auto newLevel = juce::jlimit(0.0f, 1.0f, levelSource.exchange(0.0f));
-    displayedLevel = juce::jmax(newLevel, displayedLevel * 0.85f);
-    repaint();
-}
-
 MainComponent::MainComponent()
-    : levelMeter(outputLevel),
+    : mixer(audioEngine),
+      routingMatrix(audioEngine),
       deviceSelector(deviceManager, 0, 2, 0, 2, false, false, true, false) {
     setAudioChannels(2, 2);
 
+    const auto tabColour = findColour(juce::ResizableWindow::backgroundColourId);
+    tabs.addTab("Mixer", tabColour, &mixer, false);
+    tabs.addTab("Routing", tabColour, &routingMatrix, false);
+    addAndMakeVisible(tabs);
     addAndMakeVisible(deviceSelector);
-    addAndMakeVisible(loadButton);
     addAndMakeVisible(saveButton);
-    addAndMakeVisible(pluginLabel);
-    addAndMakeVisible(levelMeter);
+    addAndMakeVisible(loadButton);
 
-    pluginLabel.setText("No plugin loaded", juce::dontSendNotification);
-    loadButton.onClick = [this] { choosePlugin(); };
     saveButton.onClick = [this] { saveScene(); };
+    loadButton.onClick = [this] { loadScene(true); };
+    mixer.onStructureChanged = [this] { routingMatrix.rebuild(); };
 
-    restoreScene();
-    setSize(760, 600);
+    loadScene(false);
+    setSize(1000, 700);
 }
 
 MainComponent::~MainComponent() {
@@ -46,23 +29,15 @@ MainComponent::~MainComponent() {
 }
 
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate) {
-    pluginHost.prepareToPlay(sampleRate, samplesPerBlockExpected);
+    audioEngine.prepareToPlay(samplesPerBlockExpected, sampleRate);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) {
-    auto* buffer = bufferToFill.buffer;
-    if (buffer == nullptr || buffer->getNumChannels() == 0 || bufferToFill.numSamples <= 0) {
-        return;
-    }
-
-    juce::AudioBuffer<float> block(buffer->getArrayOfWritePointers(), buffer->getNumChannels(),
-                                   bufferToFill.startSample, bufferToFill.numSamples);
-    pluginHost.processBlock(block);
-    outputLevel = block.getMagnitude(0, bufferToFill.numSamples);
+    audioEngine.processBlock(bufferToFill);
 }
 
 void MainComponent::releaseResources() {
-    pluginHost.releaseResources();
+    audioEngine.releaseResources();
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -70,70 +45,48 @@ void MainComponent::paint(juce::Graphics& g) {
 }
 
 void MainComponent::resized() {
-    auto area = getLocalBounds().reduced(16);
-    auto buttons = area.removeFromTop(32);
-    loadButton.setBounds(buttons.removeFromLeft(120));
-    buttons.removeFromLeft(8);
-    saveButton.setBounds(buttons.removeFromLeft(120));
-
-    area.removeFromTop(12);
-    pluginLabel.setBounds(area.removeFromTop(26));
+    auto area = getLocalBounds().reduced(12);
+    auto toolbar = area.removeFromTop(32);
+    saveButton.setBounds(toolbar.removeFromLeft(110));
+    toolbar.removeFromLeft(8);
+    loadButton.setBounds(toolbar.removeFromLeft(110));
     area.removeFromTop(8);
-    levelMeter.setBounds(area.removeFromTop(22));
-    area.removeFromTop(12);
-    deviceSelector.setBounds(area);
-}
-
-void MainComponent::choosePlugin() {
-    auto initialLocation = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
-    if (const auto path = pluginHost.getPluginPath(); path.isNotEmpty()) {
-        initialLocation = juce::File(path).getParentDirectory();
-    }
-
-    fileChooser = std::make_unique<juce::FileChooser>("Select a VST3 plugin", initialLocation,
-                                                       "*.vst3");
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [this](const juce::FileChooser& chooser) {
-                                 const auto file = chooser.getResult();
-                                 if (file != juce::File()) {
-                                     loadPluginFile(file, true);
-                                 }
-                             });
-}
-
-void MainComponent::loadPluginFile(const juce::File& file, bool showErrors) {
-    const auto error = pluginHost.loadPlugin(file);
-    if (error.isNotEmpty()) {
-        if (showErrors) {
-            showError(error);
-        } else {
-            pluginLabel.setText("Saved plugin could not be loaded", juce::dontSendNotification);
-        }
-        return;
-    }
-
-    pluginLabel.setText("Loaded: " + pluginHost.getPluginName(), juce::dontSendNotification);
+    deviceSelector.setBounds(area.removeFromBottom(170));
+    area.removeFromBottom(8);
+    tabs.setBounds(area);
 }
 
 void MainComponent::saveScene() {
-    const auto error = SceneBridge::save(pluginHost.getPluginPath(), pluginHost.getPluginName(),
-                                         pluginHost.getSampleRate(), pluginHost.getBufferSize());
+    const auto error = SceneBridge::save(audioEngine.makeScene());
     if (error.isNotEmpty()) {
         showError(error);
     }
 }
 
-void MainComponent::restoreScene() {
+void MainComponent::loadScene(bool showMissingMessage) {
     juce::String error;
     const auto saved = SceneBridge::load(error);
     if (error.isNotEmpty()) {
-        pluginLabel.setText(error, juce::dontSendNotification);
+        showError(error);
         return;
     }
-    if (saved.has_value() && saved->pluginPath.isNotEmpty()) {
-        loadPluginFile(juce::File(saved->pluginPath), false);
+    if (!saved.has_value()) {
+        if (showMissingMessage) {
+            showError("No scene has been saved yet.");
+        }
+        return;
     }
+
+    const auto pluginErrors = audioEngine.restoreScene(*saved);
+    refreshViews();
+    if (pluginErrors.isNotEmpty()) {
+        showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+    }
+}
+
+void MainComponent::refreshViews() {
+    mixer.rebuild();
+    routingMatrix.rebuild();
 }
 
 void MainComponent::showError(const juce::String& message) {

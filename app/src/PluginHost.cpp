@@ -71,7 +71,11 @@ void PluginHost::releaseResources() {
     }
 }
 
-void PluginHost::processBlock(juce::AudioBuffer<float>& buffer) {
+void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
+    if (bypassed) {
+        return;
+    }
+
     const juce::ScopedTryLock lock(pluginLock);
     if (!lock.isLocked() || plugin == nullptr) {
         return;
