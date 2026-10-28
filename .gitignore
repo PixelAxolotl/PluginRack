@@ -1,6 +1,5 @@
-.worktrees/n
 build/
 out/
 .vs/
 CMakeUserPresets.json
-task-final-fix-report.md
+.worktrees/
