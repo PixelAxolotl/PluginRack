@@ -1,5 +1,6 @@
 #include "pluginrack/SceneValidator.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
@@ -24,6 +25,11 @@ bool isSupportedSampleRate(double sampleRate) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
+    if (scene.schemaVersion != 1) {
+        errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
+                          "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
+                              "; expected 1"});
+    }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
     }
@@ -34,25 +40,41 @@ std::vector<SceneError> validate(const Scene& scene) {
     std::unordered_set<std::uint32_t> channelIds;
     channelIds.reserve(scene.channels.size() * 2 + 1);
     for (const Channel& channel : scene.channels) {
+        if (channel.id == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "channel id must not be zero"});
+        }
         if (!channelIds.insert(channel.id).second) {
             errors.push_back({SceneErrorCode::DuplicateChannelId, channel.id,
                               "duplicate channel id " + std::to_string(channel.id)});
         }
-        if (channel.gainDb < kMinGainDb || channel.gainDb > kMaxGainDb) {
+        if (!std::isfinite(channel.gainDb) || channel.gainDb < kMinGainDb ||
+            channel.gainDb > kMaxGainDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
                               "channel " + std::to_string(channel.id) +
                                   " gainDb out of range [-60, 12]"});
         }
-        if (channel.pan < kMinPan || channel.pan > kMaxPan) {
+        if (!std::isfinite(channel.pan) || channel.pan < kMinPan || channel.pan > kMaxPan) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
                               "channel " + std::to_string(channel.id) +
                                   " pan out of range [-1, 1]"});
+        }
+        for (const InsertSlot& slot : channel.inserts) {
+            if (slot.id == 0) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
+                                  "channel " + std::to_string(channel.id) +
+                                      " insert slot id must not be zero"});
+            }
         }
     }
 
     std::unordered_set<std::uint32_t> outputIds;
     outputIds.reserve(scene.outputs.size() * 2 + 1);
     for (const Output& output : scene.outputs) {
+        if (output.id == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "output id must not be zero"});
+        }
         if (!outputIds.insert(output.id).second) {
             errors.push_back({SceneErrorCode::DuplicateOutputId, output.id,
                               "duplicate output id " + std::to_string(output.id)});
@@ -62,6 +84,14 @@ std::vector<SceneError> validate(const Scene& scene) {
     std::unordered_set<std::uint64_t> routePairs;
     routePairs.reserve(scene.routes.size() * 2 + 1);
     for (const Route& route : scene.routes) {
+        if (route.channelId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "route channelId must not be zero"});
+        }
+        if (route.outputId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "route outputId must not be zero"});
+        }
         const std::uint64_t pair =
             (static_cast<std::uint64_t>(route.channelId) << 32) | route.outputId;
         if (!routePairs.insert(pair).second) {
@@ -69,17 +99,18 @@ std::vector<SceneError> validate(const Scene& scene) {
                               "duplicate route (" + std::to_string(route.channelId) + ", " +
                                   std::to_string(route.outputId) + ")"});
         }
-        if (!channelIds.contains(route.channelId)) {
+        if (route.channelId != 0 && !channelIds.contains(route.channelId)) {
             errors.push_back({SceneErrorCode::UnknownChannelInRoute, route.channelId,
                               "route references unknown channel " +
                                   std::to_string(route.channelId)});
         }
-        if (!outputIds.contains(route.outputId)) {
+        if (route.outputId != 0 && !outputIds.contains(route.outputId)) {
             errors.push_back({SceneErrorCode::UnknownOutputInRoute, route.outputId,
                               "route references unknown output " +
                                   std::to_string(route.outputId)});
         }
-        if (route.sendGainDb < kMinGainDb || route.sendGainDb > kMaxGainDb) {
+        if (!std::isfinite(route.sendGainDb) || route.sendGainDb < kMinGainDb ||
+            route.sendGainDb > kMaxGainDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, route.channelId,
                               "route (" + std::to_string(route.channelId) + ", " +
                                   std::to_string(route.outputId) +

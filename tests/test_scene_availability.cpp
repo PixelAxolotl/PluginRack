@@ -166,6 +166,24 @@ TEST_CASE("missing output is disabled and rest of scene renders") {
     }
 }
 
+TEST_CASE("shared missing input stops every channel but warns once") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1, "mic-gone");
+    addChannel(scene, 2, "mic-gone");
+    addOutput(scene, 1, "mon");
+    addRoute(scene, 1, 1);
+    addRoute(scene, 2, 1);
+
+    FakeRegistry registry;
+    registry.outputs.insert("mon");
+
+    const pluginrack::SceneAvailability avail =
+        pluginrack::resolveAvailability(scene, registry);
+    REQUIRE(avail.stoppedChannels == std::vector<std::uint32_t>{0, 1});
+    REQUIRE(avail.warnings.size() == 1);
+    REQUIRE_THAT(avail.warnings[0], ContainsSubstring("mic-gone"));
+}
+
 TEST_CASE("all devices present yields no warnings") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1, "mic-ok");

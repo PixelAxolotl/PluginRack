@@ -29,6 +29,7 @@ public:
                 std::span<AudioBlock> outputBlocks) noexcept;
     int channelCount() const noexcept;
     int outputCount() const noexcept;
+    std::vector<std::uint32_t> failedPluginSlots() const;
     const MeterBank& meters() const noexcept;
 
 private:

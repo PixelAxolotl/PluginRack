@@ -71,6 +71,37 @@ public:
     }
 };
 
+class FailProcessPlugin : public pluginrack::IPluginInstance {
+public:
+    explicit FailProcessPlugin(int* calls) : calls_(calls) {}
+
+    void prepare(double /*sampleRate*/, int /*maxBlockFrames*/) override {}
+    pluginrack::ProcessResult process(pluginrack::AudioBlock& /*block*/) noexcept override {
+        ++*calls_;
+        return pluginrack::ProcessResult::Failed;
+    }
+    void reset() noexcept override {}
+
+private:
+    int* calls_;
+};
+
+class FailProcessFactory : public pluginrack::IPluginFactory {
+public:
+    explicit FailProcessFactory(int* calls) : calls_(calls) {}
+
+    std::unique_ptr<pluginrack::IPluginInstance> create(
+        const std::string& /*pluginPath*/, std::string* error) override {
+        if (error != nullptr) {
+            error->clear();
+        }
+        return std::make_unique<FailProcessPlugin>(calls_);
+    }
+
+private:
+    int* calls_;
+};
+
 } // namespace
 
 TEST_CASE("inserts run in order") {
@@ -120,6 +151,23 @@ TEST_CASE("failed plugin load is reported and skipped") {
     for (float sample : buffer.samples) {
         REQUIRE(sample == Catch::Approx(0.25f));
     }
+}
+
+TEST_CASE("processing failure permanently bypasses the slot") {
+    int calls = 0;
+    FailProcessFactory factory(&calls);
+    const std::vector<InsertSlot> slots = {makeSlot(9, "/fails-during-processing")};
+    pluginrack::InsertChain chain(slots, factory, 48000.0, 256);
+
+    MonoBuffer buffer(8, 1.0f);
+    AudioBlock block = buffer.block();
+    AllocCounter::reset();
+    chain.process(block);
+    chain.process(block);
+
+    REQUIRE(calls == 1);
+    REQUIRE(AllocCounter::allocations() == 0);
+    REQUIRE(chain.failedSlots() == std::vector<std::uint32_t>{9});
 }
 
 TEST_CASE("chain processing allocates nothing") {
@@ -185,4 +233,35 @@ TEST_CASE("engine applies the insert chain before the fader") {
         REQUIRE(outLeft[static_cast<std::size_t>(i)] == Catch::Approx(0.5f * 0.70710678f));
         REQUIRE(outRight[static_cast<std::size_t>(i)] == Catch::Approx(0.5f * 0.70710678f));
     }
+}
+
+TEST_CASE("engine reports plugin slots that failed to load") {
+    pluginrack::Scene scene;
+    scene.schemaVersion = 1;
+    scene.name = "failed-insert";
+    scene.sampleRate = 48000;
+    scene.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.name = "ch1";
+    channel.inserts.push_back(makeSlot(7, "/bad"));
+    scene.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "out1";
+    scene.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    scene.routes.push_back(route);
+
+    FailPathFactory factory;
+    pluginrack::MixerEngine engine;
+    engine.setPluginFactory(&factory);
+    std::string error;
+    REQUIRE(engine.prepare(scene, 256, &error));
+    REQUIRE(engine.failedPluginSlots() == std::vector<std::uint32_t>{7});
 }

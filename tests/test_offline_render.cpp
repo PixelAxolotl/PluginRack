@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -144,5 +145,37 @@ TEST_CASE("wav header is 16-bit stereo at 48 kHz") {
     REQUIRE(file.tellg() == 44 + 100 * 4);
 
     std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("wav conversion maps non-finite samples to zero") {
+    const std::vector<float> samples = {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        0.25f,
+    };
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "pluginrack-wav-non-finite-test.wav").string();
+    REQUIRE(pluginrack::writeWav(path, samples, 2, 48000));
+
+    std::ifstream file(path, std::ios::binary);
+    REQUIRE(file.good());
+    file.seekg(44);
+    char data[8] = {};
+    file.read(data, sizeof(data));
+    REQUIRE(file.gcount() == sizeof(data));
+    const auto s16 = [&](int offset) {
+        const auto low = static_cast<unsigned int>(static_cast<unsigned char>(data[offset]));
+        const auto high = static_cast<unsigned int>(static_cast<unsigned char>(data[offset + 1]));
+        return static_cast<std::int16_t>(low | (high << 8));
+    };
+    REQUIRE(s16(0) == 0);
+    REQUIRE(s16(2) == 0);
+    REQUIRE(s16(4) == 0);
+    REQUIRE(s16(6) == 8192);
+
+    std::error_code ec;
+    file.close();
     std::filesystem::remove(path, ec);
 }

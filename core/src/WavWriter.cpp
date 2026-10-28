@@ -27,7 +27,8 @@ void writeU32(std::ofstream& out, std::uint32_t value) {
 }
 
 void writeSample(std::ofstream& out, float sample) {
-    const float clamped = sample < -1.0f ? -1.0f : (sample > 1.0f ? 1.0f : sample);
+    const float finite = std::isfinite(sample) ? sample : 0.0f;
+    const float clamped = finite < -1.0f ? -1.0f : (finite > 1.0f ? 1.0f : finite);
     const auto pcm =
         static_cast<std::uint16_t>(static_cast<std::int16_t>(std::lrintf(clamped * 32767.0f)));
     writeU16(out, pcm);

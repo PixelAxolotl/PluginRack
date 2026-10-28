@@ -1,10 +1,13 @@
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "pluginrack/DeviceRegistry.h"
@@ -22,6 +25,45 @@ public:
     bool hasOutput(const std::string&) const override { return true; }
 };
 
+bool parsePositiveFinite(const std::string& text, double* value) {
+    try {
+        std::size_t consumed = 0;
+        const double parsed = std::stod(text, &consumed);
+        if (consumed != text.size() || !std::isfinite(parsed) || parsed <= 0.0) {
+            return false;
+        }
+        *value = parsed;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::string outputFileStem(const pluginrack::Output& output) {
+    std::string stem = output.name;
+    for (char& ch : stem) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c) == 0 && ch != '.' && ch != '-' && ch != '_' && ch != ' ') {
+            ch = '_';
+        }
+    }
+    while (!stem.empty() && (stem.back() == '.' || stem.back() == ' ')) {
+        stem.pop_back();
+    }
+    if (stem.empty()) {
+        stem = "output-" + std::to_string(output.id);
+    }
+    return stem;
+}
+
+std::string fileKey(const std::string& fileName) {
+    std::string key = fileName;
+    for (char& ch : key) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return key;
+}
+
 void usage() {
     std::cerr << "usage: pluginrack-render <scene.json> <outDir>"
                  " [--tone <hz>] [--seconds <n>]\n";
@@ -38,29 +80,30 @@ int main(int argc, char** argv) {
     const std::string outDir = argv[2];
     double toneHz = 440.0;
     double seconds = 2.0;
-    try {
-        for (int i = 3; i < argc; ++i) {
-            const std::string arg = argv[i];
-            if (arg == "--tone" && i + 1 < argc) {
-                toneHz = std::stod(argv[++i]);
-            } else if (arg == "--seconds" && i + 1 < argc) {
-                seconds = std::stod(argv[++i]);
-            } else if (arg.rfind("--tone=", 0) == 0) {
-                toneHz = std::stod(arg.substr(7));
-            } else if (arg.rfind("--seconds=", 0) == 0) {
-                seconds = std::stod(arg.substr(10));
-            } else {
-                std::cerr << "error: unknown argument '" << arg << "'\n";
-                return 1;
-            }
+    for (int i = 3; i < argc; ++i) {
+        const std::string arg = argv[i];
+        double* destination = nullptr;
+        std::string value;
+        if (arg == "--tone" && i + 1 < argc) {
+            destination = &toneHz;
+            value = argv[++i];
+        } else if (arg == "--seconds" && i + 1 < argc) {
+            destination = &seconds;
+            value = argv[++i];
+        } else if (arg.rfind("--tone=", 0) == 0) {
+            destination = &toneHz;
+            value = arg.substr(7);
+        } else if (arg.rfind("--seconds=", 0) == 0) {
+            destination = &seconds;
+            value = arg.substr(10);
+        } else {
+            std::cerr << "error: unknown argument '" << arg << "'\n";
+            return 1;
         }
-    } catch (const std::exception& e) {
-        std::cerr << "error: bad number: " << e.what() << "\n";
-        return 1;
-    }
-    if (toneHz <= 0.0 || seconds <= 0.0) {
-        std::cerr << "error: --tone and --seconds must be positive\n";
-        return 1;
+        if (!parsePositiveFinite(value, destination)) {
+            std::cerr << "error: --tone and --seconds must be finite positive numbers\n";
+            return 1;
+        }
     }
 
     std::ifstream sceneFile(scenePath, std::ios::binary);
@@ -90,7 +133,14 @@ int main(int argc, char** argv) {
     const AllDevicesPresent registry;
     const pluginrack::SceneAvailability availability =
         pluginrack::resolveAvailability(scene, registry);
-    const int numFrames = static_cast<int>(seconds * scene.sampleRate);
+    const double frameCount = seconds * scene.sampleRate;
+    if (!std::isfinite(frameCount) || frameCount < 1.0 ||
+        frameCount > static_cast<double>(std::numeric_limits<int>::max())) {
+        std::cerr << "error: --seconds must produce between 1 and "
+                  << std::numeric_limits<int>::max() << " frames\n";
+        return 1;
+    }
+    const int numFrames = static_cast<int>(frameCount);
     std::vector<std::vector<float>> buffers;
     try {
         buffers = pluginrack::renderSine(scene, availability,
@@ -106,12 +156,20 @@ int main(int argc, char** argv) {
         std::cerr << "error: cannot create '" << outDir << "'\n";
         return 1;
     }
+    std::unordered_set<std::string> usedFileNames;
+    usedFileNames.reserve(scene.outputs.size() * 2 + 1);
     for (std::size_t o = 0; o < scene.outputs.size(); ++o) {
-        const std::string fileName =
-            (scene.outputs[o].name.empty()
-                 ? "output-" + std::to_string(scene.outputs[o].id)
-                 : scene.outputs[o].name) +
-            ".wav";
+        const std::string stem = outputFileStem(scene.outputs[o]);
+        std::string fileName = stem + ".wav";
+        if (!usedFileNames.insert(fileKey(fileName)).second) {
+            fileName = stem + "-" + std::to_string(scene.outputs[o].id) + ".wav";
+            int suffix = 2;
+            while (!usedFileNames.insert(fileKey(fileName)).second) {
+                fileName = stem + "-" + std::to_string(scene.outputs[o].id) + "-" +
+                           std::to_string(suffix++) + ".wav";
+            }
+        }
+        // outputFileStem produces one filename component, so this cannot escape outDir.
         const std::string outPath = (std::filesystem::path(outDir) / fileName).string();
         if (o >= buffers.size() ||
             !pluginrack::writeWav(outPath, buffers[o], 2,

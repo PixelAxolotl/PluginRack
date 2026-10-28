@@ -10,9 +10,9 @@ namespace pluginrack::test {
 class HalvePlugin : public IPluginInstance {
 public:
     void prepare(double /*sampleRate*/, int /*maxBlockFrames*/) override {}
-    void process(AudioBlock& block) noexcept override {
+    ProcessResult process(AudioBlock& block) noexcept override {
         if (block.channels == nullptr || block.numFrames <= 0) {
-            return;
+            return ProcessResult::Ok;
         }
         for (int c = 0; c < block.numChannels; ++c) {
             float* channel = block.channels[c];
@@ -23,6 +23,7 @@ public:
                 channel[i] *= 0.5f;
             }
         }
+        return ProcessResult::Ok;
     }
     void reset() noexcept override {}
 };
@@ -30,9 +31,9 @@ public:
 class AddOnePlugin : public IPluginInstance {
 public:
     void prepare(double /*sampleRate*/, int /*maxBlockFrames*/) override {}
-    void process(AudioBlock& block) noexcept override {
+    ProcessResult process(AudioBlock& block) noexcept override {
         if (block.channels == nullptr || block.numFrames <= 0) {
-            return;
+            return ProcessResult::Ok;
         }
         for (int c = 0; c < block.numChannels; ++c) {
             float* channel = block.channels[c];
@@ -43,6 +44,7 @@ public:
                 channel[i] += 0.25f;
             }
         }
+        return ProcessResult::Ok;
     }
     void reset() noexcept override {}
 };

@@ -16,12 +16,13 @@ public:
     InsertChain(const std::vector<InsertSlot>& slots, IPluginFactory& factory,
                 double sampleRate, int maxBlockFrames);
     void process(AudioBlock& block) noexcept; // allocation-free
-    std::vector<std::uint32_t> failedSlots() const; // slot ids that failed to load
+    std::vector<std::uint32_t> failedSlots() const; // slot ids that failed to load or process
 
 private:
     struct Entry {
         std::uint32_t id = 0;
         std::unique_ptr<IPluginInstance> instance;
+        bool failed = false;
     };
 
     std::vector<Entry> entries_;

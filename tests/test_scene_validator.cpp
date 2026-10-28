@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "pluginrack/SceneValidator.h"
@@ -75,4 +78,62 @@ TEST_CASE("scene with no outputs is rejected") {
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::NoOutputs);
+}
+
+TEST_CASE("unsupported schema version is rejected by validation") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 2;
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
+}
+
+TEST_CASE("zero entity ids are rejected") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("channel") {
+        scene.channels.front().id = 0;
+        scene.routes.clear();
+    }
+    SECTION("output") {
+        scene.outputs.front().id = 0;
+        scene.routes.clear();
+    }
+    SECTION("insert slot") {
+        scene.channels.front().inserts.push_back(pluginrack::InsertSlot{});
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}
+
+TEST_CASE("zero route endpoints are rejected in endpoint order") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.routes.front().channelId = 0;
+    scene.routes.front().outputId = 0;
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 2);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[1].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("channelId") != std::string::npos);
+    REQUIRE(errors[1].message.find("outputId") != std::string::npos);
+}
+
+TEST_CASE("non-finite mixer parameters are rejected") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("NaN gain") {
+        scene.channels.front().gainDb = std::numeric_limits<float>::quiet_NaN();
+    }
+    SECTION("infinite pan") {
+        scene.channels.front().pan = std::numeric_limits<float>::infinity();
+    }
+    SECTION("infinite send gain") {
+        scene.routes.front().sendGainDb = -std::numeric_limits<float>::infinity();
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
 }

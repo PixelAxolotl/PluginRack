@@ -325,6 +325,17 @@ int MixerEngine::channelCount() const noexcept { return static_cast<int>(channel
 
 int MixerEngine::outputCount() const noexcept { return static_cast<int>(outputCount_); }
 
+std::vector<std::uint32_t> MixerEngine::failedPluginSlots() const {
+    std::vector<std::uint32_t> failed;
+    for (const std::unique_ptr<InsertChain>& chain : insertChains_) {
+        if (chain != nullptr) {
+            const std::vector<std::uint32_t> chainFailures = chain->failedSlots();
+            failed.insert(failed.end(), chainFailures.begin(), chainFailures.end());
+        }
+    }
+    return failed;
+}
+
 const MeterBank& MixerEngine::meters() const noexcept { return meters_; }
 
 } // namespace pluginrack
