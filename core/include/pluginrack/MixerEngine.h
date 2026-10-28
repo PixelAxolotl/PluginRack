@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -8,6 +9,7 @@
 
 #include "pluginrack/AudioBlock.h"
 #include "pluginrack/InsertChain.h"
+#include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
 #include "pluginrack/Scene.h"
 #include "pluginrack/SceneAvailability.h"
@@ -27,6 +29,8 @@ public:
                 std::span<AudioBlock> outputBlocks) noexcept;
     int channelCount() const noexcept;
     int outputCount() const noexcept;
+    std::vector<std::uint32_t> failedPluginSlots() const;
+    const MeterBank& meters() const noexcept;
 
 private:
     struct ChannelCache {
@@ -51,6 +55,10 @@ private:
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;
+    std::vector<std::uint32_t> channelIds_;
+    std::vector<std::uint32_t> outputIds_;
+    MeterBank meters_;
+    double sampleRate_ = 48000.0;
     std::size_t outputCount_ = 0;
     int maxBlockFrames_ = 0;
     bool anySolo_ = false;

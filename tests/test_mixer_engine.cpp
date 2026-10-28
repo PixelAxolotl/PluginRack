@@ -194,6 +194,84 @@ TEST_CASE("solo isolates the soloed channel") {
     }
 }
 
+TEST_CASE("multiple routes into one output sum") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addChannel(scene, 2);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    addRoute(scene, 2, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in1(kFrames, 0.5f);
+    StereoBuffer in2(kFrames, 0.25f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in1.inputBlock(), in2.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.75f * kCenterPanGain;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+    }
+}
+
+TEST_CASE("hard pan reaches the constant-power endpoints") {
+    pluginrack::Scene scene = makeScene();
+    float expectedLeft = 0.0f;
+    float expectedRight = 0.0f;
+
+    SECTION("left") {
+        addChannel(scene, 1, 0.0f, -1.0f);
+        expectedLeft = 0.5f;
+    }
+    SECTION("right") {
+        addChannel(scene, 1, 0.0f, 1.0f);
+        expectedRight = 0.5f;
+    }
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] ==
+                Catch::Approx(expectedLeft).margin(0.000001f));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] ==
+                Catch::Approx(expectedRight).margin(0.000001f));
+    }
+}
+
+TEST_CASE("mute wins over solo") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    scene.channels[0].muted = true;
+    scene.channels[0].soloed = true;
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == 0.0f);
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == 0.0f);
+    }
+}
+
 TEST_CASE("gain of -60 dB is exact silence") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1, -60.0f);

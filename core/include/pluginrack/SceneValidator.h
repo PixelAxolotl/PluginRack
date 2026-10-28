@@ -14,6 +14,7 @@ enum class SceneErrorCode {
     DuplicateRoute,
     UnknownChannelInRoute,
     UnknownOutputInRoute,
+    UnsupportedSchemaVersion,
     ValueOutOfRange,
     NoChannels,
     NoOutputs
