@@ -120,14 +120,17 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         float* scratchLeft = scratch_.data() + (c * 2) * static_cast<std::size_t>(maxFrames);
         float* scratchRight = scratchLeft + maxFrames;
         const bool silenced = cache.muted || (anySolo_ && !cache.soloed);
+        const bool isMono = input.numChannels == 1;
+        const bool isStereo = input.numChannels == 2;
         if (silenced || cache.gain == 0.0f || frames == 0 || input.channels == nullptr ||
-            input.channels[0] == nullptr || (input.numChannels > 1 && input.channels[1] == nullptr)) {
+            (!isMono && !isStereo) || input.channels[0] == nullptr ||
+            (isStereo && input.channels[1] == nullptr)) {
             for (int i = 0; i < frames; ++i) {
                 scratchLeft[i] = 0.0f;
                 scratchRight[i] = 0.0f;
             }
-        } else if (input.numChannels <= 1) {
-            // Mono source: upmix by copying the single input channel into both L and R.
+        } else if (isMono) {
+            // Mono-block upmix is intentional per spec section 3.2.
             const float* mono = input.channels[0];
             const float leftScale = cache.gain * cache.panLeft;
             const float rightScale = cache.gain * cache.panRight;

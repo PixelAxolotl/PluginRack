@@ -248,5 +248,5 @@ TEST_CASE("render allocates nothing") {
     AllocCounter::reset();
     engine.render(inputs, outputs);
 
-    REQUIRE(AllocCounter::count() == 0);
+    REQUIRE(AllocCounter::allocations() == 0);
 }
