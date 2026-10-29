@@ -374,11 +374,7 @@ pluginrack::Scene eqTestScene() {
 
 } // namespace
 
-// The Task 1 EqEngine (commit 1508b0e) applies the RBJ sqrt-gain convention:
-// centre-band response is 10^(gainDb/40), so x2 (+6 dB audible) is a 12 dB
-// band setting. The brief's "+6 dB => ~2x" assumed linear-in-dB bells; the
-// engine is consumed verbatim, so the test proves the tap at 12 dB.
-TEST_CASE("mixer +12dB peak at 1k boosts 1k sine approx 2x") {
+TEST_CASE("mixer +6dB peak at 1k boosts 1k sine approx 2x") {
     pluginrack::Scene scene = eqTestScene();
     pluginrack::MixerEngine reference = prepareEngine(scene);
     const float referencePeak = sineOutputPeak(reference);
@@ -386,7 +382,7 @@ TEST_CASE("mixer +12dB peak at 1k boosts 1k sine approx 2x") {
 
     scene.channels[0].eqEnabled = true;
     scene.channels[0].eqBands = pluginrack::defaultSixBands();
-    scene.channels[0].eqBands[3].gainDb = 12.0f; // the 1 kHz peak band
+    scene.channels[0].eqBands[3].gainDb = 6.0f; // the 1 kHz peak band
     pluginrack::MixerEngine boosted = prepareEngine(scene);
     const float boostedPeak = sineOutputPeak(boosted);
 
@@ -399,7 +395,7 @@ TEST_CASE("mixer setChannelEq applies bands live and ignores bad indexes") {
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
     auto bands = pluginrack::defaultSixBands();
-    bands[3].gainDb = 12.0f;
+    bands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
     engine.setChannelEq(99, bands);
     engine.setChannelEq(-1, bands);
@@ -415,7 +411,7 @@ TEST_CASE("mixer setOutputEq boosts the summed bus") {
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
     auto bands = pluginrack::defaultSixBands();
-    bands[3].gainDb = 12.0f;
+    bands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
     engine.setOutputEq(99, bands);
     engine.setOutputEq(-1, bands);
@@ -465,4 +461,46 @@ TEST_CASE("mixer non-finite input frames are flushed at the eq tap") {
         REQUIRE(std::isfinite(out.left[static_cast<std::size_t>(i)]));
         REQUIRE(std::isfinite(out.right[static_cast<std::size_t>(i)]));
     }
+}
+
+TEST_CASE("mixer setChannelEqBypassed gates the eq live without re-prepare") {
+    pluginrack::Scene off = eqTestScene();
+    pluginrack::MixerEngine reference = prepareEngine(off);
+    const float refPeak = sineOutputPeak(reference);
+    REQUIRE(refPeak > 0.1f);
+
+    pluginrack::Scene scene = eqTestScene();
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].eqBands = pluginrack::defaultSixBands();
+    scene.channels[0].eqBands[3].gainDb = 6.0f;
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    engine.setChannelEqBypassed(99, true); // ignored, must not crash
+
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(2.0f).margin(0.08f));
+    engine.setChannelEqBypassed(0, true);
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(1.0f).margin(0.01f));
+    engine.setChannelEqBypassed(0, false);
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(2.0f).margin(0.08f));
+}
+
+TEST_CASE("mixer setOutputEqBypassed gates the output eq") {
+    pluginrack::Scene off = eqTestScene();
+    pluginrack::MixerEngine reference = prepareEngine(off);
+    const float refPeak = sineOutputPeak(reference);
+    REQUIRE(refPeak > 0.1f);
+
+    pluginrack::Scene scene = eqTestScene();
+    scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].eqBands = pluginrack::defaultSixBands();
+    scene.outputs[0].eqBands[3].gainDb = 6.0f;
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    engine.setOutputEqBypassed(-1, true); // ignored, must not crash
+
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(2.0f).margin(0.08f));
+    engine.setOutputEqBypassed(0, true);
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(1.0f).margin(0.01f));
+    engine.setOutputEqBypassed(0, false);
+    REQUIRE(sineOutputPeak(engine) / refPeak == Catch::Approx(2.0f).margin(0.08f));
 }

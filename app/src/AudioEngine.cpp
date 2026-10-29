@@ -35,6 +35,9 @@ void AudioEngine::prepareToPlay(int maxBlockFrames) {
     for (auto& channel : channels) {
         channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
         channel->buffer.clear();
+        // EqEngine::prepare only stores the rate/size and recomputes cached
+        // coefficients; bands set via setChannelEq survive a rate change.
+        channel->eq.prepare(currentSampleRate, maxBlockFrames_);
         for (auto& insert : channel->inserts) {
             insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
@@ -43,6 +46,7 @@ void AudioEngine::prepareToPlay(int maxBlockFrames) {
     for (auto& output : outputs) {
         output->buffer.setSize(2, maxBlockFrames_, false, true, true);
         output->buffer.clear();
+        output->eq.prepare(currentSampleRate, maxBlockFrames_);
         for (auto& insert : output->inserts) {
             insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
@@ -98,6 +102,14 @@ void AudioEngine::render(int frames) {
 
     for (auto& channel : channels) {
         juce::AudioBuffer<float> block(channel->buffer.getArrayOfWritePointers(), 2, 0, frames);
+        // EQ-before-inserts (pre-fader), matching core's channel tap order.
+        // stateLock (held since render entry) serializes this against the EQ
+        // setters, mirroring core's EqState mutex; bypassed strips skip
+        // process() entirely so output stays bit-identical to the pre-EQ
+        // engine. No allocation: the EQ runs through the block view.
+        if (!channel->eqBypassed.get()) {
+            channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+        }
         for (auto& insert : channel->inserts) {
             insert->pluginHost.processBlock(block, insert->bypassed.get());
         }
@@ -140,6 +152,11 @@ void AudioEngine::render(int frames) {
 
     for (auto& output : outputs) {
         juce::AudioBuffer<float> block(output->buffer.getArrayOfWritePointers(), 2, 0, frames);
+        // Output EQ before the output inserts (pre-master-write), mirroring
+        // core's output tap and the channel tap above. Same lock rules.
+        if (!output->eqBypassed.get()) {
+            output->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+        }
         for (auto& insert : output->inserts) {
             insert->pluginHost.processBlock(block, insert->bypassed.get());
         }
@@ -276,6 +293,10 @@ void AudioEngine::addChannel() {
     channel->inputChannels = {0, 1};
     channel->buffer.setSize(2, currentBufferSize);
     channel->buffer.clear();
+    // Preallocate the EQ so internal bands match the member mirror: a strip
+    // created mid-session is usable the moment the UI un-bypasses it.
+    channel->eq.prepare(currentSampleRate, currentBufferSize);
+    channel->eq.setBands(channel->eqBands);
     meters.observeChannel(channel->id, 0.0f);
     for (const auto& output : outputs) {
         auto route = std::make_unique<Route>();
@@ -298,6 +319,8 @@ void AudioEngine::addOutput() {
     else output->name = "Output " + juce::String(output->id);
     output->buffer.setSize(2, currentBufferSize);
     output->buffer.clear();
+    output->eq.prepare(currentSampleRate, currentBufferSize);
+    output->eq.setBands(output->eqBands);
     meters.observeOutput(output->id, 0.0f);
     for (const auto& channel : channels) {
         auto route = std::make_unique<Route>();
@@ -600,6 +623,56 @@ void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
     }
 }
 
+void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands) {
+    // Message thread: stateLock serializes the band copy and the coefficient
+    // rebuild against render()'s taps (mirrors core's EqState mutex). Bypass
+    // state is kept, like core's setChannelEq.
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) {
+        channel->eqBands = bands;
+        channel->eqDirty = true;
+        channel->eq.setBands(channel->eqBands);
+        channel->eqDirty = false;
+    }
+}
+
+void AudioEngine::setChannelEqBypassed(std::uint32_t channelId, bool bypassed) {
+    // Live: no re-prepare needed. The reset under stateLock cannot race the
+    // render tap, so re-enabling starts from clean filter state, like core.
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) {
+        channel->eqBypassed = bypassed;
+        if (bypassed) {
+            channel->eq.reset();
+        }
+    }
+}
+
+void AudioEngine::setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands) {
+    const juce::ScopedLock lock(stateLock);
+    // Out-of-range indexes are ignored, matching core's setOutputEq.
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
+    output->eqBands = bands;
+    output->eqDirty = true;
+    output->eq.setBands(output->eqBands);
+    output->eqDirty = false;
+}
+
+void AudioEngine::setOutputEqBypassed(int outIdx, bool bypassed) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
+    output->eqBypassed = bypassed;
+    if (bypassed) {
+        output->eq.reset();
+    }
+}
+
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
@@ -657,6 +730,9 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedChannel.pan = channel->pan.get();
         savedChannel.muted = channel->muted.get();
         savedChannel.soloed = channel->soloed.get();
+        // EQ persists; trimDb stays session-only (not a scene field).
+        savedChannel.eqEnabled = !channel->eqBypassed.get();
+        savedChannel.eqBands = channel->eqBands;
         for (const auto& insert : channel->inserts) {
             savedChannel.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
                                             insert->pluginName.toStdString(), insert->bypassed.get()});
@@ -669,6 +745,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedOutput.name = output->name.toStdString();
         savedOutput.layout = output->layout;
         savedOutput.flipped = output->flipped.get();
+        savedOutput.eqEnabled = !output->eqBypassed.get();
+        savedOutput.eqBands = output->eqBands;
         for (const auto& insert : output->inserts) {
             savedOutput.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
                                            insert->pluginName.toStdString(), insert->bypassed.get()});
@@ -719,6 +797,14 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         }
         channel->buffer.setSize(2, bufferSize);
         channel->buffer.clear();
+        // EQ bands are scene state; rebuild coefficients here on the message
+        // thread before the strip goes live (never in render).
+        channel->eqBands = savedChannel.eqBands;
+        channel->eqBypassed = !savedChannel.eqEnabled;
+        channel->eq.prepare(sampleRate, bufferSize);
+        channel->eqDirty = true;
+        channel->eq.setBands(channel->eqBands);
+        channel->eqDirty = false;
         for (const auto& savedInsert : savedChannel.inserts) {
             auto insert = std::make_unique<InsertSlot>();
             insert->id = savedInsert.id;
@@ -746,6 +832,12 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         output->flipped = savedOutput.flipped;
         output->buffer.setSize(2, bufferSize);
         output->buffer.clear();
+        output->eqBands = savedOutput.eqBands;
+        output->eqBypassed = !savedOutput.eqEnabled;
+        output->eq.prepare(sampleRate, bufferSize);
+        output->eqDirty = true;
+        output->eq.setBands(output->eqBands);
+        output->eqDirty = false;
         for (const auto& savedInsert : savedOutput.inserts) {
             auto insert = std::make_unique<InsertSlot>();
             insert->id = savedInsert.id;

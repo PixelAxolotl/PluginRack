@@ -7,6 +7,7 @@
 #include "AudioEngine.h"
 #include "ChannelStrip.h"
 #include "DeviceControl.h"
+#include "EQWindow.h"
 #include "InsertHost.h"
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
@@ -25,9 +26,17 @@ public:
 private:
     class OutputStrip final : public juce::Component, public IInsertHost {
     public:
-        OutputStrip(AudioEngine::Output& output, AudioEngine& engine);
+        // Output EQ is keyed by scene-order position (Task 3 asymmetry), so the
+        // strip captures its index at construction; rebuild() recreates strips
+        // whenever the structure changes, keeping it fresh.
+        OutputStrip(AudioEngine::Output& output, int outputIndex, AudioEngine& engine);
+        ~OutputStrip() override;
         void resized() override;
         void refresh();
+        void openEqWindow();
+        void closeEqWindow();
+        void refreshEqButton();
+        int getOutputIndex() const { return outputIndex; }
 
         // IInsertHost
         juce::String insertPlugin(const juce::File&) override;
@@ -43,6 +52,7 @@ private:
         void refreshInserts();
 
         AudioEngine::Output& output;
+        int outputIndex = 0;
         AudioEngine& audioEngine;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
@@ -55,6 +65,8 @@ private:
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
+        EqButton eqButton{"EQ"};
+        EQWindow* eqWindow = nullptr;
     };
 
     AudioEngine& audioEngine;

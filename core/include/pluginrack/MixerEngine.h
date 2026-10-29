@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ namespace pluginrack {
 
 class MixerEngine {
 public:
+    MixerEngine();
+
     void setPluginFactory(IPluginFactory* factory) noexcept;
     // Returns false and fills *error when the scene is invalid or has no outputs.
     bool prepare(const Scene& scene, int maxBlockFrames, std::string* error);
@@ -32,13 +35,18 @@ public:
     int outputCount() const noexcept;
     std::vector<std::uint32_t> failedPluginSlots() const;
     const MeterBank& meters() const noexcept;
-    // Swaps EQ bands for the channel/output at the scene-order index;
-    // out-of-range indexes are ignored. Message thread only: coefficients
-    // are rebuilt inside EqEngine::setBands(). The scene's eqEnabled flag
-    // captured by prepare() gates processing, so setting bands never
-    // enables a bypassed strip.
+    // EQ mutation API, indexed by scene-order position; out-of-range indexes
+    // are ignored. setChannelEq/setOutputEq swap bands (bypass state kept);
+    // setChannelEqBypassed/setOutputEqBypassed gate processing live without
+    // re-prepare, and bypassing resets filter state so re-enabling starts
+    // clean. These four are safe to call while the audio thread renders:
+    // an internal mutex serializes them against render()'s EQ taps
+    // (mirrors the app-side stateLock pattern). prepare() keeps its
+    // existing contract: message thread with rendering stopped.
     void setChannelEq(int ch, const std::vector<EqBand>& bands);
     void setOutputEq(int out, const std::vector<EqBand>& bands);
+    void setChannelEqBypassed(int ch, bool bypassed);
+    void setOutputEqBypassed(int out, bool bypassed);
 
 private:
     struct ChannelCache {
@@ -55,16 +63,25 @@ private:
         float sendGain = 0.0f;
     };
 
+    // Mutex and EQ state grouped behind one pointer so MixerEngine stays
+    // move-constructible (the class is returned by value from prepare
+    // helpers); exactly one owner sees the mutex, render() and the four
+    // setters are its only users.
+    struct EqState {
+        std::mutex mutex;
+        std::vector<EqEngine> channelEqs;
+        std::vector<EqEngine> outputEqs;
+        std::vector<char> channelEqEnabled;
+        std::vector<char> outputEqEnabled;
+    };
+
     std::vector<ChannelCache> channels_;
     std::vector<RouteCache> routes_;
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
     std::vector<std::unique_ptr<InsertChain>> outputInsertChains_;
-    std::vector<EqEngine> channelEqs_;
-    std::vector<EqEngine> outputEqs_;
-    std::vector<char> channelEqEnabled_;
-    std::vector<char> outputEqEnabled_;
+    std::unique_ptr<EqState> eqState_;
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;

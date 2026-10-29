@@ -48,6 +48,8 @@ void flushNonFinite(float* left, float* right, int frames) noexcept {
 
 } // namespace
 
+MixerEngine::MixerEngine() : eqState_(std::make_unique<EqState>()) {}
+
 void MixerEngine::setPluginFactory(IPluginFactory* factory) noexcept {
     pluginFactory_ = factory;
 }
@@ -129,27 +131,24 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         }
     }
 
-    channelEqs_.clear();
-    channelEqs_.reserve(scene.channels.size());
-    channelEqEnabled_.clear();
-    channelEqEnabled_.reserve(scene.channels.size());
+    eqState_ = std::make_unique<EqState>();
+    eqState_->channelEqs.reserve(scene.channels.size());
+    eqState_->channelEqEnabled.reserve(scene.channels.size());
     for (const Channel& channel : scene.channels) {
         EqEngine eq;
         eq.prepare(scene.sampleRate, maxFrames);
         eq.setBands(channel.eqBands);
-        channelEqs_.push_back(std::move(eq));
-        channelEqEnabled_.push_back(channel.eqEnabled ? 1 : 0);
+        eqState_->channelEqs.push_back(std::move(eq));
+        eqState_->channelEqEnabled.push_back(channel.eqEnabled ? 1 : 0);
     }
-    outputEqs_.clear();
-    outputEqs_.reserve(scene.outputs.size());
-    outputEqEnabled_.clear();
-    outputEqEnabled_.reserve(scene.outputs.size());
+    eqState_->outputEqs.reserve(scene.outputs.size());
+    eqState_->outputEqEnabled.reserve(scene.outputs.size());
     for (const Output& output : scene.outputs) {
         EqEngine eq;
         eq.prepare(scene.sampleRate, maxFrames);
         eq.setBands(output.eqBands);
-        outputEqs_.push_back(std::move(eq));
-        outputEqEnabled_.push_back(output.eqEnabled ? 1 : 0);
+        eqState_->outputEqs.push_back(std::move(eq));
+        eqState_->outputEqEnabled.push_back(output.eqEnabled ? 1 : 0);
     }
 
     stoppedChannels_.assign(channels_.size(), 0);
@@ -194,17 +193,53 @@ bool MixerEngine::prepare(const Scene& scene, const SceneAvailability& availabil
 }
 
 void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {
-    if (ch < 0 || static_cast<std::size_t>(ch) >= channelEqs_.size()) {
+    if (eqState_ == nullptr) {
         return;
     }
-    channelEqs_[static_cast<std::size_t>(ch)].setBands(bands);
+    std::scoped_lock lock(eqState_->mutex);
+    if (ch < 0 || static_cast<std::size_t>(ch) >= eqState_->channelEqs.size()) {
+        return;
+    }
+    eqState_->channelEqs[static_cast<std::size_t>(ch)].setBands(bands);
 }
 
 void MixerEngine::setOutputEq(int out, const std::vector<EqBand>& bands) {
-    if (out < 0 || static_cast<std::size_t>(out) >= outputEqs_.size()) {
+    if (eqState_ == nullptr) {
         return;
     }
-    outputEqs_[static_cast<std::size_t>(out)].setBands(bands);
+    std::scoped_lock lock(eqState_->mutex);
+    if (out < 0 || static_cast<std::size_t>(out) >= eqState_->outputEqs.size()) {
+        return;
+    }
+    eqState_->outputEqs[static_cast<std::size_t>(out)].setBands(bands);
+}
+
+void MixerEngine::setChannelEqBypassed(int ch, bool bypassed) {
+    if (eqState_ == nullptr) {
+        return;
+    }
+    std::scoped_lock lock(eqState_->mutex);
+    if (ch < 0 || static_cast<std::size_t>(ch) >= eqState_->channelEqEnabled.size()) {
+        return;
+    }
+    eqState_->channelEqEnabled[static_cast<std::size_t>(ch)] = bypassed ? 0 : 1;
+    if (bypassed) {
+        eqState_->channelEqs[static_cast<std::size_t>(ch)].reset();
+    }
+}
+
+void MixerEngine::setOutputEqBypassed(int out, bool bypassed) {
+    if (eqState_ == nullptr) {
+        return;
+    }
+    std::scoped_lock lock(eqState_->mutex);
+    if (out < 0 || static_cast<std::size_t>(out) >= eqState_->outputEqEnabled.size()) {
+        return;
+    }
+    eqState_->outputEqEnabled[static_cast<std::size_t>(out)] = bypassed ? 0 : 1;
+    if (bypassed) {
+        eqState_->outputEqs[static_cast<std::size_t>(out)].reset();
+    }
 }
 
 void MixerEngine::render(std::span<const AudioBlock> channelInputs,
@@ -276,12 +311,17 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             }
         }
         // Channel EQ is pre-fader and runs before inserts and gain/pan.
-        // Bypassed strips skip process() entirely, keeping their state and
-        // the output bit-identical to the pre-EQ engine.
-        if (c < channelEqEnabled_.size() && channelEqEnabled_[c] != 0 &&
-            c < channelEqs_.size()) {
-            flushNonFinite(scratchLeft, scratchRight, frames);
-            channelEqs_[c].process(scratchLeft, scratchRight, frames);
+        // Bypassed strips skip process() entirely, keeping the output
+        // bit-identical to the pre-EQ engine. The lock only spans flag
+        // read + process() so bypass/band swaps never race a live filter.
+        if (eqState_ != nullptr) {
+            std::scoped_lock lock(eqState_->mutex);
+            const std::size_t n = eqState_->channelEqEnabled.size();
+            if (c < n && eqState_->channelEqEnabled[c] != 0 &&
+                c < eqState_->channelEqs.size()) {
+                flushNonFinite(scratchLeft, scratchRight, frames);
+                eqState_->channelEqs[c].process(scratchLeft, scratchRight, frames);
+            }
         }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
@@ -343,17 +383,20 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
 
     // Output EQ is pre-master-write and runs before the output insert
     // chains, mirroring the channel tap. Bypassed outputs are untouched.
-    for (std::size_t o = 0; o < numOutputs; ++o) {
-        if (o >= outputEqEnabled_.size() || outputEqEnabled_[o] == 0 ||
-            o >= outputEqs_.size()) {
-            continue;
+    if (eqState_ != nullptr) {
+        std::scoped_lock lock(eqState_->mutex);
+        for (std::size_t o = 0; o < numOutputs; ++o) {
+            if (o >= eqState_->outputEqEnabled.size() ||
+                eqState_->outputEqEnabled[o] == 0 || o >= eqState_->outputEqs.size()) {
+                continue;
+            }
+            const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
+            float* accLeft =
+                accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
+            float* accRight = accLeft + maxFrames;
+            flushNonFinite(accLeft, accRight, frames);
+            eqState_->outputEqs[o].process(accLeft, accRight, frames);
         }
-        const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
-        float* accLeft =
-            accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
-        float* accRight = accLeft + maxFrames;
-        flushNonFinite(accLeft, accRight, frames);
-        outputEqs_[o].process(accLeft, accRight, frames);
     }
 
     for (std::size_t o = 0; o < numOutputs; ++o) {
