@@ -22,12 +22,17 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
         DeviceMenu::showOutputMenu(deviceControl, output.outputDeviceName,
                                    audioEngine.getAvailableOutputDevices(),
                                    [this](juce::String chosen) {
-            const auto err = audioEngine.setOutputDevice(output.id, chosen);
-            deviceControl.setDeviceName(output.outputDeviceName);
-            deviceControl.setError(output.outputError);
-            if (err.isNotEmpty()) {
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
-            }
+            const std::uint32_t outputId = output.id;
+            juce::Thread::launch([this, outputId, chosen] {
+                const auto err = audioEngine.setOutputDevice(outputId, chosen);
+                juce::MessageManager::callAsync([this, err] {
+                    deviceControl.setDeviceName(output.outputDeviceName);
+                    deviceControl.setError(output.outputError);
+                    if (err.isNotEmpty()) {
+                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                    }
+                });
+            });
         });
     });
     addAndMakeVisible(deviceControl);

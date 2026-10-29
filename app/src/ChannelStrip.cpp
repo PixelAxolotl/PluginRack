@@ -44,11 +44,16 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
         DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName,
                                   audioEngine.getAvailableInputDevices(),
                                   [this](juce::String chosen) {
-            const auto err = audioEngine.setChannelInputDevice(channel.id, chosen);
-            refreshInput();
-            if (err.isNotEmpty()) {
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
-            }
+            const std::uint32_t channelId = channel.id;
+            juce::Thread::launch([this, channelId, chosen] {
+                const auto err = audioEngine.setChannelInputDevice(channelId, chosen);
+                juce::MessageManager::callAsync([this, err] {
+                    refreshInput();
+                    if (err.isNotEmpty()) {
+                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                    }
+                });
+            });
         });
     });
     addAndMakeVisible(deviceControl);
