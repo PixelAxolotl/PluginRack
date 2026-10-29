@@ -65,7 +65,7 @@ private:
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
-        juce::TextButton eqButton{"EQ"};
+        EqButton eqButton{"EQ"};
         EQWindow* eqWindow = nullptr;
     };
 

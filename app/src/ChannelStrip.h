@@ -74,7 +74,7 @@ private:
 
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
-    juce::TextButton eqButton{"EQ"};
+    EqButton eqButton{"EQ"};
     EQWindow* eqWindow = nullptr;
 
     std::unique_ptr<juce::FileChooser> fileChooser;

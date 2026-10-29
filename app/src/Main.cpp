@@ -52,13 +52,28 @@ public:
         if (idx >= 0 && idx + 1 < args.size()) {
             const juce::File outPath(args[idx + 1]);
             outPath.getParentDirectory().createDirectory();
+            // Positional size args stay backward compatible; any known view
+            // name among the trailing args selects the captured view.
             int shotW = 1600;
             int shotH = 900;
-            if (idx + 2 < args.size()) shotW = juce::jmax(1, args[idx + 2].getIntValue());
-            if (idx + 3 < args.size()) shotH = juce::jmax(1, args[idx + 3].getIntValue());
+            bool haveW = false;
+            AppView shotView = AppView::Rack;
+            for (int a = idx + 2; a < args.size(); ++a) {
+                const auto tok = args[a].toLowerCase();
+                if (tok.isEmpty()) continue;
+                if (tok == "mixer") shotView = AppView::Mixer;
+                else if (tok == "rack" || tok == "racks") shotView = AppView::Rack;
+                else if (tok == "routing") shotView = AppView::Routing;
+                else if (tok == "settings") shotView = AppView::Settings;
+                else if (tok.containsOnly("0123456789")) {
+                    if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
+                    else shotH = juce::jmax(1, tok.getIntValue());
+                }
+            }
             lookAndFeel = std::make_unique<ConsoleLookAndFeel>();
             juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel.get());
             auto* comp = new MainComponent();
+            comp->selectView(shotView);
             comp->setSize(shotW, shotH);
             juce::Image snapshot = comp->createComponentSnapshot(comp->getLocalBounds(), false, 1.0f);
             juce::PNGImageFormat png;

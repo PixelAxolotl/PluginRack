@@ -281,6 +281,11 @@ void MainComponent::timerCallback() {
     toolbar.setHasError(hasError);
 }
 
+void MainComponent::selectView(AppView view) {
+    toolbar.setView(view);
+    router.setView(view);
+}
+
 void MainComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
 }

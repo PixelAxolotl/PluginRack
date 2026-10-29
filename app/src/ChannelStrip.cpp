@@ -250,9 +250,10 @@ void ChannelStrip::refreshEqButton() {
     }
     const bool open = (eqWindow != nullptr);
     eqButton.setColour(juce::TextButton::buttonColourId,
-                       open ? theme::cyan() : (active ? theme::amber() : theme::control()));
+                       active ? theme::amber() : theme::control());
     eqButton.setColour(juce::TextButton::textColourOffId,
-                       (open || active) ? theme::bg() : theme::text());
+                       active ? theme::bg() : theme::text());
+    eqButton.setRingVisible(open);
 }
 
 void ChannelStrip::resized() {

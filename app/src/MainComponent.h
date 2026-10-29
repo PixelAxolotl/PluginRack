@@ -105,6 +105,7 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    void selectView(AppView view);
 
 private:
     void saveScene();
