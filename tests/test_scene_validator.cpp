@@ -137,3 +137,58 @@ TEST_CASE("non-finite mixer parameters are rejected") {
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
 }
+
+
+TEST_CASE("valid stereo input mapping produces no errors") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().layout = pluginrack::ChannelLayout::Stereo;
+    scene.channels.front().inputChannels = {1, 0};
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("invalid input mappings are rejected") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::Channel& channel = scene.channels.front();
+
+    SECTION("mono without indexes") {
+        channel.inputChannels.clear();
+    }
+    SECTION("mono with two indexes") {
+        channel.inputChannels = {0, 1};
+    }
+    SECTION("mono with negative index") {
+        channel.inputChannels = {-1};
+    }
+    SECTION("stereo with one index") {
+        channel.layout = pluginrack::ChannelLayout::Stereo;
+        channel.inputChannels = {3};
+    }
+    SECTION("stereo with three indexes") {
+        channel.layout = pluginrack::ChannelLayout::Stereo;
+        channel.inputChannels = {0, 1, 2};
+    }
+    SECTION("stereo with negative index") {
+        channel.layout = pluginrack::ChannelLayout::Stereo;
+        channel.inputChannels = {0, -2};
+    }
+    SECTION("stereo with duplicate indexes") {
+        channel.layout = pluginrack::ChannelLayout::Stereo;
+        channel.inputChannels = {1, 1};
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].entityId == 1);
+    REQUIRE(errors[0].message.find("inputChannels") != std::string::npos);
+}
+
+TEST_CASE("input mapping error names the channel and mapping") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().layout = pluginrack::ChannelLayout::Stereo;
+    scene.channels.front().inputChannels = {2, 2};
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].message.find("channel 1") != std::string::npos);
+    REQUIRE(errors[0].message.find("[2, 2]") != std::string::npos);
+}

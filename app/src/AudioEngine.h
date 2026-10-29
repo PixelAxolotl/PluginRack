@@ -3,7 +3,9 @@
 #include <JuceHeader.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <pluginrack/Meters.h>
@@ -35,7 +37,12 @@ public:
         juce::AudioBuffer<float> buffer;
         juce::String inputDeviceName;
         juce::String inputError;
-        std::unique_ptr<InputCapture> input;
+        pluginrack::SourceKind sourceKind = pluginrack::SourceKind::Hardware;
+        std::string sourceDeviceId;
+        pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
+        std::vector<int> inputChannels{0, 1};
+        // Shared per-device capture; several logical channels may map into it.
+        std::shared_ptr<InputCapture> input;
     };
 
     struct Output {
@@ -70,6 +77,10 @@ public:
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate);
     void render(int frames);
     void releaseResources();
+    // Ensures every channel with an assigned input device shares one capture
+    // opened wide enough for the highest physical index it maps. Callers that
+    // change inputChannels/layout must re-assign the device or call this.
+    void prepareInputs();
 
     void addChannel();
     void removeChannel(std::uint32_t channelId);
@@ -91,6 +102,9 @@ public:
     void setChannelPan(std::uint32_t channelId, float pan);
     void setChannelMuted(std::uint32_t channelId, bool muted);
     void setChannelSoloed(std::uint32_t channelId, bool soloed);
+    void setChannelName(std::uint32_t channelId, const juce::String& name);
+    void setChannelLayout(std::uint32_t channelId, pluginrack::ChannelLayout layout);
+    void setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels);
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);
@@ -111,10 +125,22 @@ private:
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
+    // Drops captures no channel references anymore (closes their device).
+    // Requires stateLock.
+    void pruneUnusedCaptures();
+
+    struct SharedInputCapture {
+        std::shared_ptr<InputCapture> capture;
+        // Physical input count the device was opened with; >= a later request
+        // means the capture can be reused even when the device itself offers
+        // fewer inputs (missing ones stay silent and are reported).
+        int requestedChannels = 0;
+    };
 
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
     std::vector<std::unique_ptr<Route>> routes;
+    std::map<juce::String, SharedInputCapture> inputCaptures_;
     pluginrack::MeterBank meters;
     mutable juce::CriticalSection stateLock;
     std::uint32_t nextChannelId = 1;

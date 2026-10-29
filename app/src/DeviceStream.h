@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace DeviceEnumeration {
 juce::StringArray inputs();
@@ -16,17 +17,49 @@ public:
     InputCapture();
     ~InputCapture() override;
 
+    // numChannelsNeeded = highest selected physical input index + 1 across the
+    // logical channels using this device. At least 2 inputs are requested so
+    // stereo passthrough keeps working. Inputs the device does not provide
+    // stay silent and are reported by getInputError().
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
+                      int numChannelsNeeded,
                       juce::String& errorOut);
+    // Stereo passthrough for callers that do not select physical channels
+    // yet (until AudioEngine passes per-channel mappings).
+    juce::String open(const juce::String& preferredDeviceName,
+                      double engineSampleRate,
+                      juce::String& errorOut)
+    {
+        return open(preferredDeviceName, engineSampleRate, 2, errorOut);
+    }
     void close();
 
     double getSampleRate() const { return sampleRate; }
     juce::String getError() const { return error; }
 
+    int inputChannelCount() const { return inputChannelCount_; }
+    juce::String getInputError() const
+    {
+        if (inputError.isNotEmpty()) return inputError;
+        if (inputUnavailable_.load(std::memory_order_relaxed))
+            return "An input became unavailable.";
+        return {};
+    }
+
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
 
-    void pull(juce::AudioBuffer<float>& dest, int frames);
+    // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
+    // 0/1 in order. dest must already be sized by the caller — no resizing
+    // here (audio thread). A missing physical input leaves its dest channel
+    // silent and returns false.
+    bool pull(juce::AudioBuffer<float>& dest, int frames,
+              const std::vector<int>& physicalChannels);
+    bool pull(juce::AudioBuffer<float>& dest, int frames)
+    {
+        static const std::vector<int> stereoPassthrough{0, 1};
+        return pull(dest, frames, stereoPassthrough);
+    }
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext& context) override;
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
@@ -40,6 +73,9 @@ private:
     int capacity = 0;
     double sampleRate = 0.0;
     juce::String error;
+    juce::String inputError;
+    int inputChannelCount_ = 0;
+    std::atomic<bool> inputUnavailable_{false};
     int deviceInputLatency = 0;
     int deviceBufferSize = 0;
     std::atomic<int> latencySamples{0};

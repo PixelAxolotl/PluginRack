@@ -21,6 +21,7 @@ public:
     void refreshInserts();
     void refreshRouting();
     void rebuildRoutingButtons();
+    void refreshInput();
 
     // IInsertHost
     juce::String insertPlugin(const juce::File&) override;
@@ -31,16 +32,25 @@ public:
 
 public:
     std::function<void()> onRemoveRequested;
+    std::function<void()> rebuildCallback;
 
 private:
     void layoutSlots();
+    void applyInputMapping();
+    void splitIntoMonoChannels();
 
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
     DeviceControl deviceControl;
     juce::Label channelLabel{"", ""};
     MiniButton removeChannelButton{juce::String::fromUTF8("\xc3\x97")};
+    MiniButton splitButton{"Split"};
     juce::Label vstHeader{"", "VST RACK"};
+
+    juce::ComboBox modeCombo;
+    juce::ComboBox inputComboA;
+    juce::ComboBox inputComboB;
+    juce::Label inputErrorLabel{"", ""};
 
     juce::OwnedArray<InsertSlotComponent> slots;
     juce::TextButton addVstButton{"+ Add VST3"};

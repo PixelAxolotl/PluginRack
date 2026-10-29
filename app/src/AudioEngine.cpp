@@ -59,7 +59,7 @@ void AudioEngine::render(int frames) {
         }
         channel->buffer.clear(0, frames);
         if (channel->input) {
-            channel->input->pull(channel->buffer, frames);
+            channel->input->pull(channel->buffer, frames, channel->inputChannels);
         }
     }
     for (auto& output : outputs) {
@@ -169,6 +169,7 @@ void AudioEngine::removeChannel(std::uint32_t channelId) {
     routes.erase(std::remove_if(routes.begin(), routes.end(),
                                [channelId](const auto& route) { return route->channelId == channelId; }),
                   routes.end());
+    pruneUnusedCaptures();
 }
 
 void AudioEngine::addChannel() {
@@ -176,6 +177,9 @@ void AudioEngine::addChannel() {
     auto channel = std::make_unique<Channel>();
     channel->id = nextChannelId++;
     channel->name = "Channel " + juce::String(channel->id);
+    channel->sourceKind = pluginrack::SourceKind::Hardware;
+    channel->layout = pluginrack::ChannelLayout::Stereo;
+    channel->inputChannels = {0, 1};
     channel->buffer.setSize(2, currentBufferSize);
     channel->buffer.clear();
     meters.observeChannel(channel->id, 0.0f);
@@ -377,6 +381,47 @@ void AudioEngine::setChannelSoloed(std::uint32_t channelId, bool soloed) {
     }
 }
 
+void AudioEngine::setChannelName(std::uint32_t channelId, const juce::String& name) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) {
+        channel->name = name;
+    }
+}
+
+void AudioEngine::setChannelLayout(std::uint32_t channelId, pluginrack::ChannelLayout layout) {
+    juce::String deviceName;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) {
+            return;
+        }
+        channel->layout = layout;
+        deviceName = channel->inputDeviceName;
+    }
+    // Re-assign the device so the shared capture is re-opened (or widened)
+    // for the new layout; silent channels keep nothing to reopen.
+    if (deviceName.isNotEmpty() && deviceName != "None \xe2\x80\x94 silent") {
+        setChannelInputDevice(channelId, deviceName);
+    }
+}
+
+void AudioEngine::setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels) {
+    juce::String deviceName;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) {
+            return;
+        }
+        channel->inputChannels = inputChannels;
+        deviceName = channel->inputDeviceName;
+    }
+    if (deviceName.isNotEmpty() && deviceName != "None \xe2\x80\x94 silent") {
+        setChannelInputDevice(channelId, deviceName);
+    }
+}
+
 void AudioEngine::setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb) {
     for (auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
@@ -429,7 +474,10 @@ pluginrack::Scene AudioEngine::makeScene() const {
         pluginrack::Channel savedChannel;
         savedChannel.id = channel->id;
         savedChannel.name = channel->name.toStdString();
-        savedChannel.layout = pluginrack::ChannelLayout::Stereo;
+        savedChannel.sourceKind = channel->sourceKind;
+        savedChannel.sourceDeviceId = channel->sourceDeviceId;
+        savedChannel.layout = channel->layout;
+        savedChannel.inputChannels = channel->inputChannels;
         savedChannel.gainDb = channel->gainDb.get();
         savedChannel.pan = channel->pan.get();
         savedChannel.muted = channel->muted.get();
@@ -483,6 +531,15 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         channel->pan = savedChannel.pan;
         channel->muted = savedChannel.muted;
         channel->soloed = savedChannel.soloed;
+        channel->sourceKind = savedChannel.sourceKind;
+        channel->sourceDeviceId = savedChannel.sourceDeviceId;
+        channel->layout = savedChannel.layout;
+        channel->inputChannels = savedChannel.inputChannels;
+        if (channel->inputChannels.empty()) {
+            channel->inputChannels = channel->layout == pluginrack::ChannelLayout::Mono
+                                        ? std::vector<int>{0}
+                                        : std::vector<int>{0, 1};
+        }
         channel->buffer.setSize(2, bufferSize);
         channel->buffer.clear();
         for (const auto& savedInsert : savedChannel.inserts) {
@@ -541,14 +598,28 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         outputs = std::move(restoredOutputs);
         routes = std::move(restoredRoutes);
         meters = std::move(restoredMeters);
+        // Old channels dropped above may have left captures nobody uses.
+        pruneUnusedCaptures();
     }
 
-    // Re-apply device assignments where possible.
-    for (const auto& [id, name] : savedInputDevices) {
-        if (name.isNotEmpty()) {
-            const auto e = setChannelInputDevice(id, name);
-            if (e.isNotEmpty()) loadErrors += e + "\n";
+    // Re-apply device assignments where possible: the device stored in the
+    // scene wins; channels from scenes saved before sourceDeviceId was
+    // persisted keep whatever device was live for the same id.
+    std::map<std::uint32_t, juce::String> desiredInputDevices;
+    for (const auto& savedChannel : scene.channels) {
+        const juce::String sceneDevice(savedChannel.sourceDeviceId);
+        if (sceneDevice.isNotEmpty()) {
+            desiredInputDevices[savedChannel.id] = sceneDevice;
+            continue;
         }
+        const auto live = savedInputDevices.find(savedChannel.id);
+        if (live != savedInputDevices.end() && live->second.isNotEmpty()) {
+            desiredInputDevices[savedChannel.id] = live->second;
+        }
+    }
+    for (const auto& [id, name] : desiredInputDevices) {
+        const auto e = setChannelInputDevice(id, name);
+        if (e.isNotEmpty()) loadErrors += e + "\n";
     }
     for (const auto& [id, name] : savedOutputDevices) {
         if (name.isNotEmpty()) {
@@ -570,31 +641,102 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
         const juce::ScopedLock sl(stateLock);
         channel->input.reset();
         channel->inputDeviceName = "None \xe2\x80\x94 silent";
+        channel->sourceDeviceId.clear();
         channel->inputError.clear();
+        pruneUnusedCaptures();
         return {};
     }
 
-    const juce::String prevName = channel->inputDeviceName;
-    auto prevInput = std::move(channel->input);
+    // The shared capture for this device must cover the highest physical index
+    // used by any channel on it, including this channel's new mapping.
+    int needed = 2;
+    {
+        const juce::ScopedLock sl(stateLock);
+        for (const auto& c : channels) {
+            if (c.get() == channel || c->inputDeviceName == deviceName) {
+                for (const int index : c->inputChannels) {
+                    needed = juce::jmax(needed, index + 1);
+                }
+            }
+        }
+    }
 
-    auto newInput = std::make_unique<InputCapture>();
+    std::shared_ptr<InputCapture> reuse;
+    {
+        const juce::ScopedLock sl(stateLock);
+        const auto it = inputCaptures_.find(deviceName);
+        if (it != inputCaptures_.end() && it->second.requestedChannels >= needed) {
+            reuse = it->second.capture;
+        }
+    }
+
+    if (reuse != nullptr) {
+        // One device stays open for every logical channel mapped into it.
+        const juce::ScopedLock sl(stateLock);
+        channel->input = reuse;
+        channel->inputDeviceName = deviceName;
+        channel->sourceDeviceId = deviceName.toStdString();
+        channel->inputError = reuse->getInputError();
+        pruneUnusedCaptures();
+        return {};
+    }
+
+    // No usable capture yet (or it is too narrow): open one sized for all
+    // channels on this device. On failure every channel keeps its previous
+    // capture untouched.
+    auto capture = std::make_shared<InputCapture>();
     juce::String err;
-    const auto openErr = newInput->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       currentSampleRate, err);
+    const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
+                                       currentSampleRate, needed, err);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
-        channel->input = std::move(prevInput);
         channel->inputError = openErr;
         return openErr;
     }
 
     {
         const juce::ScopedLock sl(stateLock);
-        channel->input = std::move(newInput);
-        channel->inputDeviceName = deviceName;
-        channel->inputError.clear();
+        for (auto& c : channels) {
+            if (c.get() == channel || c->inputDeviceName == deviceName) {
+                c->input = capture;
+                c->inputDeviceName = deviceName;
+                c->sourceDeviceId = deviceName.toStdString();
+                c->inputError = capture->getInputError();
+            }
+        }
+        inputCaptures_[deviceName] = SharedInputCapture{capture, needed};
+        pruneUnusedCaptures();
     }
     return {};
+}
+
+void AudioEngine::prepareInputs() {
+    std::vector<std::pair<std::uint32_t, juce::String>> wanted;
+    {
+        const juce::ScopedLock lock(stateLock);
+        for (const auto& channel : channels) {
+            if (channel->inputDeviceName.isNotEmpty()
+                && channel->inputDeviceName != "None \xe2\x80\x94 silent") {
+                wanted.emplace_back(channel->id, channel->inputDeviceName);
+            }
+        }
+    }
+    // setChannelInputDevice reuses an existing capture when the requested
+    // width still covers the mappings and reopens wider when they grew.
+    for (const auto& [id, name] : wanted) {
+        setChannelInputDevice(id, name);
+    }
+}
+
+void AudioEngine::pruneUnusedCaptures() {
+    for (auto it = inputCaptures_.begin(); it != inputCaptures_.end();) {
+        // Only the map itself holds the capture: no channel uses it anymore.
+        if (it->second.capture == nullptr || it->second.capture.use_count() == 1) {
+            it = inputCaptures_.erase(it);  // destructor closes the device
+        } else {
+            ++it;
+        }
+    }
 }
 
 juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::String& deviceName) {

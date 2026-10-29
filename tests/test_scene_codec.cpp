@@ -169,3 +169,57 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
     REQUIRE(loaded.scene.has_value());
     REQUIRE(pluginrack::toJson(*loaded.scene).find("futureThing") == std::string::npos);
 }
+
+
+TEST_CASE("inputChannels round-trips with the channel layout") {
+    pluginrack::Scene original;
+    original.schemaVersion = 2;
+    original.name = "mapping";
+
+    pluginrack::Channel mono;
+    mono.id = 1;
+    mono.name = "kick";
+    mono.layout = pluginrack::ChannelLayout::Mono;
+    mono.inputChannels = {2};
+
+    pluginrack::Channel stereo;
+    stereo.id = 2;
+    stereo.name = "keys";
+    stereo.layout = pluginrack::ChannelLayout::Stereo;
+    stereo.inputChannels = {4, 3};
+
+    original.channels.push_back(mono);
+    original.channels.push_back(stereo);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("inputChannels") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->channels[0].inputChannels == std::vector<int>{2});
+    REQUIRE(loaded.scene->channels[1].inputChannels == std::vector<int>{4, 3});
+}
+
+TEST_CASE("scenes without inputChannels load with layout defaults") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 2,)"
+                             R"("name": "legacy",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [)"
+                             R"({"id": 1, "name": "mic", "layout": "Mono"},)"
+                             R"({"id": 2, "name": "synth", "layout": "Stereo"},)"
+                             R"({"id": 3, "name": "default"})"
+                             R"(],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": []})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->channels.size() == 3);
+    REQUIRE(loaded.scene->channels[0].inputChannels == std::vector<int>{0});
+    REQUIRE(loaded.scene->channels[1].inputChannels == std::vector<int>{0, 1});
+    REQUIRE(loaded.scene->channels[2].inputChannels == std::vector<int>{0});
+}

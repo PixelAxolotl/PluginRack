@@ -23,6 +23,7 @@ struct Channel {
     SourceKind sourceKind = SourceKind::Hardware;
     std::string sourceDeviceId;
     ChannelLayout layout = ChannelLayout::Mono;
+    std::vector<int> inputChannels{0};
     float gainDb = 0.0f;
     float pan = 0.0f;
     bool muted = false;
