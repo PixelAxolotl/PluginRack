@@ -33,6 +33,7 @@ TEST_CASE("eq flat passes audio") {
     e.process(L, R, 8);
     // 0 dB peaks and shelves are exact identities at A == 1; the 80 Hz high-pass
     // passes the impulse's first tap at (1+cos w0)/2 / (1+alpha) = 0.99197.
+    // Brief's epsilon(0.001) is unsatisfiable with RBJ math; 0.01 preserves the near-flat intent.
     REQUIRE(L[0] == Catch::Approx(1.0f).epsilon(0.01));
     REQUIRE(R[0] == Catch::Approx(1.0f).epsilon(0.01));
 }
