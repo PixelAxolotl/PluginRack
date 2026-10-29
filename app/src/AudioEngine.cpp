@@ -5,7 +5,7 @@
 #include <map>
 
 AudioEngine::AudioEngine() {
-    for (int i = 0; i < 8; ++i) addOutput();
+    for (int i = 0; i < 3; ++i) addOutput();
     addChannel();
     if (!outputs.empty()) {
         setOutputDevice(outputs.front()->id, "System Default");
@@ -192,6 +192,52 @@ void AudioEngine::addOutput() {
         routes.push_back(std::move(route));
     }
     outputs.push_back(std::move(output));
+}
+
+juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
+    // Find the output.
+    AudioEngine::Output* out = nullptr;
+    for (auto& o : outputs) {
+        if (o->id == outputId) { out = o.get(); break; }
+    }
+    if (out == nullptr) {
+        return "The output no longer exists.";
+    }
+    if (outputs.size() <= 1) {
+        return "At least one output is required.";
+    }
+
+    const bool wasClock = (clockOutputId == outputId);
+    if (wasClock && out->output != nullptr) {
+        out->output->setRenderActive(false);
+    }
+
+    {
+        const juce::ScopedLock sl(stateLock);
+        if (out->output != nullptr) {
+            out->output.reset();
+        }
+        routes.erase(std::remove_if(routes.begin(), routes.end(),
+                                   [outputId](const auto& route) { return route->outputId == outputId; }),
+                     routes.end());
+        for (auto it = outputs.begin(); it != outputs.end(); ++it) {
+            if ((*it)->id == outputId) {
+                it = outputs.erase(it);
+                break;
+            }
+        }
+        if (wasClock) {
+            clockOutputId = 0;
+            for (auto& o2 : outputs) {
+                if (o2->output != nullptr) {
+                    clockOutputId = o2->id;
+                    o2->output->setRenderHook([this](int n) { this->render(n); });
+                    break;
+                }
+            }
+        }
+    }
+    return {};
 }
 
 juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& file) {

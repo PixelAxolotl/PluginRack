@@ -73,7 +73,7 @@ public:
     void addChannel();
     void removeChannel(std::uint32_t channelId);
     void addOutput();
-    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
+    juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String getClockDescription() const;
     juce::StringArray getAvailableInputDevices() const;

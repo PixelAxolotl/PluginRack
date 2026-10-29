@@ -1,5 +1,7 @@
 #include "MainComponent.h"
 
+#include <vector>
+
 #include "SceneBridge.h"
 
 MainComponent::MainComponent()
@@ -16,6 +18,55 @@ MainComponent::MainComponent()
 
     saveButton.onClick = [this] { saveScene(); };
     loadButton.onClick = [this] { loadScene(true); };
+
+    menuButton.onClick = [this] {
+        juce::PopupMenu menu;
+        menu.addItem("Save Scene", [this] { saveScene(); });
+        menu.addItem("Load Scene", [this] { loadScene(true); });
+        menu.addItem("Open Scenes Folder", [this] {
+            const auto dir = SceneBridge::getSceneFile().getParentDirectory();
+            dir.createDirectory();
+            dir.startAsProcess();
+        });
+        menu.addSeparator();
+        menu.addItem("Reset to Defaults", [this] {
+            juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
+                                                "PluginRack",
+                                                "Reset engine to defaults (1 channel, 3 outputs)?",
+                                                "Reset", "Cancel", nullptr,
+                                                juce::ModalCallbackFunction::create([this](int result) {
+                                                    if (result != 1) return;
+                                                    std::vector<std::uint32_t> chIds;
+                                                    for (const auto& c : audioEngine.getChannels()) chIds.push_back(c->id);
+                                                    for (std::size_t i = 1; i < chIds.size(); ++i)
+                                                        audioEngine.removeChannel(chIds[i]);
+                                                    std::vector<std::uint32_t> outIds;
+                                                    for (const auto& o : audioEngine.getOutputs()) outIds.push_back(o->id);
+                                                    for (std::size_t i = 3; i < outIds.size(); ++i)
+                                                        audioEngine.removeOutput(outIds[i]);
+                                                    if (audioEngine.getChannels().empty()) audioEngine.addChannel();
+                                                    if (audioEngine.getOutputs().empty()) audioEngine.addOutput();
+                                                    refreshViews();
+                                                    saveScene();
+                                                }));
+        });
+        menu.addSeparator();
+        menu.addSectionHeader("Audio");
+        menu.addItem(audioEngine.getClockDescription(), false, false, [] {});
+        const auto report = audioEngine.getLatencyReport();
+        juce::String latText;
+        if (report.valid) {
+            latText = "Input " + juce::String((int)std::round(report.inputMs)) + " ms / Plugins " +
+                      juce::String((int)std::round(report.pluginMs)) + " ms / Output " +
+                      juce::String((int)std::round(report.outputMs)) + " ms / Total " +
+                      juce::String((int)std::round(report.totalMs)) + " ms";
+        } else {
+            latText = "No output device";
+        }
+        menu.addItem(latText, false, false, [] {});
+
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(menuButton));
+    };
 
     mixer.onStructureChanged = [this] { /* no-op */ };
 
