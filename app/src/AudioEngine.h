@@ -131,6 +131,7 @@ public:
     void setChannelName(std::uint32_t channelId, const juce::String& name);
     void setChannelLayout(std::uint32_t channelId, pluginrack::ChannelLayout layout);
     void setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels);
+    void setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels);
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);

@@ -316,9 +316,9 @@ void ChannelStrip::applyInputMapping() {
         if (b == a) b = (a == 0 ? 1 : 0);
         mapping = {a, b};
     }
-    audioEngine.setChannelLayout(channel.id,
-                                 mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo);
-    audioEngine.setChannelInputChannels(channel.id, mapping);
+    audioEngine.setChannelMapping(channel.id,
+                                 mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo,
+                                 mapping);
     refreshInput();
 }
 
@@ -347,8 +347,7 @@ void ChannelStrip::splitIntoMonoChannels() {
             if (result == 0 || safe == nullptr) return;
             auto& engine = safe->audioEngine;
             const std::uint32_t firstId = safe->channel.id;
-            engine.setChannelLayout(firstId, pluginrack::ChannelLayout::Mono);
-            engine.setChannelInputChannels(firstId, {0});
+            engine.setChannelMapping(firstId, pluginrack::ChannelLayout::Mono, {0});
             engine.setChannelName(firstId, "Input 1");
             for (int i = 1; i < inputs; ++i) {
                 engine.addChannel();
@@ -356,8 +355,7 @@ void ChannelStrip::splitIntoMonoChannels() {
                 if (chans.empty()) break;
                 const std::uint32_t newId = chans.back()->id;
                 engine.setChannelName(newId, "Input " + juce::String(i + 1));
-                engine.setChannelLayout(newId, pluginrack::ChannelLayout::Mono);
-                engine.setChannelInputChannels(newId, {i});
+                engine.setChannelMapping(newId, pluginrack::ChannelLayout::Mono, {i});
                 const auto err = engine.setChannelInputDevice(newId, device);
                 if (err.isNotEmpty()) {
                     juce::AlertWindow::showMessageBoxAsync(

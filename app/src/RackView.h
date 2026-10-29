@@ -21,6 +21,15 @@ public:
 
     void resized() override;
     void rebuild();
+    bool keyPressed(const juce::KeyPress& key) override;
+
+    bool hasChainSelected() const { return hasSelection; }
+    std::uint32_t selectedChainId() const { return selectedId; }
+    bool selectedChainIsOutput() const { return selectedIsOutput; }
+
+    // Cross-view link: the shell wires this to ViewRouter::setView(AppView::Mixer).
+    // Selection state (selectedChainId) is untouched by editor open/close.
+    std::function<void()> onJumpToMixer;
 
 private:
     class ChainRow final : public juce::Component, public IInsertHost {
@@ -31,6 +40,8 @@ private:
         void resized() override;
         void paint(juce::Graphics& g) override;
         void mouseDown(const juce::MouseEvent&) override;
+        void mouseDoubleClick(const juce::MouseEvent&) override;
+        bool keyPressed(const juce::KeyPress& key) override;
 
         void refresh();
         void setSelected(bool isSelected);
@@ -46,6 +57,8 @@ private:
         void openPicker() override;
 
         std::function<void(ChainRow*)> onSelected;
+        std::function<void(int)> onMoveSelection;
+        std::function<void()> onJumpToMixer;
 
     private:
         void initHeader();
@@ -64,6 +77,7 @@ private:
         std::unique_ptr<LevelMeter> meter;
         juce::TextButton muteButton{"Mute"};
         juce::TextButton soloButton{"Solo"};
+        juce::TextButton mixerButton{"Mixer"};
         juce::Viewport moduleViewport;
         juce::Component moduleContent;
         juce::OwnedArray<InsertSlotComponent> slots;
@@ -75,6 +89,8 @@ private:
     };
 
     void selectRow(ChainRow* row);
+    void selectRelative(int delta);
+    void jumpToMixer();
 
     AudioEngine& audioEngine;
     juce::Viewport listViewport;

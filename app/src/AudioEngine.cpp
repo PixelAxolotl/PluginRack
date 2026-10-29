@@ -437,6 +437,21 @@ void AudioEngine::setChannelInputChannels(std::uint32_t channelId, const std::ve
     }
 }
 
+void AudioEngine::setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels) {
+    juce::String deviceName;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) return;
+        channel->layout = layout;
+        channel->inputChannels = inputChannels;
+        deviceName = channel->inputDeviceName;
+    }
+    if (deviceName.isNotEmpty() && deviceName != "None \xe2\x80\x94 silent") {
+        setChannelInputDevice(channelId, deviceName);
+    }
+}
+
 void AudioEngine::setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb) {
     for (auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
