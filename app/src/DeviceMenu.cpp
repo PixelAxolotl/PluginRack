@@ -16,6 +16,12 @@ void buildMenu(juce::PopupMenu& menu, const juce::String& header,
     for (const auto& d : devices) {
         menu.addItem(d, true, current == d, [onChoose, d] { onChoose(d); });
     }
+#if JUCE_WINDOWS && !JUCE_ASIO
+    // ASIO is a compile-time JUCE flag; without it the type can never appear
+    // in the list (DeviceStream.cpp only tries ASIO when JUCE_ASIO is set).
+    menu.addSeparator();
+    menu.addItem(juce::String("ASIO (SDK not installed)"), false, false, [] {});
+#endif
 }
 }
 

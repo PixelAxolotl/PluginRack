@@ -52,6 +52,8 @@ public:
         juce::Atomic<float> peak{0.0f};
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
+        pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
+        juce::Atomic<bool> flipped{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
         juce::String outputDeviceName;
@@ -62,7 +64,8 @@ public:
     struct Route {
         std::uint32_t channelId = 0;
         std::uint32_t outputId = 0;
-        juce::Atomic<float> sendGainDb{0.0f};
+        juce::Atomic<float> sendGainDbL{0.0f};
+        juce::Atomic<float> sendGainDbR{0.0f};
     };
 
     struct LatencyReport {
@@ -81,6 +84,10 @@ public:
         double maxInsertMs = 0.0;
         bool valid = false;
         bool approximate = true;
+        double measuredMs = 0.0;
+        bool measuredValid = false;
+        bool measuredAttempted = false;
+        bool measureFailed = false;
     };
 
     struct FifoDiagnostics {
@@ -133,9 +140,16 @@ public:
     void setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels);
     void setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels);
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
+    void setSendGainL(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
+    void setSendGainR(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
+    float getSendGainL(std::uint32_t channelId, std::uint32_t outputId) const;
+    float getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);
     void setOutputMuted(std::uint32_t outputId, bool muted);
+    void setOutputName(std::uint32_t outputId, const juce::String& name);
+    void setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout);
+    void setOutputFlipped(std::uint32_t outputId, bool flipped);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
@@ -144,6 +158,13 @@ public:
     LatencyReport getLatencyReport() const;
 
     FifoDiagnostics getFifoDiagnostics() const;
+
+    void startLatencyMeasurement();
+    void cancelLatencyMeasurement();
+    bool isLatencyMeasuring() const { return latencyMeasureActive_.load(std::memory_order_relaxed); }
+    bool hasMeasuredLatency() const { return latencyMeasuredValid_.load(std::memory_order_relaxed); }
+    bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
+    double getMeasuredLatencyMs() const;
 
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);
@@ -157,6 +178,7 @@ private:
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
+    void cancelLatencyMeasurementImpl();
 
     struct SharedInputCapture {
         std::shared_ptr<InputCapture> capture;
@@ -164,6 +186,9 @@ private:
         // means the capture can be reused even when the device itself offers
         // fewer inputs (missing ones stay silent and are reported).
         int requestedChannels = 0;
+        // Buffer size the capture was opened with. Drivers may clamp to the
+        // nearest supported size, so reuse compares requests, not actuals.
+        int requestedBufferSize = 0;
     };
 
     std::vector<std::unique_ptr<Channel>> channels;
@@ -183,6 +208,17 @@ private:
     juce::AudioBuffer<float> silenceBuffer_;
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
+
+    // Round-trip latency measurement state.
+    std::atomic<bool> latencyMeasureActive_{false};
+    std::atomic<bool> latencyMeasureEmitted_{false};
+    std::atomic<std::uint64_t> latencyMeasureOutputSample_{0};
+    std::atomic<int> latencyMeasureBlocks_{0};
+    std::atomic<bool> latencyMeasuredValid_{false};
+    std::atomic<int> latencyMeasuredSamples_{0};
+    std::atomic<std::uint32_t> latencyMeasureStartMs_{0};
+    std::atomic<bool> latencyMeasureFailed_{false};
+    std::uint64_t outputSampleCounter_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

@@ -26,7 +26,7 @@ ToolbarComponent::ToolbarComponent() {
     latencyLabel.setColour(juce::Label::textColourId, theme::dim());
 
     errorButton.setColour(juce::TextButton::textColourOffId, theme::red());
-    errorButton.setTooltip("Audio errors — click for details");
+    errorButton.setTooltip("Audio errors - click for details");
     errorButton.setVisible(false);
     errorButton.onClick = [this] { if (onErrorClicked) onErrorClicked(); };
 
@@ -93,7 +93,7 @@ void ToolbarComponent::paint(juce::Graphics& g) {
     g.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     g.drawText("PluginRack", 20, 0, 182, getHeight(), juce::Justification::centredLeft);
 
-    // clock info (single line, clipped — same as the old header paint)
+    // clock info (single line, clipped - same as the old header paint)
     g.setColour(clockColour);
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
     g.drawFittedText(clockText, clockBounds, juce::Justification::centredRight, 1);
@@ -157,12 +157,19 @@ void ViewRouter::PlaceholderView::resized() {
     subtitleLabel.setBounds(area.removeFromTop(22));
 }
 
-ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
+ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
-    , routingView("Routing", "The full channel/output matrix arrives in Task 5. Per-channel routing stays in the mixer strips.")
-    , settingsView("Settings", "Device, buffer and diagnostics arrive in Task 5. Audio details stay in the toolbar menu.") {
+    , routingView(audioEngine)
+    , settingsView(audioEngine) {
+    rackView.onJumpToMixer = [this] {
+        setView(AppView::Mixer);
+        if (onViewChanged) onViewChanged(AppView::Mixer);
+    };
+    rackView.onStructureChanged = [this] {
+        if (onStructureChanged) onStructureChanged();
+    };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
@@ -173,6 +180,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
 
 void ViewRouter::setView(AppView view) {
     currentView = view;
+    if (view == AppView::Rack) rackView.rebuild();
+    if (view == AppView::Mixer) mixerView.rebuild();
+    if (view == AppView::Routing) routingView.rebuild();
+    if (view == AppView::Settings) settingsView.refresh();
     mixerView.setVisible(view == AppView::Mixer);
     rackView.setVisible(view == AppView::Rack);
     routingView.setVisible(view == AppView::Routing);
@@ -181,6 +192,8 @@ void ViewRouter::setView(AppView view) {
 
 void ViewRouter::refreshViews() {
     rackView.rebuild();
+    routingView.rebuild();
+    settingsView.refresh();
 }
 
 void ViewRouter::resized() {
@@ -197,6 +210,8 @@ MainComponent::MainComponent()
 
     toolbar.setView(AppView::Rack);
     toolbar.onViewSelected = [this](AppView view) { router.setView(view); };
+    router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
+    router.onStructureChanged = [this] { refreshViews(); };
     toolbar.onSave = [this] { saveScene(); };
     toolbar.onLoad = [this] { loadScene(true); };
     toolbar.onMenu = [this] { showMenu(); };
@@ -225,21 +240,30 @@ void MainComponent::timerCallback() {
         const bool glitch = (report.underruns + report.overruns) > 0;
         if (glitch || smoothedLatencyMs < 0.0) smoothedLatencyMs = report.totalMs;
         else smoothedLatencyMs += 0.25 * (report.totalMs - smoothedLatencyMs);
-        juce::String latText = "LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms (est.)";
+        const juce::String estimateTip = "Estimated (approx.) input to output: input " +
+                            juce::String((int)std::round(report.inputDeviceMs)) + " ms (buffer " +
+                            juce::String(report.inputBufferSize) + " smp) + plugins " +
+                            juce::String((int)std::round(report.pluginMs)) + " ms + output " +
+                            juce::String((int)std::round(report.outputDeviceMs)) + " ms (buffer " +
+                            juce::String(report.outputBufferSize) + " smp) + FIFO " +
+                            juce::String((int)std::round(report.fifoMs)) + " ms" +
+                            (glitch ? " - dropouts detected" : "");
+        juce::String latText;
+        juce::String tip;
+        if (report.measuredValid) {
+            latText = "LAT " + juce::String((int)std::round(report.measuredMs)) + " ms";
+            tip = "Measured round-trip: " + juce::String((int)std::round(report.measuredMs))
+                + " ms (" + estimateTip + ")";
+        } else {
+            latText = "LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms (est.)";
+            tip = estimateTip;
+        }
         if (glitch) latText += " !";
         juce::Colour colour = theme::dim();
         if (glitch) colour = theme::red();
         else if (smoothedLatencyMs > 60.0) colour = theme::red();
         else if (smoothedLatencyMs > 30.0) colour = theme::amber();
-        toolbar.setLatencyText(latText, colour,
-                                "Estimated (approx.) input to output: input " +
-                                juce::String((int)std::round(report.inputDeviceMs)) + " ms (buffer " +
-                                juce::String(report.inputBufferSize) + " smp) + plugins " +
-                                juce::String((int)std::round(report.pluginMs)) + " ms + output " +
-                                juce::String((int)std::round(report.outputDeviceMs)) + " ms (buffer " +
-                                juce::String(report.outputBufferSize) + " smp) + FIFO " +
-                                juce::String((int)std::round(report.fifoMs)) + " ms" +
-                                (glitch ? " - dropouts detected" : ""));
+        toolbar.setLatencyText(latText, colour, tip);
     }
 
     bool hasError = !report.valid;
@@ -320,6 +344,11 @@ void MainComponent::showMenu() {
                          + juce::String(report.outputBufferSize) + " smp)",
                      false, false, [] {});
         menu.addItem("FIFO " + ms(report.fifoMs), false, false, [] {});
+        if (report.measuredValid) {
+            menu.addItem("Measured round-trip " + ms(report.measuredMs), false, false, [] {});
+        } else if (report.measureFailed) {
+            menu.addItem("Measurement failed", false, false, [] {});
+        }
         if (report.underruns > 0 || report.overruns > 0) {
             menu.addItem("Glitches: " + juce::String((juce::int64)report.overruns)
                              + " overruns / " + juce::String((juce::int64)report.underruns)
@@ -352,7 +381,7 @@ void MainComponent::showAudioErrors() {
 
 void MainComponent::showSnapshotPlaceholder() {
     juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "PluginRack",
-                                           "Snapshots are not implemented yet — scene save/load stays in the toolbar.");
+                                           "Snapshots are not implemented yet - scene save/load stays in the toolbar.");
 }
 
 void MainComponent::saveScene() {

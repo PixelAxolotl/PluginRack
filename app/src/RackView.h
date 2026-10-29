@@ -24,6 +24,7 @@ public:
     bool keyPressed(const juce::KeyPress& key) override;
 
     bool hasChainSelected() const { return hasSelection; }
+    std::function<void()> onStructureChanged;
     std::uint32_t selectedChainId() const { return selectedId; }
     bool selectedChainIsOutput() const { return selectedIsOutput; }
 
@@ -59,6 +60,8 @@ private:
         std::function<void(ChainRow*)> onSelected;
         std::function<void(int)> onMoveSelection;
         std::function<void()> onJumpToMixer;
+        std::function<void()> onChanged;
+        std::function<void()> onStructureChanged;
 
     private:
         void initHeader();
@@ -78,6 +81,8 @@ private:
         juce::TextButton muteButton{"Mute"};
         juce::TextButton soloButton{"Solo"};
         juce::TextButton mixerButton{"Mixer"};
+        juce::ComboBox modeCombo;
+        juce::TextButton flipButton{"Flip"};
         juce::Viewport moduleViewport;
         juce::Component moduleContent;
         juce::OwnedArray<InsertSlotComponent> slots;

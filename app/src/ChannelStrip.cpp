@@ -56,6 +56,22 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
             });
         });
     });
+    deviceControl.setOnRename([this] {
+        auto* w = new juce::AlertWindow("Rename channel", "Enter new name:", juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor("name", channel.name);
+        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<ChannelStrip> safe(this);
+        w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w](int result) {
+            if (result == 1 && safe != nullptr) {
+                const auto newName = w->getTextEditorContents("name");
+                safe->audioEngine.setChannelName(safe->channel.id, newName);
+                safe->deviceControl.setTitle(newName);
+                if (safe->rebuildCallback) safe->rebuildCallback();
+            }
+            delete w;
+        }), true);
+    });
     addAndMakeVisible(deviceControl);
 
     modeCombo.addItem("Mono", 1);
@@ -408,6 +424,12 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
 
 void ChannelStrip::refreshAfterInsertChange() {
     refreshInserts();
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        auto callback = safe->rebuildCallback;
+        if (callback) callback();
+    });
 }
 
 void ChannelStrip::rebuildRoutingButtons() {

@@ -45,6 +45,9 @@ public:
 
     double getSampleRate() const { return sampleRate; }
     juce::String getError() const { return error; }
+    // Device type the last successful open() selected (e.g. "Windows Audio
+    // (Low Latency Mode)"). Diagnostics only; empty while closed.
+    juce::String getActiveDeviceType() const { return activeDeviceType_; }
 
     int inputChannelCount() const { return inputChannelCount_; }
     // Total inputs the device itself provides; may exceed inputChannelCount(),
@@ -59,8 +62,16 @@ public:
     }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+    int getDeviceBufferSize() const { return deviceBufferSize; }
+    double getOccupancy() const { return (double) deviceBufferSize / (double) juce::jmax(1, capacity); }
     std::uint64_t getInputOverruns() const { return inputOverruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
+    void setLatencyMeasurementActive(bool active) {
+        latencyMeasureActive.store(active, std::memory_order_relaxed);
+        if (!active) latencyImpulseDetected.store(false, std::memory_order_relaxed);
+    }
+    bool isLatencyImpulseDetected() const { return latencyImpulseDetected.load(std::memory_order_relaxed); }
+    std::uint64_t getLatencyImpulseInputSample() const { return latencyImpulseInputSample.load(std::memory_order_relaxed); }
 
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
@@ -88,6 +99,7 @@ private:
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;
+    juce::String activeDeviceType_;
     int inputChannelCount_ = 0;
     int availableInputCount_ = 0;
     std::atomic<bool> inputUnavailable_{false};
@@ -96,6 +108,10 @@ private:
     std::atomic<int> latencySamples{0};
     std::atomic<std::uint64_t> inputOverruns{0};
     std::atomic<std::uint64_t> inputDroppedFrames{0};
+    // Round-trip latency measurement support.
+    std::atomic<bool> latencyMeasureActive{false};
+    std::atomic<bool> latencyImpulseDetected{false};
+    std::atomic<std::uint64_t> latencyImpulseInputSample{0};
 };
 
 class OutputPlayback : public juce::AudioIODeviceCallback {
@@ -111,7 +127,14 @@ public:
 
     double getSampleRate() const { return sampleRate; }
     int getBufferSize() const { return bufferSize; }
+    double getOccupancy() const {
+        if (fifo == nullptr || capacity <= 0) return 0.0;
+        return (double) fifo->getNumReady() / (double) juce::jmax(1, capacity);
+    }
     juce::String getError() const { return error; }
+    // Device type the last successful open() selected (e.g. "Windows Audio
+    // (Low Latency Mode)"). Diagnostics only; empty while closed.
+    juce::String getActiveDeviceType() const { return activeDeviceType_; }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
@@ -137,6 +160,7 @@ private:
     int bufferSize = 256;
     double sampleRate = 0.0;
     juce::String error;
+    juce::String activeDeviceType_;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
     std::atomic<std::uint64_t> outputUnderruns{0};

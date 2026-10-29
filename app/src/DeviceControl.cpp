@@ -96,6 +96,10 @@ void DeviceControl::mouseDown(const juce::MouseEvent&) {
     if (onClick) onClick();
 }
 
+void DeviceControl::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onRename) onRename();
+}
+
 bool DeviceControl::keyPressed(const juce::KeyPress& key) {
     if (key == juce::KeyPress::returnKey || key == juce::KeyPress::spaceKey) {
         if (onClick) onClick();

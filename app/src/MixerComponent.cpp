@@ -35,7 +35,48 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
             });
         });
     });
+    deviceControl.setOnRename([this] {
+        auto* w = new juce::AlertWindow("Rename output", "Enter new name:", juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor("name", output.name);
+        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
+        w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w](int result) {
+            if (result == 1 && safe != nullptr) {
+                const auto newName = w->getTextEditorContents("name");
+                safe->audioEngine.setOutputName(safe->output.id, newName);
+                safe->deviceControl.setTitle(newName);
+                if (safe->onRenamed) safe->onRenamed();
+            }
+            delete w;
+        }), true);
+    });
     addAndMakeVisible(deviceControl);
+
+    modeCombo.addItem("Mono", 1);
+    modeCombo.addItem("Stereo", 2);
+    modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
+    modeCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
+    modeCombo.setColour(juce::ComboBox::textColourId, theme::text());
+    modeCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
+    modeCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
+    modeCombo.onChange = [this] {
+        audioEngine.setOutputLayout(output.id,
+            modeCombo.getSelectedId() == 1 ? pluginrack::ChannelLayout::Mono
+                                          : pluginrack::ChannelLayout::Stereo);
+    };
+    addAndMakeVisible(modeCombo);
+
+    flipButton.setClickingTogglesState(true);
+    flipButton.setToggleState(output.flipped.get(), juce::dontSendNotification);
+    flipButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    flipButton.setColour(juce::TextButton::buttonOnColourId, theme::cyan());
+    flipButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    flipButton.setTooltip("Flip L/R of this output");
+    flipButton.onClick = [this] {
+        audioEngine.setOutputFlipped(output.id, flipButton.getToggleState());
+    };
+    addAndMakeVisible(flipButton);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -92,6 +133,12 @@ void MixerComponent::OutputStrip::resized() {
     deviceControl.setBounds(area.removeFromTop(46));
     area.removeFromTop(4);
 
+    auto modeRow = area.removeFromTop(20);
+    modeCombo.setBounds(modeRow.removeFromLeft(modeRow.getWidth() / 2 - 2));
+    modeRow.removeFromLeft(4);
+    flipButton.setBounds(modeRow);
+    area.removeFromTop(4);
+
     vstHeader.setBounds(area.removeFromTop(14));
     const int slotH = 22;
     for (int i = 0; i < (int)slots.size(); ++i) {
@@ -116,6 +163,8 @@ void MixerComponent::OutputStrip::refresh() {
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
+    modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
+    flipButton.setToggleState(output.flipped.get(), juce::dontSendNotification);
 }
 
 void MixerComponent::OutputStrip::refreshInserts() {
@@ -143,6 +192,13 @@ void MixerComponent::OutputStrip::setPluginBypass(std::uint32_t insertId, bool b
 
 void MixerComponent::OutputStrip::refreshAfterInsertChange() {
     refreshInserts();
+    juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        auto callback = safe->onRenamed;
+        // reuse onRenamed as the structure-changed callback for outputs
+        if (callback) callback();
+    });
 }
 
 void MixerComponent::OutputStrip::openPicker() {
@@ -271,6 +327,10 @@ void MixerComponent::rebuild() {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                 return;
             }
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
+        s->onRenamed = [this] {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };

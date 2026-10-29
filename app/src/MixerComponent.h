@@ -37,6 +37,7 @@ private:
         void openPicker() override;
 
         std::function<void()> onRemoveRequested;
+        std::function<void()> onRenamed;
 
     private:
         void refreshInserts();
@@ -45,6 +46,8 @@ private:
         AudioEngine& audioEngine;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
+        juce::ComboBox modeCombo;
+        juce::TextButton flipButton{"Flip"};
         juce::OwnedArray<InsertSlotComponent> slots;
         juce::Label vstHeader{"", "VST RACK"};
         juce::TextButton addVstButton{"+ Add VST3"};

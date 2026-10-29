@@ -2,9 +2,9 @@
 
 namespace {
 constexpr int rowHeaderWidth = 130;
-constexpr int columnWidth = 160;
+constexpr int columnWidth = 200;
 constexpr int headerHeight = 36;
-constexpr int rowHeight = 52;
+constexpr int rowHeight = 72;
 }
 
 RoutingMatrixComponent::RoutingMatrixComponent(AudioEngine& engine)
@@ -35,10 +35,11 @@ void RoutingMatrixComponent::resized() {
     int cell = 0;
     for (int channel = 0; channel < channelLabels.size(); ++channel) {
         for (int output = 0; output < outputHeaders.size(); ++output) {
-            if (cell < sendSliders.size()) {
-                sendSliders[cell]->setBounds(rowHeaderWidth + output * columnWidth,
-                                             headerHeight + channel * rowHeight + 8,
-                                             columnWidth - 12, 34);
+            if (cell * 2 + 1 < sendSliders.size()) {
+                const int x = rowHeaderWidth + output * columnWidth;
+                const int y = headerHeight + channel * rowHeight;
+                sendSliders[cell * 2]->setBounds(x, y + 4, columnWidth - 12, 28);
+                sendSliders[cell * 2 + 1]->setBounds(x, y + 36, columnWidth - 12, 28);
             }
             ++cell;
         }
@@ -64,21 +65,42 @@ void RoutingMatrixComponent::rebuild() {
         gridContent.addAndMakeVisible(*label);
 
         for (const auto& output : audioEngine.getOutputs()) {
-            auto* slider = sendSliders.add(new juce::Slider());
-            slider->setSliderStyle(juce::Slider::LinearBar);
-            slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 24);
-            slider->setRange(-60.0, 12.0, 0.1);
-            slider->setTextValueSuffix(" dB");
-            slider->setDoubleClickReturnValue(true, 0.0);
-            slider->setValue(audioEngine.getSendGain(channel->id, output->id),
-                             juce::dontSendNotification);
-            const auto channelId = channel->id;
-            const auto outputId = output->id;
-            slider->onValueChange = [this, slider, channelId, outputId] {
-                audioEngine.setSendGain(channelId, outputId,
-                                        static_cast<float>(slider->getValue()));
-            };
-            gridContent.addAndMakeVisible(*slider);
+            // L slider
+            {
+                auto* slider = sendSliders.add(new juce::Slider());
+                slider->setSliderStyle(juce::Slider::LinearBar);
+                slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
+                slider->setRange(-60.0, 12.0, 0.1);
+                slider->setTextValueSuffix(" dB");
+                slider->setDoubleClickReturnValue(true, 0.0);
+                slider->setValue(audioEngine.getSendGainL(channel->id, output->id),
+                                  juce::dontSendNotification);
+                const auto channelId = channel->id;
+                const auto outputId = output->id;
+                slider->onValueChange = [this, slider, channelId, outputId] {
+                    audioEngine.setSendGainL(channelId, outputId,
+                                             static_cast<float>(slider->getValue()));
+                };
+                gridContent.addAndMakeVisible(*slider);
+            }
+            // R slider
+            {
+                auto* slider = sendSliders.add(new juce::Slider());
+                slider->setSliderStyle(juce::Slider::LinearBar);
+                slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
+                slider->setRange(-60.0, 12.0, 0.1);
+                slider->setTextValueSuffix(" dB");
+                slider->setDoubleClickReturnValue(true, 0.0);
+                slider->setValue(audioEngine.getSendGainR(channel->id, output->id),
+                                  juce::dontSendNotification);
+                const auto channelId = channel->id;
+                const auto outputId = output->id;
+                slider->onValueChange = [this, slider, channelId, outputId] {
+                    audioEngine.setSendGainR(channelId, outputId,
+                                             static_cast<float>(slider->getValue()));
+                };
+                gridContent.addAndMakeVisible(*slider);
+            }
         }
     }
     resized();

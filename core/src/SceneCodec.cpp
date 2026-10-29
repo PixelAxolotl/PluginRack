@@ -131,6 +131,8 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"name", output.name},
         {"kind", output.kind},
         {"deviceId", output.deviceId},
+        {"layout", output.layout},
+        {"flipped", output.flipped},
         {"inserts", output.inserts},
     };
 }
@@ -143,6 +145,10 @@ void from_json(const nlohmann::json& j, Output& output) {
         j.at("kind").get_to(output.kind);
     }
     output.deviceId = j.value("deviceId", std::string{});
+    if (j.contains("layout")) {
+        j.at("layout").get_to(output.layout);
+    }
+    output.flipped = j.value("flipped", false);
     if (j.contains("inserts")) {
         j.at("inserts").get_to(output.inserts);
     }

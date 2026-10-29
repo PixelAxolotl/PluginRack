@@ -38,6 +38,8 @@ struct Output {
     std::string name;
     OutputKind kind = OutputKind::Physical;
     std::string deviceId;
+    ChannelLayout layout = ChannelLayout::Stereo;
+    bool flipped = false;
     std::vector<InsertSlot> inserts;
 
     bool operator==(const Output&) const = default;
