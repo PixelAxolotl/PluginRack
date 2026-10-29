@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <pluginrack/EqEngine.h>
 #include <pluginrack/Meters.h>
 #include <pluginrack/Scene.h>
 
@@ -36,6 +37,16 @@ public:
         juce::Atomic<float> peak{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
+        // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
+        // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
+        // and keep output bit-identical to the pre-EQ engine. eq/eqBands are
+        // touched only under stateLock (render holds it; setters take it),
+        // mirroring core's EqState mutex; eqBypassed/eqDirty are atomics so the
+        // UI can read them without the lock.
+        pluginrack::EqEngine eq;
+        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        juce::Atomic<bool> eqBypassed{true};
+        juce::Atomic<bool> eqDirty{false};
         juce::String inputDeviceName;
         juce::String inputError;
         pluginrack::SourceKind sourceKind = pluginrack::SourceKind::Hardware;
@@ -56,6 +67,12 @@ public:
         juce::Atomic<bool> flipped{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
+        // Output EQ, tapped before the output inserts, mirroring core's
+        // pre-master-write output tap. Same locking rules as Channel.
+        pluginrack::EqEngine eq;
+        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        juce::Atomic<bool> eqBypassed{true};
+        juce::Atomic<bool> eqDirty{false};
         juce::String outputDeviceName;
         juce::String outputError;
         std::unique_ptr<OutputPlayback> output;
@@ -150,6 +167,16 @@ public:
     void setOutputName(std::uint32_t outputId, const juce::String& name);
     void setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout);
     void setOutputFlipped(std::uint32_t outputId, bool flipped);
+
+    // EQ API mirroring core MixerEngine: setChannelEq/setOutputEq swap bands
+    // (bypass state kept) and rebuild coefficients on the message thread
+    // under stateLock; the bypass setters take effect live, no re-prepare,
+    // and reset filter state when engaging so re-enabling starts clean.
+    // Outputs are indexed by scene-order position like core; channels by id.
+    void setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands);
+    void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
+    void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
+    void setOutputEqBypassed(int outIdx, bool bypassed);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
