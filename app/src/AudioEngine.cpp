@@ -416,7 +416,7 @@ void AudioEngine::setChannelLayout(std::uint32_t channelId, pluginrack::ChannelL
     }
     // Re-assign the device so the shared capture is re-opened (or widened)
     // for the new layout; silent channels keep nothing to reopen.
-    if (deviceName.isNotEmpty() && deviceName != "None \xe2\x80\x94 silent") {
+    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
         setChannelInputDevice(channelId, deviceName);
     }
 }
@@ -432,7 +432,22 @@ void AudioEngine::setChannelInputChannels(std::uint32_t channelId, const std::ve
         channel->inputChannels = inputChannels;
         deviceName = channel->inputDeviceName;
     }
-    if (deviceName.isNotEmpty() && deviceName != "None \xe2\x80\x94 silent") {
+    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
+        setChannelInputDevice(channelId, deviceName);
+    }
+}
+
+void AudioEngine::setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels) {
+    juce::String deviceName;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) return;
+        channel->layout = layout;
+        channel->inputChannels = inputChannels;
+        deviceName = channel->inputDeviceName;
+    }
+    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
         setChannelInputDevice(channelId, deviceName);
     }
 }
@@ -654,10 +669,10 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
         return "The channel no longer exists.";
     }
 
-    if (deviceName == "None \xe2\x80\x94 silent" || deviceName.isEmpty()) {
+    if (deviceName == "None - silent" || deviceName.isEmpty()) {
         const juce::ScopedLock sl(stateLock);
         channel->input.reset();
-        channel->inputDeviceName = "None \xe2\x80\x94 silent";
+        channel->inputDeviceName = "None - silent";
         channel->sourceDeviceId.clear();
         channel->inputError.clear();
         pruneUnusedCaptures();
@@ -733,7 +748,7 @@ void AudioEngine::prepareInputs() {
         const juce::ScopedLock lock(stateLock);
         for (const auto& channel : channels) {
             if (channel->inputDeviceName.isNotEmpty()
-                && channel->inputDeviceName != "None \xe2\x80\x94 silent") {
+                && channel->inputDeviceName != "None - silent") {
                 wanted.emplace_back(channel->id, channel->inputDeviceName);
             }
         }
@@ -767,7 +782,7 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
 
     const bool isClock = (clockOutputId == outputId) || (clockOutputId == 0);
 
-    if (deviceName == "None \xe2\x80\x94 silent" || deviceName.isEmpty()) {
+    if (deviceName == "None - silent" || deviceName.isEmpty()) {
         const bool wasClock = (clockOutputId == outputId);
         {
             const juce::ScopedLock sl(stateLock);
@@ -840,14 +855,14 @@ juce::String AudioEngine::setDeviceBufferSize(int size) {
     juce::String firstError;
     for (auto& channel : channels) {
         if (channel->inputDeviceName.isNotEmpty() &&
-            channel->inputDeviceName != "None \xe2\x80\x94 silent") {
+            channel->inputDeviceName != "None - silent") {
             const auto e = setChannelInputDevice(channel->id, channel->inputDeviceName);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }
     }
     for (auto& output : outputs) {
         if (output->outputDeviceName.isNotEmpty() &&
-            output->outputDeviceName != "None \xe2\x80\x94 silent") {
+            output->outputDeviceName != "None - silent") {
             const auto e = setOutputDevice(output->id, output->outputDeviceName);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }

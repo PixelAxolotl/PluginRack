@@ -14,6 +14,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     deviceControl.setTitle(channel.name);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
+    refreshInput();
 
     channelLabel.setText("CH " + juce::String(channel.id), juce::dontSendNotification);
     channelLabel.setJustificationType(juce::Justification::centredLeft);
@@ -36,18 +37,23 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     splitButton.setFontSize(8.0f);
     splitButton.setClickAction([this] { splitIntoMonoChannels(); });
-    splitButton.setTooltip("Split into mono channels \xe2\x80\x94 one strip per physical input");
+    splitButton.setTooltip("Split into mono channels - one strip per physical input");
     addAndMakeVisible(splitButton);
 
     deviceControl.setOnClick([this] {
         DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName,
                                   audioEngine.getAvailableInputDevices(),
                                   [this](juce::String chosen) {
-            const auto err = audioEngine.setChannelInputDevice(channel.id, chosen);
-            refreshInput();
-            if (err.isNotEmpty()) {
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
-            }
+            const std::uint32_t channelId = channel.id;
+            juce::Thread::launch([this, channelId, chosen] {
+                const auto err = audioEngine.setChannelInputDevice(channelId, chosen);
+                juce::MessageManager::callAsync([this, err] {
+                    refreshInput();
+                    if (err.isNotEmpty()) {
+                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                    }
+                });
+            });
         });
     });
     addAndMakeVisible(deviceControl);
@@ -266,7 +272,7 @@ void ChannelStrip::refreshInserts() {
     if (hottest.latencySamples > 0) {
         const double sampleRate = audioEngine.getLatencyReport().sampleRate;
         const double ms = hottest.latencySamples / (sampleRate > 0.0 ? sampleRate : 48000.0) * 1000.0;
-        vstHeader.setText("VST RACK \xe2\x80\x94 hottest " + hottest.name + " "
+        vstHeader.setText("VST RACK - hottest " + hottest.name + " "
                               + juce::String((int)std::round(ms)) + " ms",
                           juce::dontSendNotification);
     } else {
@@ -316,9 +322,9 @@ void ChannelStrip::applyInputMapping() {
         if (b == a) b = (a == 0 ? 1 : 0);
         mapping = {a, b};
     }
-    audioEngine.setChannelLayout(channel.id,
-                                 mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo);
-    audioEngine.setChannelInputChannels(channel.id, mapping);
+    audioEngine.setChannelMapping(channel.id,
+                                 mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo,
+                                 mapping);
     refreshInput();
 }
 
@@ -347,8 +353,7 @@ void ChannelStrip::splitIntoMonoChannels() {
             if (result == 0 || safe == nullptr) return;
             auto& engine = safe->audioEngine;
             const std::uint32_t firstId = safe->channel.id;
-            engine.setChannelLayout(firstId, pluginrack::ChannelLayout::Mono);
-            engine.setChannelInputChannels(firstId, {0});
+            engine.setChannelMapping(firstId, pluginrack::ChannelLayout::Mono, {0});
             engine.setChannelName(firstId, "Input 1");
             for (int i = 1; i < inputs; ++i) {
                 engine.addChannel();
@@ -356,8 +361,7 @@ void ChannelStrip::splitIntoMonoChannels() {
                 if (chans.empty()) break;
                 const std::uint32_t newId = chans.back()->id;
                 engine.setChannelName(newId, "Input " + juce::String(i + 1));
-                engine.setChannelLayout(newId, pluginrack::ChannelLayout::Mono);
-                engine.setChannelInputChannels(newId, {i});
+                engine.setChannelMapping(newId, pluginrack::ChannelLayout::Mono, {i});
                 const auto err = engine.setChannelInputDevice(newId, device);
                 if (err.isNotEmpty()) {
                     juce::AlertWindow::showMessageBoxAsync(

@@ -11,6 +11,7 @@ constexpr int kModuleGap = 8;
 
 RackView::ChainRow::ChainRow(AudioEngine& engine, AudioEngine::Channel& channelState)
     : audioEngine(engine), channel(&channelState) {
+    setWantsKeyboardFocus(true);
     meter = std::make_unique<LevelMeter>(channel->peak);
     initHeader();
     refresh();
@@ -18,6 +19,7 @@ RackView::ChainRow::ChainRow(AudioEngine& engine, AudioEngine::Channel& channelS
 
 RackView::ChainRow::ChainRow(AudioEngine& engine, AudioEngine::Output& outputState)
     : audioEngine(engine), output(&outputState) {
+    setWantsKeyboardFocus(true);
     meter = std::make_unique<LevelMeter>(output->peak);
     initHeader();
     refresh();
@@ -61,6 +63,15 @@ void RackView::ChainRow::initHeader() {
         if (onSelected) onSelected(this);
     };
     soloButton.setVisible(channel != nullptr);
+
+    mixerButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    mixerButton.setColour(juce::TextButton::textColourOffId, theme::cyan());
+    mixerButton.setTooltip("Show this chain in the Mixer view");
+    mixerButton.onClick = [this] {
+        if (onSelected) onSelected(this);
+        if (onJumpToMixer) onJumpToMixer();
+    };
+    addAndMakeVisible(mixerButton);
 
     emptyLabel.setJustificationType(juce::Justification::centred);
     emptyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
@@ -119,7 +130,7 @@ juce::String RackView::ChainRow::buildRoutingSummary() const {
         if (audioEngine.getSendGain(channel->id, out->id) > -30.0f) targets.add(out->name);
     }
     if (targets.isEmpty()) return "No routes";
-    return juce::String::fromUTF8("\xe2\x86\x92 ") + targets.joinIntoString(", ");
+    return juce::String("-> ") + targets.joinIntoString(", ");
 }
 
 void RackView::ChainRow::refreshModules() {
@@ -168,12 +179,17 @@ void RackView::ChainRow::resized() {
 
     auto buttonRow = header.removeFromBottom(24);
     if (soloButton.isVisible()) {
+        const int third = buttonRow.getWidth() / 3 - 3;
+        muteButton.setBounds(buttonRow.removeFromLeft(third));
+        buttonRow.removeFromLeft(4);
+        soloButton.setBounds(buttonRow.removeFromLeft(third));
+        buttonRow.removeFromLeft(4);
+        mixerButton.setBounds(buttonRow);
+    } else {
         const int half = buttonRow.getWidth() / 2 - 2;
         muteButton.setBounds(buttonRow.removeFromLeft(half));
         buttonRow.removeFromLeft(4);
-        soloButton.setBounds(buttonRow);
-    } else {
-        muteButton.setBounds(buttonRow);
+        mixerButton.setBounds(buttonRow);
     }
 
     layoutModules();
@@ -189,10 +205,36 @@ void RackView::ChainRow::paint(juce::Graphics& g) {
         g.setColour(theme::border());
         g.drawRect(getLocalBounds(), 1);
     }
+    if (hasKeyboardFocus(true)) {
+        g.setColour(theme::cyan());
+        g.drawRect(getLocalBounds().reduced(1), 1);
+    }
 }
 
 void RackView::ChainRow::mouseDown(const juce::MouseEvent&) {
+    grabKeyboardFocus();
     if (onSelected) onSelected(this);
+}
+
+void RackView::ChainRow::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onSelected) onSelected(this);
+    if (onJumpToMixer) onJumpToMixer();
+}
+
+bool RackView::ChainRow::keyPressed(const juce::KeyPress& key) {
+    if (key.isKeyCode(juce::KeyPress::upKey)) {
+        if (onMoveSelection) onMoveSelection(-1);
+        return true;
+    }
+    if (key.isKeyCode(juce::KeyPress::downKey)) {
+        if (onMoveSelection) onMoveSelection(1);
+        return true;
+    }
+    if (key.isKeyCode(juce::KeyPress::returnKey)) {
+        if (onSelected) onSelected(this);
+        return true;
+    }
+    return false;
 }
 
 juce::String RackView::ChainRow::insertPlugin(const juce::File& file) {
@@ -235,6 +277,8 @@ void RackView::ChainRow::openPicker() {
 }
 
 RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
+    setWantsKeyboardFocus(true);
+    setFocusContainerType(juce::Component::FocusContainerType::keyboardFocusContainer);
     emptyLabel.setText("No chains yet — add a channel or output in the Mixer view.",
                        juce::dontSendNotification);
     emptyLabel.setJustificationType(juce::Justification::centred);
@@ -255,12 +299,16 @@ void RackView::rebuild() {
     for (const auto& ch : audioEngine.getChannels()) {
         auto* row = rows.add(new ChainRow(audioEngine, *ch));
         row->onSelected = [this](ChainRow* selected) { selectRow(selected); };
+        row->onMoveSelection = [this](int delta) { selectRelative(delta); };
+        row->onJumpToMixer = [this] { jumpToMixer(); };
         if (hasSelection && !selectedIsOutput && selectedId == ch->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }
     for (const auto& out : audioEngine.getOutputs()) {
         auto* row = rows.add(new ChainRow(audioEngine, *out));
         row->onSelected = [this](ChainRow* selected) { selectRow(selected); };
+        row->onMoveSelection = [this](int delta) { selectRelative(delta); };
+        row->onJumpToMixer = [this] { jumpToMixer(); };
         if (hasSelection && selectedIsOutput && selectedId == out->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }
@@ -275,6 +323,42 @@ void RackView::selectRow(ChainRow* row) {
     selectedIsOutput = row->isOutput();
     selectedId = row->chainId();
     for (auto* r : rows) r->setSelected(r == row);
+    row->grabKeyboardFocus();
+}
+
+void RackView::selectRelative(int delta) {
+    if (rows.isEmpty()) return;
+    int index = 0;
+    if (hasSelection) {
+        for (int i = 0; i < rows.size(); ++i) {
+            if (rows[i]->chainId() == selectedId && rows[i]->isOutput() == selectedIsOutput) {
+                index = i;
+                break;
+            }
+        }
+        index = juce::jlimit(0, rows.size() - 1, index + delta);
+    }
+    selectRow(rows[index]);
+}
+
+void RackView::jumpToMixer() {
+    if (onJumpToMixer) onJumpToMixer();
+}
+
+bool RackView::keyPressed(const juce::KeyPress& key) {
+    if (key.isKeyCode(juce::KeyPress::upKey)) {
+        selectRelative(-1);
+        return true;
+    }
+    if (key.isKeyCode(juce::KeyPress::downKey)) {
+        selectRelative(1);
+        return true;
+    }
+    if (key.isKeyCode(juce::KeyPress::returnKey)) {
+        if (hasSelection) selectRelative(0);
+        return true;
+    }
+    return false;
 }
 
 void RackView::resized() {
