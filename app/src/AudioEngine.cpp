@@ -15,23 +15,25 @@ AudioEngine::AudioEngine() {
     }
 }
 
-void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate) {
+void AudioEngine::prepareToPlay(int maxBlockFrames) {
     const juce::ScopedLock lock(stateLock);
-    currentSampleRate = sampleRate;
-    currentBufferSize = juce::jmax(1, samplesPerBlockExpected);
+    maxBlockFrames_ = juce::jmax(1, maxBlockFrames);
+    currentBufferSize = maxBlockFrames_;
+    silenceBuffer_.setSize(2, maxBlockFrames_, false, true, true);
+    silenceBuffer_.clear();
     for (auto& channel : channels) {
-        channel->buffer.setSize(2, currentBufferSize);
+        channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
         channel->buffer.clear();
         for (auto& insert : channel->inserts) {
-            insert->pluginHost.prepareToPlay(sampleRate, currentBufferSize);
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
         meters.observeChannel(channel->id, 0.0f);
     }
     for (auto& output : outputs) {
-        output->buffer.setSize(2, currentBufferSize);
+        output->buffer.setSize(2, maxBlockFrames_, false, true, true);
         output->buffer.clear();
         for (auto& insert : output->inserts) {
-            insert->pluginHost.prepareToPlay(sampleRate, currentBufferSize);
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
         meters.observeOutput(output->id, 0.0f);
     }
@@ -52,20 +54,27 @@ void AudioEngine::render(int frames) {
         return;
     }
 
-    // ensure buffers
-    for (auto& channel : channels) {
-        if (channel->buffer.getNumSamples() < frames) {
-            channel->buffer.setSize(2, frames, true, true, true);
+    // Oversized block: silence it, count once, skip processing.
+    if (maxBlockFrames_ > 0 && frames > maxBlockFrames_) {
+        oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
+        for (auto& output : outputs) {
+            if (output->output) {
+                juce::AudioBuffer<float> silence(2, frames);
+                silence.clear();
+                output->output->push(silence, frames);
+            }
         }
+        return;
+    }
+
+    // buffers are preallocated in prepareToPlay; clear used range only.
+    for (auto& channel : channels) {
         channel->buffer.clear(0, frames);
         if (channel->input) {
             channel->input->pull(channel->buffer, frames, channel->inputChannels);
         }
     }
     for (auto& output : outputs) {
-        if (output->buffer.getNumSamples() < frames) {
-            output->buffer.setSize(2, frames, true, true, true);
-        }
         output->buffer.clear(0, frames);
     }
 
@@ -277,6 +286,7 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     }
     insert->pluginPath = file.getFullPathName();
     insert->pluginName = insert->pluginHost.getPluginName();
+    insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
     if (channel->inserts.size() >= 4) {
@@ -302,6 +312,7 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findInsert(channelId, insertId)) {
         insert->bypassed = bypassed;
+        insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
 
@@ -323,6 +334,7 @@ juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::Fi
     }
     insert->pluginPath = file.getFullPathName();
     insert->pluginName = insert->pluginHost.getPluginName();
+    insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
     if (output->inserts.size() >= 4) {
@@ -348,6 +360,7 @@ void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t inser
 void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findOutputInsert(outputId, insertId)) {
         insert->bypassed = bypassed;
+        insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
 
@@ -553,6 +566,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             if (error.isNotEmpty()) {
                 loadErrors += channel->name + ": " + error + "\n";
             }
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
             nextInsertId = juce::jmax(nextInsertId, insert->id + 1);
             channel->inserts.push_back(std::move(insert));
         }
@@ -577,6 +591,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             if (error.isNotEmpty()) {
                 loadErrors += output->name + ": " + error + "\n";
             }
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
             nextInsertId = juce::jmax(nextInsertId, insert->id + 1);
             output->inserts.push_back(std::move(insert));
         }
@@ -687,7 +702,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     auto capture = std::make_shared<InputCapture>();
     juce::String err;
     const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       currentSampleRate, needed, err);
+                                       currentSampleRate, needed, err, requestedBufferSize_);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         channel->inputError = openErr;
@@ -786,7 +801,7 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     juce::String err;
     const double rateForValidation = isClock ? 0.0 : currentSampleRate;
     const auto openErr = newPlayback->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                          rateForValidation, err);
+                                          rateForValidation, err, requestedBufferSize_);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
@@ -802,23 +817,9 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
         {
             const juce::ScopedLock sl(stateLock);
             currentSampleRate = newRate;
-            currentBufferSize = newBuf;
             clockOutputId = outputId;
-            for (auto& channel : channels) {
-                channel->buffer.setSize(2, currentBufferSize);
-                channel->buffer.clear();
-                for (auto& insert : channel->inserts) {
-                    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-                }
-            }
-            for (auto& o : outputs) {
-                o->buffer.setSize(2, currentBufferSize);
-                o->buffer.clear();
-                for (auto& insert : o->inserts) {
-                    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-                }
-            }
         }
+        prepareToPlay(newBuf);
     } else {
         // ensure clock id remains; if no clock, maybe set? handled by isClock true when none
     }
@@ -830,6 +831,26 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
         out->outputError.clear();
     }
     return {};
+}
+
+juce::String AudioEngine::setDeviceBufferSize(int size) {
+    requestedBufferSize_ = size;
+    juce::String firstError;
+    for (auto& channel : channels) {
+        if (channel->inputDeviceName.isNotEmpty() &&
+            channel->inputDeviceName != "None \xe2\x80\x94 silent") {
+            const auto e = setChannelInputDevice(channel->id, channel->inputDeviceName);
+            if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
+        }
+    }
+    for (auto& output : outputs) {
+        if (output->outputDeviceName.isNotEmpty() &&
+            output->outputDeviceName != "None \xe2\x80\x94 silent") {
+            const auto e = setOutputDevice(output->id, output->outputDeviceName);
+            if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
+        }
+    }
+    return firstError;
 }
 
 juce::String AudioEngine::getClockDescription() const {
@@ -905,7 +926,11 @@ AudioEngine::InsertSlot* AudioEngine::findOutputInsert(std::uint32_t outputId, s
 
 AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     LatencyReport report;
-    const juce::ScopedLock lock(stateLock);
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) {
+        report.valid = false;
+        return report;
+    }
 
     const Channel* inputChannel = nullptr;
     for (const auto& channel : channels) {
@@ -915,23 +940,30 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         }
     }
 
-    int inputSamples = 0;
+    int inputDeviceSamples = 0;
+    int inputBufferSize = 0;
+    if (inputChannel != nullptr && inputChannel->input != nullptr) {
+        inputDeviceSamples = inputChannel->input->getLatencySamples();
+        inputBufferSize = currentBufferSize;
+    }
+
     int pluginSamples = 0;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
-        inputSamples = inputChannel->input->getLatencySamples();
         for (const auto& insert : inputChannel->inserts) {
-            pluginSamples += insert->pluginHost.getLatencySamples();
+            pluginSamples += insert->latencySamples;
         }
     }
 
-    int outputSamples = 0;
+    int outputDeviceSamples = 0;
+    int outputBufferSize = 0;
     bool valid = false;
     if (clockOutputId != 0) {
         for (const auto& output : outputs) {
             if (output->id == clockOutputId && output->output != nullptr) {
-                outputSamples = output->output->getLatencySamples();
+                outputDeviceSamples = output->output->getLatencySamples();
+                outputBufferSize = currentBufferSize;
                 for (const auto& insert : output->inserts) {
-                    pluginSamples += insert->pluginHost.getLatencySamples();
+                    pluginSamples += insert->latencySamples;
                 }
                 valid = true;
                 break;
@@ -939,14 +971,70 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         }
     }
 
-    const int totalSamples = inputSamples + pluginSamples + outputSamples;
     const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
-    report.inputMs = inputSamples / sampleRate * 1000.0;
+    const double fifoMs = 0.0;
+    report.inputDeviceMs = inputDeviceSamples / sampleRate * 1000.0 + inputBufferSize / sampleRate * 1000.0;
+    report.outputDeviceMs = outputDeviceSamples / sampleRate * 1000.0 + outputBufferSize / sampleRate * 1000.0;
     report.pluginMs = pluginSamples / sampleRate * 1000.0;
-    report.outputMs = outputSamples / sampleRate * 1000.0;
-    report.totalMs = totalSamples / sampleRate * 1000.0;
+    report.fifoMs = fifoMs;
+    report.totalMs = report.inputDeviceMs + report.pluginMs + report.outputDeviceMs + report.fifoMs;
+    report.inputBufferSize = inputBufferSize;
+    report.outputBufferSize = outputBufferSize;
+    report.sampleRate = sampleRate;
+    report.underruns = 0;
+    report.overruns = 0;
+    // aggregate fifo counters
+    auto diag = getFifoDiagnostics();
+    report.underruns = diag.outputUnderruns;
+    report.overruns = diag.inputOverruns;
     report.valid = valid;
+    report.approximate = true;
     return report;
+}
+
+AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
+    FifoDiagnostics diagnostics;
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) {
+        return diagnostics;
+    }
+
+    for (const auto& entry : inputCaptures_) {
+        const auto& capture = entry.second.capture;
+        if (capture != nullptr) {
+            diagnostics.inputOverruns += capture->getInputOverruns();
+            diagnostics.inputDroppedFrames += capture->getInputDroppedFrames();
+        }
+    }
+
+    for (const auto& output : outputs) {
+        if (output->output != nullptr) {
+            diagnostics.outputUnderruns += output->output->getOutputUnderruns();
+            diagnostics.outputDroppedFrames += output->output->getOutputDroppedFrames();
+        }
+    }
+
+    return diagnostics;
+}
+
+AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint32_t channelId) const {
+    HighestLatencyInsert result;
+    result.channelId = channelId;
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) return result;
+    const Channel* ch = nullptr;
+    for (const auto& c : channels) if (c->id == channelId) { ch = c.get(); break; }
+    if (ch == nullptr) return result;
+    int maxLat = 0;
+    for (const auto& ins : ch->inserts) {
+        if (ins->latencySamples > maxLat) {
+            maxLat = ins->latencySamples;
+            result.insertId = ins->id;
+            result.name = ins->pluginName;
+            result.latencySamples = ins->latencySamples;
+        }
+    }
+    return result;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {

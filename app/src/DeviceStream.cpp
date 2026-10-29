@@ -46,7 +46,8 @@ InputCapture::~InputCapture() {
 juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                double engineSampleRate,
                                int numChannelsNeeded,
-                               juce::String& errorOut) {
+                               juce::String& errorOut,
+                               int requestedBufferSize) {
     close();
     error.clear();
     inputError.clear();
@@ -57,6 +58,21 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         error = err;
         errorOut = err;
         return err;
+    }
+
+    // Apply requested buffer size via AudioDeviceSetup.
+    if (requestedBufferSize >= 0) {
+        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
+        setup.bufferSize = requestedBufferSize; // 0 = driver default
+        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
+        juce::String berr = manager.setAudioDeviceSetup(setup, true);
+        if (berr.isNotEmpty()) {
+            manager.setAudioDeviceSetup(prev, true);
+            error = berr;
+            errorOut = berr;
+            return berr;
+        }
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
@@ -85,6 +101,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // indexes it does not have are reported via getInputError() and stay
     // silent — never remapped onto input 0.
     const int availableInputs = (int) dev->getInputChannelNames().size();
+    availableInputCount_ = availableInputs < 1 ? 1 : availableInputs;
     inputChannelCount_ = (numInputChannels < availableInputs) ? numInputChannels : availableInputs;
     if (inputChannelCount_ < 1) inputChannelCount_ = 1;
     if (inputChannelCount_ < numChannelsNeeded) {
@@ -95,7 +112,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    capacity = juce::jmax(1, (int)std::round(sampleRate * 2.0));
+    capacity = juce::jmax(1, deviceBufferSize * 4);
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
@@ -113,6 +130,7 @@ void InputCapture::close() {
     deviceInputLatency = 0;
     deviceBufferSize = 0;
     inputChannelCount_ = 0;
+    availableInputCount_ = 0;
     inputUnavailable_.store(false, std::memory_order_relaxed);
     latencySamples.store(0, std::memory_order_relaxed);
 }
@@ -120,14 +138,17 @@ void InputCapture::close() {
 bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         const std::vector<int>& physicalChannels) {
     if (frames <= 0) return true;
-    if (dest.getNumChannels() < 2 || dest.getNumSamples() < frames) {
+
+    // dest is sized by the caller: mono mappings need 1 channel, stereo 2.
+    const int numDest = juce::jmin(2, (int)physicalChannels.size());
+    if (numDest < 1 || dest.getNumChannels() < numDest || dest.getNumSamples() < frames) {
         return false;
     }
     dest.clear(0, frames);
 
     if (fifo == nullptr) {
         latencySamples.store(0, std::memory_order_relaxed);
-        return true;
+        return false;
     }
 
     // Structural delay only: device latency + one device buffer.
@@ -135,25 +156,16 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         std::memory_order_relaxed);
 
     bool ok = true;
-    const int numDest = juce::jmin(2, (int)physicalChannels.size());
-    // Validate mappings first; missing inputs stay silent.
-    for (int i = 0; i < numDest; ++i) {
-        int src = physicalChannels[i];
-        if (src < 0 || src >= inputChannelCount_) {
-            ok = false;
-            if (inputError.isEmpty()) {
-                inputError = "Missing input " + juce::String(src + 1);
-            }
-        }
-    }
-
     auto readHandle = fifo->read(frames);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
+    // Missing physical inputs leave their dest channel silent (already
+    // cleared). Only flip the flag here — error strings are built in open(),
+    // never on the audio thread.
     for (int i = 0; i < numDest; ++i) {
-        int src = physicalChannels[i];
+        const int src = physicalChannels[(size_t)i];
         if (src < 0 || src >= inputChannelCount_) {
-            // leave silence (already cleared)
+            ok = false;
             continue;
         }
         for (int s = 0; s < b1; ++s) {
@@ -163,6 +175,8 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
             dest.setSample(i, b1 + s, storage.getSample(src, readHandle.startIndex2 + s));
         }
     }
+    if (!ok)
+        inputUnavailable_.store(true, std::memory_order_relaxed);
     // finishedRead automatic
     return ok;
 }
@@ -175,10 +189,18 @@ void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputCh
     auto writeHandle = fifo->write(numSamples);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
-    if (b1 + b2 <= 0) return;
+    const int total = b1 + b2;
+    if (total < numSamples) {
+        inputOverruns.fetch_add(1, std::memory_order_relaxed);
+        inputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
+                                     std::memory_order_relaxed);
+    }
+    if (total <= 0) return;
 
     for (int ch = 0; ch < inputChannelCount_; ++ch) {
         int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
+        if (srcCh < 0)
+            inputUnavailable_.store(true, std::memory_order_relaxed); // silence, never remap to input 0
         for (int i = 0; i < b1; ++i) {
             const float v = (srcCh >= 0) ? inputChannelData[srcCh][i] : 0.0f;
             storage.setSample(ch, writeHandle.startIndex1 + i, v);
@@ -215,7 +237,8 @@ OutputPlayback::~OutputPlayback() {
 
 juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                  double engineSampleRate,
-                                 juce::String& errorOut) {
+                                 juce::String& errorOut,
+                                 int requestedBufferSize) {
     close();
     error.clear();
 
@@ -224,6 +247,20 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
         error = err;
         errorOut = err;
         return err;
+    }
+    if (requestedBufferSize >= 0) {
+        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
+        setup.bufferSize = requestedBufferSize;
+        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
+        juce::String berr = manager.setAudioDeviceSetup(setup, true);
+        if (berr.isNotEmpty()) {
+            manager.setAudioDeviceSetup(prev, true);
+            error = berr;
+            errorOut = berr;
+            close();
+            return berr;
+        }
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
@@ -247,7 +284,7 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    capacity = juce::jmax(1, (int)std::round(sampleRate * 2.0));
+    capacity = juce::jmax(1, bufferSize * 4);
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
@@ -272,6 +309,11 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     auto writeHandle = fifo->write(frames);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
+    const int total = b1 + b2;
+    if (total < frames) {
+        outputDroppedFrames.fetch_add((std::uint64_t)(frames - total),
+                                      std::memory_order_relaxed);
+    }
     const int srcChans = juce::jmax(1, src.getNumChannels());
 
     for (int ch = 0; ch < 2; ++ch) {
@@ -313,6 +355,12 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     auto readHandle = fifo->read(numSamples);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
+    const int total = b1 + b2;
+    if (total < numSamples) {
+        outputUnderruns.fetch_add(1, std::memory_order_relaxed);
+        outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
+                                      std::memory_order_relaxed);
+    }
 
     const int chans = juce::jmin(2, numOutputChannels);
     for (int ch = 0; ch < chans; ++ch) {

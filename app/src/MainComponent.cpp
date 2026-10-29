@@ -56,10 +56,10 @@ MainComponent::MainComponent()
         const auto report = audioEngine.getLatencyReport();
         juce::String latText;
         if (report.valid) {
-            latText = "Input " + juce::String((int)std::round(report.inputMs)) + " ms / Plugins " +
+            latText = "Input " + juce::String((int)std::round(report.inputDeviceMs)) + " ms / Plugins " +
                       juce::String((int)std::round(report.pluginMs)) + " ms / Output " +
-                      juce::String((int)std::round(report.outputMs)) + " ms / Total " +
-                      juce::String((int)std::round(report.totalMs)) + " ms";
+                      juce::String((int)std::round(report.outputDeviceMs)) + " ms / Total " +
+                      juce::String((int)std::round(report.totalMs)) + " ms (est.)";
         } else {
             latText = "No output device";
         }
@@ -88,16 +88,16 @@ void MainComponent::timerCallback() {
     // spikes during startup/transients. EMA keeps the header stable live.
     if (smoothedLatencyMs < 0.0) smoothedLatencyMs = report.totalMs;
     else smoothedLatencyMs += 0.25 * (report.totalMs - smoothedLatencyMs);
-    latencyLabel.setText("LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms",
+    latencyLabel.setText("LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms (est.)",
                          juce::dontSendNotification);
     juce::Colour colour = theme::dim();
     if (smoothedLatencyMs > 60.0) colour = theme::red();
     else if (smoothedLatencyMs > 30.0) colour = theme::amber();
     latencyLabel.setColour(juce::Label::textColourId, colour);
-    latencyLabel.setTooltip("Estimated input to output: input " +
-                            juce::String((int)std::round(report.inputMs)) + " ms + plugins " +
+    latencyLabel.setTooltip("Estimated (approx.) input to output: input " +
+                            juce::String((int)std::round(report.inputDeviceMs)) + " ms + plugins " +
                             juce::String((int)std::round(report.pluginMs)) + " ms + output " +
-                            juce::String((int)std::round(report.outputMs)) + " ms");
+                            juce::String((int)std::round(report.outputDeviceMs)) + " ms");
 }
 
 void MainComponent::paint(juce::Graphics& g) {

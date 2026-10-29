@@ -22,6 +22,7 @@ public:
         juce::String pluginName;
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
+        int latencySamples = 0;
     };
 
     struct Channel {
@@ -65,17 +66,37 @@ public:
     };
 
     struct LatencyReport {
-        double inputMs = 0.0;
+        double inputDeviceMs = 0.0;
+        double outputDeviceMs = 0.0;
         double pluginMs = 0.0;
-        double outputMs = 0.0;
+        double fifoMs = 0.0;
         double totalMs = 0.0;
+        int inputBufferSize = 0;
+        int outputBufferSize = 0;
+        double sampleRate = 48000.0;
+        std::uint64_t underruns = 0;
+        std::uint64_t overruns = 0;
+        std::uint32_t maxInsertId = 0;
+        juce::String maxInsertName;
+        double maxInsertMs = 0.0;
         bool valid = false;
+        bool approximate = true;
+    };
+
+    struct FifoDiagnostics {
+        std::uint64_t inputOverruns = 0;
+        std::uint64_t inputDroppedFrames = 0;
+        std::uint64_t outputUnderruns = 0;
+        std::uint64_t outputDroppedFrames = 0;
+        double inputOccupancy = 0.0;
+        double outputOccupancy = 0.0;
     };
 
     AudioEngine();
 
-    void prepareToPlay(int samplesPerBlockExpected, double sampleRate);
+    void prepareToPlay(int maxBlockFrames);
     void render(int frames);
+    std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
     void releaseResources();
     // Ensures every channel with an assigned input device shares one capture
     // opened wide enough for the highest physical index it maps. Callers that
@@ -87,6 +108,7 @@ public:
     void addOutput();
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
+    juce::String setDeviceBufferSize(int size);
     juce::String getClockDescription() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
@@ -94,6 +116,8 @@ public:
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
+    struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
+    HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
 
@@ -115,6 +139,8 @@ public:
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
     LatencyReport getLatencyReport() const;
+
+    FifoDiagnostics getFifoDiagnostics() const;
 
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);
@@ -148,6 +174,10 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    int requestedBufferSize_ = 0;
+    int maxBlockFrames_ = 256;
+    std::atomic<std::uint64_t> oversizedBlockCount_{0};
+    juce::AudioBuffer<float> silenceBuffer_;
     std::uint32_t clockOutputId = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

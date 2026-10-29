@@ -313,7 +313,9 @@ void ChannelStrip::applyInputMapping() {
 
 void ChannelStrip::splitIntoMonoChannels() {
     const auto device = channel.inputDeviceName;
-    const int inputs = channel.input != nullptr ? channel.input->inputChannelCount() : 0;
+    // The capture only stores what was requested; the device may expose more
+    // physical inputs than this channel's mapping uses.
+    const int inputs = channel.input != nullptr ? channel.input->availableInputCount() : 0;
     if (device.isEmpty() || inputs < 2) {
         juce::AlertWindow::showMessageBoxAsync(
             juce::MessageBoxIconType::InfoIcon, "PluginRack",

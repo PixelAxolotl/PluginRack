@@ -24,7 +24,15 @@ public:
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       int numChannelsNeeded,
-                      juce::String& errorOut);
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0);
+    juce::String open(const juce::String& preferredDeviceName,
+                      double engineSampleRate,
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0)
+    {
+        return open(preferredDeviceName, engineSampleRate, 2, errorOut, requestedBufferSize);
+    }
     // Stereo passthrough for callers that do not select physical channels
     // yet (until AudioEngine passes per-channel mappings).
     juce::String open(const juce::String& preferredDeviceName,
@@ -39,6 +47,9 @@ public:
     juce::String getError() const { return error; }
 
     int inputChannelCount() const { return inputChannelCount_; }
+    // Total inputs the device itself provides; may exceed inputChannelCount(),
+    // which is capped to what the opener requested.
+    int availableInputCount() const { return availableInputCount_; }
     juce::String getInputError() const
     {
         if (inputError.isNotEmpty()) return inputError;
@@ -48,6 +59,8 @@ public:
     }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+    std::uint64_t getInputOverruns() const { return inputOverruns.load(std::memory_order_relaxed); }
+    std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
 
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
@@ -75,10 +88,13 @@ private:
     juce::String error;
     juce::String inputError;
     int inputChannelCount_ = 0;
+    int availableInputCount_ = 0;
     std::atomic<bool> inputUnavailable_{false};
     int deviceInputLatency = 0;
     int deviceBufferSize = 0;
     std::atomic<int> latencySamples{0};
+    std::atomic<std::uint64_t> inputOverruns{0};
+    std::atomic<std::uint64_t> inputDroppedFrames{0};
 };
 
 class OutputPlayback : public juce::AudioIODeviceCallback {
@@ -88,7 +104,8 @@ public:
 
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
-                      juce::String& errorOut);
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0);
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -96,6 +113,8 @@ public:
     juce::String getError() const { return error; }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+    std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
+    std::uint64_t getOutputDroppedFrames() const { return outputDroppedFrames.load(std::memory_order_relaxed); }
 
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
@@ -119,6 +138,8 @@ private:
     juce::String error;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
+    std::atomic<std::uint64_t> outputUnderruns{0};
+    std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::function<void(int)> renderHook;
     std::atomic<bool> renderActive{true};
     float* const* currentOutputChannels = nullptr;

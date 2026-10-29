@@ -64,9 +64,14 @@ bool PluginHost::hasPlugin() const {
 }
 
 int PluginHost::getLatencySamples() const {
-    const juce::ScopedLock lock(pluginLock);
-    if (plugin == nullptr) return 0;
-    return plugin->getLatencySamples();
+    return cachedLatencySamples_.load(std::memory_order_relaxed);
+}
+
+void PluginHost::refreshLatencyCache() {
+    const juce::ScopedTryLock lock(pluginLock);
+    if (!lock.isLocked()) return;
+    cachedLatencySamples_.store(plugin != nullptr ? plugin->getLatencySamples() : 0,
+                                std::memory_order_relaxed);
 }
 
 void PluginHost::editorBeingDeleted(juce::AudioProcessorEditor* ed) {
@@ -160,6 +165,7 @@ juce::String PluginHost::loadPlugin(const juce::File& file) {
     pluginPath = file.getFullPathName();
     pluginName = candidate->getName();
     plugin = std::move(candidate);
+    cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
     return {};
 }
 
@@ -171,6 +177,8 @@ void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
         plugin->setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
         plugin->prepareToPlay(sampleRate, samplesPerBlock);
     }
+    cachedLatencySamples_.store(plugin != nullptr ? plugin->getLatencySamples() : 0,
+                                std::memory_order_relaxed);
 }
 
 void PluginHost::releaseResources() {

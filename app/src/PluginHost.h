@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+#include <atomic>
+
 class PluginHost {
 public:
     PluginHost();
@@ -18,7 +20,10 @@ public:
     int getBufferSize() const;
 
     bool hasPlugin() const;
+    // Lock-free cached latency: refreshed on load/prepare/bypass so the
+    // latency report never blocks on pluginLock.
     int getLatencySamples() const;
+    void refreshLatencyCache();
     void showEditor();
     void editorBeingDeleted(juce::AudioProcessorEditor* editor);
     void clearEditorWindow(juce::DocumentWindow* window);
@@ -33,6 +38,7 @@ private:
     juce::String pluginName;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    std::atomic<int> cachedLatencySamples_{0};
 
     juce::DocumentWindow* editorWindow = nullptr;
 
