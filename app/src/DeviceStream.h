@@ -81,9 +81,10 @@ public:
 private:
     juce::AudioDeviceManager manager;
     juce::SpinLock lock;
-    std::unique_ptr<juce::AbstractFifo> fifo;
     juce::AudioBuffer<float> storage;
     int capacity = 0;
+    int writePos = 0;
+    int totalWritten = 0;
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;

@@ -113,9 +113,10 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     }
 
     capacity = juce::jmax(1, deviceBufferSize * 4);
-    fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
+    writePos = 0;
+    totalWritten = 0;
 
     manager.addAudioCallback(this);
     return {};
@@ -124,7 +125,6 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
 void InputCapture::close() {
     manager.removeAudioCallback(this);
     manager.closeAudioDevice();
-    fifo.reset();
     storage.setSize(0, 0, false, true, false);
     sampleRate = 0.0;
     deviceInputLatency = 0;
@@ -132,6 +132,8 @@ void InputCapture::close() {
     inputChannelCount_ = 0;
     availableInputCount_ = 0;
     inputUnavailable_.store(false, std::memory_order_relaxed);
+    writePos = 0;
+    totalWritten = 0;
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
@@ -146,7 +148,7 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
     }
     dest.clear(0, frames);
 
-    if (fifo == nullptr) {
+    if (capacity <= 0) {
         latencySamples.store(0, std::memory_order_relaxed);
         return false;
     }
@@ -156,11 +158,13 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         std::memory_order_relaxed);
 
     bool ok = true;
-    auto readHandle = fifo->read(frames);
-    const int b1 = readHandle.blockSize1;
-    const int b2 = readHandle.blockSize2;
+    // Read the last `frames` samples from the ring buffer (broadcast, no
+    // consumption). Multiple channels share the same capture.
+    const int available = (totalWritten < frames) ? totalWritten : frames;
+    const int startIdx = (writePos - available + capacity * 4) % capacity;
+    const int offset = frames - available; // leading silence if not enough data
     // Missing physical inputs leave their dest channel silent (already
-    // cleared). Only flip the flag here — error strings are built in open(),
+    // cleared). Only flip the flag here - error strings are built in open(),
     // never on the audio thread.
     for (int i = 0; i < numDest; ++i) {
         const int src = physicalChannels[(size_t)i];
@@ -168,48 +172,33 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
             ok = false;
             continue;
         }
-        for (int s = 0; s < b1; ++s) {
-            dest.setSample(i, s, storage.getSample(src, readHandle.startIndex1 + s));
-        }
-        for (int s = 0; s < b2; ++s) {
-            dest.setSample(i, b1 + s, storage.getSample(src, readHandle.startIndex2 + s));
+        for (int s = 0; s < available; ++s) {
+            const int idx = (startIdx + s) % capacity;
+            dest.setSample(i, offset + s, storage.getSample(src, idx));
         }
     }
     if (!ok)
         inputUnavailable_.store(true, std::memory_order_relaxed);
-    // finishedRead automatic
     return ok;
 }
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
     juce::SpinLock::ScopedTryLockType tryLock(lock);
     if (!tryLock.isLocked()) return; // drop
-    if (fifo == nullptr) return;
+    if (capacity <= 0) return;
 
-    auto writeHandle = fifo->write(numSamples);
-    const int b1 = writeHandle.blockSize1;
-    const int b2 = writeHandle.blockSize2;
-    const int total = b1 + b2;
-    if (total < numSamples) {
-        inputOverruns.fetch_add(1, std::memory_order_relaxed);
-        inputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
-                                     std::memory_order_relaxed);
-    }
-    if (total <= 0) return;
-
+    // Write to ring buffer (broadcast to all consumers - no FIFO consumption).
     for (int ch = 0; ch < inputChannelCount_; ++ch) {
         int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
         if (srcCh < 0)
             inputUnavailable_.store(true, std::memory_order_relaxed); // silence, never remap to input 0
-        for (int i = 0; i < b1; ++i) {
+        for (int i = 0; i < numSamples; ++i) {
             const float v = (srcCh >= 0) ? inputChannelData[srcCh][i] : 0.0f;
-            storage.setSample(ch, writeHandle.startIndex1 + i, v);
-        }
-        for (int i = 0; i < b2; ++i) {
-            const float v = (srcCh >= 0) ? inputChannelData[srcCh][b1 + i] : 0.0f;
-            storage.setSample(ch, writeHandle.startIndex2 + i, v);
+            storage.setSample(ch, (writePos + i) % capacity, v);
         }
     }
+    writePos = (writePos + numSamples) % capacity;
+    totalWritten += numSamples;
     // Channels beyond what the device provides are not stored (storage sized
     // to inputChannelCount_); they are reported via getInputError() and pull()
     // leaves their destination silent.
