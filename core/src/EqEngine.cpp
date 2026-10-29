@@ -10,7 +10,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinFreqHz = 10.0;      // HP range starts at 10 Hz; clamps protect the rest.
 constexpr double kMaxFreqHz = 20000.0;
 constexpr double kMinQ = 0.1;
-constexpr double kMaxQ = 10.0;
+constexpr double kMaxQ = 20.0; // matches SceneValidator's eq q ceiling [0.1, 20]
 constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q (brief: "HP Q unused")
 constexpr float kDenormalFloor = 1e-30f;
 
@@ -109,12 +109,14 @@ void EqEngine::computeCoeffs(const EqBand& band, double sampleRate, Biquad& out)
     }
     case EqType::Peak: {
         const double alpha = sinW0 / (2.0 * q);
+        // RBJ cookbook bell: centre gain = a^2 = 10^(gainDb/20), which
+        // requires the denominator 1 +/- alpha/a (1 +/- alpha halves it).
         b0 = 1.0 + alpha * a;
         b1 = -2.0 * cosW0;
         b2 = 1.0 - alpha * a;
-        a0 = 1.0 + alpha;
+        a0 = 1.0 + alpha / a;
         a1 = -2.0 * cosW0;
-        a2 = 1.0 - alpha;
+        a2 = 1.0 - alpha / a;
         break;
     }
     case EqType::HighShelf: {
