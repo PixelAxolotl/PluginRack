@@ -30,6 +30,9 @@ void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate) 
     for (auto& output : outputs) {
         output->buffer.setSize(2, currentBufferSize);
         output->buffer.clear();
+        for (auto& insert : output->inserts) {
+            insert->pluginHost.prepareToPlay(sampleRate, currentBufferSize);
+        }
         meters.observeOutput(output->id, 0.0f);
     }
 }
@@ -111,6 +114,13 @@ void AudioEngine::render(int frames) {
     }
 
     for (auto& output : outputs) {
+        juce::AudioBuffer<float> block(output->buffer.getArrayOfWritePointers(), 2, 0, frames);
+        for (auto& insert : output->inserts) {
+            insert->pluginHost.processBlock(block, insert->bypassed.get());
+        }
+    }
+
+    for (auto& output : outputs) {
         const float outGain = output->muted.get() ? 0.0f : decibelsToGain(output->gainDb.get());
         if (outGain != 1.0f) {
             output->buffer.applyGain(0, 0, frames, outGain);
@@ -136,6 +146,11 @@ void AudioEngine::releaseResources() {
     const juce::ScopedLock lock(stateLock);
     for (auto& channel : channels) {
         for (auto& insert : channel->inserts) {
+            insert->pluginHost.releaseResources();
+        }
+    }
+    for (auto& output : outputs) {
+        for (auto& insert : output->inserts) {
             insert->pluginHost.releaseResources();
         }
     }
@@ -245,6 +260,9 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     if (channel == nullptr) {
         return "The channel no longer exists.";
     }
+    if (channel->inserts.size() >= 4) {
+        return "Each strip holds at most 4 inserts.";
+    }
 
     auto insert = std::make_unique<InsertSlot>();
     insert->id = nextInsertId++;
@@ -257,6 +275,9 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     insert->pluginName = insert->pluginHost.getPluginName();
 
     const juce::ScopedLock lock(stateLock);
+    if (channel->inserts.size() >= 4) {
+        return "Each strip holds at most 4 inserts.";
+    }
     channel->inserts.push_back(std::move(insert));
     return {};
 }
@@ -276,6 +297,52 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findInsert(channelId, insertId)) {
+        insert->bypassed = bypassed;
+    }
+}
+
+juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::File& file) {
+    auto* output = findOutput(outputId);
+    if (output == nullptr) {
+        return "The output no longer exists.";
+    }
+    if (output->inserts.size() >= 4) {
+        return "Each strip holds at most 4 inserts.";
+    }
+
+    auto insert = std::make_unique<InsertSlot>();
+    insert->id = nextInsertId++;
+    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+    const auto error = insert->pluginHost.loadPlugin(file);
+    if (error.isNotEmpty()) {
+        return error;
+    }
+    insert->pluginPath = file.getFullPathName();
+    insert->pluginName = insert->pluginHost.getPluginName();
+
+    const juce::ScopedLock lock(stateLock);
+    if (output->inserts.size() >= 4) {
+        return "Each strip holds at most 4 inserts.";
+    }
+    output->inserts.push_back(std::move(insert));
+    return {};
+}
+
+void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) {
+        return;
+    }
+    auto& inserts = output->inserts;
+    inserts.erase(std::remove_if(inserts.begin(), inserts.end(), [insertId](const auto& insert) {
+                      return insert->id == insertId;
+                  }),
+                  inserts.end());
+}
+
+void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {
+    if (auto* insert = findOutputInsert(outputId, insertId)) {
         insert->bypassed = bypassed;
     }
 }
@@ -374,7 +441,14 @@ pluginrack::Scene AudioEngine::makeScene() const {
         scene.channels.push_back(std::move(savedChannel));
     }
     for (const auto& output : outputs) {
-        scene.outputs.push_back({output->id, output->name.toStdString()});
+        pluginrack::Output savedOutput;
+        savedOutput.id = output->id;
+        savedOutput.name = output->name.toStdString();
+        for (const auto& insert : output->inserts) {
+            savedOutput.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
+                                           insert->pluginName.toStdString(), insert->bypassed.get()});
+        }
+        scene.outputs.push_back(std::move(savedOutput));
     }
     for (const auto& route : routes) {
         scene.routes.push_back({route->channelId, route->outputId, route->sendGainDb.get()});
@@ -435,6 +509,20 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         output->name = savedOutput.name;
         output->buffer.setSize(2, bufferSize);
         output->buffer.clear();
+        for (const auto& savedInsert : savedOutput.inserts) {
+            auto insert = std::make_unique<InsertSlot>();
+            insert->id = savedInsert.id;
+            insert->pluginPath = savedInsert.pluginPath;
+            insert->pluginName = savedInsert.pluginName;
+            insert->bypassed = savedInsert.bypassed;
+            insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
+            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath));
+            if (error.isNotEmpty()) {
+                loadErrors += output->name + ": " + error + "\n";
+            }
+            nextInsertId = juce::jmax(nextInsertId, insert->id + 1);
+            output->inserts.push_back(std::move(insert));
+        }
         nextOutputId = juce::jmax(nextOutputId, output->id + 1);
         restoredMeters.observeOutput(output->id, 0.0f);
         restoredOutputs.push_back(std::move(output));
@@ -584,6 +672,9 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
             for (auto& o : outputs) {
                 o->buffer.setSize(2, currentBufferSize);
                 o->buffer.clear();
+                for (auto& insert : o->inserts) {
+                    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+                }
             }
         }
     } else {
@@ -648,6 +739,28 @@ AudioEngine::InsertSlot* AudioEngine::findInsert(std::uint32_t channelId, std::u
     return nullptr;
 }
 
+AudioEngine::Output* AudioEngine::findOutput(std::uint32_t outputId) {
+    for (auto& output : outputs) {
+        if (output->id == outputId) {
+            return output.get();
+        }
+    }
+    return nullptr;
+}
+
+AudioEngine::InsertSlot* AudioEngine::findOutputInsert(std::uint32_t outputId, std::uint32_t insertId) {
+    auto* output = findOutput(outputId);
+    if (output == nullptr) {
+        return nullptr;
+    }
+    for (auto& insert : output->inserts) {
+        if (insert->id == insertId) {
+            return insert.get();
+        }
+    }
+    return nullptr;
+}
+
 AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     LatencyReport report;
     const juce::ScopedLock lock(stateLock);
@@ -675,6 +788,9 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         for (const auto& output : outputs) {
             if (output->id == clockOutputId && output->output != nullptr) {
                 outputSamples = output->output->getLatencySamples();
+                for (const auto& insert : output->inserts) {
+                    pluginSamples += insert->pluginHost.getLatencySamples();
+                }
                 valid = true;
                 break;
             }
