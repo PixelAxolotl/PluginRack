@@ -21,12 +21,6 @@ ToolbarComponent::ToolbarComponent() {
     snapshotButton.setTooltip("Snapshots arrive in a later task");
     snapshotButton.onClick = [this] { if (onSnapshot) onSnapshot(); };
 
-    clockLabel.setJustificationType(juce::Justification::centredRight);
-    clockLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    clockLabel.setColour(juce::Label::textColourId, theme::dim());
-    statusLabel.setJustificationType(juce::Justification::centredRight);
-    statusLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    statusLabel.setColour(juce::Label::textColourId, theme::dim());
     latencyLabel.setJustificationType(juce::Justification::centredRight);
     latencyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     latencyLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -45,8 +39,6 @@ ToolbarComponent::ToolbarComponent() {
     addAndMakeVisible(routingButton);
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(snapshotButton);
-    addAndMakeVisible(clockLabel);
-    addAndMakeVisible(statusLabel);
     addAndMakeVisible(latencyLabel);
     addAndMakeVisible(errorButton);
     addAndMakeVisible(saveButton);
@@ -74,13 +66,9 @@ void ToolbarComponent::updateNavToggles() {
 }
 
 void ToolbarComponent::setClockText(const juce::String& text, bool isWarning) {
-    clockLabel.setText(text, juce::dontSendNotification);
-    clockLabel.setColour(juce::Label::textColourId, isWarning ? theme::amber() : theme::dim());
-}
-
-void ToolbarComponent::setAudioStatusText(const juce::String& text, const juce::String& tooltip) {
-    statusLabel.setText(text, juce::dontSendNotification);
-    statusLabel.setTooltip(tooltip);
+    clockText = text;
+    clockColour = isWarning ? theme::amber() : theme::dim();
+    repaint();
 }
 
 void ToolbarComponent::setLatencyText(const juce::String& text, juce::Colour colour, const juce::String& tooltip) {
@@ -103,38 +91,40 @@ void ToolbarComponent::paint(juce::Graphics& g) {
     // wordmark
     g.setColour(theme::green());
     g.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
-    g.drawText("PluginRack", 20, 0, 190, getHeight(), juce::Justification::centredLeft);
+    g.drawText("PluginRack", 20, 0, 182, getHeight(), juce::Justification::centredLeft);
+
+    // clock info (single line, clipped — same as the old header paint)
+    g.setColour(clockColour);
+    g.setFont(juce::Font(juce::FontOptions(11.0f)));
+    g.drawFittedText(clockText, clockBounds, juce::Justification::centredRight, 1);
 }
 
 void ToolbarComponent::resized() {
     auto area = getLocalBounds().reduced(8, 12);
-    area.removeFromLeft(202); // painted wordmark space
+    area.removeFromLeft(190); // painted wordmark space
 
-    racksButton.setBounds(area.removeFromLeft(78));
+    racksButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
-    mixerButton.setBounds(area.removeFromLeft(78));
+    mixerButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
-    routingButton.setBounds(area.removeFromLeft(78));
+    routingButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
-    settingsButton.setBounds(area.removeFromLeft(78));
+    settingsButton.setBounds(area.removeFromLeft(64));
 
-    menuButton.setBounds(area.removeFromRight(72));
+    menuButton.setBounds(area.removeFromRight(60));
     area.removeFromRight(8);
-    loadButton.setBounds(area.removeFromRight(56));
+    loadButton.setBounds(area.removeFromRight(50));
     area.removeFromRight(4);
-    saveButton.setBounds(area.removeFromRight(56));
+    saveButton.setBounds(area.removeFromRight(50));
     area.removeFromRight(8);
-    snapshotButton.setBounds(area.removeFromRight(88));
+    snapshotButton.setBounds(area.removeFromRight(76));
     area.removeFromRight(8);
     if (errorButton.isVisible()) {
         errorButton.setBounds(area.removeFromRight(28));
         area.removeFromRight(8);
     }
-    latencyLabel.setBounds(area.removeFromRight(140));
-    area.removeFromRight(8);
-    statusLabel.setBounds(area.removeFromRight(120));
-    area.removeFromRight(8);
-    clockLabel.setBounds(area);
+    latencyLabel.setBounds(area.removeFromRight(128));
+    clockBounds = area;
 }
 
 ViewRouter::PlaceholderView::PlaceholderView(const juce::String& title, const juce::String& subtitle) {
@@ -170,7 +160,7 @@ void ViewRouter::PlaceholderView::resized() {
 ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
-    , rackView("Racks", {})
+    , rackView(audioEngine)
     , routingView("Routing", "The full channel/output matrix arrives in Task 5. Per-channel routing stays in the mixer strips.")
     , settingsView("Settings", "Device, buffer and diagnostics arrive in Task 5. Audio details stay in the toolbar menu.") {
     addAndMakeVisible(mixerView);
@@ -190,11 +180,7 @@ void ViewRouter::setView(AppView view) {
 }
 
 void ViewRouter::refreshViews() {
-    const int numChannels = static_cast<int>(audioEngine.getChannels().size());
-    const int numOutputs = static_cast<int>(audioEngine.getOutputs().size());
-    rackView.setSubtitle("Chains for " + juce::String(numChannels) + (numChannels == 1 ? " channel" : " channels")
-                         + " and " + juce::String(numOutputs) + (numOutputs == 1 ? " output" : " outputs")
-                         + " arrive in Task 2 — use Mixer for full controls.");
+    rackView.rebuild();
 }
 
 void ViewRouter::resized() {
@@ -217,7 +203,7 @@ MainComponent::MainComponent()
     toolbar.onSnapshot = [this] { showSnapshotPlaceholder(); };
     toolbar.onErrorClicked = [this] { showAudioErrors(); };
 
-    mixer.onStructureChanged = [this] { /* no-op */ };
+    mixer.onStructureChanged = [this] { refreshViews(); };
 
     loadScene(false);
     startTimerHz(4);
@@ -232,13 +218,8 @@ void MainComponent::timerCallback() {
     const auto report = audioEngine.getLatencyReport();
     if (!report.valid) {
         smoothedLatencyMs = -1.0;
-        toolbar.setAudioStatusText("No device", {});
         toolbar.setLatencyText({}, theme::dim(), {});
     } else {
-        toolbar.setAudioStatusText(
-            juce::String(report.sampleRate / 1000.0, 1) + " kHz - " + juce::String(report.outputBufferSize) + " smp",
-            "Sample rate " + juce::String(report.sampleRate, 1) + " Hz: input buffer " + juce::String(report.inputBufferSize)
-                + " smp, output buffer " + juce::String(report.outputBufferSize) + " smp");
         // A live glitch counter overrides smoothing: snap to the raw total so
         // the EMA never hides an active underrun/overrun.
         const bool glitch = (report.underruns + report.overruns) > 0;

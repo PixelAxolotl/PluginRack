@@ -33,6 +33,8 @@ target_sources(pluginrack_app PRIVATE
     src/MixerComponent.h
     src/PluginHost.cpp
     src/PluginHost.h
+    src/RackView.cpp
+    src/RackView.h
     src/RoutingMatrixComponent.cpp
     src/RoutingMatrixComponent.h
     src/SceneBridge.cpp

@@ -6,6 +6,7 @@
 
 #include "AudioEngine.h"
 #include "MixerComponent.h"
+#include "RackView.h"
 #include "Theme.h"
 
 enum class AppView { Rack = 0, Mixer, Routing, Settings };
@@ -22,7 +23,6 @@ public:
 
     void setView(AppView view);
     void setClockText(const juce::String& text, bool isWarning);
-    void setAudioStatusText(const juce::String& text, const juce::String& tooltip);
     void setLatencyText(const juce::String& text, juce::Colour colour, const juce::String& tooltip);
     void setHasError(bool hasError);
 
@@ -44,20 +44,21 @@ private:
     juce::TextButton routingButton{"Routing"};
     juce::TextButton settingsButton{"Settings"};
     juce::TextButton snapshotButton{"Snapshot"};
-    juce::Label clockLabel;
-    juce::Label statusLabel;
     juce::Label latencyLabel;
     juce::TextButton errorButton{"!"};
     juce::TextButton saveButton{"Save"};
     juce::TextButton loadButton{"Load"};
     juce::TextButton menuButton{"Menu"};
+    juce::String clockText;
+    juce::Colour clockColour = theme::dim();
+    juce::Rectangle<int> clockBounds;
     AppView currentView = AppView::Rack;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToolbarComponent)
 };
 
-// Content area below the toolbar. Hosts the real mixer plus lightweight
-// placeholders for the views later tasks will build out. Default is Rack.
+// Content area below the toolbar. Hosts the real mixer and rack views plus
+// lightweight placeholders for the views later tasks will build out. Default is Rack.
 class ViewRouter final : public juce::Component {
 public:
     ViewRouter(AudioEngine& engine, juce::Component& mixerView);
@@ -84,7 +85,7 @@ private:
 
     AudioEngine& audioEngine;
     juce::Component& mixerView;
-    PlaceholderView rackView;
+    RackView rackView;
     PlaceholderView routingView;
     PlaceholderView settingsView;
     AppView currentView = AppView::Rack;
