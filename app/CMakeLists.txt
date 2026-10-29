@@ -20,6 +20,7 @@ target_sources(pluginrack_app PRIVATE
     src/DeviceControl.cpp
     src/DeviceControl.h
     src/DeviceMenu.cpp
+    src/InsertHost.h
     src/DeviceMenu.h
     src/DeviceStream.cpp
     src/DeviceStream.h
