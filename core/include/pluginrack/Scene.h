@@ -51,7 +51,7 @@ struct Route {
 };
 
 struct Scene {
-    int schemaVersion = 1;
+    int schemaVersion = 2;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;
