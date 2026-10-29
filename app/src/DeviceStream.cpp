@@ -174,7 +174,13 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
         }
         for (int s = 0; s < available; ++s) {
             const int idx = (startIdx + s) % capacity;
-            dest.setSample(i, offset + s, storage.getSample(src, idx));
+            const float v = storage.getSample(src, idx);
+            dest.setSample(i, offset + s, v);
+            // Mono (single physical channel): upmix to both L and R so that
+            // panning works correctly (50/50 at center).
+            if (numDest == 1) {
+                dest.setSample(1, offset + s, v);
+            }
         }
     }
     if (!ok)
