@@ -37,6 +37,7 @@ struct Output {
     std::string name;
     OutputKind kind = OutputKind::Physical;
     std::string deviceId;
+    std::vector<InsertSlot> inserts;
 
     bool operator==(const Output&) const = default;
 };

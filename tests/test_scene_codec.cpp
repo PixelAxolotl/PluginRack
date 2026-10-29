@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 1;
+    original.schemaVersion = 2;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -81,10 +81,77 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 2})");
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 3})");
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
+}
+
+TEST_CASE("v2 scene with output inserts round-trips") {
+    pluginrack::Scene original;
+    original.schemaVersion = 2;
+    original.name = "outfx";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.name = "mic";
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    output.kind = pluginrack::OutputKind::Physical;
+    output.deviceId = "out-1";
+
+    pluginrack::InsertSlot slot1;
+    slot1.id = 7;
+    slot1.pluginPath = "/plugins/echo.dll";
+    slot1.pluginName = "Echo";
+    slot1.bypassed = true;
+    output.inserts.push_back(slot1);
+
+    pluginrack::InsertSlot slot2;
+    slot2.id = 8;
+    slot2.pluginPath = "/plugins/gain.dll";
+    slot2.pluginName = "Gain";
+    slot2.bypassed = false;
+    output.inserts.push_back(slot2);
+
+    original.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    route.sendGainDb = 0.0f;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
+    REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
+    REQUIRE(loaded.scene->outputs.front().inserts[1].bypassed == false);
+}
+
+TEST_CASE("v1 scene loads with empty output racks and no errors") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 1,)"
+                             R"("name": "legacy",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1}],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": [])"
+                             R"(})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->outputs.size() == 1);
+    REQUIRE(loaded.scene->outputs.front().inserts.empty());
 }
 
 TEST_CASE("unknown fields are ignored on load and dropped on save") {
