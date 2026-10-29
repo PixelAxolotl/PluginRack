@@ -44,8 +44,8 @@ MainComponent::MainComponent()
                                                     for (const auto& o : audioEngine.getOutputs()) outIds.push_back(o->id);
                                                     for (std::size_t i = 3; i < outIds.size(); ++i)
                                                         audioEngine.removeOutput(outIds[i]);
-                                                    if (audioEngine.getChannels().empty()) audioEngine.addChannel();
-                                                    if (audioEngine.getOutputs().empty()) audioEngine.addOutput();
+                                                    while (audioEngine.getChannels().size() < 1) audioEngine.addChannel();
+                                                    while (audioEngine.getOutputs().size() < 3) audioEngine.addOutput();
                                                     refreshViews();
                                                     saveScene();
                                                 }));
@@ -79,15 +79,20 @@ MainComponent::MainComponent()
 void MainComponent::timerCallback() {
     const auto report = audioEngine.getLatencyReport();
     if (!report.valid) {
+        smoothedLatencyMs = -1.0;
         latencyLabel.setText({}, juce::dontSendNotification);
         latencyLabel.setTooltip({});
         return;
     }
-    latencyLabel.setText("LAT ~" + juce::String((int)std::round(report.totalMs)) + " ms",
+    // Smooth the readout: the FIFO queue-depth term is instantaneous and
+    // spikes during startup/transients. EMA keeps the header stable live.
+    if (smoothedLatencyMs < 0.0) smoothedLatencyMs = report.totalMs;
+    else smoothedLatencyMs += 0.25 * (report.totalMs - smoothedLatencyMs);
+    latencyLabel.setText("LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms",
                          juce::dontSendNotification);
     juce::Colour colour = theme::dim();
-    if (report.totalMs > 60.0) colour = theme::red();
-    else if (report.totalMs > 30.0) colour = theme::amber();
+    if (smoothedLatencyMs > 60.0) colour = theme::red();
+    else if (smoothedLatencyMs > 30.0) colour = theme::amber();
     latencyLabel.setColour(juce::Label::textColourId, colour);
     latencyLabel.setTooltip("Estimated input to output: input " +
                             juce::String((int)std::round(report.inputMs)) + " ms + plugins " +

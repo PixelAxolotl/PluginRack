@@ -108,7 +108,10 @@ void InputCapture::pull(juce::AudioBuffer<float>& dest, int frames) {
         return;
     }
 
-    latencySamples.store(deviceInputLatency + deviceBufferSize + fifo->getNumReady(),
+    // Structural delay only: device latency + one device buffer. The FIFO
+    // queue depth is transient occupancy (spikes at startup, drains in
+    // steady state), not delay — including it makes the readout jumpy.
+    latencySamples.store(deviceInputLatency + deviceBufferSize,
                         std::memory_order_relaxed);
 
     auto readHandle = fifo->read(frames);
@@ -245,8 +248,9 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
         }
     }
     // finishedWrite automatic
+    // Structural delay only (see InputCapture::pull): device + one buffer.
     if (fifo != nullptr) {
-        latencySamples.store(deviceOutputLatency + bufferSize + fifo->getNumReady(),
+        latencySamples.store(deviceOutputLatency + bufferSize,
                             std::memory_order_relaxed);
     }
 }
