@@ -72,6 +72,15 @@ public:
         bool valid = false;
     };
 
+    struct FifoDiagnostics {
+        std::uint64_t inputOverruns = 0;
+        std::uint64_t inputDroppedFrames = 0;
+        std::uint64_t outputUnderruns = 0;
+        std::uint64_t outputDroppedFrames = 0;
+        double inputOccupancy = 0.0;
+        double outputOccupancy = 0.0;
+    };
+
     AudioEngine();
 
     void prepareToPlay(int maxBlockFrames);
@@ -116,6 +125,8 @@ public:
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
     LatencyReport getLatencyReport() const;
+
+    FifoDiagnostics getFifoDiagnostics() const;
 
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);

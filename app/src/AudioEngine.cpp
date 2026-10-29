@@ -948,6 +948,31 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     return report;
 }
 
+AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
+    FifoDiagnostics diagnostics;
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) {
+        return diagnostics;
+    }
+
+    for (const auto& entry : inputCaptures_) {
+        const auto& capture = entry.second.capture;
+        if (capture != nullptr) {
+            diagnostics.inputOverruns += capture->getInputOverruns();
+            diagnostics.inputDroppedFrames += capture->getInputDroppedFrames();
+        }
+    }
+
+    for (const auto& output : outputs) {
+        if (output->output != nullptr) {
+            diagnostics.outputUnderruns += output->output->getOutputUnderruns();
+            diagnostics.outputDroppedFrames += output->output->getOutputDroppedFrames();
+        }
+    }
+
+    return diagnostics;
+}
+
 float AudioEngine::decibelsToGain(float gainDb) {
     return gainDb <= -60.0f ? 0.0f : std::pow(10.0f, gainDb / 20.0f);
 }

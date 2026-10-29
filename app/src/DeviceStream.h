@@ -51,6 +51,8 @@ public:
     }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+    std::uint64_t getInputOverruns() const { return inputOverruns.load(std::memory_order_relaxed); }
+    std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
 
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
@@ -83,6 +85,8 @@ private:
     int deviceInputLatency = 0;
     int deviceBufferSize = 0;
     std::atomic<int> latencySamples{0};
+    std::atomic<std::uint64_t> inputOverruns{0};
+    std::atomic<std::uint64_t> inputDroppedFrames{0};
 };
 
 class OutputPlayback : public juce::AudioIODeviceCallback {
@@ -100,6 +104,8 @@ public:
     juce::String getError() const { return error; }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+    std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
+    std::uint64_t getOutputDroppedFrames() const { return outputDroppedFrames.load(std::memory_order_relaxed); }
 
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
@@ -123,6 +129,8 @@ private:
     juce::String error;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
+    std::atomic<std::uint64_t> outputUnderruns{0};
+    std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::function<void(int)> renderHook;
     std::atomic<bool> renderActive{true};
     float* const* currentOutputChannels = nullptr;

@@ -96,7 +96,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    capacity = juce::jmax(1, (int)std::round(sampleRate * 2.0));
+    capacity = juce::jmax(1, deviceBufferSize * 4);
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
@@ -173,7 +173,13 @@ void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputCh
     auto writeHandle = fifo->write(numSamples);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
-    if (b1 + b2 <= 0) return;
+    const int total = b1 + b2;
+    if (total < numSamples) {
+        inputOverruns.fetch_add(1, std::memory_order_relaxed);
+        inputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
+                                     std::memory_order_relaxed);
+    }
+    if (total <= 0) return;
 
     for (int ch = 0; ch < inputChannelCount_; ++ch) {
         int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
@@ -247,7 +253,7 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    capacity = juce::jmax(1, (int)std::round(sampleRate * 2.0));
+    capacity = juce::jmax(1, bufferSize * 4);
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
@@ -272,6 +278,11 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     auto writeHandle = fifo->write(frames);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
+    const int total = b1 + b2;
+    if (total < frames) {
+        outputDroppedFrames.fetch_add((std::uint64_t)(frames - total),
+                                      std::memory_order_relaxed);
+    }
     const int srcChans = juce::jmax(1, src.getNumChannels());
 
     for (int ch = 0; ch < 2; ++ch) {
@@ -313,6 +324,12 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     auto readHandle = fifo->read(numSamples);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
+    const int total = b1 + b2;
+    if (total < numSamples) {
+        outputUnderruns.fetch_add(1, std::memory_order_relaxed);
+        outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
+                                      std::memory_order_relaxed);
+    }
 
     const int chans = juce::jmin(2, numOutputChannels);
     for (int ch = 0; ch < chans; ++ch) {
