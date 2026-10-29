@@ -18,6 +18,7 @@ public:
     bool getToggleState() const { return on; }
     void setClickAction(std::function<void()> action) { clickAction = std::move(action); }
     void setEnabledState(bool state) { active = state; repaint(); }
+    void setFontSize(float size) { fontSize = size; repaint(); }
 
     void paint(juce::Graphics& g) override {
         auto r = getLocalBounds().toFloat().reduced(0.5f);
@@ -40,7 +41,7 @@ public:
         if (on) textColour = juce::Colour(0xff1b2229);
         if (!active) textColour = theme::dim().withAlpha(0.5f);
         g.setColour(textColour);
-        g.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+        g.setFont(juce::Font(juce::FontOptions(fontSize, juce::Font::bold)));
         g.drawText(label, getLocalBounds(), juce::Justification::centred);
     }
 
@@ -58,6 +59,7 @@ public:
 private:
     juce::String label;
     std::function<void()> clickAction;
+    float fontSize = 10.0f;
     bool on = false;
     bool active = true;
     bool hovered = false;

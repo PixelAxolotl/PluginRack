@@ -22,6 +22,7 @@ public:
     void showEditor();
     void editorBeingDeleted(juce::AudioProcessorEditor* editor);
     void clearEditorWindow(juce::DocumentWindow* window);
+    void closeEditorWindow(juce::DocumentWindow* window);
 
 private:
     juce::AudioPluginFormatManager formatManager;

@@ -125,10 +125,14 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     channelLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(channelLabel);
 
+    removeChannelButton.setFontSize(13.0f);
     removeChannelButton.setClickAction([this] {
         juce::Component::SafePointer<ChannelStrip> safe(this);
         juce::MessageManager::callAsync([safe] {
-            if (safe != nullptr && safe->onRemoveRequested) safe->onRemoveRequested();
+            if (safe == nullptr) return;
+            // Copy the callback: the strip is destroyed by the handler that runs it.
+            auto callback = safe->onRemoveRequested;
+            if (callback) callback();
         });
     });
     removeChannelButton.setTooltip("Remove this channel");
@@ -248,10 +252,10 @@ void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
 
     // header row
-    auto headerRow = area.removeFromTop(18);
-    channelLabel.setBounds(headerRow.removeFromLeft(juce::jmax(0, headerRow.getWidth() - 20)));
-    auto btnArea = headerRow.removeFromRight(18);
-    removeChannelButton.setBounds(btnArea.getX() + 1, btnArea.getY() + 1, 16, 16);
+    auto headerRow = area.removeFromTop(22);
+    auto btnArea = headerRow.removeFromRight(22);
+    channelLabel.setBounds(headerRow);
+    removeChannelButton.setBounds(btnArea);
     area.removeFromTop(4);
 
     deviceControl.setBounds(area.removeFromTop(40));

@@ -54,7 +54,7 @@ private:
     AudioEngine& audioEngine;
     DeviceControl deviceControl;
     juce::Label channelLabel{"", ""};
-    MiniButton removeChannelButton{juce::String::fromUTF8("\\xc3\\x97")};
+    MiniButton removeChannelButton{juce::String::fromUTF8("\xc3\x97")};
     juce::Label vstHeader{"", "VST RACK"};
 
     juce::OwnedArray<InsertSlotComponent> slots;

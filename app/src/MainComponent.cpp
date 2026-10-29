@@ -21,6 +21,7 @@ MainComponent::MainComponent()
 
     loadScene(false);
     startTimerHz(4);
+    timerCallback(); // populate the latency readout before the first tick
     setSize(1600, 900);
 }
 

@@ -27,7 +27,15 @@ public:
         setVisible(true);
     }
 
-    void closeButtonPressed() override { delete this; }
+    void closeButtonPressed() override {
+        // Deleting a window from inside its own close-button callback is fragile:
+        // defer so the button can finish dispatching first. The owner may destroy
+        // the window before the message arrives, so guard with a weak pointer.
+        juce::Component::SafePointer<PluginWindow> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr) safe->owner.closeEditorWindow(safe.getComponent());
+        });
+    }
 
     ~PluginWindow() override {
         owner.editorBeingDeleted(editor);
@@ -70,6 +78,13 @@ void PluginHost::editorBeingDeleted(juce::AudioProcessorEditor* ed) {
 
 void PluginHost::clearEditorWindow(juce::DocumentWindow* window) {
     if (editorWindow == window) editorWindow = nullptr;
+}
+
+void PluginHost::closeEditorWindow(juce::DocumentWindow* window) {
+    if (window == nullptr || window != editorWindow) return;
+    auto* doomed = editorWindow;
+    editorWindow = nullptr;
+    delete doomed;
 }
 
 void PluginHost::showEditor() {
