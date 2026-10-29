@@ -74,8 +74,9 @@ public:
 
     AudioEngine();
 
-    void prepareToPlay(int samplesPerBlockExpected, double sampleRate);
+    void prepareToPlay(int maxBlockFrames);
     void render(int frames);
+    std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
     void releaseResources();
     // Ensures every channel with an assigned input device shares one capture
     // opened wide enough for the highest physical index it maps. Callers that
@@ -148,6 +149,9 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    int maxBlockFrames_ = 256;
+    std::atomic<std::uint64_t> oversizedBlockCount_{0};
+    juce::AudioBuffer<float> silenceBuffer_;
     std::uint32_t clockOutputId = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

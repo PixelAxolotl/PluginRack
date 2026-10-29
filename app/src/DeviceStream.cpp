@@ -85,6 +85,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // indexes it does not have are reported via getInputError() and stay
     // silent — never remapped onto input 0.
     const int availableInputs = (int) dev->getInputChannelNames().size();
+    availableInputCount_ = availableInputs < 1 ? 1 : availableInputs;
     inputChannelCount_ = (numInputChannels < availableInputs) ? numInputChannels : availableInputs;
     if (inputChannelCount_ < 1) inputChannelCount_ = 1;
     if (inputChannelCount_ < numChannelsNeeded) {
@@ -113,6 +114,7 @@ void InputCapture::close() {
     deviceInputLatency = 0;
     deviceBufferSize = 0;
     inputChannelCount_ = 0;
+    availableInputCount_ = 0;
     inputUnavailable_.store(false, std::memory_order_relaxed);
     latencySamples.store(0, std::memory_order_relaxed);
 }
@@ -120,14 +122,17 @@ void InputCapture::close() {
 bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         const std::vector<int>& physicalChannels) {
     if (frames <= 0) return true;
-    if (dest.getNumChannels() < 2 || dest.getNumSamples() < frames) {
+
+    // dest is sized by the caller: mono mappings need 1 channel, stereo 2.
+    const int numDest = juce::jmin(2, (int)physicalChannels.size());
+    if (numDest < 1 || dest.getNumChannels() < numDest || dest.getNumSamples() < frames) {
         return false;
     }
     dest.clear(0, frames);
 
     if (fifo == nullptr) {
         latencySamples.store(0, std::memory_order_relaxed);
-        return true;
+        return false;
     }
 
     // Structural delay only: device latency + one device buffer.
@@ -135,25 +140,16 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         std::memory_order_relaxed);
 
     bool ok = true;
-    const int numDest = juce::jmin(2, (int)physicalChannels.size());
-    // Validate mappings first; missing inputs stay silent.
-    for (int i = 0; i < numDest; ++i) {
-        int src = physicalChannels[i];
-        if (src < 0 || src >= inputChannelCount_) {
-            ok = false;
-            if (inputError.isEmpty()) {
-                inputError = "Missing input " + juce::String(src + 1);
-            }
-        }
-    }
-
     auto readHandle = fifo->read(frames);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
+    // Missing physical inputs leave their dest channel silent (already
+    // cleared). Only flip the flag here — error strings are built in open(),
+    // never on the audio thread.
     for (int i = 0; i < numDest; ++i) {
-        int src = physicalChannels[i];
+        const int src = physicalChannels[(size_t)i];
         if (src < 0 || src >= inputChannelCount_) {
-            // leave silence (already cleared)
+            ok = false;
             continue;
         }
         for (int s = 0; s < b1; ++s) {
@@ -163,6 +159,8 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
             dest.setSample(i, b1 + s, storage.getSample(src, readHandle.startIndex2 + s));
         }
     }
+    if (!ok)
+        inputUnavailable_.store(true, std::memory_order_relaxed);
     // finishedRead automatic
     return ok;
 }
@@ -179,6 +177,8 @@ void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputCh
 
     for (int ch = 0; ch < inputChannelCount_; ++ch) {
         int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
+        if (srcCh < 0)
+            inputUnavailable_.store(true, std::memory_order_relaxed); // silence, never remap to input 0
         for (int i = 0; i < b1; ++i) {
             const float v = (srcCh >= 0) ? inputChannelData[srcCh][i] : 0.0f;
             storage.setSample(ch, writeHandle.startIndex1 + i, v);

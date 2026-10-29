@@ -15,23 +15,25 @@ AudioEngine::AudioEngine() {
     }
 }
 
-void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate) {
+void AudioEngine::prepareToPlay(int maxBlockFrames) {
     const juce::ScopedLock lock(stateLock);
-    currentSampleRate = sampleRate;
-    currentBufferSize = juce::jmax(1, samplesPerBlockExpected);
+    maxBlockFrames_ = juce::jmax(1, maxBlockFrames);
+    currentBufferSize = maxBlockFrames_;
+    silenceBuffer_.setSize(2, maxBlockFrames_, false, true, true);
+    silenceBuffer_.clear();
     for (auto& channel : channels) {
-        channel->buffer.setSize(2, currentBufferSize);
+        channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
         channel->buffer.clear();
         for (auto& insert : channel->inserts) {
-            insert->pluginHost.prepareToPlay(sampleRate, currentBufferSize);
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
         meters.observeChannel(channel->id, 0.0f);
     }
     for (auto& output : outputs) {
-        output->buffer.setSize(2, currentBufferSize);
+        output->buffer.setSize(2, maxBlockFrames_, false, true, true);
         output->buffer.clear();
         for (auto& insert : output->inserts) {
-            insert->pluginHost.prepareToPlay(sampleRate, currentBufferSize);
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
         meters.observeOutput(output->id, 0.0f);
     }
@@ -52,20 +54,27 @@ void AudioEngine::render(int frames) {
         return;
     }
 
-    // ensure buffers
-    for (auto& channel : channels) {
-        if (channel->buffer.getNumSamples() < frames) {
-            channel->buffer.setSize(2, frames, true, true, true);
+    // Oversized block: silence it, count once, skip processing.
+    if (maxBlockFrames_ > 0 && frames > maxBlockFrames_) {
+        oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
+        for (auto& output : outputs) {
+            if (output->output) {
+                juce::AudioBuffer<float> silence(2, frames);
+                silence.clear();
+                output->output->push(silence, frames);
+            }
         }
+        return;
+    }
+
+    // buffers are preallocated in prepareToPlay; clear used range only.
+    for (auto& channel : channels) {
         channel->buffer.clear(0, frames);
         if (channel->input) {
             channel->input->pull(channel->buffer, frames, channel->inputChannels);
         }
     }
     for (auto& output : outputs) {
-        if (output->buffer.getNumSamples() < frames) {
-            output->buffer.setSize(2, frames, true, true, true);
-        }
         output->buffer.clear(0, frames);
     }
 
@@ -802,23 +811,9 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
         {
             const juce::ScopedLock sl(stateLock);
             currentSampleRate = newRate;
-            currentBufferSize = newBuf;
             clockOutputId = outputId;
-            for (auto& channel : channels) {
-                channel->buffer.setSize(2, currentBufferSize);
-                channel->buffer.clear();
-                for (auto& insert : channel->inserts) {
-                    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-                }
-            }
-            for (auto& o : outputs) {
-                o->buffer.setSize(2, currentBufferSize);
-                o->buffer.clear();
-                for (auto& insert : o->inserts) {
-                    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-                }
-            }
         }
+        prepareToPlay(newBuf);
     } else {
         // ensure clock id remains; if no clock, maybe set? handled by isClock true when none
     }
@@ -905,7 +900,11 @@ AudioEngine::InsertSlot* AudioEngine::findOutputInsert(std::uint32_t outputId, s
 
 AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     LatencyReport report;
-    const juce::ScopedLock lock(stateLock);
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) {
+        report.valid = false;
+        return report;
+    }
 
     const Channel* inputChannel = nullptr;
     for (const auto& channel : channels) {

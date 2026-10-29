@@ -39,6 +39,9 @@ public:
     juce::String getError() const { return error; }
 
     int inputChannelCount() const { return inputChannelCount_; }
+    // Total inputs the device itself provides; may exceed inputChannelCount(),
+    // which is capped to what the opener requested.
+    int availableInputCount() const { return availableInputCount_; }
     juce::String getInputError() const
     {
         if (inputError.isNotEmpty()) return inputError;
@@ -75,6 +78,7 @@ private:
     juce::String error;
     juce::String inputError;
     int inputChannelCount_ = 0;
+    int availableInputCount_ = 0;
     std::atomic<bool> inputUnavailable_{false};
     int deviceInputLatency = 0;
     int deviceBufferSize = 0;
