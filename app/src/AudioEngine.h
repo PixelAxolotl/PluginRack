@@ -109,6 +109,8 @@ public:
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String setDeviceBufferSize(int size);
+    bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
+    bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
@@ -179,6 +181,7 @@ private:
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     juce::AudioBuffer<float> silenceBuffer_;
     std::uint32_t clockOutputId = 0;
+    bool fullDuplex_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

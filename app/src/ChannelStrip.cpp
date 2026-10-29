@@ -1,6 +1,7 @@
 #include "ChannelStrip.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 constexpr int kStripWidth = 148;
@@ -260,6 +261,16 @@ void ChannelStrip::refreshInserts() {
         AudioEngine::InsertSlot* ins = nullptr;
         if (i < (int)channel.inserts.size()) ins = channel.inserts[i].get();
         slots[i]->setInsert(ins);
+    }
+    const auto hottest = audioEngine.getHighestLatencyInsert(channel.id);
+    if (hottest.latencySamples > 0) {
+        const double sampleRate = audioEngine.getLatencyReport().sampleRate;
+        const double ms = hottest.latencySamples / (sampleRate > 0.0 ? sampleRate : 48000.0) * 1000.0;
+        vstHeader.setText("VST RACK \xe2\x80\x94 hottest " + hottest.name + " "
+                              + juce::String((int)std::round(ms)) + " ms",
+                          juce::dontSendNotification);
+    } else {
+        vstHeader.setText("VST RACK", juce::dontSendNotification);
     }
     repaint();
 }
