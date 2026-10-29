@@ -22,6 +22,7 @@ public:
         juce::String pluginName;
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
+        int latencySamples = 0;
     };
 
     struct Channel {
@@ -75,6 +76,9 @@ public:
         double sampleRate = 48000.0;
         std::uint64_t underruns = 0;
         std::uint64_t overruns = 0;
+        std::uint32_t maxInsertId = 0;
+        juce::String maxInsertName;
+        double maxInsertMs = 0.0;
         bool valid = false;
         bool approximate = true;
     };
@@ -112,6 +116,8 @@ public:
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
+    struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
+    HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
 

@@ -286,6 +286,7 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     }
     insert->pluginPath = file.getFullPathName();
     insert->pluginName = insert->pluginHost.getPluginName();
+    insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
     if (channel->inserts.size() >= 4) {
@@ -311,6 +312,7 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findInsert(channelId, insertId)) {
         insert->bypassed = bypassed;
+        insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
 
@@ -332,6 +334,7 @@ juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::Fi
     }
     insert->pluginPath = file.getFullPathName();
     insert->pluginName = insert->pluginHost.getPluginName();
+    insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
     if (output->inserts.size() >= 4) {
@@ -357,6 +360,7 @@ void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t inser
 void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findOutputInsert(outputId, insertId)) {
         insert->bypassed = bypassed;
+        insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
 
@@ -562,6 +566,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             if (error.isNotEmpty()) {
                 loadErrors += channel->name + ": " + error + "\n";
             }
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
             nextInsertId = juce::jmax(nextInsertId, insert->id + 1);
             channel->inserts.push_back(std::move(insert));
         }
@@ -586,6 +591,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             if (error.isNotEmpty()) {
                 loadErrors += output->name + ": " + error + "\n";
             }
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
             nextInsertId = juce::jmax(nextInsertId, insert->id + 1);
             output->inserts.push_back(std::move(insert));
         }
@@ -944,7 +950,7 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     int pluginSamples = 0;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
         for (const auto& insert : inputChannel->inserts) {
-            pluginSamples += insert->pluginHost.getLatencySamples();
+            pluginSamples += insert->latencySamples;
         }
     }
 
@@ -957,7 +963,7 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                 outputDeviceSamples = output->output->getLatencySamples();
                 outputBufferSize = currentBufferSize;
                 for (const auto& insert : output->inserts) {
-                    pluginSamples += insert->pluginHost.getLatencySamples();
+                    pluginSamples += insert->latencySamples;
                 }
                 valid = true;
                 break;
@@ -1009,6 +1015,26 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
     }
 
     return diagnostics;
+}
+
+AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint32_t channelId) const {
+    HighestLatencyInsert result;
+    result.channelId = channelId;
+    const juce::ScopedTryLock lock(stateLock);
+    if (!lock.isLocked()) return result;
+    const Channel* ch = nullptr;
+    for (const auto& c : channels) if (c->id == channelId) { ch = c.get(); break; }
+    if (ch == nullptr) return result;
+    int maxLat = 0;
+    for (const auto& ins : ch->inserts) {
+        if (ins->latencySamples > maxLat) {
+            maxLat = ins->latencySamples;
+            result.insertId = ins->id;
+            result.name = ins->pluginName;
+            result.latencySamples = ins->latencySamples;
+        }
+    }
+    return result;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {
