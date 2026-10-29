@@ -24,7 +24,15 @@ public:
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       int numChannelsNeeded,
-                      juce::String& errorOut);
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0);
+    juce::String open(const juce::String& preferredDeviceName,
+                      double engineSampleRate,
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0)
+    {
+        return open(preferredDeviceName, engineSampleRate, 2, errorOut, requestedBufferSize);
+    }
     // Stereo passthrough for callers that do not select physical channels
     // yet (until AudioEngine passes per-channel mappings).
     juce::String open(const juce::String& preferredDeviceName,
@@ -96,7 +104,8 @@ public:
 
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
-                      juce::String& errorOut);
+                      juce::String& errorOut,
+                      int requestedBufferSize = 0);
     void close();
 
     double getSampleRate() const { return sampleRate; }

@@ -97,6 +97,7 @@ public:
     void addOutput();
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
+    juce::String setDeviceBufferSize(int size);
     juce::String getClockDescription() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
@@ -160,6 +161,7 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    int requestedBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     juce::AudioBuffer<float> silenceBuffer_;

@@ -696,7 +696,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     auto capture = std::make_shared<InputCapture>();
     juce::String err;
     const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       currentSampleRate, needed, err);
+                                       currentSampleRate, needed, err, requestedBufferSize_);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         channel->inputError = openErr;
@@ -795,7 +795,7 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     juce::String err;
     const double rateForValidation = isClock ? 0.0 : currentSampleRate;
     const auto openErr = newPlayback->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                          rateForValidation, err);
+                                          rateForValidation, err, requestedBufferSize_);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
@@ -825,6 +825,26 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
         out->outputError.clear();
     }
     return {};
+}
+
+juce::String AudioEngine::setDeviceBufferSize(int size) {
+    requestedBufferSize_ = size;
+    juce::String firstError;
+    for (auto& channel : channels) {
+        if (channel->inputDeviceName.isNotEmpty() &&
+            channel->inputDeviceName != "None \xe2\x80\x94 silent") {
+            const auto e = setChannelInputDevice(channel->id, channel->inputDeviceName);
+            if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
+        }
+    }
+    for (auto& output : outputs) {
+        if (output->outputDeviceName.isNotEmpty() &&
+            output->outputDeviceName != "None \xe2\x80\x94 silent") {
+            const auto e = setOutputDevice(output->id, output->outputDeviceName);
+            if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
+        }
+    }
+    return firstError;
 }
 
 juce::String AudioEngine::getClockDescription() const {

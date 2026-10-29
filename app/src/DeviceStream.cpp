@@ -46,7 +46,8 @@ InputCapture::~InputCapture() {
 juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                double engineSampleRate,
                                int numChannelsNeeded,
-                               juce::String& errorOut) {
+                               juce::String& errorOut,
+                               int requestedBufferSize) {
     close();
     error.clear();
     inputError.clear();
@@ -57,6 +58,21 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         error = err;
         errorOut = err;
         return err;
+    }
+
+    // Apply requested buffer size via AudioDeviceSetup.
+    if (requestedBufferSize >= 0) {
+        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
+        setup.bufferSize = requestedBufferSize; // 0 = driver default
+        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
+        juce::String berr = manager.setAudioDeviceSetup(setup, true);
+        if (berr.isNotEmpty()) {
+            manager.setAudioDeviceSetup(prev, true);
+            error = berr;
+            errorOut = berr;
+            return berr;
+        }
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
@@ -221,7 +237,8 @@ OutputPlayback::~OutputPlayback() {
 
 juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                  double engineSampleRate,
-                                 juce::String& errorOut) {
+                                 juce::String& errorOut,
+                                 int requestedBufferSize) {
     close();
     error.clear();
 
@@ -230,6 +247,20 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
         error = err;
         errorOut = err;
         return err;
+    }
+    if (requestedBufferSize >= 0) {
+        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
+        setup.bufferSize = requestedBufferSize;
+        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
+        juce::String berr = manager.setAudioDeviceSetup(setup, true);
+        if (berr.isNotEmpty()) {
+            manager.setAudioDeviceSetup(prev, true);
+            error = berr;
+            errorOut = berr;
+            close();
+            return berr;
+        }
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
