@@ -7,6 +7,7 @@
 #include "AudioEngine.h"
 #include "ChannelStrip.h"
 #include "DeviceControl.h"
+#include "InsertHost.h"
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
@@ -22,19 +23,32 @@ public:
     std::function<void()> onStructureChanged;
 
 private:
-    class OutputStrip final : public juce::Component {
+    class OutputStrip final : public juce::Component, public IInsertHost {
     public:
         OutputStrip(AudioEngine::Output& output, AudioEngine& engine);
         void resized() override;
         void refresh();
 
+        // IInsertHost
+        juce::String insertPlugin(const juce::File&) override;
+        void erasePlugin(std::uint32_t insertId) override;
+        void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
+        void refreshAfterInsertChange() override;
+        void openPicker() override;
+
         std::function<void()> onRemoveRequested;
 
     private:
+        void refreshInserts();
+
         AudioEngine::Output& output;
         AudioEngine& audioEngine;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
+        juce::OwnedArray<InsertSlotComponent> slots;
+        juce::Label vstHeader{"", "VST RACK"};
+        juce::TextButton addVstButton{"+ Add VST3"};
+        std::unique_ptr<juce::FileChooser> fileChooser;
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};

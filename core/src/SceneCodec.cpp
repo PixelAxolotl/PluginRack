@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -121,6 +121,7 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"name", output.name},
         {"kind", output.kind},
         {"deviceId", output.deviceId},
+        {"inserts", output.inserts},
     };
 }
 
@@ -132,6 +133,9 @@ void from_json(const nlohmann::json& j, Output& output) {
         j.at("kind").get_to(output.kind);
     }
     output.deviceId = j.value("deviceId", std::string{});
+    if (j.contains("inserts")) {
+        j.at("inserts").get_to(output.inserts);
+    }
 }
 
 void to_json(nlohmann::json& j, const Route& route) {
@@ -167,9 +171,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion != kSchemaVersion) {
+        if (schemaVersion != 1 && schemaVersion != 2) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected " + std::to_string(kSchemaVersion));
+                                    ", expected 1 or 2");
             return result;
         }
         Scene scene;

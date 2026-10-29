@@ -6,111 +6,6 @@ namespace {
 constexpr int kStripWidth = 148;
 }
 
-ChannelStrip::InsertSlotComponent::InsertSlotComponent(ChannelStrip& ownerRef, int index)
-    : owner(ownerRef), slotIndex(index) {
-    setMouseCursor(juce::MouseCursor::PointingHandCursor);
-    setTooltip("Click to load a VST3 plugin");
-
-    indexLabel.setText(juce::String(index + 1), juce::dontSendNotification);
-    indexLabel.setJustificationType(juce::Justification::centred);
-    indexLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
-    indexLabel.setColour(juce::Label::textColourId, theme::dim());
-    indexLabel.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(indexLabel);
-
-    nameLabel.setJustificationType(juce::Justification::centredLeft);
-    nameLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    nameLabel.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(nameLabel);
-
-    bypassButton.setClickAction([this] {
-        if (insert == nullptr) return;
-        const bool next = !bypassButton.getToggleState();
-        bypassButton.setToggleState(next);
-        owner.audioEngine.setPluginBypassed(owner.channel.id, insert->id, next);
-    });
-    bypassButton.setTooltip("Bypass this plugin");
-    addAndMakeVisible(bypassButton);
-
-    removeButton.setClickAction([this] {
-        if (insert == nullptr) return;
-        owner.audioEngine.removePlugin(owner.channel.id, insert->id);
-        juce::Component::SafePointer<ChannelStrip> safeOwner(&owner);
-        juce::MessageManager::callAsync([safeOwner] {
-            if (safeOwner != nullptr) safeOwner->refreshInserts();
-        });
-    });
-    removeButton.setTooltip("Remove this plugin");
-    addAndMakeVisible(removeButton);
-}
-
-void ChannelStrip::InsertSlotComponent::setInsert(AudioEngine::InsertSlot* newInsert) {
-    insert = newInsert;
-    if (insert != nullptr) {
-        nameLabel.setText(insert->pluginName.isNotEmpty() ? insert->pluginName
-                                                          : juce::File(insert->pluginPath).getFileName(),
-                          juce::dontSendNotification);
-        bypassButton.setToggleState(insert->bypassed.get());
-        bypassButton.setEnabledState(true);
-        removeButton.setEnabledState(true);
-        nameLabel.setColour(juce::Label::textColourId, theme::text());
-        nameLabel.setTooltip(insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath);
-        setTooltip("Click to open the plugin editor");
-    } else {
-        nameLabel.setText("empty", juce::dontSendNotification);
-        nameLabel.setColour(juce::Label::textColourId, theme::dim());
-        nameLabel.setTooltip("Click to load a VST3 plugin");
-        bypassButton.setToggleState(false);
-        bypassButton.setEnabledState(false);
-        removeButton.setEnabledState(false);
-        setTooltip("Click to load a VST3 plugin");
-    }
-    repaint();
-}
-
-void ChannelStrip::InsertSlotComponent::resized() {
-    auto area = getLocalBounds().reduced(3, 1);
-    indexLabel.setBounds(area.removeFromLeft(14));
-    removeButton.setBounds(area.removeFromRight(18));
-    area.removeFromRight(2);
-    bypassButton.setBounds(area.removeFromRight(18));
-    area.removeFromRight(3);
-    nameLabel.setBounds(area);
-}
-
-void ChannelStrip::InsertSlotComponent::mouseDown(const juce::MouseEvent&) {
-    if (insert == nullptr) {
-        owner.choosePlugin();
-    } else {
-        insert->pluginHost.showEditor();
-    }
-}
-
-void ChannelStrip::InsertSlotComponent::mouseEnter(const juce::MouseEvent&) {
-    hovered = true;
-    repaint();
-}
-
-void ChannelStrip::InsertSlotComponent::mouseExit(const juce::MouseEvent&) {
-    hovered = false;
-    repaint();
-}
-
-void ChannelStrip::InsertSlotComponent::paint(juce::Graphics& g) {
-    auto r = getLocalBounds().toFloat();
-    juce::Colour face = insert != nullptr ? theme::strip() : theme::control().withAlpha(0.45f);
-    if (hovered && insert == nullptr) face = theme::control().withAlpha(0.75f);
-    g.setColour(face);
-    g.fillRoundedRectangle(r, 3.0f);
-    if (insert != nullptr) {
-        g.setColour(theme::violet().withAlpha(0.6f));
-        g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 1.0f);
-    } else {
-        g.setColour(theme::border());
-        g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 1.0f);
-    }
-}
-
 ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engine)
     : channel(channelState),
       audioEngine(engine),
@@ -163,7 +58,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
     addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
-    addVstButton.onClick = [this] { choosePlugin(); };
+    addVstButton.onClick = [this] { openPicker(); };
     addAndMakeVisible(addVstButton);
 
     levelLabel.setJustificationType(juce::Justification::centred);
@@ -336,7 +231,7 @@ void ChannelStrip::refreshRouting() {
     }
 }
 
-void ChannelStrip::choosePlugin() {
+void ChannelStrip::openPicker() {
     fileChooser = std::make_unique<juce::FileChooser>(
         "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
         "*.vst3");
@@ -346,13 +241,30 @@ void ChannelStrip::choosePlugin() {
                              [safeThis](const juce::FileChooser& chooser) {
                                  const auto file = chooser.getResult();
                                  if (safeThis == nullptr || file == juce::File()) return;
-                                 const auto error = safeThis->audioEngine.addPlugin(safeThis->channel.id, file);
+                                 const auto error = safeThis->insertPlugin(file);
                                  if (error.isNotEmpty()) {
                                      juce::AlertWindow::showMessageBoxAsync(
                                          juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
                                  }
-                                 safeThis->refreshInserts();
                              });
+}
+
+juce::String ChannelStrip::insertPlugin(const juce::File& file) {
+    const auto error = audioEngine.addPlugin(channel.id, file);
+    refreshAfterInsertChange();
+    return error;
+}
+
+void ChannelStrip::erasePlugin(std::uint32_t insertId) {
+    audioEngine.removePlugin(channel.id, insertId);
+}
+
+void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
+    audioEngine.setPluginBypassed(channel.id, insertId, bypassed);
+}
+
+void ChannelStrip::refreshAfterInsertChange() {
+    refreshInserts();
 }
 
 void ChannelStrip::rebuildRoutingButtons() {

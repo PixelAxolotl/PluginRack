@@ -52,6 +52,7 @@ private:
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
+    std::vector<std::unique_ptr<InsertChain>> outputInsertChains_;
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;

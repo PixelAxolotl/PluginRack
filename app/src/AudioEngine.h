@@ -44,6 +44,7 @@ public:
         juce::Atomic<float> peak{0.0f};
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
+        std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
         juce::String outputDeviceName;
         juce::String outputError;
@@ -81,6 +82,9 @@ public:
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
+    juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
+    void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
+    void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
 
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);
@@ -104,6 +108,8 @@ public:
 private:
     Channel* findChannel(std::uint32_t channelId);
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);
+    Output* findOutput(std::uint32_t outputId);
+    InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
 
     std::vector<std::unique_ptr<Channel>> channels;

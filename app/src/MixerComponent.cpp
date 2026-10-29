@@ -32,6 +32,21 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
     });
     addAndMakeVisible(deviceControl);
 
+    vstHeader.setJustificationType(juce::Justification::centredLeft);
+    vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    vstHeader.setColour(juce::Label::textColourId, theme::violet());
+    addAndMakeVisible(vstHeader);
+
+    for (int i = 0; i < 4; ++i) {
+        auto* slot = slots.add(new InsertSlotComponent(*this, i));
+        addAndMakeVisible(*slot);
+    }
+
+    addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
+    addVstButton.onClick = [this] { openPicker(); };
+    addAndMakeVisible(addVstButton);
+
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
     gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 40, 14);
     gainSlider.setRange(-60.0, 12.0, 0.1);
@@ -59,6 +74,8 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
         audioEngine.setOutputMuted(output.id, muteButton.getToggleState());
     };
     addAndMakeVisible(muteButton);
+
+    refreshInserts();
 }
 
 void MixerComponent::OutputStrip::resized() {
@@ -69,6 +86,16 @@ void MixerComponent::OutputStrip::resized() {
     area.removeFromTop(4);
     deviceControl.setBounds(area.removeFromTop(46));
     area.removeFromTop(4);
+
+    vstHeader.setBounds(area.removeFromTop(14));
+    const int slotH = 22;
+    for (int i = 0; i < (int)slots.size(); ++i) {
+        slots[i]->setBounds(area.removeFromTop(slotH));
+        area.removeFromTop(2);
+    }
+    addVstButton.setBounds(area.removeFromTop(20));
+    area.removeFromTop(6);
+
     auto mb = area.removeFromBottom(22);
     muteButton.setBounds(mb);
     area.removeFromBottom(4);
@@ -84,6 +111,51 @@ void MixerComponent::OutputStrip::refresh() {
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
+}
+
+void MixerComponent::OutputStrip::refreshInserts() {
+    for (int i = 0; i < (int)slots.size(); ++i) {
+        AudioEngine::InsertSlot* ins = nullptr;
+        if (i < (int)output.inserts.size()) ins = output.inserts[i].get();
+        slots[i]->setInsert(ins);
+    }
+    repaint();
+}
+
+juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
+    const auto error = audioEngine.addOutputPlugin(output.id, file);
+    refreshAfterInsertChange();
+    return error;
+}
+
+void MixerComponent::OutputStrip::erasePlugin(std::uint32_t insertId) {
+    audioEngine.removeOutputPlugin(output.id, insertId);
+}
+
+void MixerComponent::OutputStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
+    audioEngine.setOutputPluginBypassed(output.id, insertId, bypassed);
+}
+
+void MixerComponent::OutputStrip::refreshAfterInsertChange() {
+    refreshInserts();
+}
+
+void MixerComponent::OutputStrip::openPicker() {
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        "*.vst3");
+    juce::Component::SafePointer<OutputStrip> safeThis(this);
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
+                                 | juce::FileBrowserComponent::canSelectFiles,
+                             [safeThis](const juce::FileChooser& chooser) {
+                                 const auto file = chooser.getResult();
+                                 if (safeThis == nullptr || file == juce::File()) return;
+                                 const auto error = safeThis->insertPlugin(file);
+                                 if (error.isNotEmpty()) {
+                                     juce::AlertWindow::showMessageBoxAsync(
+                                         juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
+                                 }
+                             });
 }
 
 MixerComponent::MixerComponent(AudioEngine& engine)
@@ -131,7 +203,7 @@ void MixerComponent::resized() {
     addOutputButton.setBounds(toolbar.removeFromLeft(60));
     area.removeFromTop(4);
 
-    const int masterW = juce::jlimit(0, area.getWidth(), 3 * (76 + 4) + 24);
+    const int masterW = juce::jlimit(0, area.getWidth(), 3 * (120 + 4) + 24);
     masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
     area.removeFromRight(6);
     channelViewport.setBounds(area);
@@ -152,7 +224,7 @@ void MixerComponent::resized() {
     auto ma = masterPanel.getLocalBounds();
     masterHeader.setBounds(ma.removeFromTop(24));
     masterViewport.setBounds(ma);
-    const int outW = 76;
+    const int outW = 120;
     const int outGap = 4;
     const int contentW2 = (int)outputStrips.size() * (outW + outGap) + 8;
     int masterH = masterViewport.getHeight();

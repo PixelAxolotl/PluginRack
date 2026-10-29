@@ -37,6 +37,7 @@ struct Output {
     std::string name;
     OutputKind kind = OutputKind::Physical;
     std::string deviceId;
+    std::vector<InsertSlot> inserts;
 
     bool operator==(const Output&) const = default;
 };
@@ -50,7 +51,7 @@ struct Route {
 };
 
 struct Scene {
-    int schemaVersion = 1;
+    int schemaVersion = 2;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;

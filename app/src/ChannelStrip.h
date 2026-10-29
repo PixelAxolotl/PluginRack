@@ -7,11 +7,12 @@
 #include "AudioEngine.h"
 #include "DeviceControl.h"
 #include "DeviceMenu.h"
+#include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
 #include "Theme.h"
 
-class ChannelStrip final : public juce::Component {
+class ChannelStrip final : public juce::Component, public IInsertHost {
 public:
     ChannelStrip(AudioEngine::Channel& channel, AudioEngine& engine);
 
@@ -21,33 +22,17 @@ public:
     void refreshRouting();
     void rebuildRoutingButtons();
 
+    // IInsertHost
+    juce::String insertPlugin(const juce::File&) override;
+    void erasePlugin(std::uint32_t insertId) override;
+    void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
+    void refreshAfterInsertChange() override;
+    void openPicker() override;
+
 public:
     std::function<void()> onRemoveRequested;
 
 private:
-    class InsertSlotComponent final : public juce::Component, public juce::SettableTooltipClient {
-    public:
-        InsertSlotComponent(ChannelStrip& owner, int slotIndex);
-
-        void setInsert(AudioEngine::InsertSlot* insert);
-        void resized() override;
-        void paint(juce::Graphics& g) override;
-        void mouseDown(const juce::MouseEvent&) override;
-        void mouseEnter(const juce::MouseEvent&) override;
-        void mouseExit(const juce::MouseEvent&) override;
-
-    private:
-        ChannelStrip& owner;
-        int slotIndex = 0;
-        AudioEngine::InsertSlot* insert = nullptr;
-        bool hovered = false;
-        juce::Label indexLabel;
-        juce::Label nameLabel;
-        MiniButton bypassButton{"B"};
-        MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
-    };
-
-    void choosePlugin();
     void layoutSlots();
 
     AudioEngine::Channel& channel;

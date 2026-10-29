@@ -82,7 +82,7 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 2;
+    scene.schemaVersion = 3;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);

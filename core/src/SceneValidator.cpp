@@ -25,10 +25,10 @@ bool isSupportedSampleRate(double sampleRate) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion != 1) {
+    if (scene.schemaVersion != 1 && scene.schemaVersion != 2) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
-                              "; expected 1"});
+                              "; expected 1 or 2"});
     }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
@@ -78,6 +78,13 @@ std::vector<SceneError> validate(const Scene& scene) {
         if (!outputIds.insert(output.id).second) {
             errors.push_back({SceneErrorCode::DuplicateOutputId, output.id,
                               "duplicate output id " + std::to_string(output.id)});
+        }
+        for (const InsertSlot& slot : output.inserts) {
+            if (slot.id == 0) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, output.id,
+                                  "output " + std::to_string(output.id) +
+                                      " insert slot id must not be zero"});
+            }
         }
     }
 
