@@ -7,6 +7,8 @@
 #include "AudioEngine.h"
 #include "MixerComponent.h"
 #include "RackView.h"
+#include "RoutingMatrixComponent.h"
+#include "SettingsView.h"
 #include "Theme.h"
 
 enum class AppView { Rack = 0, Mixer, Routing, Settings };
@@ -68,6 +70,8 @@ public:
     void refreshViews();
     void resized() override;
 
+    std::function<void(AppView)> onViewChanged;
+
 private:
     class PlaceholderView final : public juce::Component {
     public:
@@ -86,8 +90,8 @@ private:
     AudioEngine& audioEngine;
     juce::Component& mixerView;
     RackView rackView;
-    PlaceholderView routingView;
-    PlaceholderView settingsView;
+    RoutingMatrixComponent routingView;
+    SettingsView settingsView;
     AppView currentView = AppView::Rack;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewRouter)

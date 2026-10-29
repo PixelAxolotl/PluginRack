@@ -161,8 +161,12 @@ ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
-    , routingView("Routing", "The full channel/output matrix arrives in Task 5. Per-channel routing stays in the mixer strips.")
-    , settingsView("Settings", "Device, buffer and diagnostics arrive in Task 5. Audio details stay in the toolbar menu.") {
+    , routingView(audioEngine)
+    , settingsView(audioEngine) {
+    rackView.onJumpToMixer = [this] {
+        setView(AppView::Mixer);
+        if (onViewChanged) onViewChanged(AppView::Mixer);
+    };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
@@ -181,6 +185,8 @@ void ViewRouter::setView(AppView view) {
 
 void ViewRouter::refreshViews() {
     rackView.rebuild();
+    routingView.rebuild();
+    settingsView.refresh();
 }
 
 void ViewRouter::resized() {
@@ -197,6 +203,7 @@ MainComponent::MainComponent()
 
     toolbar.setView(AppView::Rack);
     toolbar.onViewSelected = [this](AppView view) { router.setView(view); };
+    router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
     toolbar.onSave = [this] { saveScene(); };
     toolbar.onLoad = [this] { loadScene(true); };
     toolbar.onMenu = [this] { showMenu(); };

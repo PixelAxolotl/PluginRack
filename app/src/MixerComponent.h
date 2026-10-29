@@ -37,6 +37,7 @@ private:
         void openPicker() override;
 
         std::function<void()> onRemoveRequested;
+        std::function<void()> onRenamed;
 
     private:
         void refreshInserts();

@@ -136,6 +136,7 @@ public:
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);
     void setOutputMuted(std::uint32_t outputId, bool muted);
+    void setOutputName(std::uint32_t outputId, const juce::String& name);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

@@ -35,6 +35,22 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
             });
         });
     });
+    deviceControl.setOnRename([this] {
+        auto* w = new juce::AlertWindow("Rename output", "Enter new name:", juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor("name", output.name);
+        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
+        w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w](int result) {
+            if (result == 1 && safe != nullptr) {
+                const auto newName = w->getTextEditorContents("name");
+                safe->audioEngine.setOutputName(safe->output.id, newName);
+                safe->deviceControl.setTitle(newName);
+                if (safe->onRenamed) safe->onRenamed();
+            }
+            delete w;
+        }), true);
+    });
     addAndMakeVisible(deviceControl);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
@@ -271,6 +287,10 @@ void MixerComponent::rebuild() {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                 return;
             }
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
+        s->onRenamed = [this] {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };

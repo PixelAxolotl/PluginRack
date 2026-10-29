@@ -38,7 +38,9 @@ target_sources(pluginrack_app PRIVATE
     src/RoutingMatrixComponent.cpp
     src/RoutingMatrixComponent.h
     src/SceneBridge.cpp
-    src/SceneBridge.h)
+    src/SceneBridge.h
+    src/SettingsView.cpp
+    src/SettingsView.h)
 
 target_compile_features(pluginrack_app PRIVATE cxx_std_20)
 target_compile_definitions(pluginrack_app PRIVATE

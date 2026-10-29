@@ -473,6 +473,13 @@ void AudioEngine::setOutputMuted(std::uint32_t outputId, bool muted) {
     }
 }
 
+void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name) {
+    const juce::ScopedLock lock(stateLock);
+    for (auto& output : outputs) {
+        if (output->id == outputId) { output->name = name; return; }
+    }
+}
+
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {

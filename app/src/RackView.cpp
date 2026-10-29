@@ -301,6 +301,7 @@ void RackView::rebuild() {
         row->onSelected = [this](ChainRow* selected) { selectRow(selected); };
         row->onMoveSelection = [this](int delta) { selectRelative(delta); };
         row->onJumpToMixer = [this] { jumpToMixer(); };
+        row->onChanged = [this] { rebuild(); };
         if (hasSelection && !selectedIsOutput && selectedId == ch->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }
@@ -309,6 +310,7 @@ void RackView::rebuild() {
         row->onSelected = [this](ChainRow* selected) { selectRow(selected); };
         row->onMoveSelection = [this](int delta) { selectRelative(delta); };
         row->onJumpToMixer = [this] { jumpToMixer(); };
+        row->onChanged = [this] { rebuild(); };
         if (hasSelection && selectedIsOutput && selectedId == out->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }

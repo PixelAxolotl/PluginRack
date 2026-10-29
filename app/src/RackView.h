@@ -59,6 +59,7 @@ private:
         std::function<void(ChainRow*)> onSelected;
         std::function<void(int)> onMoveSelection;
         std::function<void()> onJumpToMixer;
+        std::function<void()> onChanged;
 
     private:
         void initHeader();
