@@ -14,6 +14,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     deviceControl.setTitle(channel.name);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
+    refreshInput();
 
     channelLabel.setText("CH " + juce::String(channel.id), juce::dontSendNotification);
     channelLabel.setJustificationType(juce::Justification::centredLeft);
