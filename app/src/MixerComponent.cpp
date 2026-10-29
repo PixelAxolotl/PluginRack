@@ -1,7 +1,8 @@
 #include "MixerComponent.h"
 
-MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, AudioEngine& engine)
-    : output(outputState), audioEngine(engine), meter(outputState.peak) {
+MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
+                                                 AudioEngine& engine)
+    : output(outputState), outputIndex(outputIdx), audioEngine(engine), meter(outputState.peak) {
     deviceControl.setTitle(output.name);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
@@ -121,7 +122,64 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, Audio
     };
     addAndMakeVisible(muteButton);
 
+    eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    eqButton.setTooltip("Open the output EQ editor");
+    eqButton.onClick = [this] {
+        if (eqWindow == nullptr) {
+            openEqWindow();
+        } else {
+            closeEqWindow();
+        }
+    };
+    addAndMakeVisible(eqButton);
+    refreshEqButton();
+
     refreshInserts();
+}
+
+MixerComponent::OutputStrip::~OutputStrip() {
+    closeEqWindow();
+}
+
+void MixerComponent::OutputStrip::openEqWindow() {
+    if (eqWindow != nullptr) {
+        eqWindow->toFront(true);
+        return;
+    }
+    auto* window = new EQWindow("EQ - " + output.name);
+    eqWindow = window;
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    window->onCloseRequest = [safe] {
+        if (safe == nullptr) return;
+        safe->closeEqWindow();
+    };
+    refreshEqButton();
+}
+
+void MixerComponent::OutputStrip::closeEqWindow() {
+    if (eqWindow == nullptr) return;
+    auto* doomed = eqWindow;
+    eqWindow = nullptr;
+    delete doomed;
+    refreshEqButton();
+}
+
+void MixerComponent::OutputStrip::refreshEqButton() {
+    bool active = false;
+    if (!output.eqBypassed.get()) {
+        for (const auto& band : output.eqBands) {
+            if (band.enabled) {
+                active = true;
+                break;
+            }
+        }
+    }
+    const bool open = (eqWindow != nullptr);
+    eqButton.setColour(juce::TextButton::buttonColourId,
+                       open ? theme::cyan() : (active ? theme::amber() : theme::control()));
+    eqButton.setColour(juce::TextButton::textColourOffId,
+                       (open || active) ? theme::bg() : theme::text());
 }
 
 void MixerComponent::OutputStrip::resized() {
@@ -149,6 +207,9 @@ void MixerComponent::OutputStrip::resized() {
     area.removeFromTop(6);
 
     auto mb = area.removeFromBottom(22);
+    const int half = (mb.getWidth() - 4) / 2;
+    eqButton.setBounds(mb.removeFromLeft(half));
+    mb.removeFromLeft(4);
     muteButton.setBounds(mb);
     area.removeFromBottom(4);
     // meter right
@@ -165,6 +226,7 @@ void MixerComponent::OutputStrip::refresh() {
     deviceControl.setError(output.outputError);
     modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
     flipButton.setToggleState(output.flipped.get(), juce::dontSendNotification);
+    refreshEqButton();
 }
 
 void MixerComponent::OutputStrip::refreshInserts() {
@@ -318,8 +380,9 @@ void MixerComponent::rebuild() {
     }
 
     outputStrips.clear();
+    int outputIndex = 0;
     for (const auto& out : audioEngine.getOutputs()) {
-        auto* s = outputStrips.add(new OutputStrip(*out, audioEngine));
+        auto* s = outputStrips.add(new OutputStrip(*out, outputIndex++, audioEngine));
         const std::uint32_t id = out->id;
         s->onRemoveRequested = [this, id] {
             const auto err = audioEngine.removeOutput(id);

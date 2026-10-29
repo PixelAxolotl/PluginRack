@@ -24,6 +24,10 @@ target_sources(pluginrack_app PRIVATE
     src/DeviceMenu.h
     src/DeviceStream.cpp
     src/DeviceStream.h
+    src/EQCurveComponent.cpp
+    src/EQCurveComponent.h
+    src/EQWindow.cpp
+    src/EQWindow.h
     src/LevelMeter.cpp
     src/LevelMeter.h
     src/Main.cpp

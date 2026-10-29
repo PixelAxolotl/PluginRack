@@ -7,6 +7,7 @@
 #include "AudioEngine.h"
 #include "DeviceControl.h"
 #include "DeviceMenu.h"
+#include "EQWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
@@ -15,6 +16,7 @@
 class ChannelStrip final : public juce::Component, public IInsertHost {
 public:
     ChannelStrip(AudioEngine::Channel& channel, AudioEngine& engine);
+    ~ChannelStrip() override;
 
     void resized() override;
     void paint(juce::Graphics& g) override;
@@ -22,6 +24,9 @@ public:
     void refreshRouting();
     void rebuildRoutingButtons();
     void refreshInput();
+    void openEqWindow();
+    void closeEqWindow();
+    void refreshEqButton();
 
     // IInsertHost
     juce::String insertPlugin(const juce::File&) override;
@@ -69,6 +74,8 @@ private:
 
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
+    juce::TextButton eqButton{"EQ"};
+    EQWindow* eqWindow = nullptr;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
 

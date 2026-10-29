@@ -193,9 +193,66 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
         audioEngine.setChannelSoloed(channel.id, soloButton.getToggleState());
     };
 
+    eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    eqButton.setTooltip("Open the channel EQ editor");
+    eqButton.onClick = [this] {
+        if (eqWindow == nullptr) {
+            openEqWindow();
+        } else {
+            closeEqWindow();
+        }
+    };
+    addAndMakeVisible(eqButton);
+    refreshEqButton();
+
     refreshInserts();
     refreshRouting();
     refreshInput();
+}
+
+ChannelStrip::~ChannelStrip() {
+    closeEqWindow();
+}
+
+void ChannelStrip::openEqWindow() {
+    if (eqWindow != nullptr) {
+        eqWindow->toFront(true);
+        return;
+    }
+    auto* window = new EQWindow("EQ - " + channel.name);
+    eqWindow = window;
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    window->onCloseRequest = [safe] {
+        if (safe == nullptr) return;
+        safe->closeEqWindow();
+    };
+    refreshEqButton();
+}
+
+void ChannelStrip::closeEqWindow() {
+    if (eqWindow == nullptr) return;
+    auto* doomed = eqWindow;
+    eqWindow = nullptr;
+    delete doomed;
+    refreshEqButton();
+}
+
+void ChannelStrip::refreshEqButton() {
+    bool active = false;
+    if (!channel.eqBypassed.get()) {
+        for (const auto& band : channel.eqBands) {
+            if (band.enabled) {
+                active = true;
+                break;
+            }
+        }
+    }
+    const bool open = (eqWindow != nullptr);
+    eqButton.setColour(juce::TextButton::buttonColourId,
+                       open ? theme::cyan() : (active ? theme::amber() : theme::control()));
+    eqButton.setColour(juce::TextButton::textColourOffId,
+                       (open || active) ? theme::bg() : theme::text());
 }
 
 void ChannelStrip::resized() {
@@ -262,7 +319,8 @@ void ChannelStrip::resized() {
     area.removeFromTop(4);
 
     // fader + meter
-    auto bottom = area.removeFromBottom(30); // mute/solo
+    auto bottom = area.removeFromBottom(30); // eq/mute/solo thirds
+    const int third = (bottom.getWidth() - 8) / 3;
     auto fm = area; // remaining for fader+meter
     if (fm.getHeight() < 140) {
         // keep minimum; area already consumed? leave as is
@@ -272,9 +330,11 @@ void ChannelStrip::resized() {
     fm.removeFromRight(4);
     faderSlider.setBounds(fm);
 
-    muteButton.setBounds(bottom.removeFromLeft(bottom.getWidth() / 2));
+    muteButton.setBounds(bottom.removeFromLeft(third));
     bottom.removeFromLeft(4);
-    soloButton.setBounds(bottom);
+    soloButton.setBounds(bottom.removeFromLeft(third));
+    bottom.removeFromLeft(4);
+    eqButton.setBounds(bottom);
 }
 
 void ChannelStrip::refreshInserts() {
