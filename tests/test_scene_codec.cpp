@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 2;
+    original.schemaVersion = 3;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -81,7 +81,7 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 3})");
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 4})");
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
@@ -131,7 +131,10 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
-    REQUIRE(*loaded.scene == original);
+    // v2 auto-migrates: saving a v2 scene always writes a v3 file.
+    pluginrack::Scene expected = original;
+    expected.schemaVersion = 3;
+    REQUIRE(*loaded.scene == expected);
     REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
     REQUIRE(loaded.scene->outputs.front().inserts[1].bypassed == false);
@@ -173,7 +176,7 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
 
 TEST_CASE("inputChannels round-trips with the channel layout") {
     pluginrack::Scene original;
-    original.schemaVersion = 2;
+    original.schemaVersion = 3;
     original.name = "mapping";
 
     pluginrack::Channel mono;
@@ -222,4 +225,85 @@ TEST_CASE("scenes without inputChannels load with layout defaults") {
     REQUIRE(loaded.scene->channels[0].inputChannels == std::vector<int>{0});
     REQUIRE(loaded.scene->channels[1].inputChannels == std::vector<int>{0, 1});
     REQUIRE(loaded.scene->channels[2].inputChannels == std::vector<int>{0});
+}
+
+TEST_CASE("v2 scene loads flat EQ and saves as v3") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 2,)"
+                             R"("name": "legacy-eq",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1, "name": "mic"}],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": [])"
+                             R"(})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->schemaVersion == 2);
+
+    const pluginrack::Channel& channel = loaded.scene->channels.front();
+    REQUIRE(channel.eqEnabled == false);
+    REQUIRE(channel.eqBands.size() == 6);
+    for (const pluginrack::EqBand& band : channel.eqBands) {
+        REQUIRE(band.gainDb == 0.0f);
+    }
+
+    const pluginrack::Output& output = loaded.scene->outputs.front();
+    REQUIRE(output.eqEnabled == false);
+    REQUIRE(output.eqBands.size() == 6);
+    for (const pluginrack::EqBand& band : output.eqBands) {
+        REQUIRE(band.gainDb == 0.0f);
+    }
+
+    // The loaded scene saves as v3, completing the auto-migration.
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":3") != std::string::npos);
+}
+
+TEST_CASE("scene v3 round-trip preserves eq bands") {
+    pluginrack::Scene original;
+    original.schemaVersion = 3;
+    original.name = "eq";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.name = "mic";
+    channel.eqEnabled = true;
+    channel.eqBands = pluginrack::defaultSixBands();
+    channel.eqBands[0].enabled = false;
+    channel.eqBands[3].freqHz = 1250.5f;
+    channel.eqBands[3].gainDb = 6.0f;
+    channel.eqBands[3].q = 1.2f;
+    channel.eqBands[3].solo = true;
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    output.eqEnabled = true;
+    output.eqBands = pluginrack::defaultSixBands();
+    output.eqBands[1].freqHz = 150.25f;
+    output.eqBands[5].gainDb = -3.0f;
+    original.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"schemaVersion\":3") != std::string::npos);
+    REQUIRE(json.find("eqBands") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->channels.front().eqBands[3].gainDb == 6.0f);
+    REQUIRE(loaded.scene->channels.front().eqBands[3].solo == true);
+    REQUIRE(loaded.scene->channels.front().eqBands[0].enabled == false);
+    REQUIRE(loaded.scene->outputs.front().eqEnabled == true);
+    REQUIRE(loaded.scene->outputs.front().eqBands[5].gainDb == -3.0f);
 }

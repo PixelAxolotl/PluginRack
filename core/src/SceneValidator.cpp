@@ -15,10 +15,45 @@ constexpr float kMinGainDb = -60.0f;
 constexpr float kMaxGainDb = 12.0f;
 constexpr float kMinPan = -1.0f;
 constexpr float kMaxPan = 1.0f;
+constexpr float kMinEqFreqHz = 10.0f;
+constexpr float kMaxEqFreqHz = 22050.0f;
+constexpr float kMinEqGainDb = -15.0f;
+constexpr float kMaxEqGainDb = 15.0f;
+constexpr float kMinEqQ = 0.1f;
+constexpr float kMaxEqQ = 20.0f;
+constexpr std::size_t kMaxEqBands = 6;
 
 bool isSupportedSampleRate(double sampleRate) {
     return sampleRate == 44100.0 || sampleRate == 48000.0 || sampleRate == 88200.0 ||
            sampleRate == 96000.0;
+}
+
+void validateEqBands(const char* kind, std::uint32_t id, const std::vector<EqBand>& bands,
+                     std::vector<SceneError>& errors) {
+    if (bands.size() > kMaxEqBands) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                          std::string(kind) + " " + std::to_string(id) + " eqBands has " +
+                              std::to_string(bands.size()) + " bands, expected at most 6"});
+    }
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+        const EqBand& band = bands[i];
+        const std::string where =
+            std::string(kind) + " " + std::to_string(id) + " eqBands[" + std::to_string(i) + "]";
+        if (!std::isfinite(band.freqHz) || band.freqHz < kMinEqFreqHz ||
+            band.freqHz > kMaxEqFreqHz) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, id, where + " freqHz out of range [10, 22050]"});
+        }
+        if (!std::isfinite(band.gainDb) || band.gainDb < kMinEqGainDb ||
+            band.gainDb > kMaxEqGainDb) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, id, where + " gainDb out of range [-15, 15]"});
+        }
+        if (!std::isfinite(band.q) || band.q < kMinEqQ || band.q > kMaxEqQ) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              where + " q out of range [0.1, 20]"});
+        }
+    }
 }
 
 std::string describeMapping(const std::vector<int>& mapping) {
@@ -38,10 +73,10 @@ std::string describeMapping(const std::vector<int>& mapping) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion != 1 && scene.schemaVersion != 2) {
+    if (scene.schemaVersion < 1 || scene.schemaVersion > 3) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
-                              "; expected 1 or 2"});
+                              "; expected 1, 2 or 3"});
     }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
@@ -94,6 +129,7 @@ std::vector<SceneError> validate(const Scene& scene) {
                                   describeMapping(channel.inputChannels) +
                                   " must contain exactly two distinct non-negative indexes"});
         }
+        validateEqBands("channel", channel.id, channel.eqBands, errors);
     }
 
     std::unordered_set<std::uint32_t> outputIds;
@@ -114,6 +150,7 @@ std::vector<SceneError> validate(const Scene& scene) {
                                       " insert slot id must not be zero"});
             }
         }
+        validateEqBands("output", output.id, output.eqBands, errors);
     }
 
     std::unordered_set<std::uint64_t> routePairs;

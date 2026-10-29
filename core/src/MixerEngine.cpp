@@ -31,6 +31,21 @@ int clampFrames(int frames, int maxFrames) noexcept {
     return frames;
 }
 
+// NaN hygiene at the EQ tap: non-finite samples would pass straight through
+// a biquad (the filter guards only its own state), so flush them to silence
+// before the strip's EQ runs. Strips with EQ bypassed keep the historical
+// pass-through behaviour untouched.
+void flushNonFinite(float* left, float* right, int frames) noexcept {
+    for (int i = 0; i < frames; ++i) {
+        if (!std::isfinite(left[i])) {
+            left[i] = 0.0f;
+        }
+        if (!std::isfinite(right[i])) {
+            right[i] = 0.0f;
+        }
+    }
+}
+
 } // namespace
 
 void MixerEngine::setPluginFactory(IPluginFactory* factory) noexcept {
@@ -113,6 +128,30 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 output.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
         }
     }
+
+    channelEqs_.clear();
+    channelEqs_.reserve(scene.channels.size());
+    channelEqEnabled_.clear();
+    channelEqEnabled_.reserve(scene.channels.size());
+    for (const Channel& channel : scene.channels) {
+        EqEngine eq;
+        eq.prepare(scene.sampleRate, maxFrames);
+        eq.setBands(channel.eqBands);
+        channelEqs_.push_back(std::move(eq));
+        channelEqEnabled_.push_back(channel.eqEnabled ? 1 : 0);
+    }
+    outputEqs_.clear();
+    outputEqs_.reserve(scene.outputs.size());
+    outputEqEnabled_.clear();
+    outputEqEnabled_.reserve(scene.outputs.size());
+    for (const Output& output : scene.outputs) {
+        EqEngine eq;
+        eq.prepare(scene.sampleRate, maxFrames);
+        eq.setBands(output.eqBands);
+        outputEqs_.push_back(std::move(eq));
+        outputEqEnabled_.push_back(output.eqEnabled ? 1 : 0);
+    }
+
     stoppedChannels_.assign(channels_.size(), 0);
     disabledOutputs_.assign(outputCount_, 0);
 
@@ -152,6 +191,20 @@ bool MixerEngine::prepare(const Scene& scene, const SceneAvailability& availabil
         }
     }
     return true;
+}
+
+void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {
+    if (ch < 0 || static_cast<std::size_t>(ch) >= channelEqs_.size()) {
+        return;
+    }
+    channelEqs_[static_cast<std::size_t>(ch)].setBands(bands);
+}
+
+void MixerEngine::setOutputEq(int out, const std::vector<EqBand>& bands) {
+    if (out < 0 || static_cast<std::size_t>(out) >= outputEqs_.size()) {
+        return;
+    }
+    outputEqs_[static_cast<std::size_t>(out)].setBands(bands);
 }
 
 void MixerEngine::render(std::span<const AudioBlock> channelInputs,
@@ -222,6 +275,14 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchRight[i] = 0.0f;
             }
         }
+        // Channel EQ is pre-fader and runs before inserts and gain/pan.
+        // Bypassed strips skip process() entirely, keeping their state and
+        // the output bit-identical to the pre-EQ engine.
+        if (c < channelEqEnabled_.size() && channelEqEnabled_[c] != 0 &&
+            c < channelEqs_.size()) {
+            flushNonFinite(scratchLeft, scratchRight, frames);
+            channelEqs_[c].process(scratchLeft, scratchRight, frames);
+        }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
             AudioBlock scratchBlock{scratchPtrs, 2, frames};
@@ -278,6 +339,21 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             accLeft[i] += scratchLeft[i] * route.sendGain;
             accRight[i] += scratchRight[i] * route.sendGain;
         }
+    }
+
+    // Output EQ is pre-master-write and runs before the output insert
+    // chains, mirroring the channel tap. Bypassed outputs are untouched.
+    for (std::size_t o = 0; o < numOutputs; ++o) {
+        if (o >= outputEqEnabled_.size() || outputEqEnabled_[o] == 0 ||
+            o >= outputEqs_.size()) {
+            continue;
+        }
+        const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
+        float* accLeft =
+            accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
+        float* accRight = accLeft + maxFrames;
+        flushNonFinite(accLeft, accRight, frames);
+        outputEqs_[o].process(accLeft, accRight, frames);
     }
 
     for (std::size_t o = 0; o < numOutputs; ++o) {

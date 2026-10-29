@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "pluginrack/AudioBlock.h"
+#include "pluginrack/EqEngine.h"
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
@@ -31,6 +32,13 @@ public:
     int outputCount() const noexcept;
     std::vector<std::uint32_t> failedPluginSlots() const;
     const MeterBank& meters() const noexcept;
+    // Swaps EQ bands for the channel/output at the scene-order index;
+    // out-of-range indexes are ignored. Message thread only: coefficients
+    // are rebuilt inside EqEngine::setBands(). The scene's eqEnabled flag
+    // captured by prepare() gates processing, so setting bands never
+    // enables a bypassed strip.
+    void setChannelEq(int ch, const std::vector<EqBand>& bands);
+    void setOutputEq(int out, const std::vector<EqBand>& bands);
 
 private:
     struct ChannelCache {
@@ -53,6 +61,10 @@ private:
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
     std::vector<std::unique_ptr<InsertChain>> outputInsertChains_;
+    std::vector<EqEngine> channelEqs_;
+    std::vector<EqEngine> outputEqs_;
+    std::vector<char> channelEqEnabled_;
+    std::vector<char> outputEqEnabled_;
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;

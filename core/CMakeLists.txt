@@ -1,7 +1,7 @@
 include(FetchContent)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
 FetchContent_MakeAvailable(nlohmann_json)
-add_library(pluginrack_core STATIC src/Version.cpp src/SceneCodec.cpp src/SceneValidator.cpp src/MixerEngine.cpp src/InsertChain.cpp src/SceneAvailability.cpp src/Meters.cpp src/WavWriter.cpp src/OfflineRenderer.cpp)
+add_library(pluginrack_core STATIC src/Version.cpp src/SceneCodec.cpp src/SceneValidator.cpp src/MixerEngine.cpp src/InsertChain.cpp src/SceneAvailability.cpp src/Meters.cpp src/WavWriter.cpp src/OfflineRenderer.cpp src/EqEngine.cpp)
 add_library(pluginrack::core ALIAS pluginrack_core)
 target_include_directories(pluginrack_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(pluginrack_core PUBLIC nlohmann_json::nlohmann_json)

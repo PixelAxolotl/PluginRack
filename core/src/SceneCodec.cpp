@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -63,6 +63,51 @@ void from_json(const nlohmann::json& j, ChannelLayout& layout) {
     }
 }
 
+void to_json(nlohmann::json& j, EqType type) {
+    switch (type) {
+        case EqType::HighPass: j = "HighPass"; break;
+        case EqType::LowShelf: j = "LowShelf"; break;
+        case EqType::Peak: j = "Peak"; break;
+        case EqType::HighShelf: j = "HighShelf"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, EqType& type) {
+    const std::string name = j.get<std::string>();
+    if (name == "HighPass") {
+        type = EqType::HighPass;
+    } else if (name == "LowShelf") {
+        type = EqType::LowShelf;
+    } else if (name == "Peak") {
+        type = EqType::Peak;
+    } else if (name == "HighShelf") {
+        type = EqType::HighShelf;
+    } else {
+        throw nlohmann::json::other_error::create(502, "unknown EqType '" + name + "'", &j);
+    }
+}
+
+void to_json(nlohmann::json& j, const EqBand& band) {
+    j = nlohmann::json{
+        {"type", band.type},
+        {"freqHz", band.freqHz},
+        {"gainDb", band.gainDb},
+        {"q", band.q},
+        {"enabled", band.enabled},
+        {"solo", band.solo},
+    };
+}
+
+void from_json(const nlohmann::json& j, EqBand& band) {
+    band = EqBand{};
+    j.at("type").get_to(band.type);
+    band.freqHz = j.value("freqHz", 1000.0f);
+    band.gainDb = j.value("gainDb", 0.0f);
+    band.q = j.value("q", 0.707f);
+    band.enabled = j.value("enabled", true);
+    band.solo = j.value("solo", false);
+}
+
 void to_json(nlohmann::json& j, const InsertSlot& slot) {
     j = nlohmann::json{
         {"id", slot.id},
@@ -93,6 +138,8 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"muted", channel.muted},
         {"soloed", channel.soloed},
         {"inserts", channel.inserts},
+        {"eqEnabled", channel.eqEnabled},
+        {"eqBands", channel.eqBands},
     };
 }
 
@@ -123,6 +170,12 @@ void from_json(const nlohmann::json& j, Channel& channel) {
     if (j.contains("inserts")) {
         j.at("inserts").get_to(channel.inserts);
     }
+    // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
+    // the flat defaultSixBands() from Channel{} above.
+    channel.eqEnabled = j.value("eqEnabled", false);
+    if (j.contains("eqBands")) {
+        j.at("eqBands").get_to(channel.eqBands);
+    }
 }
 
 void to_json(nlohmann::json& j, const Output& output) {
@@ -134,6 +187,8 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"layout", output.layout},
         {"flipped", output.flipped},
         {"inserts", output.inserts},
+        {"eqEnabled", output.eqEnabled},
+        {"eqBands", output.eqBands},
     };
 }
 
@@ -151,6 +206,12 @@ void from_json(const nlohmann::json& j, Output& output) {
     output.flipped = j.value("flipped", false);
     if (j.contains("inserts")) {
         j.at("inserts").get_to(output.inserts);
+    }
+    // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
+    // the flat defaultSixBands() from Output{} above.
+    output.eqEnabled = j.value("eqEnabled", false);
+    if (j.contains("eqBands")) {
+        j.at("eqBands").get_to(output.eqBands);
     }
 }
 
@@ -187,9 +248,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion != 1 && schemaVersion != 2) {
+        if (schemaVersion < 1 || schemaVersion > 3) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 or 2");
+                                    ", expected 1, 2 or 3");
             return result;
         }
         Scene scene;
