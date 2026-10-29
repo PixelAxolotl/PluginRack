@@ -424,6 +424,12 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
 
 void ChannelStrip::refreshAfterInsertChange() {
     refreshInserts();
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        auto callback = safe->rebuildCallback;
+        if (callback) callback();
+    });
 }
 
 void ChannelStrip::rebuildRoutingButtons() {

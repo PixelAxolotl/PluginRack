@@ -167,6 +167,9 @@ ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
         setView(AppView::Mixer);
         if (onViewChanged) onViewChanged(AppView::Mixer);
     };
+    rackView.onStructureChanged = [this] {
+        if (onStructureChanged) onStructureChanged();
+    };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
@@ -204,6 +207,7 @@ MainComponent::MainComponent()
     toolbar.setView(AppView::Rack);
     toolbar.onViewSelected = [this](AppView view) { router.setView(view); };
     router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
+    router.onStructureChanged = [this] { refreshViews(); };
     toolbar.onSave = [this] { saveScene(); };
     toolbar.onLoad = [this] { loadScene(true); };
     toolbar.onMenu = [this] { showMenu(); };

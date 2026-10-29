@@ -73,6 +73,32 @@ void RackView::ChainRow::initHeader() {
     };
     addAndMakeVisible(mixerButton);
 
+    modeCombo.addItem("Mono", 1);
+    modeCombo.addItem("Stereo", 2);
+    modeCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
+    modeCombo.setColour(juce::ComboBox::textColourId, theme::text());
+    modeCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
+    modeCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
+    modeCombo.onChange = [this] {
+        if (output != nullptr) {
+            audioEngine.setOutputLayout(output->id,
+                modeCombo.getSelectedId() == 1 ? pluginrack::ChannelLayout::Mono
+                                              : pluginrack::ChannelLayout::Stereo);
+        }
+    };
+    addAndMakeVisible(modeCombo);
+    modeCombo.setVisible(output != nullptr);
+
+    flipButton.setClickingTogglesState(true);
+    flipButton.setColour(juce::TextButton::buttonColourId, theme::control());
+    flipButton.setColour(juce::TextButton::buttonOnColourId, theme::cyan());
+    flipButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    flipButton.onClick = [this] {
+        if (output != nullptr) audioEngine.setOutputFlipped(output->id, flipButton.getToggleState());
+    };
+    addAndMakeVisible(flipButton);
+    flipButton.setVisible(output != nullptr);
+
     emptyLabel.setJustificationType(juce::Justification::centred);
     emptyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     emptyLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -113,6 +139,8 @@ void RackView::ChainRow::refresh() {
             routingLabel.setColour(juce::Label::textColourId, theme::dim());
         }
         muteButton.setToggleState(output->muted.get(), juce::dontSendNotification);
+        modeCombo.setSelectedId(output->layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
+        flipButton.setToggleState(output->flipped.get(), juce::dontSendNotification);
     }
     refreshModules();
 }
@@ -176,6 +204,14 @@ void RackView::ChainRow::resized() {
     identityLabel.setBounds(header.removeFromTop(18));
     routingLabel.setBounds(header.removeFromTop(18));
     header.removeFromTop(4);
+
+    if (modeCombo.isVisible()) {
+        auto modeRow = header.removeFromTop(20);
+        modeCombo.setBounds(modeRow.removeFromLeft(modeRow.getWidth() / 2 - 2));
+        modeRow.removeFromLeft(4);
+        flipButton.setBounds(modeRow);
+        header.removeFromTop(2);
+    }
 
     auto buttonRow = header.removeFromBottom(24);
     if (soloButton.isVisible()) {
@@ -256,6 +292,12 @@ void RackView::ChainRow::setPluginBypass(std::uint32_t insertId, bool bypassed) 
 
 void RackView::ChainRow::refreshAfterInsertChange() {
     refreshModules();
+    juce::Component::SafePointer<RackView::ChainRow> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        auto callback = safe->onStructureChanged;
+        if (callback) callback();
+    });
 }
 
 void RackView::ChainRow::openPicker() {
@@ -302,6 +344,7 @@ void RackView::rebuild() {
         row->onMoveSelection = [this](int delta) { selectRelative(delta); };
         row->onJumpToMixer = [this] { jumpToMixer(); };
         row->onChanged = [this] { rebuild(); };
+        row->onStructureChanged = [this] { if (onStructureChanged) onStructureChanged(); };
         if (hasSelection && !selectedIsOutput && selectedId == ch->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }
@@ -311,6 +354,7 @@ void RackView::rebuild() {
         row->onMoveSelection = [this](int delta) { selectRelative(delta); };
         row->onJumpToMixer = [this] { jumpToMixer(); };
         row->onChanged = [this] { rebuild(); };
+        row->onStructureChanged = [this] { if (onStructureChanged) onStructureChanged(); };
         if (hasSelection && selectedIsOutput && selectedId == out->id) row->setSelected(true);
         listContent.addAndMakeVisible(*row);
     }

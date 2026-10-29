@@ -52,6 +52,8 @@ public:
         juce::Atomic<float> peak{0.0f};
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
+        pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
+        juce::Atomic<bool> flipped{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         juce::AudioBuffer<float> buffer;
         juce::String outputDeviceName;
@@ -142,6 +144,8 @@ public:
     void setOutputGain(std::uint32_t outputId, float gainDb);
     void setOutputMuted(std::uint32_t outputId, bool muted);
     void setOutputName(std::uint32_t outputId, const juce::String& name);
+    void setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout);
+    void setOutputFlipped(std::uint32_t outputId, bool flipped);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

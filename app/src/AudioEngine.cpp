@@ -131,6 +131,20 @@ void AudioEngine::render(int frames) {
         for (auto& insert : output->inserts) {
             insert->pluginHost.processBlock(block, insert->bypassed.get());
         }
+        if (output->flipped.get()) {
+            for (int i = 0; i < frames; ++i) {
+                const float l = output->buffer.getSample(0, i);
+                const float r = output->buffer.getSample(1, i);
+                output->buffer.setSample(0, i, r);
+                output->buffer.setSample(1, i, l);
+            }
+        }
+        if (output->layout == pluginrack::ChannelLayout::Mono) {
+            for (int i = 0; i < frames; ++i) {
+                const float v = output->buffer.getSample(0, i);
+                output->buffer.setSample(1, i, v);
+            }
+        }
     }
 
     for (auto& output : outputs) {
@@ -506,6 +520,19 @@ void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name
     }
 }
 
+void AudioEngine::setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout) {
+    const juce::ScopedLock lock(stateLock);
+    for (auto& output : outputs) {
+        if (output->id == outputId) { output->layout = layout; return; }
+    }
+}
+
+void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
+    for (auto& output : outputs) {
+        if (output->id == outputId) { output->flipped = flipped; return; }
+    }
+}
+
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
@@ -573,6 +600,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
         pluginrack::Output savedOutput;
         savedOutput.id = output->id;
         savedOutput.name = output->name.toStdString();
+        savedOutput.layout = output->layout;
+        savedOutput.flipped = output->flipped.get();
         for (const auto& insert : output->inserts) {
             savedOutput.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
                                            insert->pluginName.toStdString(), insert->bypassed.get()});
@@ -646,6 +675,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         auto output = std::make_unique<Output>();
         output->id = savedOutput.id;
         output->name = savedOutput.name;
+        output->layout = savedOutput.layout;
+        output->flipped = savedOutput.flipped;
         output->buffer.setSize(2, bufferSize);
         output->buffer.clear();
         for (const auto& savedInsert : savedOutput.inserts) {

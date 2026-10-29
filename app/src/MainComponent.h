@@ -71,6 +71,7 @@ public:
     void resized() override;
 
     std::function<void(AppView)> onViewChanged;
+    std::function<void()> onStructureChanged;
 
 private:
     class PlaceholderView final : public juce::Component {
