@@ -4,3 +4,4 @@ out/
 CMakeUserPresets.json
 .worktrees/
 /PluginRack.exe
+.superpowers/
