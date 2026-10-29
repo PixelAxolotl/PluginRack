@@ -65,11 +65,18 @@ public:
     };
 
     struct LatencyReport {
-        double inputMs = 0.0;
+        double inputDeviceMs = 0.0;
+        double outputDeviceMs = 0.0;
         double pluginMs = 0.0;
-        double outputMs = 0.0;
+        double fifoMs = 0.0;
         double totalMs = 0.0;
+        int inputBufferSize = 0;
+        int outputBufferSize = 0;
+        double sampleRate = 48000.0;
+        std::uint64_t underruns = 0;
+        std::uint64_t overruns = 0;
         bool valid = false;
+        bool approximate = true;
     };
 
     struct FifoDiagnostics {

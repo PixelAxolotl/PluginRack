@@ -934,21 +934,28 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         }
     }
 
-    int inputSamples = 0;
+    int inputDeviceSamples = 0;
+    int inputBufferSize = 0;
+    if (inputChannel != nullptr && inputChannel->input != nullptr) {
+        inputDeviceSamples = inputChannel->input->getLatencySamples();
+        inputBufferSize = currentBufferSize;
+    }
+
     int pluginSamples = 0;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
-        inputSamples = inputChannel->input->getLatencySamples();
         for (const auto& insert : inputChannel->inserts) {
             pluginSamples += insert->pluginHost.getLatencySamples();
         }
     }
 
-    int outputSamples = 0;
+    int outputDeviceSamples = 0;
+    int outputBufferSize = 0;
     bool valid = false;
     if (clockOutputId != 0) {
         for (const auto& output : outputs) {
             if (output->id == clockOutputId && output->output != nullptr) {
-                outputSamples = output->output->getLatencySamples();
+                outputDeviceSamples = output->output->getLatencySamples();
+                outputBufferSize = currentBufferSize;
                 for (const auto& insert : output->inserts) {
                     pluginSamples += insert->pluginHost.getLatencySamples();
                 }
@@ -958,13 +965,24 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         }
     }
 
-    const int totalSamples = inputSamples + pluginSamples + outputSamples;
     const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
-    report.inputMs = inputSamples / sampleRate * 1000.0;
+    const double fifoMs = 0.0;
+    report.inputDeviceMs = inputDeviceSamples / sampleRate * 1000.0 + inputBufferSize / sampleRate * 1000.0;
+    report.outputDeviceMs = outputDeviceSamples / sampleRate * 1000.0 + outputBufferSize / sampleRate * 1000.0;
     report.pluginMs = pluginSamples / sampleRate * 1000.0;
-    report.outputMs = outputSamples / sampleRate * 1000.0;
-    report.totalMs = totalSamples / sampleRate * 1000.0;
+    report.fifoMs = fifoMs;
+    report.totalMs = report.inputDeviceMs + report.pluginMs + report.outputDeviceMs + report.fifoMs;
+    report.inputBufferSize = inputBufferSize;
+    report.outputBufferSize = outputBufferSize;
+    report.sampleRate = sampleRate;
+    report.underruns = 0;
+    report.overruns = 0;
+    // aggregate fifo counters
+    auto diag = getFifoDiagnostics();
+    report.underruns = diag.outputUnderruns;
+    report.overruns = diag.inputOverruns;
     report.valid = valid;
+    report.approximate = true;
     return report;
 }
 
