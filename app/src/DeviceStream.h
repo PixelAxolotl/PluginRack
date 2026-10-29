@@ -6,6 +6,11 @@
 #include <functional>
 #include <memory>
 
+namespace DeviceEnumeration {
+juce::StringArray inputs();
+juce::StringArray outputs();
+}
+
 class InputCapture : public juce::AudioIODeviceCallback {
 public:
     InputCapture();
@@ -18,6 +23,8 @@ public:
 
     double getSampleRate() const { return sampleRate; }
     juce::String getError() const { return error; }
+
+    int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
 
     void pull(juce::AudioBuffer<float>& dest, int frames);
 
@@ -33,6 +40,9 @@ private:
     int capacity = 0;
     double sampleRate = 0.0;
     juce::String error;
+    int deviceInputLatency = 0;
+    int deviceBufferSize = 0;
+    std::atomic<int> latencySamples{0};
 };
 
 class OutputPlayback : public juce::AudioIODeviceCallback {
@@ -49,7 +59,10 @@ public:
     int getBufferSize() const { return bufferSize; }
     juce::String getError() const { return error; }
 
+    int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
+
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
+    void setRenderActive(bool active) { renderActive = active; }
 
     void push(const juce::AudioBuffer<float>& src, int frames);
 
@@ -68,7 +81,10 @@ private:
     int bufferSize = 256;
     double sampleRate = 0.0;
     juce::String error;
+    int deviceOutputLatency = 0;
+    std::atomic<int> latencySamples{0};
     std::function<void(int)> renderHook;
+    std::atomic<bool> renderActive{true};
     float* const* currentOutputChannels = nullptr;
     int currentNumOutputChannels = 0;
 };

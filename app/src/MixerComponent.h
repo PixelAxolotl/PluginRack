@@ -30,7 +30,6 @@ private:
     private:
         AudioEngine::Output& output;
         AudioEngine& audioEngine;
-        juce::Label nameLabel;
         DeviceControl deviceControl;
         juce::Slider gainSlider;
         LevelMeter meter;

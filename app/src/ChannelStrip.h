@@ -8,6 +8,7 @@
 #include "DeviceControl.h"
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
+#include "MiniButton.h"
 #include "Theme.h"
 
 class ChannelStrip final : public juce::Component {
@@ -18,25 +19,32 @@ public:
     void paint(juce::Graphics& g) override;
     void refreshInserts();
     void refreshRouting();
+    void rebuildRoutingButtons();
+
+public:
+    std::function<void()> onRemoveRequested;
 
 private:
-    class InsertSlotComponent final : public juce::Component {
+    class InsertSlotComponent final : public juce::Component, public juce::SettableTooltipClient {
     public:
         InsertSlotComponent(ChannelStrip& owner, int slotIndex);
 
-        void setInsert(const AudioEngine::InsertSlot* insert);
+        void setInsert(AudioEngine::InsertSlot* insert);
         void resized() override;
         void paint(juce::Graphics& g) override;
         void mouseDown(const juce::MouseEvent&) override;
+        void mouseEnter(const juce::MouseEvent&) override;
+        void mouseExit(const juce::MouseEvent&) override;
 
     private:
         ChannelStrip& owner;
         int slotIndex = 0;
-        const AudioEngine::InsertSlot* insert = nullptr;
+        AudioEngine::InsertSlot* insert = nullptr;
+        bool hovered = false;
         juce::Label indexLabel;
         juce::Label nameLabel;
-        juce::TextButton bypassButton{"B"};
-        juce::TextButton removeButton{"x"};
+        MiniButton bypassButton{"B"};
+        MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
     };
 
     void choosePlugin();
@@ -45,6 +53,8 @@ private:
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
     DeviceControl deviceControl;
+    juce::Label channelLabel{"", ""};
+    MiniButton removeChannelButton{juce::String::fromUTF8("\\xc3\\x97")};
     juce::Label vstHeader{"", "VST RACK"};
 
     juce::OwnedArray<InsertSlotComponent> slots;
@@ -56,6 +66,7 @@ private:
     juce::Slider panKnob;
 
     juce::OwnedArray<juce::TextButton> routingButtons;
+    std::vector<std::uint32_t> routingOutputIds;
 
     juce::Label faderLabel{"", "dB"};
     juce::Slider faderSlider;

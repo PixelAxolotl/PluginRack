@@ -5,6 +5,7 @@
 class PluginHost {
 public:
     PluginHost();
+    ~PluginHost();
 
     juce::String loadPlugin(const juce::File& file);
     void prepareToPlay(double sampleRate, int samplesPerBlock);
@@ -16,6 +17,12 @@ public:
     double getSampleRate() const;
     int getBufferSize() const;
 
+    bool hasPlugin() const;
+    int getLatencySamples() const;
+    void showEditor();
+    void editorBeingDeleted(juce::AudioProcessorEditor* editor);
+    void clearEditorWindow(juce::DocumentWindow* window);
+
 private:
     juce::AudioPluginFormatManager formatManager;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
@@ -25,6 +32,8 @@ private:
     juce::String pluginName;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+
+    juce::DocumentWindow* editorWindow = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHost)
 };

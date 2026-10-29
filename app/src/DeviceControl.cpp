@@ -1,8 +1,28 @@
 ﻿#include "DeviceControl.h"
 
+namespace {
+const juce::String kSystemDefault = "System Default";
+
+juce::String compactDeviceName(const juce::String& name) {
+    if (name == kSystemDefault) return "Default";
+    if (name.startsWith("None")) return "None";
+    auto trimmed = name;
+    const int paren = trimmed.indexOfChar('(');
+    if (paren > 1) trimmed = trimmed.substring(0, paren).trim();
+    return trimmed;
+}
+}
+
 DeviceControl::DeviceControl() {
     setWantsKeyboardFocus(true);
     setMouseCursor(juce::MouseCursor::PointingHandCursor);
+}
+
+void DeviceControl::updateTooltip() {
+    juce::String text = title;
+    if (deviceName.isNotEmpty()) text += "\n" + deviceName;
+    if (error.isNotEmpty()) text += "\n" + error;
+    setTooltip(text);
 }
 
 void DeviceControl::paint(juce::Graphics& g) {
@@ -21,18 +41,21 @@ void DeviceControl::paint(juce::Graphics& g) {
         g.drawRoundedRectangle(r.reduced(1.0f), 4.0f, 1.0f);
     }
 
-    auto area = getLocalBounds().reduced(8, 4);
+    const bool narrow = getWidth() < 110;
+    auto area = getLocalBounds().reduced(narrow ? 5 : 8, 4);
     // right side: dot + chevron
     auto right = area.removeFromRight(26);
     // chevron
     {
         juce::Path p;
-        auto cr = right.removeFromRight(10).toFloat().reduced(2.0f);
-        p.startNewSubPath(cr.getX(), cr.getY() + 2);
-        p.lineTo(cr.getCentreX(), cr.getBottom() - 2);
-        p.lineTo(cr.getRight(), cr.getY() + 2);
+        auto chevronArea = right.removeFromRight(10).toFloat();
+        auto cr = juce::Rectangle<float>(chevronArea.getCentreX() - 3.5f,
+                                         chevronArea.getCentreY() - 2.0f, 7.0f, 4.0f);
+        p.startNewSubPath(cr.getX(), cr.getY());
+        p.lineTo(cr.getCentreX(), cr.getBottom());
+        p.lineTo(cr.getRight(), cr.getY());
         g.setColour(theme::dim());
-        g.strokePath(p, juce::PathStrokeType(1.4f));
+        g.strokePath(p, juce::PathStrokeType(1.2f));
     }
     // dot
     {
@@ -52,10 +75,18 @@ void DeviceControl::paint(juce::Graphics& g) {
     g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
     g.drawText(title, textArea.removeFromTop(textArea.getHeight() / 2), juce::Justification::centredLeft, true);
 
-    juce::String sub = deviceName.isNotEmpty() ? deviceName : juce::String("Click to choose device");
-    if (deviceName.isEmpty()) sub = "Click to choose device";
-    g.setColour(theme::dim());
-    g.setFont(juce::Font(juce::FontOptions(11.0f)));
+    juce::String sub;
+    juce::Colour subColour = theme::dim();
+    if (error.isNotEmpty()) {
+        sub = error;
+        subColour = theme::red();
+    } else if (deviceName.isEmpty()) {
+        sub = narrow ? "assign" : "Choose device";
+    } else {
+        sub = narrow ? compactDeviceName(deviceName) : deviceName;
+    }
+    g.setColour(subColour);
+    g.setFont(juce::Font(juce::FontOptions(narrow ? 10.0f : 11.0f)));
     g.drawText(sub, textArea, juce::Justification::centredLeft, true);
 }
 

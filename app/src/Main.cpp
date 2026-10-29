@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 
 #include "ConsoleLookAndFeel.h"
+#include "DeviceStream.h"
 #include "MainComponent.h"
 
 #include <iostream>
@@ -11,6 +12,7 @@ public:
         : juce::DocumentWindow("PluginRack", juce::Colours::darkgrey, allButtons) {
         setUsingNativeTitleBar(true);
         setContentOwned(new MainComponent(), true);
+        setResizeLimits(1180, 700, 10000, 10000);
         centreWithSize(1600, 900);
         setVisible(true);
     }
@@ -31,29 +33,14 @@ public:
         args.addTokens(commandLine, true);
 
         if (args.contains("--list-devices")) {
-            juce::AudioDeviceManager probeIn, probeOut;
-            probeIn.initialise(1, 0, nullptr, true, {}, nullptr);
-            probeOut.initialise(0, 1, nullptr, true, {}, nullptr);
+            const auto inNames = DeviceEnumeration::inputs();
+            const auto outNames = DeviceEnumeration::outputs();
 
             std::cout << "Input devices:\n";
-            juce::StringArray inNames;
-            for (auto* type : probeIn.getAvailableDeviceTypes()) {
-                for (const auto& n : type->getDeviceNames(true)) {
-                    if (!inNames.contains(n)) inNames.add(n);
-                }
-            }
-            inNames.sort(true);
             for (const auto& n : inNames) std::cout << "  " << n.toStdString() << "\n";
             if (inNames.isEmpty()) std::cout << "  (none)\n";
 
             std::cout << "Output devices:\n";
-            juce::StringArray outNames;
-            for (auto* type : probeOut.getAvailableDeviceTypes()) {
-                for (const auto& n : type->getDeviceNames(false)) {
-                    if (!outNames.contains(n)) outNames.add(n);
-                }
-            }
-            outNames.sort(true);
             for (const auto& n : outNames) std::cout << "  " << n.toStdString() << "\n";
             if (outNames.isEmpty()) std::cout << "  (none)\n";
 
@@ -65,10 +52,14 @@ public:
         if (idx >= 0 && idx + 1 < args.size()) {
             const juce::File outPath(args[idx + 1]);
             outPath.getParentDirectory().createDirectory();
+            int shotW = 1600;
+            int shotH = 900;
+            if (idx + 2 < args.size()) shotW = juce::jmax(1, args[idx + 2].getIntValue());
+            if (idx + 3 < args.size()) shotH = juce::jmax(1, args[idx + 3].getIntValue());
             lookAndFeel = std::make_unique<ConsoleLookAndFeel>();
             juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel.get());
             auto* comp = new MainComponent();
-            comp->setSize(1600, 900);
+            comp->setSize(shotW, shotH);
             juce::Image snapshot = comp->createComponentSnapshot(comp->getLocalBounds(), false, 1.0f);
             juce::PNGImageFormat png;
             if (auto stream = outPath.createOutputStream()) {

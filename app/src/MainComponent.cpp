@@ -9,13 +9,38 @@ MainComponent::MainComponent()
     addAndMakeVisible(loadButton);
     addAndMakeVisible(menuButton);
 
+    latencyLabel.setJustificationType(juce::Justification::centredRight);
+    latencyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    latencyLabel.setColour(juce::Label::textColourId, theme::dim());
+    addAndMakeVisible(latencyLabel);
+
     saveButton.onClick = [this] { saveScene(); };
     loadButton.onClick = [this] { loadScene(true); };
 
     mixer.onStructureChanged = [this] { /* no-op */ };
 
     loadScene(false);
+    startTimerHz(4);
     setSize(1600, 900);
+}
+
+void MainComponent::timerCallback() {
+    const auto report = audioEngine.getLatencyReport();
+    if (!report.valid) {
+        latencyLabel.setText({}, juce::dontSendNotification);
+        latencyLabel.setTooltip({});
+        return;
+    }
+    latencyLabel.setText("LAT ~" + juce::String((int)std::round(report.totalMs)) + " ms",
+                         juce::dontSendNotification);
+    juce::Colour colour = theme::dim();
+    if (report.totalMs > 60.0) colour = theme::red();
+    else if (report.totalMs > 30.0) colour = theme::amber();
+    latencyLabel.setColour(juce::Label::textColourId, colour);
+    latencyLabel.setTooltip("Estimated input to output: input " +
+                            juce::String((int)std::round(report.inputMs)) + " ms + plugins " +
+                            juce::String((int)std::round(report.pluginMs)) + " ms + output " +
+                            juce::String((int)std::round(report.outputMs)) + " ms");
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -38,7 +63,8 @@ void MainComponent::paint(juce::Graphics& g) {
     const bool noClock = desc.startsWith("No output");
     g.setColour(noClock ? theme::amber() : theme::dim());
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
-    g.drawText(desc, getWidth() - 460, 0, 220, 56, juce::Justification::centredRight);
+    const int clockRight = latencyLabel.getX() - 8;
+    g.drawFittedText(desc, 220, 0, juce::jmax(0, clockRight - 220), 56, juce::Justification::centredRight, 1);
 }
 
 void MainComponent::resized() {
@@ -53,6 +79,8 @@ void MainComponent::resized() {
     loadButton.setBounds(hr.removeFromRight(60));
     hr.removeFromRight(4);
     saveButton.setBounds(hr.removeFromRight(60));
+    hr.removeFromRight(8);
+    latencyLabel.setBounds(hr.removeFromRight(90));
 
     mixer.setBounds(area);
 }

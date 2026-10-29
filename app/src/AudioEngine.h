@@ -56,6 +56,14 @@ public:
         juce::Atomic<float> sendGainDb{0.0f};
     };
 
+    struct LatencyReport {
+        double inputMs = 0.0;
+        double pluginMs = 0.0;
+        double outputMs = 0.0;
+        double totalMs = 0.0;
+        bool valid = false;
+    };
+
     AudioEngine();
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate);
@@ -63,6 +71,7 @@ public:
     void releaseResources();
 
     void addChannel();
+    void removeChannel(std::uint32_t channelId);
     void addOutput();
     juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
@@ -86,6 +95,8 @@ public:
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
+
+    LatencyReport getLatencyReport() const;
 
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);

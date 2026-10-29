@@ -141,6 +141,21 @@ void AudioEngine::releaseResources() {
     }
 }
 
+void AudioEngine::removeChannel(std::uint32_t channelId) {
+    const juce::ScopedLock lock(stateLock);
+    for (auto it = channels.begin(); it != channels.end();) {
+        if ((*it)->id == channelId) {
+            (*it)->input.reset();
+            it = channels.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    routes.erase(std::remove_if(routes.begin(), routes.end(),
+                               [channelId](const auto& route) { return route->channelId == channelId; }),
+                  routes.end());
+}
+
 void AudioEngine::addChannel() {
     const juce::ScopedLock lock(stateLock);
     auto channel = std::make_unique<Channel>();
@@ -482,6 +497,10 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
 
     const juce::String prevName = out->outputDeviceName;
     auto prevOutput = std::move(out->output);
+    if (prevOutput != nullptr && isClock) {
+        // Stop the old clock before a second render hook can run.
+        prevOutput->setRenderActive(false);
+    }
 
     auto newPlayback = std::make_unique<OutputPlayback>();
     if (isClock) {
@@ -495,6 +514,7 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
+        if (out->output != nullptr) out->output->setRenderActive(true);
         out->outputError = openErr;
         return openErr;
     }
@@ -539,36 +559,25 @@ juce::String AudioEngine::getClockDescription() const {
     }
     for (const auto& o : outputs) {
         if (o->id == clockOutputId) {
-            return o->name + "  " + juce::String((int)currentSampleRate) + " Hz  " + juce::String(currentBufferSize);
+            const auto device = o->outputDeviceName.isEmpty() ? juce::String("System Default")
+                                                              : o->outputDeviceName;
+            const auto khzValue = currentSampleRate / 1000.0;
+            const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
+                                 ? juce::String((int)std::round(khzValue))
+                                 : juce::String(khzValue, 1);
+            return o->name + "  \xc2\xb7  " + device + "  \xc2\xb7  " + khz + " kHz  \xc2\xb7  "
+                   + juce::String(currentBufferSize) + " smp";
         }
     }
     return "No output device \xe2\x80\x94 click a master strip";
 }
 
 juce::StringArray AudioEngine::getAvailableInputDevices() const {
-    juce::AudioDeviceManager probe;
-    probe.initialise(1, 0, nullptr, true, {}, nullptr);
-    juce::StringArray names;
-    for (auto* type : probe.getAvailableDeviceTypes()) {
-        for (const auto& n : type->getDeviceNames(true)) {
-            if (!names.contains(n)) names.add(n);
-        }
-    }
-    names.sort(true);
-    return names;
+    return DeviceEnumeration::inputs();
 }
 
 juce::StringArray AudioEngine::getAvailableOutputDevices() const {
-    juce::AudioDeviceManager probe;
-    probe.initialise(0, 1, nullptr, true, {}, nullptr);
-    juce::StringArray names;
-    for (auto* type : probe.getAvailableDeviceTypes()) {
-        for (const auto& n : type->getDeviceNames(false)) {
-            if (!names.contains(n)) names.add(n);
-        }
-    }
-    names.sort(true);
-    return names;
+    return DeviceEnumeration::outputs();
 }
 
 AudioEngine::Channel* AudioEngine::findChannel(std::uint32_t channelId) {
@@ -591,6 +600,49 @@ AudioEngine::InsertSlot* AudioEngine::findInsert(std::uint32_t channelId, std::u
         }
     }
     return nullptr;
+}
+
+AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
+    LatencyReport report;
+    const juce::ScopedLock lock(stateLock);
+
+    const Channel* inputChannel = nullptr;
+    for (const auto& channel : channels) {
+        if (channel->input != nullptr) {
+            inputChannel = channel.get();
+            break;
+        }
+    }
+
+    int inputSamples = 0;
+    int pluginSamples = 0;
+    if (inputChannel != nullptr && inputChannel->input != nullptr) {
+        inputSamples = inputChannel->input->getLatencySamples();
+        for (const auto& insert : inputChannel->inserts) {
+            pluginSamples += insert->pluginHost.getLatencySamples();
+        }
+    }
+
+    int outputSamples = 0;
+    bool valid = false;
+    if (clockOutputId != 0) {
+        for (const auto& output : outputs) {
+            if (output->id == clockOutputId && output->output != nullptr) {
+                outputSamples = output->output->getLatencySamples();
+                valid = true;
+                break;
+            }
+        }
+    }
+
+    const int totalSamples = inputSamples + pluginSamples + outputSamples;
+    const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
+    report.inputMs = inputSamples / sampleRate * 1000.0;
+    report.pluginMs = pluginSamples / sampleRate * 1000.0;
+    report.outputMs = outputSamples / sampleRate * 1000.0;
+    report.totalMs = totalSamples / sampleRate * 1000.0;
+    report.valid = valid;
+    return report;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {
