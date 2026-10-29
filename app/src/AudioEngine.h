@@ -84,6 +84,10 @@ public:
         double maxInsertMs = 0.0;
         bool valid = false;
         bool approximate = true;
+        double measuredMs = 0.0;
+        bool measuredValid = false;
+        bool measuredAttempted = false;
+        bool measureFailed = false;
     };
 
     struct FifoDiagnostics {
@@ -155,6 +159,13 @@ public:
 
     FifoDiagnostics getFifoDiagnostics() const;
 
+    void startLatencyMeasurement();
+    void cancelLatencyMeasurement();
+    bool isLatencyMeasuring() const { return latencyMeasureActive_.load(std::memory_order_relaxed); }
+    bool hasMeasuredLatency() const { return latencyMeasuredValid_.load(std::memory_order_relaxed); }
+    bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
+    double getMeasuredLatencyMs() const;
+
     pluginrack::Scene makeScene() const;
     juce::String restoreScene(const pluginrack::Scene& scene);
 
@@ -167,6 +178,7 @@ private:
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
+    void cancelLatencyMeasurementImpl();
 
     struct SharedInputCapture {
         std::shared_ptr<InputCapture> capture;
@@ -193,6 +205,17 @@ private:
     juce::AudioBuffer<float> silenceBuffer_;
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
+
+    // Round-trip latency measurement state.
+    std::atomic<bool> latencyMeasureActive_{false};
+    std::atomic<bool> latencyMeasureEmitted_{false};
+    std::atomic<std::uint64_t> latencyMeasureOutputSample_{0};
+    std::atomic<int> latencyMeasureBlocks_{0};
+    std::atomic<bool> latencyMeasuredValid_{false};
+    std::atomic<int> latencyMeasuredSamples_{0};
+    std::atomic<std::uint32_t> latencyMeasureStartMs_{0};
+    std::atomic<bool> latencyMeasureFailed_{false};
+    std::uint64_t outputSampleCounter_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

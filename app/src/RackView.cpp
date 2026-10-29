@@ -103,7 +103,7 @@ void RackView::ChainRow::initHeader() {
     emptyLabel.setJustificationType(juce::Justification::centred);
     emptyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     emptyLabel.setColour(juce::Label::textColourId, theme::dim());
-    emptyLabel.setText("Empty — chain is clean", juce::dontSendNotification);
+    emptyLabel.setText("Empty - chain is clean", juce::dontSendNotification);
     moduleContent.addAndMakeVisible(emptyLabel);
 
     addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
@@ -322,7 +322,7 @@ void RackView::ChainRow::openPicker() {
 RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     setWantsKeyboardFocus(true);
     setFocusContainerType(juce::Component::FocusContainerType::keyboardFocusContainer);
-    emptyLabel.setText("No chains yet — add a channel or output in the Mixer view.",
+    emptyLabel.setText("No chains yet - add a channel or output in the Mixer view.",
                        juce::dontSendNotification);
     emptyLabel.setJustificationType(juce::Justification::centred);
     emptyLabel.setFont(juce::Font(juce::FontOptions(13.0f)));

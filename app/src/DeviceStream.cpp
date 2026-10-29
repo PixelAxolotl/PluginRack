@@ -60,11 +60,12 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         return err;
     }
 
-    // Apply requested buffer size via AudioDeviceSetup.
+    // Apply requested buffer size via AudioDeviceSetup. A non-positive value
+    // means "keep the driver default" -> leave bufferSize untouched.
     if (requestedBufferSize >= 0) {
         juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
         juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
-        setup.bufferSize = requestedBufferSize; // 0 = driver default
+        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
         if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
         juce::String berr = manager.setAudioDeviceSetup(setup, true);
         if (berr.isNotEmpty()) {
@@ -96,6 +97,13 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     deviceInputLatency = dev->getInputLatencyInSamples();
     deviceBufferSize = dev->getCurrentBufferSizeSamples();
     if (deviceBufferSize <= 0) deviceBufferSize = 256;
+    if (requestedBufferSize > 0 && deviceBufferSize != requestedBufferSize) {
+        const auto msg = "Device kept " + juce::String(deviceBufferSize) + " samples (requested " + juce::String(requestedBufferSize) + ")";
+        error = msg;
+        errorOut = msg;
+        close();
+        return msg;
+    }
 
     // Keep every physical input the device actually provides. Requested
     // indexes it does not have are reported via getInputError() and stay
@@ -112,7 +120,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    capacity = juce::jmax(1, deviceBufferSize * 4);
+    capacity = juce::jmax(1, deviceBufferSize * 2);
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
     writePos = 0;
@@ -185,6 +193,23 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
     }
     if (!ok)
         inputUnavailable_.store(true, std::memory_order_relaxed);
+
+    // Round-trip latency measurement: detect the injected impulse on input.
+    if (latencyMeasureActive.load(std::memory_order_relaxed) &&
+        !latencyImpulseDetected.load(std::memory_order_relaxed)) {
+        const int base = (totalWritten >= frames) ? (totalWritten - frames) : 0;
+        for (int i = 0; i < numDest; ++i) {
+            for (int s = 0; s < available; ++s) {
+                if (std::abs(dest.getSample(i, offset + s)) > 0.9f) {
+                    latencyImpulseInputSample.store((std::uint64_t)(base + s),
+                                                  std::memory_order_relaxed);
+                    latencyImpulseDetected.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+            if (latencyImpulseDetected.load(std::memory_order_relaxed)) break;
+        }
+    }
     return ok;
 }
 
@@ -246,7 +271,7 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     if (requestedBufferSize >= 0) {
         juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
         juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
-        setup.bufferSize = requestedBufferSize;
+        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
         if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
         juce::String berr = manager.setAudioDeviceSetup(setup, true);
         if (berr.isNotEmpty()) {
@@ -278,8 +303,15 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     sampleRate = actual;
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
+    if (requestedBufferSize > 0 && bufferSize != requestedBufferSize) {
+        const auto msg = "Device kept " + juce::String(bufferSize) + " samples (requested " + juce::String(requestedBufferSize) + ")";
+        error = msg;
+        errorOut = msg;
+        close();
+        return msg;
+    }
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    capacity = juce::jmax(1, bufferSize * 4);
+    capacity = juce::jmax(1, bufferSize * 2);
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();

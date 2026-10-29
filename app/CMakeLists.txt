@@ -69,4 +69,5 @@ target_link_libraries(pluginrack_app PRIVATE
 
 if(MSVC)
     target_compile_options(pluginrack_app PRIVATE /W4 /WX)
+    target_compile_options(pluginrack_app PRIVATE /utf-8)
 endif()

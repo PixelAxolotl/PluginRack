@@ -64,6 +64,7 @@ void AudioEngine::render(int frames) {
                 output->output->push(silence, frames);
             }
         }
+        outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
 
@@ -162,11 +163,66 @@ void AudioEngine::render(int frames) {
         output->peak = meters.outputPeak(output->id);
     }
 
+    // Round-trip latency measurement: inject a one-sample impulse on the
+    // clock output after all processing, then detect it on input.
+    if (latencyMeasureActive_.load(std::memory_order_relaxed) &&
+        !latencyMeasureEmitted_.load(std::memory_order_relaxed)) {
+        for (auto& output : outputs) {
+            if (output->id == clockOutputId && output->output != nullptr) {
+                output->buffer.setSample(0, 0, 1.0f);
+                output->buffer.setSample(1, 0, 1.0f);
+            }
+        }
+        latencyMeasureOutputSample_.store(outputSampleCounter_, std::memory_order_relaxed);
+        latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+        latencyMeasureEmitted_.store(true, std::memory_order_relaxed);
+    }
+
     for (auto& output : outputs) {
         if (output->output) {
             output->output->push(output->buffer, frames);
         }
     }
+
+    if (latencyMeasureActive_.load(std::memory_order_relaxed)) {
+        latencyMeasureBlocks_.fetch_add(1, std::memory_order_relaxed);
+        bool detected = false;
+        for (auto& entry : inputCaptures_) {
+            if (entry.second.capture != nullptr &&
+                entry.second.capture->isLatencyImpulseDetected()) {
+                detected = true;
+                break;
+            }
+        }
+        if (detected) {
+            const auto now = juce::Time::getMillisecondCounter();
+            const auto start = latencyMeasureStartMs_.load(std::memory_order_relaxed);
+            const std::uint32_t ms = (now >= start) ? (now - start) : 0;
+            const double sr = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
+            latencyMeasuredSamples_.store((int) (ms * sr / 1000.0), std::memory_order_relaxed);
+            latencyMeasuredValid_.store(true, std::memory_order_relaxed);
+            latencyMeasureActive_.store(false, std::memory_order_relaxed);
+            for (auto& entry : inputCaptures_) {
+                if (entry.second.capture != nullptr)
+                    entry.second.capture->setLatencyMeasurementActive(false);
+            }
+        } else {
+            const auto now = juce::Time::getMillisecondCounter();
+            const auto start = latencyMeasureStartMs_.load(std::memory_order_relaxed);
+            const bool timedOut = latencyMeasureEmitted_.load(std::memory_order_relaxed)
+                && (now - start > 3000 || latencyMeasureBlocks_.load(std::memory_order_relaxed) > 200);
+            if (timedOut) {
+                latencyMeasureFailed_.store(true, std::memory_order_relaxed);
+                latencyMeasureActive_.store(false, std::memory_order_relaxed);
+                for (auto& entry : inputCaptures_) {
+                    if (entry.second.capture != nullptr)
+                        entry.second.capture->setLatencyMeasurementActive(false);
+                }
+            }
+        }
+    }
+
+    outputSampleCounter_ += (std::uint64_t)frames;
 }
 
 void AudioEngine::releaseResources() {
@@ -780,7 +836,8 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     {
         const juce::ScopedLock sl(stateLock);
         const auto it = inputCaptures_.find(deviceName);
-        if (it != inputCaptures_.end() && it->second.requestedChannels >= needed) {
+        if (it != inputCaptures_.end() && it->second.requestedChannels >= needed
+            && (requestedBufferSize_ == 0 || it->second.capture->getDeviceBufferSize() == requestedBufferSize_)) {
             reuse = it->second.capture;
         }
     }
@@ -955,7 +1012,7 @@ juce::String AudioEngine::setDeviceBufferSize(int size) {
 
 juce::String AudioEngine::getClockDescription() const {
     if (clockOutputId == 0) {
-        return "No output device \xe2\x80\x94 click a master strip";
+        return "No output device - click a master strip";
     }
     for (const auto& o : outputs) {
         if (o->id == clockOutputId) {
@@ -965,11 +1022,11 @@ juce::String AudioEngine::getClockDescription() const {
             const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
                                  ? juce::String((int)std::round(khzValue))
                                  : juce::String(khzValue, 1);
-            return o->name + "  \xc2\xb7  " + device + "  \xc2\xb7  " + khz + " kHz  \xc2\xb7  "
+            return o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
                    + juce::String(currentBufferSize) + " smp";
         }
     }
-    return "No output device \xe2\x80\x94 click a master strip";
+    return "No output device - click a master strip";
 }
 
 juce::StringArray AudioEngine::getAvailableInputDevices() const {
@@ -1042,9 +1099,12 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
 
     int inputDeviceSamples = 0;
     int inputBufferSize = 0;
+    double inputOcc = 0.0;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
         inputDeviceSamples = inputChannel->input->getLatencySamples();
-        inputBufferSize = currentBufferSize;
+        inputBufferSize = inputChannel->input->getDeviceBufferSize();
+        if (inputBufferSize <= 0) inputBufferSize = currentBufferSize;
+        inputOcc = inputChannel->input->getOccupancy();
     }
 
     int pluginSamples = 0;
@@ -1064,12 +1124,15 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
 
     int outputDeviceSamples = 0;
     int outputBufferSize = 0;
+    double outputOcc = 0.0;
     bool valid = false;
     if (clockOutputId != 0) {
         for (const auto& output : outputs) {
             if (output->id == clockOutputId && output->output != nullptr) {
                 outputDeviceSamples = output->output->getLatencySamples();
-                outputBufferSize = currentBufferSize;
+                outputBufferSize = output->output->getBufferSize();
+                if (outputBufferSize <= 0) outputBufferSize = currentBufferSize;
+                outputOcc = output->output->getOccupancy();
                 for (const auto& insert : output->inserts) {
                     pluginSamples += insert->latencySamples;
                     if (insert->latencySamples > maxInsertSamples) {
@@ -1085,7 +1148,7 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     }
 
     const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
-    const double fifoMs = 0.0;
+    const double fifoMs = (inputOcc + outputOcc) * 0.5 * currentBufferSize / sampleRate * 1000.0;
     // getLatencySamples() already reports device latency + one device
     // buffer (see DeviceStream), so the device terms carry that combined
     // structural delay; the buffer sizes are reported separately below.
@@ -1117,6 +1180,11 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     }
     report.valid = valid;
     report.approximate = true;
+    report.measuredValid = latencyMeasuredValid_.load(std::memory_order_relaxed);
+    report.measuredMs = report.measuredValid ? getMeasuredLatencyMs() : 0.0;
+    report.measureFailed = latencyMeasureFailed_.load(std::memory_order_relaxed);
+    report.measuredAttempted = report.measuredValid || report.measureFailed
+        || latencyMeasureActive_.load(std::memory_order_relaxed);
     return report;
 }
 
@@ -1143,6 +1211,39 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
     }
 
     return diagnostics;
+}
+
+void AudioEngine::startLatencyMeasurement() {
+    const juce::ScopedLock lock(stateLock);
+    latencyMeasureActive_.store(true, std::memory_order_relaxed);
+    latencyMeasureEmitted_.store(false, std::memory_order_relaxed);
+    latencyMeasureOutputSample_.store(0, std::memory_order_relaxed);
+    latencyMeasureBlocks_.store(0, std::memory_order_relaxed);
+    latencyMeasuredValid_.store(false, std::memory_order_relaxed);
+    latencyMeasuredSamples_.store(0, std::memory_order_relaxed);
+    latencyMeasureFailed_.store(false, std::memory_order_relaxed);
+    latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+    outputSampleCounter_ = 0;
+    for (auto& entry : inputCaptures_) {
+        if (entry.second.capture) entry.second.capture->setLatencyMeasurementActive(true);
+    }
+}
+
+void AudioEngine::cancelLatencyMeasurementImpl() {
+    latencyMeasureActive_.store(false, std::memory_order_relaxed);
+    for (auto& entry : inputCaptures_) {
+        if (entry.second.capture) entry.second.capture->setLatencyMeasurementActive(false);
+    }
+}
+
+void AudioEngine::cancelLatencyMeasurement() {
+    const juce::ScopedLock lock(stateLock);
+    cancelLatencyMeasurementImpl();
+}
+
+double AudioEngine::getMeasuredLatencyMs() const {
+    const double sr = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
+    return latencyMeasuredSamples_.load(std::memory_order_relaxed) / sr * 1000.0;
 }
 
 AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint32_t channelId) const {
