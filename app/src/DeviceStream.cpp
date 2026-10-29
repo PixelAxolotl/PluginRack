@@ -84,12 +84,14 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // Keep every physical input the device actually provides. Requested
     // indexes it does not have are reported via getInputError() and stay
     // silent — never remapped onto input 0.
-    inputChannelCount_ = juce::jmin(numInputChannels, dev->getCurrentActiveInputChannels().size());
+    const int availableInputs = (int) dev->getInputChannelNames().size();
+    inputChannelCount_ = (numInputChannels < availableInputs) ? numInputChannels : availableInputs;
+    if (inputChannelCount_ < 1) inputChannelCount_ = 1;
     if (inputChannelCount_ < numChannelsNeeded) {
         juce::StringArray missing;
         for (int i = inputChannelCount_ + 1; i <= numChannelsNeeded; ++i) missing.add(juce::String(i));
         inputError = "Missing input" + (numChannelsNeeded - inputChannelCount_ > 1 ? juce::String("s ") : juce::String(" "))
-                     + missing.joinBy(", ");
+                     + missing.joinIntoString(", ");
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
@@ -115,35 +117,54 @@ void InputCapture::close() {
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
-void InputCapture::pull(juce::AudioBuffer<float>& dest, int frames) {
-    if (frames <= 0) return;
-    if (dest.getNumChannels() < 2) dest.setSize(2, frames, true, true, true);
-    else if (dest.getNumSamples() < frames) dest.setSize(2, frames, true, true, true);
+bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
+                        const std::vector<int>& physicalChannels) {
+    if (frames <= 0) return true;
+    if (dest.getNumChannels() < 2 || dest.getNumSamples() < frames) {
+        return false;
+    }
     dest.clear(0, frames);
 
     if (fifo == nullptr) {
         latencySamples.store(0, std::memory_order_relaxed);
-        return;
+        return true;
     }
 
-    // Structural delay only: device latency + one device buffer. The FIFO
-    // queue depth is transient occupancy (spikes at startup, drains in
-    // steady state), not delay — including it makes the readout jumpy.
+    // Structural delay only: device latency + one device buffer.
     latencySamples.store(deviceInputLatency + deviceBufferSize,
                         std::memory_order_relaxed);
+
+    bool ok = true;
+    const int numDest = juce::jmin(2, (int)physicalChannels.size());
+    // Validate mappings first; missing inputs stay silent.
+    for (int i = 0; i < numDest; ++i) {
+        int src = physicalChannels[i];
+        if (src < 0 || src >= inputChannelCount_) {
+            ok = false;
+            if (inputError.isEmpty()) {
+                inputError = "Missing input " + juce::String(src + 1);
+            }
+        }
+    }
 
     auto readHandle = fifo->read(frames);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
-    for (int ch = 0; ch < 2; ++ch) {
-        for (int i = 0; i < b1; ++i) {
-            dest.setSample(ch, i, storage.getSample(ch, readHandle.startIndex1 + i));
+    for (int i = 0; i < numDest; ++i) {
+        int src = physicalChannels[i];
+        if (src < 0 || src >= inputChannelCount_) {
+            // leave silence (already cleared)
+            continue;
         }
-        for (int i = 0; i < b2; ++i) {
-            dest.setSample(ch, b1 + i, storage.getSample(ch, readHandle.startIndex2 + i));
+        for (int s = 0; s < b1; ++s) {
+            dest.setSample(i, s, storage.getSample(src, readHandle.startIndex1 + s));
+        }
+        for (int s = 0; s < b2; ++s) {
+            dest.setSample(i, b1 + s, storage.getSample(src, readHandle.startIndex2 + s));
         }
     }
     // finishedRead automatic
+    return ok;
 }
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
@@ -156,23 +177,20 @@ void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputCh
     const int b2 = writeHandle.blockSize2;
     if (b1 + b2 <= 0) return;
 
-    for (int ch = 0; ch < 2; ++ch) {
-        int srcCh = -1;
-        if (numInputChannels > ch) srcCh = ch;
-        else if (numInputChannels > 0) srcCh = 0;
+    for (int ch = 0; ch < inputChannelCount_; ++ch) {
+        int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
         for (int i = 0; i < b1; ++i) {
-            const float v = (srcCh >= 0 && inputChannelData != nullptr && inputChannelData[srcCh] != nullptr)
-                                ? inputChannelData[srcCh][i]
-                                : 0.0f;
+            const float v = (srcCh >= 0) ? inputChannelData[srcCh][i] : 0.0f;
             storage.setSample(ch, writeHandle.startIndex1 + i, v);
         }
         for (int i = 0; i < b2; ++i) {
-            const float v = (srcCh >= 0 && inputChannelData != nullptr && inputChannelData[srcCh] != nullptr)
-                                ? inputChannelData[srcCh][b1 + i]
-                                : 0.0f;
+            const float v = (srcCh >= 0) ? inputChannelData[srcCh][b1 + i] : 0.0f;
             storage.setSample(ch, writeHandle.startIndex2 + i, v);
         }
     }
+    // Channels beyond what the device provides are not stored (storage sized
+    // to inputChannelCount_); they are reported via getInputError() and pull()
+    // leaves their destination silent.
     // finishedWrite automatic
 }
 
