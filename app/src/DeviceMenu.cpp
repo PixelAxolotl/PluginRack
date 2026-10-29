@@ -2,7 +2,7 @@
 
 namespace {
 const juce::String kSystemDefault = "System Default";
-const juce::String kNone = "None \xe2\x80\x94 silent";
+const juce::String kNone = "None - silent";
 
 void buildMenu(juce::PopupMenu& menu, const juce::String& header,
                const juce::String& current, const juce::StringArray& devices,

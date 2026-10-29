@@ -130,7 +130,7 @@ juce::String RackView::ChainRow::buildRoutingSummary() const {
         if (audioEngine.getSendGain(channel->id, out->id) > -30.0f) targets.add(out->name);
     }
     if (targets.isEmpty()) return "No routes";
-    return juce::String::fromUTF8("\xe2\x86\x92 ") + targets.joinIntoString(", ");
+    return juce::String("-> ") + targets.joinIntoString(", ");
 }
 
 void RackView::ChainRow::refreshModules() {

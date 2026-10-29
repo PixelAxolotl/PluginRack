@@ -36,7 +36,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     splitButton.setFontSize(8.0f);
     splitButton.setClickAction([this] { splitIntoMonoChannels(); });
-    splitButton.setTooltip("Split into mono channels \xe2\x80\x94 one strip per physical input");
+    splitButton.setTooltip("Split into mono channels - one strip per physical input");
     addAndMakeVisible(splitButton);
 
     deviceControl.setOnClick([this] {
@@ -266,7 +266,7 @@ void ChannelStrip::refreshInserts() {
     if (hottest.latencySamples > 0) {
         const double sampleRate = audioEngine.getLatencyReport().sampleRate;
         const double ms = hottest.latencySamples / (sampleRate > 0.0 ? sampleRate : 48000.0) * 1000.0;
-        vstHeader.setText("VST RACK \xe2\x80\x94 hottest " + hottest.name + " "
+        vstHeader.setText("VST RACK - hottest " + hottest.name + " "
                               + juce::String((int)std::round(ms)) + " ms",
                           juce::dontSendNotification);
     } else {
