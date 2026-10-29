@@ -93,6 +93,7 @@ void RackView::ChainRow::initHeader() {
     flipButton.setColour(juce::TextButton::buttonColourId, theme::control());
     flipButton.setColour(juce::TextButton::buttonOnColourId, theme::cyan());
     flipButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    flipButton.setTooltip("Flip L/R of this output");
     flipButton.onClick = [this] {
         if (output != nullptr) audioEngine.setOutputFlipped(output->id, flipButton.getToggleState());
     };

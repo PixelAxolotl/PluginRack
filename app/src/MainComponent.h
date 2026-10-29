@@ -63,7 +63,7 @@ private:
 // lightweight placeholders for the views later tasks will build out. Default is Rack.
 class ViewRouter final : public juce::Component {
 public:
-    ViewRouter(AudioEngine& engine, juce::Component& mixerView);
+    ViewRouter(AudioEngine& engine, MixerComponent& mixerView);
 
     void setView(AppView view);
     AppView getView() const { return currentView; }
@@ -89,7 +89,7 @@ private:
     };
 
     AudioEngine& audioEngine;
-    juce::Component& mixerView;
+    MixerComponent& mixerView;
     RackView rackView;
     RoutingMatrixComponent routingView;
     SettingsView settingsView;

@@ -157,7 +157,7 @@ void ViewRouter::PlaceholderView::resized() {
     subtitleLabel.setBounds(area.removeFromTop(22));
 }
 
-ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
+ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
@@ -180,6 +180,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, juce::Component& mixerViewIn)
 
 void ViewRouter::setView(AppView view) {
     currentView = view;
+    if (view == AppView::Rack) rackView.rebuild();
+    if (view == AppView::Mixer) mixerView.rebuild();
+    if (view == AppView::Routing) routingView.rebuild();
+    if (view == AppView::Settings) settingsView.refresh();
     mixerView.setVisible(view == AppView::Mixer);
     rackView.setVisible(view == AppView::Rack);
     routingView.setVisible(view == AppView::Routing);
