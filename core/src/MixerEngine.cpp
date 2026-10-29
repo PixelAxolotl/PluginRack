@@ -105,6 +105,14 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 channel.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
         }
     }
+    outputInsertChains_.clear();
+    if (pluginFactory_ != nullptr) {
+        outputInsertChains_.reserve(scene.outputs.size());
+        for (const Output& output : scene.outputs) {
+            outputInsertChains_.push_back(std::make_unique<InsertChain>(
+                output.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
+        }
+    }
     stoppedChannels_.assign(channels_.size(), 0);
     disabledOutputs_.assign(outputCount_, 0);
 
@@ -273,6 +281,19 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     }
 
     for (std::size_t o = 0; o < numOutputs; ++o) {
+        if (o >= outputInsertChains_.size() || outputInsertChains_[o] == nullptr) {
+            continue;
+        }
+        const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
+        float* accLeft =
+            accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
+        float* accRight = accLeft + maxFrames;
+        float* chainPtrs[2] = {accLeft, accRight};
+        AudioBlock chainBlock{chainPtrs, 2, frames};
+        outputInsertChains_[o]->process(chainBlock);
+    }
+
+    for (std::size_t o = 0; o < numOutputs; ++o) {
         AudioBlock& output = outputBlocks[o];
         const int frames = clampFrames(output.numFrames, maxFrames);
         const float* accLeft =
@@ -328,6 +349,12 @@ int MixerEngine::outputCount() const noexcept { return static_cast<int>(outputCo
 std::vector<std::uint32_t> MixerEngine::failedPluginSlots() const {
     std::vector<std::uint32_t> failed;
     for (const std::unique_ptr<InsertChain>& chain : insertChains_) {
+        if (chain != nullptr) {
+            const std::vector<std::uint32_t> chainFailures = chain->failedSlots();
+            failed.insert(failed.end(), chainFailures.begin(), chainFailures.end());
+        }
+    }
+    for (const std::unique_ptr<InsertChain>& chain : outputInsertChains_) {
         if (chain != nullptr) {
             const std::vector<std::uint32_t> chainFailures = chain->failedSlots();
             failed.insert(failed.end(), chainFailures.begin(), chainFailures.end());

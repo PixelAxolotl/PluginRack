@@ -265,3 +265,107 @@ TEST_CASE("engine reports plugin slots that failed to load") {
     REQUIRE(engine.prepare(scene, 256, &error));
     REQUIRE(engine.failedPluginSlots() == std::vector<std::uint32_t>{7});
 }
+
+TEST_CASE("engine applies output insert chain to its bus") {
+    pluginrack::Scene scene;
+    scene.schemaVersion = 1;
+    scene.name = "output-insert";
+    scene.sampleRate = 48000;
+    scene.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.name = "ch1";
+    channel.layout = pluginrack::ChannelLayout::Mono;
+    channel.gainDb = 0.0f;
+    channel.pan = 0.0f;
+    scene.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "out1";
+    output.inserts.push_back(makeSlot(3, "/halve"));
+    scene.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    route.sendGainDb = 0.0f;
+    scene.routes.push_back(route);
+
+    pluginrack::test::HalfFactory factory;
+    pluginrack::MixerEngine engine;
+    engine.setPluginFactory(&factory);
+    std::string error;
+    REQUIRE(engine.prepare(scene, 256, &error));
+
+    constexpr int kFrames = 128;
+    std::vector<float> mono(static_cast<std::size_t>(kFrames), 1.0f);
+    float* inPtrs[1] = {mono.data()};
+    const AudioBlock inputs[] = {AudioBlock{inPtrs, 1, kFrames}};
+
+    std::vector<float> outLeft(static_cast<std::size_t>(kFrames), 0.0f);
+    std::vector<float> outRight(static_cast<std::size_t>(kFrames), 0.0f);
+    float* outPtrs[2] = {outLeft.data(), outRight.data()};
+    AudioBlock outputs[] = {AudioBlock{outPtrs, 2, kFrames}};
+
+    engine.render(inputs, outputs);
+
+    constexpr float kCenter = 0.70710678f;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(outLeft[static_cast<std::size_t>(i)] == Catch::Approx(kCenter * 0.5f));
+        REQUIRE(outRight[static_cast<std::size_t>(i)] == Catch::Approx(kCenter * 0.5f));
+    }
+}
+
+TEST_CASE("bypassed output insert passes audio unchanged") {
+    pluginrack::Scene scene;
+    scene.schemaVersion = 1;
+    scene.name = "output-insert-bypass";
+    scene.sampleRate = 48000;
+    scene.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.name = "ch1";
+    channel.layout = pluginrack::ChannelLayout::Mono;
+    channel.gainDb = 0.0f;
+    channel.pan = 0.0f;
+    scene.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "out1";
+    output.inserts.push_back(makeSlot(4, "/halve", true));
+    scene.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    route.sendGainDb = 0.0f;
+    scene.routes.push_back(route);
+
+    pluginrack::test::HalfFactory factory;
+    pluginrack::MixerEngine engine;
+    engine.setPluginFactory(&factory);
+    std::string error;
+    REQUIRE(engine.prepare(scene, 256, &error));
+
+    constexpr int kFrames = 128;
+    std::vector<float> mono(static_cast<std::size_t>(kFrames), 1.0f);
+    float* inPtrs[1] = {mono.data()};
+    const AudioBlock inputs[] = {AudioBlock{inPtrs, 1, kFrames}};
+
+    std::vector<float> outLeft(static_cast<std::size_t>(kFrames), 0.0f);
+    std::vector<float> outRight(static_cast<std::size_t>(kFrames), 0.0f);
+    float* outPtrs[2] = {outLeft.data(), outRight.data()};
+    AudioBlock outputs[] = {AudioBlock{outPtrs, 2, kFrames}};
+
+    engine.render(inputs, outputs);
+
+    constexpr float kCenter = 0.70710678f;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(outLeft[static_cast<std::size_t>(i)] == Catch::Approx(kCenter));
+        REQUIRE(outRight[static_cast<std::size_t>(i)] == Catch::Approx(kCenter));
+    }
+}
