@@ -113,12 +113,16 @@ void AudioEngine::render(int frames) {
             continue;
         }
 
-        const float sendGain = decibelsToGain(route->sendGainDb.get());
-        if (sendGain == 0.0f) {
+        const float sendGainL = decibelsToGain(route->sendGainDbL.get());
+        const float sendGainR = decibelsToGain(route->sendGainDbR.get());
+        if (sendGainL == 0.0f && sendGainR == 0.0f) {
             continue;
         }
-        for (int side = 0; side < 2; ++side) {
-            (*outputIt)->buffer.addFrom(side, 0, (*channelIt)->buffer, side, 0, frames, sendGain);
+        if (sendGainL != 0.0f) {
+            (*outputIt)->buffer.addFrom(0, 0, (*channelIt)->buffer, 0, 0, frames, sendGainL);
+        }
+        if (sendGainR != 0.0f) {
+            (*outputIt)->buffer.addFrom(1, 0, (*channelIt)->buffer, 1, 0, frames, sendGainR);
         }
     }
 
@@ -196,7 +200,9 @@ void AudioEngine::addChannel() {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
         route->outputId = output->id;
-        route->sendGainDb = output == outputs.front() ? 0.0f : -60.0f;
+        const float g = output == outputs.front() ? 0.0f : -60.0f;
+        route->sendGainDbL = g;
+        route->sendGainDbR = g;
         routes.push_back(std::move(route));
     }
     channels.push_back(std::move(channel));
@@ -216,7 +222,8 @@ void AudioEngine::addOutput() {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
         route->outputId = output->id;
-        route->sendGainDb = -60.0f;
+        route->sendGainDbL = -60.0f;
+        route->sendGainDbR = -60.0f;
         routes.push_back(std::move(route));
     }
     outputs.push_back(std::move(output));
@@ -455,7 +462,26 @@ void AudioEngine::setChannelMapping(std::uint32_t channelId, pluginrack::Channel
 void AudioEngine::setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb) {
     for (auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
-            route->sendGainDb = gainDb;
+            route->sendGainDbL = gainDb;
+            route->sendGainDbR = gainDb;
+            return;
+        }
+    }
+}
+
+void AudioEngine::setSendGainL(std::uint32_t channelId, std::uint32_t outputId, float gainDb) {
+    for (auto& route : routes) {
+        if (route->channelId == channelId && route->outputId == outputId) {
+            route->sendGainDbL = gainDb;
+            return;
+        }
+    }
+}
+
+void AudioEngine::setSendGainR(std::uint32_t channelId, std::uint32_t outputId, float gainDb) {
+    for (auto& route : routes) {
+        if (route->channelId == channelId && route->outputId == outputId) {
+            route->sendGainDbR = gainDb;
             return;
         }
     }
@@ -483,7 +509,25 @@ void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
-            return route->sendGainDb.get();
+            return route->sendGainDbL.get();
+        }
+    }
+    return -60.0f;
+}
+
+float AudioEngine::getSendGainL(std::uint32_t channelId, std::uint32_t outputId) const {
+    for (const auto& route : routes) {
+        if (route->channelId == channelId && route->outputId == outputId) {
+            return route->sendGainDbL.get();
+        }
+    }
+    return -60.0f;
+}
+
+float AudioEngine::getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const {
+    for (const auto& route : routes) {
+        if (route->channelId == channelId && route->outputId == outputId) {
+            return route->sendGainDbR.get();
         }
     }
     return -60.0f;
@@ -536,7 +580,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
         scene.outputs.push_back(std::move(savedOutput));
     }
     for (const auto& route : routes) {
-        scene.routes.push_back({route->channelId, route->outputId, route->sendGainDb.get()});
+        scene.routes.push_back({route->channelId, route->outputId, route->sendGainDbL.get()});
     }
     return scene;
 }
@@ -627,7 +671,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         auto route = std::make_unique<Route>();
         route->channelId = savedRoute.channelId;
         route->outputId = savedRoute.outputId;
-        route->sendGainDb = savedRoute.sendGainDb;
+        route->sendGainDbL = savedRoute.sendGainDb;
+        route->sendGainDbR = savedRoute.sendGainDb;
         restoredRoutes.push_back(std::move(route));
     }
 

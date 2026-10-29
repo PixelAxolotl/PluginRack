@@ -62,7 +62,8 @@ public:
     struct Route {
         std::uint32_t channelId = 0;
         std::uint32_t outputId = 0;
-        juce::Atomic<float> sendGainDb{0.0f};
+        juce::Atomic<float> sendGainDbL{0.0f};
+        juce::Atomic<float> sendGainDbR{0.0f};
     };
 
     struct LatencyReport {
@@ -133,7 +134,11 @@ public:
     void setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels);
     void setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels);
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
+    void setSendGainL(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
+    void setSendGainR(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
+    float getSendGainL(std::uint32_t channelId, std::uint32_t outputId) const;
+    float getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);
     void setOutputMuted(std::uint32_t outputId, bool muted);
     void setOutputName(std::uint32_t outputId, const juce::String& name);
