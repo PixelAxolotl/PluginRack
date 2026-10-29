@@ -147,9 +147,27 @@ void MixerComponent::OutputStrip::openEqWindow() {
         eqWindow->toFront(true);
         return;
     }
-    auto* window = new EQWindow("EQ - " + output.name);
-    eqWindow = window;
+    const std::uint32_t outputId = output.id;
     juce::Component::SafePointer<OutputStrip> safe(this);
+    // setOutputEq is keyed by scene-order position (Task 3 asymmetry), so
+    // resolve the position by id at edit time rather than trusting the
+    // cached strip index across open->edit gaps. Engagement follows edits,
+    // same rationale as the channel strip.
+    auto* window = new EQWindow(
+        "EQ - " + output.name, output.eqBands,
+        [safe, outputId](const std::vector<pluginrack::EqBand>& bands) {
+            if (safe == nullptr) return;
+            const auto& outs = safe->audioEngine.getOutputs();
+            for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+                if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                    safe->audioEngine.setOutputEqBypassed(i, false);
+                    safe->audioEngine.setOutputEq(i, bands);
+                    break;
+                }
+            }
+            safe->refreshEqButton();
+        });
+    eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
         safe->closeEqWindow();

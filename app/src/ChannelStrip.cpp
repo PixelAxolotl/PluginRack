@@ -220,9 +220,20 @@ void ChannelStrip::openEqWindow() {
         eqWindow->toFront(true);
         return;
     }
-    auto* window = new EQWindow("EQ - " + channel.name);
-    eqWindow = window;
     juce::Component::SafePointer<ChannelStrip> safe(this);
+    // Bands are snapshotted at open time (same semantics as the title);
+    // every in-window edit lands here. Editing implies engagement: the
+    // engine starts bypassed (scene default eqEnabled=false) and the
+    // window is the app's only engage path, so a drag must be audible.
+    auto* window = new EQWindow(
+        "EQ - " + channel.name, channel.eqBands,
+        [safe](const std::vector<pluginrack::EqBand>& bands) {
+            if (safe == nullptr) return;
+            safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
+            safe->audioEngine.setChannelEq(safe->channel.id, bands);
+            safe->refreshEqButton();
+        });
+    eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
         safe->closeEqWindow();
