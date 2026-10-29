@@ -186,6 +186,9 @@ private:
         // means the capture can be reused even when the device itself offers
         // fewer inputs (missing ones stay silent and are reported).
         int requestedChannels = 0;
+        // Buffer size the capture was opened with. Drivers may clamp to the
+        // nearest supported size, so reuse compares requests, not actuals.
+        int requestedBufferSize = 0;
     };
 
     std::vector<std::unique_ptr<Channel>> channels;

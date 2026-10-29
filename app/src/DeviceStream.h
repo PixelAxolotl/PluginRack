@@ -45,6 +45,9 @@ public:
 
     double getSampleRate() const { return sampleRate; }
     juce::String getError() const { return error; }
+    // Device type the last successful open() selected (e.g. "Windows Audio
+    // (Low Latency Mode)"). Diagnostics only; empty while closed.
+    juce::String getActiveDeviceType() const { return activeDeviceType_; }
 
     int inputChannelCount() const { return inputChannelCount_; }
     // Total inputs the device itself provides; may exceed inputChannelCount(),
@@ -96,6 +99,7 @@ private:
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;
+    juce::String activeDeviceType_;
     int inputChannelCount_ = 0;
     int availableInputCount_ = 0;
     std::atomic<bool> inputUnavailable_{false};
@@ -128,6 +132,9 @@ public:
         return (double) fifo->getNumReady() / (double) juce::jmax(1, capacity);
     }
     juce::String getError() const { return error; }
+    // Device type the last successful open() selected (e.g. "Windows Audio
+    // (Low Latency Mode)"). Diagnostics only; empty while closed.
+    juce::String getActiveDeviceType() const { return activeDeviceType_; }
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
@@ -153,6 +160,7 @@ private:
     int bufferSize = 256;
     double sampleRate = 0.0;
     juce::String error;
+    juce::String activeDeviceType_;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
     std::atomic<std::uint64_t> outputUnderruns{0};

@@ -4,6 +4,17 @@
 #include <cmath>
 #include <map>
 
+namespace {
+// Compact label for the clock description: the registered device type names
+// ("Windows Audio (Low Latency Mode)") are too long for the toolbar.
+juce::String shortDeviceTypeTag(const juce::String& type) {
+    if (type == "Windows Audio (Low Latency Mode)") return "LowLatency";
+    if (type == "Windows Audio (Exclusive Mode)") return "Exclusive";
+    if (type == "Windows Audio") return "Shared";
+    return type;
+}
+}
+
 AudioEngine::AudioEngine() {
     for (int i = 0; i < 3; ++i) addOutput();
     addChannel();
@@ -837,7 +848,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
         const juce::ScopedLock sl(stateLock);
         const auto it = inputCaptures_.find(deviceName);
         if (it != inputCaptures_.end() && it->second.requestedChannels >= needed
-            && (requestedBufferSize_ == 0 || it->second.capture->getDeviceBufferSize() == requestedBufferSize_)) {
+            && it->second.requestedBufferSize == requestedBufferSize_) {
             reuse = it->second.capture;
         }
     }
@@ -876,7 +887,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
                 c->inputError = capture->getInputError();
             }
         }
-        inputCaptures_[deviceName] = SharedInputCapture{capture, needed};
+        inputCaptures_[deviceName] = SharedInputCapture{capture, needed, requestedBufferSize_};
         pruneUnusedCaptures();
     }
     return {};
@@ -956,9 +967,15 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     }
 
     juce::String err;
-    const double rateForValidation = isClock ? 0.0 : currentSampleRate;
-    const auto openErr = newPlayback->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                          rateForValidation, err, requestedBufferSize_);
+    const auto openName = deviceName == "System Default" ? juce::String() : deviceName;
+    // Always offer the engine rate, including for the clock: exclusive-mode
+    // WASAPI can only negotiate when a concrete sample rate is requested.
+    auto openErr = newPlayback->open(openName, currentSampleRate, err, requestedBufferSize_);
+    if (isClock && openErr.isNotEmpty() && currentSampleRate > 0.0) {
+        // Clock device cannot do the engine rate: fall back to its own default
+        // once (old behaviour) before giving up.
+        openErr = newPlayback->open(openName, 0.0, err, requestedBufferSize_);
+    }
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
@@ -1022,8 +1039,14 @@ juce::String AudioEngine::getClockDescription() const {
             const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
                                  ? juce::String((int)std::round(khzValue))
                                  : juce::String(khzValue, 1);
-            return o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
-                   + juce::String(currentBufferSize) + " smp";
+            auto desc = o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
+                      + juce::String(currentBufferSize) + " smp";
+            if (o->output != nullptr) {
+                const auto type = o->output->getActiveDeviceType();
+                if (type.isNotEmpty())
+                    desc += " [" + shortDeviceTypeTag(type) + "]";
+            }
+            return desc;
         }
     }
     return "No output device - click a master strip";

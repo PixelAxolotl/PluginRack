@@ -51,6 +51,15 @@ target_compile_definitions(pluginrack_app PRIVATE
     JUCE_VST3_HOST_CROSS_PLATFORM_UID=1
     JUCE_WEB_BROWSER=0)
 
+# ASIO support: JUCE 9 bundles the Steinberg host headers (asio.h, asiosys.h,
+# iasiodrv.h) next to juce_audio_devices. When they are present enable ASIO so
+# DeviceStream can try the "ASIO" type last in its fallback chain. Never vendor
+# SDK binaries here; without the headers the flag stays off and the UI labels
+# ASIO as unavailable.
+if(EXISTS "${JUCE_DIR}/modules/juce_audio_devices/native/asio/iasiodrv.h")
+    target_compile_definitions(pluginrack_app PRIVATE JUCE_ASIO=1)
+endif()
+
 target_link_libraries(pluginrack_app PRIVATE
     pluginrack_core
     juce::juce_audio_basics

@@ -10,6 +10,139 @@ juce::String formatKhz(double rate) {
     }
     return juce::String(k, 1) + " kHz";
 }
+
+// Device type names registered by JUCE for the WASAPI modes, in the order we
+// prefer them: event-driven shared first, then exclusive, then plain shared.
+// ASIO (only when this build has JUCE_ASIO) is tried last, after the WASAPI
+// modes. "Windows Audio (Exclusive Mode)" is JUCE's exact registered name.
+const juce::String kTypeLowLatency = "Windows Audio (Low Latency Mode)";
+const juce::String kTypeExclusive = "Windows Audio (Exclusive Mode)";
+const juce::String kTypeShared = "Windows Audio";
+const juce::String kTypeAsio = "ASIO";
+
+std::unique_ptr<juce::AudioIODeviceType> createTypeInstance(const juce::String& typeName) {
+    if (typeName == kTypeLowLatency)
+        return std::unique_ptr<juce::AudioIODeviceType>(
+            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::sharedLowLatency));
+    if (typeName == kTypeExclusive)
+        return std::unique_ptr<juce::AudioIODeviceType>(
+            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::exclusive));
+    if (typeName == kTypeShared)
+        return std::unique_ptr<juce::AudioIODeviceType>(
+            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::shared));
+    if (typeName == kTypeAsio)
+        return std::unique_ptr<juce::AudioIODeviceType>(
+            juce::AudioIODeviceType::createAudioIODeviceType_ASIO()); // null unless JUCE_ASIO
+    return {};
+}
+
+// Returns the type of this name registered with the manager, creating and
+// adding it via AudioDeviceManager::addAudioDeviceType when it is missing.
+// Null when the platform cannot provide it (e.g. WASAPI off Windows).
+juce::AudioIODeviceType* ensureTypeRegistered(juce::AudioDeviceManager& manager,
+                                              const juce::String& typeName) {
+    for (auto* type : manager.getAvailableDeviceTypes())
+        if (type->getTypeName() == typeName)
+            return type;
+    auto fresh = createTypeInstance(typeName);
+    if (fresh == nullptr)
+        return nullptr;
+    auto* raw = fresh.get();
+    manager.addAudioDeviceType(std::move(fresh));
+    raw->scanForDevices(); // the manager only scanned the types it had before
+    return raw;
+}
+
+// Legacy open path: wildcard device-name search over all registered types,
+// then rate/buffer applied through setAudioDeviceSetup (rolled back on error).
+// Returns the active type name, or empty with errorOut set on failure.
+juce::String openWithWildcardSearch(juce::AudioDeviceManager& manager,
+                                    const juce::String& preferredDeviceName,
+                                    int numInputChannels,
+                                    int numOutputChannels,
+                                    double engineSampleRate,
+                                    int requestedBufferSize,
+                                    juce::String& errorOut) {
+    auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
+                                  preferredDeviceName, nullptr);
+    if (err.isEmpty() && requestedBufferSize >= 0) {
+        const juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
+        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
+        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
+        err = manager.setAudioDeviceSetup(setup, true);
+        if (err.isNotEmpty())
+            manager.setAudioDeviceSetup(prev, true);
+    }
+    if (err.isNotEmpty()) {
+        errorOut = err;
+        return {};
+    }
+    return manager.getCurrentAudioDeviceType();
+}
+
+// Opens preferredDeviceName (empty = system default) in the first device type
+// from the low-latency chain that actually carries it, passing the full
+// AudioDeviceSetup with the name explicit instead of relying on a wildcard
+// match. A type switch that opens another device is closed again before the
+// chosen setup is applied. On success returns the selected type name; on
+// failure returns empty and sets errorOut.
+juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
+                                   const juce::String& preferredDeviceName,
+                                   bool wantInput,
+                                   int numInputChannels,
+                                   int numOutputChannels,
+                                   double engineSampleRate,
+                                   int requestedBufferSize,
+                                   juce::String& errorOut) {
+    static const juce::StringArray typeOrder { kTypeLowLatency, kTypeExclusive,
+                                               kTypeShared, kTypeAsio };
+
+    juce::String lastError;
+    for (const auto& typeName : typeOrder) {
+        auto* type = ensureTypeRegistered(manager, typeName);
+        if (type == nullptr)
+            continue; // platform without this type (or ASIO built without JUCE_ASIO)
+        const auto deviceNames = type->getDeviceNames(wantInput);
+        const bool hasDevice = preferredDeviceName.isEmpty()
+                                   ? !deviceNames.isEmpty()
+                                   : deviceNames.contains(preferredDeviceName);
+        if (!hasDevice)
+            continue; // no matching device name in this type: fall through
+
+        manager.setCurrentAudioDeviceType(typeName, false);
+        if (manager.getCurrentAudioDeviceType() != typeName)
+            continue;
+        // The type switch probes the type's default device; release it so the
+        // selected endpoint below is the only one that stays open.
+        manager.closeAudioDevice();
+
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        if (wantInput)
+            setup.inputDeviceName = preferredDeviceName;
+        else
+            setup.outputDeviceName = preferredDeviceName;
+        if (requestedBufferSize >= 0) {
+            setup.sampleRate = engineSampleRate; // 0 = driver default
+            setup.bufferSize = requestedBufferSize > 0 ? requestedBufferSize : 0;
+        }
+        auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
+                                      preferredDeviceName, &setup);
+        if (err.isEmpty())
+            return typeName;
+        lastError = err;
+        manager.closeAudioDevice();
+    }
+
+    // Nothing in the chain opened this device (non-WASAPI backends, DirectSound
+    // only names, or every mode refused): keep the legacy behaviour.
+    auto fallback = openWithWildcardSearch(manager, preferredDeviceName, numInputChannels,
+                                           numOutputChannels, engineSampleRate,
+                                           requestedBufferSize, errorOut);
+    if (fallback.isEmpty() && lastError.isNotEmpty())
+        errorOut = lastError;
+    return fallback;
+}
 }
 
 namespace DeviceEnumeration {
@@ -53,28 +186,16 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     inputError.clear();
 
     const int numInputChannels = juce::jmax(2, numChannelsNeeded);
-    auto err = manager.initialise(numInputChannels, 0, nullptr, true, preferredDeviceName, nullptr);
-    if (err.isNotEmpty()) {
-        error = err;
-        errorOut = err;
-        return err;
+    // Pick the lowest-latency device type that carries this device before
+    // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
+    activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ true,
+                                              numInputChannels, 0,
+                                              engineSampleRate, requestedBufferSize, errorOut);
+    if (activeDeviceType_.isEmpty()) {
+        error = errorOut;
+        return errorOut;
     }
 
-    // Apply requested buffer size via AudioDeviceSetup. A non-positive value
-    // means "keep the driver default" -> leave bufferSize untouched.
-    if (requestedBufferSize >= 0) {
-        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
-        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
-        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
-        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
-        juce::String berr = manager.setAudioDeviceSetup(setup, true);
-        if (berr.isNotEmpty()) {
-            manager.setAudioDeviceSetup(prev, true);
-            error = berr;
-            errorOut = berr;
-            return berr;
-        }
-    }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
         const auto msg = juce::String("Could not open input device.");
@@ -98,11 +219,11 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     deviceBufferSize = dev->getCurrentBufferSizeSamples();
     if (deviceBufferSize <= 0) deviceBufferSize = 256;
     if (requestedBufferSize > 0 && deviceBufferSize != requestedBufferSize) {
-        const auto msg = "Device kept " + juce::String(deviceBufferSize) + " samples (requested " + juce::String(requestedBufferSize) + ")";
-        error = msg;
-        errorOut = msg;
-        close();
-        return msg;
+        // setAudioDeviceSetup() clamps to the nearest size from
+        // getAvailableBufferSizes(); accept the rounded value and report it
+        // informationally instead of failing the open.
+        error = "info: device buffer is " + juce::String(deviceBufferSize)
+                + " samples (requested " + juce::String(requestedBufferSize) + ")";
     }
 
     // Keep every physical input the device actually provides. Requested
@@ -135,6 +256,7 @@ void InputCapture::close() {
     manager.closeAudioDevice();
     storage.setSize(0, 0, false, true, false);
     sampleRate = 0.0;
+    activeDeviceType_.clear();
     deviceInputLatency = 0;
     deviceBufferSize = 0;
     inputChannelCount_ = 0;
@@ -262,25 +384,14 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     close();
     error.clear();
 
-    auto err = manager.initialise(0, 2, nullptr, true, preferredDeviceName, nullptr);
-    if (err.isNotEmpty()) {
-        error = err;
-        errorOut = err;
-        return err;
-    }
-    if (requestedBufferSize >= 0) {
-        juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
-        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
-        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
-        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
-        juce::String berr = manager.setAudioDeviceSetup(setup, true);
-        if (berr.isNotEmpty()) {
-            manager.setAudioDeviceSetup(prev, true);
-            error = berr;
-            errorOut = berr;
-            close();
-            return berr;
-        }
+    // Pick the lowest-latency device type that carries this device before
+    // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
+    activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
+                                              0, 2,
+                                              engineSampleRate, requestedBufferSize, errorOut);
+    if (activeDeviceType_.isEmpty()) {
+        error = errorOut;
+        return errorOut;
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
@@ -304,11 +415,11 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     if (requestedBufferSize > 0 && bufferSize != requestedBufferSize) {
-        const auto msg = "Device kept " + juce::String(bufferSize) + " samples (requested " + juce::String(requestedBufferSize) + ")";
-        error = msg;
-        errorOut = msg;
-        close();
-        return msg;
+        // setAudioDeviceSetup() clamps to the nearest size from
+        // getAvailableBufferSizes(); accept the rounded value and report it
+        // informationally instead of failing the open.
+        error = "info: device buffer is " + juce::String(bufferSize)
+                + " samples (requested " + juce::String(requestedBufferSize) + ")";
     }
     deviceOutputLatency = dev->getOutputLatencyInSamples();
     capacity = juce::jmax(1, bufferSize * 2);
@@ -326,6 +437,7 @@ void OutputPlayback::close() {
     fifo.reset();
     storage.setSize(0, 0, false, true, false);
     sampleRate = 0.0;
+    activeDeviceType_.clear();
     deviceOutputLatency = 0;
     latencySamples.store(0, std::memory_order_relaxed);
 }
