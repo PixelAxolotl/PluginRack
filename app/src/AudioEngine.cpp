@@ -312,6 +312,7 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findInsert(channelId, insertId)) {
         insert->bypassed = bypassed;
+        insert->pluginHost.refreshLatencyCache();
         insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
@@ -360,6 +361,7 @@ void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t inser
 void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {
     if (auto* insert = findOutputInsert(outputId, insertId)) {
         insert->bypassed = bypassed;
+        insert->pluginHost.refreshLatencyCache();
         insert->latencySamples = insert->pluginHost.getLatencySamples();
     }
 }
@@ -948,9 +950,17 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     }
 
     int pluginSamples = 0;
+    int maxInsertSamples = 0;
+    std::uint32_t maxInsertId = 0;
+    juce::String maxInsertName;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
         for (const auto& insert : inputChannel->inserts) {
             pluginSamples += insert->latencySamples;
+            if (insert->latencySamples > maxInsertSamples) {
+                maxInsertSamples = insert->latencySamples;
+                maxInsertId = insert->id;
+                maxInsertName = insert->pluginName;
+            }
         }
     }
 
@@ -964,6 +974,11 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                 outputBufferSize = currentBufferSize;
                 for (const auto& insert : output->inserts) {
                     pluginSamples += insert->latencySamples;
+                    if (insert->latencySamples > maxInsertSamples) {
+                        maxInsertSamples = insert->latencySamples;
+                        maxInsertId = insert->id;
+                        maxInsertName = insert->pluginName;
+                    }
                 }
                 valid = true;
                 break;
@@ -973,20 +988,35 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
 
     const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
     const double fifoMs = 0.0;
-    report.inputDeviceMs = inputDeviceSamples / sampleRate * 1000.0 + inputBufferSize / sampleRate * 1000.0;
-    report.outputDeviceMs = outputDeviceSamples / sampleRate * 1000.0 + outputBufferSize / sampleRate * 1000.0;
+    // getLatencySamples() already reports device latency + one device
+    // buffer (see DeviceStream), so the device terms carry that combined
+    // structural delay; the buffer sizes are reported separately below.
+    report.inputDeviceMs = inputDeviceSamples / sampleRate * 1000.0;
+    report.outputDeviceMs = outputDeviceSamples / sampleRate * 1000.0;
     report.pluginMs = pluginSamples / sampleRate * 1000.0;
+    report.maxInsertId = maxInsertId;
+    report.maxInsertName = maxInsertName;
+    report.maxInsertMs = maxInsertSamples / sampleRate * 1000.0;
     report.fifoMs = fifoMs;
     report.totalMs = report.inputDeviceMs + report.pluginMs + report.outputDeviceMs + report.fifoMs;
     report.inputBufferSize = inputBufferSize;
     report.outputBufferSize = outputBufferSize;
     report.sampleRate = sampleRate;
+    // Aggregate the FIFO counters directly: getFifoDiagnostics() takes its
+    // own try-lock on stateLock, which is already held here, so calling it
+    // would always fall through to zeros.
     report.underruns = 0;
     report.overruns = 0;
-    // aggregate fifo counters
-    auto diag = getFifoDiagnostics();
-    report.underruns = diag.outputUnderruns;
-    report.overruns = diag.inputOverruns;
+    for (const auto& entry : inputCaptures_) {
+        if (entry.second.capture != nullptr) {
+            report.overruns += entry.second.capture->getInputOverruns();
+        }
+    }
+    for (const auto& output : outputs) {
+        if (output->output != nullptr) {
+            report.underruns += output->output->getOutputUnderruns();
+        }
+    }
     report.valid = valid;
     report.approximate = true;
     return report;
@@ -1035,6 +1065,16 @@ AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint
         }
     }
     return result;
+}
+
+bool AudioEngine::openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice) {
+    fullDuplex_ = false;
+    if (inputDevice.isEmpty() || outputDevice.isEmpty()) return false;
+    if (inputDevice != outputDevice) return false;
+    // Same device: use existing separate streams (device provides both directions).
+    // Single render is guaranteed by clockOutputId (only the clock output renders).
+    fullDuplex_ = true;
+    return true;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {

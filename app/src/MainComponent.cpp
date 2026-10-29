@@ -53,17 +53,32 @@ MainComponent::MainComponent()
         menu.addSeparator();
         menu.addSectionHeader("Audio");
         menu.addItem(audioEngine.getClockDescription(), false, false, [] {});
+        menu.addSectionHeader("Latency (est.)");
         const auto report = audioEngine.getLatencyReport();
-        juce::String latText;
-        if (report.valid) {
-            latText = "Input " + juce::String((int)std::round(report.inputDeviceMs)) + " ms / Plugins " +
-                      juce::String((int)std::round(report.pluginMs)) + " ms / Output " +
-                      juce::String((int)std::round(report.outputDeviceMs)) + " ms / Total " +
-                      juce::String((int)std::round(report.totalMs)) + " ms (est.)";
+        if (!report.valid) {
+            menu.addItem("No output device", false, false, [] {});
         } else {
-            latText = "No output device";
+            const auto ms = [](double v) { return juce::String((int)std::round(v)) + " ms"; };
+            menu.addItem("Total ~" + ms(report.totalMs), false, false, [] {});
+            menu.addItem("Input device " + ms(report.inputDeviceMs) + " (buffer "
+                             + juce::String(report.inputBufferSize) + " smp)",
+                         false, false, [] {});
+            juce::String pluginText = "Plugins " + ms(report.pluginMs);
+            if (report.maxInsertId != 0) {
+                pluginText += " (max " + report.maxInsertName + " " + ms(report.maxInsertMs) + ")";
+            }
+            menu.addItem(pluginText, false, false, [] {});
+            menu.addItem("Output device " + ms(report.outputDeviceMs) + " (buffer "
+                             + juce::String(report.outputBufferSize) + " smp)",
+                         false, false, [] {});
+            menu.addItem("FIFO " + ms(report.fifoMs), false, false, [] {});
+            if (report.underruns > 0 || report.overruns > 0) {
+                menu.addItem("Glitches: " + juce::String((juce::int64)report.overruns)
+                                 + " overruns / " + juce::String((juce::int64)report.underruns)
+                                 + " underruns",
+                             false, false, [] {});
+            }
         }
-        menu.addItem(latText, false, false, [] {});
 
         menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(menuButton));
     };
@@ -84,20 +99,27 @@ void MainComponent::timerCallback() {
         latencyLabel.setTooltip({});
         return;
     }
-    // Smooth the readout: the FIFO queue-depth term is instantaneous and
-    // spikes during startup/transients. EMA keeps the header stable live.
-    if (smoothedLatencyMs < 0.0) smoothedLatencyMs = report.totalMs;
+    // A live glitch counter overrides smoothing: snap to the raw total so
+    // the EMA never hides an active underrun/overrun.
+    const bool glitch = (report.underruns + report.overruns) > 0;
+    if (glitch || smoothedLatencyMs < 0.0) smoothedLatencyMs = report.totalMs;
     else smoothedLatencyMs += 0.25 * (report.totalMs - smoothedLatencyMs);
-    latencyLabel.setText("LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms (est.)",
-                         juce::dontSendNotification);
+    juce::String latText = "LAT ~" + juce::String((int)std::round(smoothedLatencyMs)) + " ms (est.)";
+    if (glitch) latText += " !";
+    latencyLabel.setText(latText, juce::dontSendNotification);
     juce::Colour colour = theme::dim();
-    if (smoothedLatencyMs > 60.0) colour = theme::red();
+    if (glitch) colour = theme::red();
+    else if (smoothedLatencyMs > 60.0) colour = theme::red();
     else if (smoothedLatencyMs > 30.0) colour = theme::amber();
     latencyLabel.setColour(juce::Label::textColourId, colour);
     latencyLabel.setTooltip("Estimated (approx.) input to output: input " +
-                            juce::String((int)std::round(report.inputDeviceMs)) + " ms + plugins " +
+                            juce::String((int)std::round(report.inputDeviceMs)) + " ms (buffer " +
+                            juce::String(report.inputBufferSize) + " smp) + plugins " +
                             juce::String((int)std::round(report.pluginMs)) + " ms + output " +
-                            juce::String((int)std::round(report.outputDeviceMs)) + " ms");
+                            juce::String((int)std::round(report.outputDeviceMs)) + " ms (buffer " +
+                            juce::String(report.outputBufferSize) + " smp) + FIFO " +
+                            juce::String((int)std::round(report.fifoMs)) + " ms" +
+                            (glitch ? " - dropouts detected" : ""));
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -137,7 +159,7 @@ void MainComponent::resized() {
     hr.removeFromRight(4);
     saveButton.setBounds(hr.removeFromRight(60));
     hr.removeFromRight(8);
-    latencyLabel.setBounds(hr.removeFromRight(90));
+    latencyLabel.setBounds(hr.removeFromRight(140));
 
     mixer.setBounds(area);
 }
