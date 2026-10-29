@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "pluginrack/EqEngine.h"
 #include "pluginrack/Types.h"
 
 namespace pluginrack {
@@ -29,6 +30,8 @@ struct Channel {
     bool muted = false;
     bool soloed = false;
     std::vector<InsertSlot> inserts;
+    bool eqEnabled = false;
+    std::vector<EqBand> eqBands = defaultSixBands();
 
     bool operator==(const Channel&) const = default;
 };
@@ -41,6 +44,8 @@ struct Output {
     ChannelLayout layout = ChannelLayout::Stereo;
     bool flipped = false;
     std::vector<InsertSlot> inserts;
+    bool eqEnabled = false;
+    std::vector<EqBand> eqBands = defaultSixBands();
 
     bool operator==(const Output&) const = default;
 };
@@ -54,7 +59,7 @@ struct Route {
 };
 
 struct Scene {
-    int schemaVersion = 2;
+    int schemaVersion = 3;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;

@@ -82,10 +82,64 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 3;
+    scene.schemaVersion = 4;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
+}
+
+TEST_CASE("v3 scene with default flat EQ is valid") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 3;
+    scene.channels.front().eqEnabled = true;
+    scene.outputs.front().eqEnabled = true;
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("scene rejects out-of-range eq band parameters") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 3;
+    scene.channels.front().eqEnabled = true;
+
+    SECTION("freq below floor") {
+        scene.channels.front().eqBands[2].freqHz = 5.0f;
+    }
+    SECTION("freq above ceiling") {
+        scene.channels.front().eqBands[2].freqHz = 25000.0f;
+    }
+    SECTION("non-finite freq") {
+        scene.channels.front().eqBands[2].freqHz = std::numeric_limits<float>::quiet_NaN();
+    }
+    SECTION("gain above ceiling") {
+        scene.channels.front().eqBands[0].gainDb = 16.0f;
+    }
+    SECTION("gain below floor") {
+        scene.channels.front().eqBands[0].gainDb = -16.0f;
+    }
+    SECTION("Q below floor") {
+        scene.channels.front().eqBands[4].q = 0.05f;
+    }
+    SECTION("Q above ceiling") {
+        scene.channels.front().eqBands[4].q = 21.0f;
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].entityId == 1);
+    REQUIRE(errors[0].message.find("eqBands") != std::string::npos);
+}
+
+TEST_CASE("scene rejects out-of-range output eq bands") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 3;
+    scene.outputs.front().eqEnabled = true;
+    scene.outputs.front().eqBands[1].gainDb = 20.0f;
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].entityId == 1);
+    REQUIRE(errors[0].message.find("eqBands") != std::string::npos);
 }
 
 TEST_CASE("zero entity ids are rejected") {
