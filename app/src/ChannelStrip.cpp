@@ -32,19 +32,50 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     });
     removeChannelButton.setTooltip("Remove this channel");
     addAndMakeVisible(removeChannelButton);
+
+    splitButton.setFontSize(8.0f);
+    splitButton.setClickAction([this] { splitIntoMonoChannels(); });
+    splitButton.setTooltip("Split into mono channels \xe2\x80\x94 one strip per physical input");
+    addAndMakeVisible(splitButton);
+
     deviceControl.setOnClick([this] {
         DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName,
                                   audioEngine.getAvailableInputDevices(),
                                   [this](juce::String chosen) {
             const auto err = audioEngine.setChannelInputDevice(channel.id, chosen);
-            deviceControl.setDeviceName(channel.inputDeviceName);
-            deviceControl.setError(channel.inputError);
+            refreshInput();
             if (err.isNotEmpty()) {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
             }
         });
     });
     addAndMakeVisible(deviceControl);
+
+    modeCombo.addItem("Mono", 1);
+    modeCombo.addItem("Stereo", 2);
+    for (int i = 1; i <= 16; ++i) {
+        inputComboA.addItem(juce::String(i), i);
+        inputComboB.addItem(juce::String(i), i);
+    }
+    inputComboA.setTooltip("Physical input for this channel (1-based)");
+    inputComboB.setTooltip("Physical input for the right side (1-based)");
+    const auto styleCombo = [this](juce::ComboBox& combo) {
+        combo.setColour(juce::ComboBox::backgroundColourId, theme::control());
+        combo.setColour(juce::ComboBox::textColourId, theme::text());
+        combo.setColour(juce::ComboBox::arrowColourId, theme::dim());
+        combo.setColour(juce::ComboBox::outlineColourId, theme::border());
+        combo.onChange = [this] { applyInputMapping(); };
+        addAndMakeVisible(combo);
+    };
+    styleCombo(modeCombo);
+    styleCombo(inputComboA);
+    styleCombo(inputComboB);
+
+    inputErrorLabel.setFont(juce::Font(juce::FontOptions(9.0f)));
+    inputErrorLabel.setJustificationType(juce::Justification::centredLeft);
+    inputErrorLabel.setColour(juce::Label::textColourId, theme::red());
+    inputErrorLabel.setVisible(false);
+    addAndMakeVisible(inputErrorLabel);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -141,6 +172,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     refreshInserts();
     refreshRouting();
+    refreshInput();
 }
 
 void ChannelStrip::resized() {
@@ -149,12 +181,28 @@ void ChannelStrip::resized() {
     // header row
     auto headerRow = area.removeFromTop(22);
     auto btnArea = headerRow.removeFromRight(22);
+    auto splitArea = headerRow.removeFromRight(48);
     channelLabel.setBounds(headerRow);
     removeChannelButton.setBounds(btnArea);
+    splitButton.setBounds(splitArea);
     area.removeFromTop(4);
 
     deviceControl.setBounds(area.removeFromTop(40));
     area.removeFromTop(4);
+
+    // input mapping row: [Mono/Stereo] .... [In A][In B]
+    auto inputRow = area.removeFromTop(20);
+    inputRow.removeFromTop(1);
+    modeCombo.setBounds(inputRow.removeFromLeft(58));
+    if (inputComboB.isVisible()) {
+        inputComboB.setBounds(inputRow.removeFromRight(34));
+        inputRow.removeFromRight(4);
+    }
+    inputComboA.setBounds(inputRow.removeFromRight(34));
+    if (inputErrorLabel.isVisible()) {
+        inputErrorLabel.setBounds(area.removeFromTop(14));
+    }
+    area.removeFromTop(2);
 
     vstHeader.setBounds(area.removeFromTop(14));
     // slots
@@ -229,6 +277,84 @@ void ChannelStrip::refreshRouting() {
         routingButtons[i]->setEnabled(enabled);
         routingButtons[i]->setToggleState(on, juce::dontSendNotification);
     }
+}
+
+void ChannelStrip::refreshInput() {
+    const bool mono = channel.layout == pluginrack::ChannelLayout::Mono;
+    modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
+    const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
+    inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
+    const int b = channel.inputChannels.size() > 1 ? channel.inputChannels[1] + 1 : a;
+    inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
+    inputComboB.setVisible(!mono);
+    deviceControl.setDeviceName(channel.inputDeviceName);
+    deviceControl.setError(channel.inputError);
+    inputErrorLabel.setText(channel.inputError, juce::dontSendNotification);
+    inputErrorLabel.setVisible(channel.inputError.isNotEmpty());
+    resized();
+}
+
+void ChannelStrip::applyInputMapping() {
+    const bool mono = modeCombo.getSelectedId() == 1;
+    const int a = juce::jmax(0, juce::jmax(1, inputComboA.getSelectedId()) - 1);
+    std::vector<int> mapping;
+    if (mono) {
+        mapping = {a};
+    } else {
+        int b = juce::jmax(0, juce::jmax(1, inputComboB.getSelectedId()) - 1);
+        if (b == a) b = (a == 0 ? 1 : 0);
+        mapping = {a, b};
+    }
+    audioEngine.setChannelLayout(channel.id,
+                                 mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo);
+    audioEngine.setChannelInputChannels(channel.id, mapping);
+    refreshInput();
+}
+
+void ChannelStrip::splitIntoMonoChannels() {
+    const auto device = channel.inputDeviceName;
+    const int inputs = channel.input != nullptr ? channel.input->inputChannelCount() : 0;
+    if (device.isEmpty() || inputs < 2) {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::MessageBoxIconType::InfoIcon, "PluginRack",
+            "Split needs an input device with at least two available physical inputs.");
+        return;
+    }
+
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    juce::AlertWindow::showAsync(
+        juce::MessageBoxOptions()
+            .withIconType(juce::MessageBoxIconType::QuestionIcon)
+            .withTitle("PluginRack")
+            .withMessage("Split into mono channels? The " + juce::String(device) + " device has "
+                          + juce::String(inputs) + " inputs; each gets its own mono strip.")
+            .withButton("Split")
+            .withButton("Cancel"),
+        [safe, device, inputs](int result) {
+            if (result == 0 || safe == nullptr) return;
+            auto& engine = safe->audioEngine;
+            const std::uint32_t firstId = safe->channel.id;
+            engine.setChannelLayout(firstId, pluginrack::ChannelLayout::Mono);
+            engine.setChannelInputChannels(firstId, {0});
+            engine.setChannelName(firstId, "Input 1");
+            for (int i = 1; i < inputs; ++i) {
+                engine.addChannel();
+                const auto& chans = engine.getChannels();
+                if (chans.empty()) break;
+                const std::uint32_t newId = chans.back()->id;
+                engine.setChannelName(newId, "Input " + juce::String(i + 1));
+                engine.setChannelLayout(newId, pluginrack::ChannelLayout::Mono);
+                engine.setChannelInputChannels(newId, {i});
+                const auto err = engine.setChannelInputDevice(newId, device);
+                if (err.isNotEmpty()) {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                }
+            }
+            // Copy the callback: this strip is destroyed when the mixer rebuilds.
+            auto callback = safe->rebuildCallback;
+            juce::MessageManager::callAsync([callback] { if (callback) callback(); });
+        });
 }
 
 void ChannelStrip::openPicker() {

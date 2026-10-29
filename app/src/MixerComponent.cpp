@@ -248,6 +248,11 @@ void MixerComponent::rebuild() {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
+        s->rebuildCallback = [this] {
+            // Strips call this after engine-side structure edits (e.g. split).
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
         stripContent.addAndMakeVisible(*s);
     }
 
