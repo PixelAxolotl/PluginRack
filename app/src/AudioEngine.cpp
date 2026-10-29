@@ -430,6 +430,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedChannel.id = channel->id;
         savedChannel.name = channel->name.toStdString();
         savedChannel.layout = pluginrack::ChannelLayout::Stereo;
+        savedChannel.inputChannels = {0, 1};
         savedChannel.gainDb = channel->gainDb.get();
         savedChannel.pan = channel->pan.get();
         savedChannel.muted = channel->muted.get();

@@ -87,6 +87,7 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"sourceKind", channel.sourceKind},
         {"sourceDeviceId", channel.sourceDeviceId},
         {"layout", channel.layout},
+        {"inputChannels", channel.inputChannels},
         {"gainDb", channel.gainDb},
         {"pan", channel.pan},
         {"muted", channel.muted},
@@ -105,6 +106,15 @@ void from_json(const nlohmann::json& j, Channel& channel) {
     channel.sourceDeviceId = j.value("sourceDeviceId", std::string{});
     if (j.contains("layout")) {
         j.at("layout").get_to(channel.layout);
+    }
+    if (j.contains("inputChannels")) {
+        j.at("inputChannels").get_to(channel.inputChannels);
+    } else {
+        if (channel.layout == ChannelLayout::Stereo) {
+            channel.inputChannels = {0, 1};
+        } else {
+            channel.inputChannels = {0};
+        }
     }
     channel.gainDb = j.value("gainDb", 0.0f);
     channel.pan = j.value("pan", 0.0f);

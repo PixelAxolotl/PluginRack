@@ -1,6 +1,7 @@
 #include "pluginrack/SceneValidator.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
@@ -18,6 +19,18 @@ constexpr float kMaxPan = 1.0f;
 bool isSupportedSampleRate(double sampleRate) {
     return sampleRate == 44100.0 || sampleRate == 48000.0 || sampleRate == 88200.0 ||
            sampleRate == 96000.0;
+}
+
+std::string describeMapping(const std::vector<int>& mapping) {
+    std::string text = "[";
+    for (std::size_t i = 0; i < mapping.size(); ++i) {
+        if (i != 0) {
+            text += ", ";
+        }
+        text += std::to_string(mapping[i]);
+    }
+    text += "]";
+    return text;
 }
 
 } // namespace
@@ -65,6 +78,21 @@ std::vector<SceneError> validate(const Scene& scene) {
                                   "channel " + std::to_string(channel.id) +
                                       " insert slot id must not be zero"});
             }
+        }
+        if (channel.layout == ChannelLayout::Mono) {
+            if (channel.inputChannels.size() != 1 || channel.inputChannels[0] < 0) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
+                                  "channel " + std::to_string(channel.id) + " inputChannels " +
+                                      describeMapping(channel.inputChannels) +
+                                      " must contain exactly one non-negative index"});
+            }
+        } else if (channel.inputChannels.size() != 2 || channel.inputChannels[0] < 0 ||
+                   channel.inputChannels[1] < 0 ||
+                   channel.inputChannels[0] == channel.inputChannels[1]) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
+                              "channel " + std::to_string(channel.id) + " inputChannels " +
+                                  describeMapping(channel.inputChannels) +
+                                  " must contain exactly two distinct non-negative indexes"});
         }
     }
 

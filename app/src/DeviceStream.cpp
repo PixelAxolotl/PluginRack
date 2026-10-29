@@ -45,11 +45,14 @@ InputCapture::~InputCapture() {
 
 juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                double engineSampleRate,
+                               int numChannelsNeeded,
                                juce::String& errorOut) {
     close();
     error.clear();
+    inputError.clear();
 
-    auto err = manager.initialise(2, 0, nullptr, true, preferredDeviceName, nullptr);
+    const int numInputChannels = juce::jmax(2, numChannelsNeeded);
+    auto err = manager.initialise(numInputChannels, 0, nullptr, true, preferredDeviceName, nullptr);
     if (err.isNotEmpty()) {
         error = err;
         errorOut = err;
@@ -77,9 +80,22 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     deviceInputLatency = dev->getInputLatencyInSamples();
     deviceBufferSize = dev->getCurrentBufferSizeSamples();
     if (deviceBufferSize <= 0) deviceBufferSize = 256;
+
+    // Keep every physical input the device actually provides. Requested
+    // indexes it does not have are reported via getInputError() and stay
+    // silent — never remapped onto input 0.
+    inputChannelCount_ = juce::jmin(numInputChannels, dev->getCurrentActiveInputChannels().size());
+    if (inputChannelCount_ < numChannelsNeeded) {
+        juce::StringArray missing;
+        for (int i = inputChannelCount_ + 1; i <= numChannelsNeeded; ++i) missing.add(juce::String(i));
+        inputError = "Missing input" + (numChannelsNeeded - inputChannelCount_ > 1 ? juce::String("s ") : juce::String(" "))
+                     + missing.joinBy(", ");
+        inputUnavailable_.store(true, std::memory_order_relaxed);
+    }
+
     capacity = juce::jmax(1, (int)std::round(sampleRate * 2.0));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
-    storage.setSize(2, capacity);
+    storage.setSize(inputChannelCount_, capacity);
     storage.clear();
 
     manager.addAudioCallback(this);
@@ -94,6 +110,8 @@ void InputCapture::close() {
     sampleRate = 0.0;
     deviceInputLatency = 0;
     deviceBufferSize = 0;
+    inputChannelCount_ = 0;
+    inputUnavailable_.store(false, std::memory_order_relaxed);
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
