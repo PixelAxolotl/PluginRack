@@ -221,6 +221,10 @@ void ChannelStrip::openEqWindow() {
         return;
     }
     juce::Component::SafePointer<ChannelStrip> safe(this);
+    // Live device rate so the curve's magnitude maths matches what the engine
+    // applies; getLatencyReport().sampleRate is the UI-thread convention
+    // already used for the latency readout.
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
     // Bands are snapshotted at open time (same semantics as the title);
     // every in-window edit lands here. Editing implies engagement: the
     // engine starts bypassed (scene default eqEnabled=false) and the
@@ -232,7 +236,8 @@ void ChannelStrip::openEqWindow() {
             safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
             safe->audioEngine.setChannelEq(safe->channel.id, bands);
             safe->refreshEqButton();
-        });
+        },
+        liveRateHz);
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

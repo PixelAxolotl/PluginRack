@@ -49,6 +49,8 @@ private:
 // open time (same semantics as the title), and every edit funnels through
 // applyBands, which the owner wires to setChannelEq/setOutputEq plus
 // refreshEqButton so the strip's amber state tracks in-window changes.
+// sampleRateHz is the owner's live device rate at open, injected into the
+// curve's magnitude maths so the drawn response matches the engine's.
 class EQWindow final : public juce::DocumentWindow {
 public:
     static constexpr int kWidth = 560;
@@ -56,7 +58,8 @@ public:
 
     EQWindow(const juce::String& title,
              const std::vector<pluginrack::EqBand>& initialBands,
-             std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands);
+             std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands,
+             double sampleRateHz);
 
     void closeButtonPressed() override;
     void resized() override;

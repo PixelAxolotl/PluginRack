@@ -2,13 +2,15 @@
 
 EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
-                   std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback)
+                   std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback,
+                   double sampleRateHz)
     : juce::DocumentWindow(title, theme::strip(), juce::DocumentWindow::allButtons),
       applyBands(std::move(applyBandsCallback)) {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
     setResizeLimits(400, 320, 1000, 700);
 
+    curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
     curve.setBands(initialBands);
     curve.onBandsChanged = [this] {
         if (applyBands) applyBands(curve.getBands());

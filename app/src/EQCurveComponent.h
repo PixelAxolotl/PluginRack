@@ -28,8 +28,19 @@ public:
     void setBands(const std::vector<pluginrack::EqBand>& newBands);
     const std::vector<pluginrack::EqBand>& getBands() const { return bands; }
 
+    // Reference rate for the biquad magnitude maths. EQWindow injects the
+    // engine's live device rate at open; 48000 is only the pre-injection
+    // fallback. Non-positive rates are ignored.
+    void setSampleRateHz(double rateHz);
+    double getSampleRateHz() const { return sampleRateHz; }
+
     int getSelectedBand() const { return selectedBand; }
     void setSelectedBand(int index);
+
+    // Combined magnitude in dB that the yellow curve would show at hz, given
+    // the current bands and the reference rate: exactly the maths paint()
+    // draws, exposed for verification (sine-vs-curve checks).
+    double magnitudeDbAt(double hz) const;
 
     // Fires after any user edit (node drag) so EQWindow can push the bands
     // to the audio engine and refresh the owning strip's EQ button.
@@ -60,9 +71,9 @@ private:
     std::vector<pluginrack::EqBand> bands{pluginrack::defaultSixBands()};
     int selectedBand = 2; // first peak band: a meaningful default selection
     int dragBand = -1;    // band being dragged this gesture, -1 when idle
-    // Curve reference rate. The app engine runs at 48 kHz by default and the
-    // normalised magnitude response is visually indistinguishable at 44.1;
-    // re-querying the engine per repaint would need a lock. UI-thread only.
+    // Curve reference rate: the live device rate injected by EQWindow at
+    // open (setSampleRateHz). 48000 is the pre-injection fallback matching
+    // the engine default; non-positive rates never land here. UI-thread only.
     double sampleRateHz = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQCurveComponent)

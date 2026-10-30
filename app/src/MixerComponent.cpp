@@ -149,6 +149,8 @@ void MixerComponent::OutputStrip::openEqWindow() {
     }
     const std::uint32_t outputId = output.id;
     juce::Component::SafePointer<OutputStrip> safe(this);
+    // Live device rate for the curve's magnitude maths (see ChannelStrip).
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
     // setOutputEq is keyed by scene-order position (Task 3 asymmetry), so
     // resolve the position by id at edit time rather than trusting the
     // cached strip index across open->edit gaps. Engagement follows edits,
@@ -166,7 +168,8 @@ void MixerComponent::OutputStrip::openEqWindow() {
                 }
             }
             safe->refreshEqButton();
-        });
+        },
+        liveRateHz);
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

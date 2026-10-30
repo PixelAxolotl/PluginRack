@@ -52,6 +52,13 @@ void EQCurveComponent::setBands(const std::vector<pluginrack::EqBand>& newBands)
     repaint();
 }
 
+void EQCurveComponent::setSampleRateHz(double rateHz) {
+    if (!(rateHz > 0.0)) return; // non-positive ignored: keep the fallback
+    if (sampleRateHz == rateHz) return;
+    sampleRateHz = rateHz;
+    repaint();
+}
+
 void EQCurveComponent::setSelectedBand(int index) {
     if (index < 0 || index >= static_cast<int>(bands.size())) return;
     if (index == selectedBand) return;
@@ -166,6 +173,19 @@ double EQCurveComponent::bandShapeDb(const pluginrack::EqBand& band,
     return 20.0 * std::log10(juce::jmax(1e-12, numMag / denMag));
 }
 
+double EQCurveComponent::magnitudeDbAt(double hz) const {
+    // Same active-band rule and rate the yellow curve is painted with.
+    bool anySolo = false;
+    for (const auto& band : bands) {
+        if (band.solo) { anySolo = true; break; }
+    }
+    double totalDb = 0.0;
+    for (const auto& band : bands) {
+        if (bandActive(band, anySolo)) totalDb += bandShapeDb(band, sampleRateHz, hz);
+    }
+    return totalDb;
+}
+
 double EQCurveComponent::xToFreq(float x) const {
     const double t = juce::jlimit(0.0, 1.0, static_cast<double>(x) / static_cast<double>(juce::jmax(1, getWidth())));
     return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, t);
@@ -215,26 +235,15 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
     }
 
-    // --- combined magnitude (yellow): dB sum of the active bands' responses.
-    bool anySolo = false;
-    for (const auto& band : bands) {
-        if (band.solo) { anySolo = true; break; }
-    }
-
+    // --- combined magnitude (yellow): dB sum of the active bands' responses,
+    // via the same magnitudeDbAt the sine-vs-curve verification checks.
     auto paintCurve = [&](int index, juce::Colour colour, float thickness, bool fill) {
         juce::Path curve;
-        const int count = static_cast<int>(bands.size());
         for (int x = 0; x <= w; x += kCurveStepPx) {
             const double f = xToFreq(static_cast<float>(x));
-            double totalDb = 0.0;
-            if (index >= 0) {
-                totalDb = bandShapeDb(bands[static_cast<std::size_t>(index)], sampleRateHz, f);
-            } else {
-                for (int i = 0; i < count; ++i) {
-                    const pluginrack::EqBand& band = bands[static_cast<std::size_t>(i)];
-                    if (bandActive(band, anySolo)) totalDb += bandShapeDb(band, sampleRateHz, f);
-                }
-            }
+            const double totalDb = (index >= 0)
+                ? bandShapeDb(bands[static_cast<std::size_t>(index)], sampleRateHz, f)
+                : magnitudeDbAt(f);
             const float y = gainToY(juce::jlimit(-kMaxGainDb * 1.4, kMaxGainDb * 1.4, totalDb));
             if (x == 0) curve.startNewSubPath(static_cast<float>(x), y);
             else curve.lineTo(static_cast<float>(x), y);
