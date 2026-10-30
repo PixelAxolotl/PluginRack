@@ -138,10 +138,10 @@ private:
     MiniButton rtaMinusButton{"-"};
     MiniButton rtaPlusButton{"+"};
     juce::Label rtaOffsetLabel{"", "+12"};
-    static constexpr float kRtaOffsetMinDb = -30.0f;
-    static constexpr float kRtaOffsetMaxDb = 30.0f;
+    static constexpr float kRtaOffsetMinDb = -60.0f;
+    static constexpr float kRtaOffsetMaxDb = 60.0f;
     static constexpr float kRtaOffsetStepDb = 3.0f;
-    static constexpr float kDefaultRtaOffsetDb = 12.0f;
+    static constexpr float kDefaultRtaOffsetDb = 24.0f;
     void setRtaOffsetDb(float offsetDb);
     int analyzerMode = kAnalyzerOff;
     bool reducedToFps30 = false;
@@ -152,6 +152,10 @@ private:
     std::vector<float> tapL;
     std::vector<float> tapR;
     std::vector<float> spectrumDb;  // FFT bins 0..N/2, dBFS, fed to the curve
+    // Smoothed copy of spectrumDb (fast attack, slow release per bin) so
+    // music/noise reads as a steady Pro-Q-style trace instead of flicker.
+    // Same size as spectrumDb, UI thread only, allocated at construction.
+    std::vector<float> spectrumAvg;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQWindow)
 };

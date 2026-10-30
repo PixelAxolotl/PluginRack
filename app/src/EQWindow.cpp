@@ -132,6 +132,7 @@ EQWindow::EQWindow(const juce::String& title,
     tapL.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
     tapR.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
     spectrumDb.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, 0.0f);
+    spectrumAvg.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, -100.0f);
     analyzerPreButton.setTooltip("Analyzer: spectrum before the EQ tap");
     analyzerPreButton.setClickAction([this] { setAnalyzerMode(kAnalyzerPre); });
     Component::addAndMakeVisible(analyzerPreButton);
@@ -226,7 +227,16 @@ void EQWindow::timerCallback() {
         const float mag = fftScratch[bin] * kNorm;
         spectrumDb[bin] = juce::jmax(-100.0f, 20.0f * std::log10(juce::jmax(1e-5f, mag)));
     }
-    curve.setSpectrum(spectrumDb.data(), static_cast<int>(spectrumDb.size()));
+    // Pro-Q-style ballistics: fast attack so onsets register instantly, slow
+    // release so the trace integrates instead of flickering. The smoothed
+    // copy is what the curve draws, so a -6 dBFS tone still lands on the
+    // -6 dB gridline while broadband music reads as a steady spectrum.
+    for (std::size_t bin = 0; bin < spectrumDb.size(); ++bin) {
+        const float fresh = spectrumDb[bin];
+        float& held = spectrumAvg[bin];
+        held += (fresh - held) * (fresh > held ? 0.6f : 0.15f);
+    }
+    curve.setSpectrum(spectrumAvg.data(), static_cast<int>(spectrumAvg.size()));
 
     // Overload auto-drop (spec: never drops audio, only frames): if the pull
     // + FFT alone costs more than half the 30 fps budget five ticks running,
