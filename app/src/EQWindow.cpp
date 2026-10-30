@@ -1,5 +1,7 @@
 #include "EQWindow.h"
 
+#include <cmath>
+
 EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
                    std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback,
@@ -116,8 +118,129 @@ EQWindow::EQWindow(const juce::String& title,
 
     syncControls();
 
+    // --- analyzer (Task 6): one FFT per open window, everything allocated
+    // here on the message thread so the timer callback never touches the
+    // heap. A Hann window keeps spectral leakage down; the tap rings arrive
+    // through pullAnalyzerTap, wired by the owning strip.
+    analyzerFft = std::make_unique<juce::dsp::FFT>(13); // 2^13 = 8192
+    hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const double t = juce::MathConstants<double>::twoPi * i / kAnalyzerFftSize;
+        hannCoeffs[static_cast<std::size_t>(i)] = static_cast<float>(0.5 - 0.5 * std::cos(t));
+    }
+    fftScratch.assign(static_cast<std::size_t>(kAnalyzerFftSize) * 2, 0.0f);
+    tapL.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
+    tapR.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
+    spectrumDb.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, 0.0f);
+    spectrumAvg.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, -100.0f);
+    // Analyzer mode is fixed to Post (no Pre/Post/Off switch): the window
+    // always shows the post-EQ spectrum. The owning strip starts it via
+    // setAnalyzerMode after wiring the tap callbacks, because the ctor runs
+    // before those callbacks exist and starting it here would address no one
+    // (this was the "dead RTA until mode toggle" bug).
+    analyzerLabel.setJustificationType(juce::Justification::centredRight);
+    analyzerLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    analyzerLabel.setColour(juce::Label::textColourId, theme::dim());
+    Component::addAndMakeVisible(analyzerLabel);
+    // RTA display offset (Task 6 follow-up): +/- buttons shift the analyzer
+    // fill up/down in the view so quiet program material can be lifted into
+    // the +/-15 dB window. Session-only; the engine never sees it.
+    rtaMinusButton.setTooltip("RTA display: shift the analyzer down");
+    rtaMinusButton.setClickAction([this] {
+        setRtaOffsetDb(curve.getSpectrumOffsetDb() - kRtaOffsetStepDb);
+    });
+    Component::addAndMakeVisible(rtaMinusButton);
+    rtaPlusButton.setTooltip("RTA display: shift the analyzer up");
+    rtaPlusButton.setClickAction([this] {
+        setRtaOffsetDb(curve.getSpectrumOffsetDb() + kRtaOffsetStepDb);
+    });
+    Component::addAndMakeVisible(rtaPlusButton);
+    rtaOffsetLabel.setJustificationType(juce::Justification::centred);
+    rtaOffsetLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    rtaOffsetLabel.setColour(juce::Label::textColourId, theme::dim());
+    rtaOffsetLabel.setTooltip("RTA display offset in dB (view only)");
+    Component::addAndMakeVisible(rtaOffsetLabel);
+    setRtaOffsetDb(kDefaultRtaOffsetDb);
+
     centreWithSize(kWidth, kHeight);
     setVisible(true);
+}
+
+EQWindow::~EQWindow() {
+    stopTimer();
+    if (setAnalyzerTapMode) setAnalyzerTapMode(kAnalyzerOff); // silence the tap
+}
+
+void EQWindow::setAnalyzerMode(int mode) {
+    // Fixed to Post by the owners (no mode switch in the UI): the strip
+    // calls this once after wiring the tap callbacks. Kept as a function
+    // (rather than inlining) so the start/stop/tap-gating stays in one place.
+    if (mode == analyzerMode) return;
+    analyzerMode = mode;
+    if (setAnalyzerTapMode) setAnalyzerTapMode(mode);
+    if (mode == kAnalyzerOff) {
+        stopTimer();
+        curve.setSpectrum(nullptr, 0); // Off hides the grey fill
+        return;
+    }
+    startTimerHz(reducedToFps30 ? 30 : 60); // spec: 30-60 fps; timerCallback slows to 30 on overload
+}
+
+void EQWindow::setRtaOffsetDb(float offsetDb) {
+    const float clamped = juce::jlimit(kRtaOffsetMinDb, kRtaOffsetMaxDb, offsetDb);
+    curve.setSpectrumOffsetDb(clamped);
+    const float shown = curve.getSpectrumOffsetDb();
+    rtaOffsetLabel.setText((shown >= 0.0f ? "+" : "") + juce::String(static_cast<int>(shown)),
+                           juce::dontSendNotification);
+}
+
+void EQWindow::timerCallback() {
+    const auto startTicks = juce::Time::getHighResolutionTicks();
+
+    // Pull the ring copy (a plain memcpy out of preallocated engine memory)
+    // and mix down to mono through the Hann window. The back half of the
+    // scratch is FFT workspace; only the first N floats are input.
+    if (pullAnalyzerTap) {
+        pullAnalyzerTap(analyzerMode == kAnalyzerPost,
+                        tapL.data(), tapR.data());
+    }
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
+    }
+    analyzerFft->performFrequencyOnlyForwardTransform(fftScratch.data(),
+                                                      true /* non-negative bins only */);
+
+    // Bin magnitudes in dBFS. Normalisation: 2/N for the real-signal single-
+    // sided peak amplitude, 1/0.5 for the Hann coherent gain. Silence floors
+    // at -100 dB so the fill rests at the bottom of the view.
+    constexpr float kNorm = 4.0f / static_cast<float>(kAnalyzerFftSize);
+    for (std::size_t bin = 0; bin < spectrumDb.size(); ++bin) {
+        const float mag = fftScratch[bin] * kNorm;
+        spectrumDb[bin] = juce::jmax(-100.0f, 20.0f * std::log10(juce::jmax(1e-5f, mag)));
+    }
+    // Pro-Q-style ballistics: fast attack so onsets register instantly, slow
+    // release so the trace integrates instead of flickering. The smoothed
+    // copy is what the curve draws, so a -6 dBFS tone still lands on the
+    // -6 dB gridline while broadband music reads as a steady spectrum.
+    for (std::size_t bin = 0; bin < spectrumDb.size(); ++bin) {
+        const float fresh = spectrumDb[bin];
+        float& held = spectrumAvg[bin];
+        held += (fresh - held) * (fresh > held ? 0.6f : 0.15f);
+    }
+    curve.setSpectrum(spectrumAvg.data(), static_cast<int>(spectrumAvg.size()));
+
+    // Overload auto-drop (spec: never drops audio, only frames): if the pull
+    // + FFT alone costs more than half the 30 fps budget five ticks running,
+    // settle at 30 fps for the rest of this window's life.
+    const double spent = juce::Time::highResolutionTicksToSeconds(
+        juce::Time::getHighResolutionTicks() - startTicks);
+    if (!reducedToFps30 && spent > 1.0 / 60.0) {
+        if (++slowTicks >= 5) {
+            reducedToFps30 = true;
+            startTimerHz(30); // re-targets the running timer's fps
+        }
+    }
 }
 
 void EQWindow::applyFromControls() {
@@ -170,6 +293,17 @@ void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
     auto area = getLocalBounds().reduced(4);
     auto controlsRow = area.removeFromBottom(104);
+    auto analyzerRow = area.removeFromTop(20);
+    analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
+    analyzerRow.removeFromLeft(4);
+    // (Mode buttons removed: analyzer is fixed to Post. The freed space
+    // stays empty; the offset steppers are right-aligned below.)
+    // RTA display offset, right-aligned: value label flanked by -/+ steppers.
+    rtaPlusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
+    analyzerRow.removeFromRight(2);
+    rtaOffsetLabel.setBounds(analyzerRow.removeFromRight(34));
+    analyzerRow.removeFromRight(2);
+    rtaMinusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
     curve.setBounds(area);
 
     auto left = controlsRow.removeFromLeft(64);

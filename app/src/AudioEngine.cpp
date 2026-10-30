@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 
 namespace {
@@ -51,6 +52,56 @@ void AudioEngine::prepareToPlay(int maxBlockFrames) {
             insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
         }
         meters.observeOutput(output->id, 0.0f);
+    }
+}
+
+// AnalyzerTap ring writes stay allocation-free: the buffers are sized at
+// strip construction (AnalyzerTap data members) and never resized, so the
+// audio thread only memcpy-copies into them and the UI thread only
+// memcpy-copies out. Mode/cursor atomics make the unlocked UI snapshot safe
+// to race (worst case: one visually torn block).
+void AudioEngine::AnalyzerTap::writeTap(bool postEq, const float* inL, const float* inR,
+                                        int frames) noexcept {
+    const std::uint32_t active = mode.get();
+    if (postEq ? (active != kPost) : (active != kPre)) return; // off or other side
+    const int total = pre.getNumSamples(); // == kSamples; rings are fixed
+    if (total <= 0 || frames <= 0) return;
+    const int skip = juce::jmax(0, frames - total); // ring keeps the newest window
+    const int n = frames - skip;
+    juce::AudioBuffer<float>& ring = postEq ? post : pre;
+    juce::Atomic<std::uint32_t>& cursor = postEq ? postWrite : preWrite;
+    const int pos = static_cast<int>(cursor.get() % static_cast<std::uint32_t>(total));
+    const int first = juce::jmin(n, total - pos);
+    const float* srcL = inL + skip;
+    const float* srcR = inR + skip;
+    float* dstL = ring.getWritePointer(0);
+    float* dstR = ring.getWritePointer(1);
+    std::memcpy(dstL + pos, srcL, sizeof(float) * static_cast<std::size_t>(first));
+    std::memcpy(dstR + pos, srcR, sizeof(float) * static_cast<std::size_t>(first));
+    if (n > first) { // wrapped segment
+        std::memcpy(dstL, srcL + first, sizeof(float) * static_cast<std::size_t>(n - first));
+        std::memcpy(dstR, srcR + first, sizeof(float) * static_cast<std::size_t>(n - first));
+    }
+    cursor.set(static_cast<std::uint32_t>((pos + n) % total));
+}
+
+void AudioEngine::AnalyzerTap::snapshot(bool postEq, float* destL, float* destR,
+                                        int maxFrames) const noexcept {
+    const juce::AudioBuffer<float>& ring = postEq ? post : pre;
+    const std::uint32_t cursor = (postEq ? postWrite : preWrite).get();
+    const int total = ring.getNumSamples();
+    const int n = juce::jmin(maxFrames, total);
+    if (n <= 0) return;
+    // Newest sample sits at cursor - 1; read the newest window oldest-first
+    // so the FFT sees a contiguous ramp-up ending at the freshest frame.
+    const int pos = static_cast<int>(cursor % static_cast<std::uint32_t>(total));
+    const int start = (pos + total - n) % total;
+    const int first = juce::jmin(n, total - start);
+    std::memcpy(destL, ring.getReadPointer(0) + start, sizeof(float) * static_cast<std::size_t>(first));
+    std::memcpy(destR, ring.getReadPointer(1) + start, sizeof(float) * static_cast<std::size_t>(first));
+    if (n > first) {
+        std::memcpy(destL + first, ring.getReadPointer(0), sizeof(float) * static_cast<std::size_t>(n - first));
+        std::memcpy(destR + first, ring.getReadPointer(1), sizeof(float) * static_cast<std::size_t>(n - first));
     }
 }
 
@@ -107,9 +158,13 @@ void AudioEngine::render(int frames) {
         // setters, mirroring core's EqState mutex; bypassed strips skip
         // process() entirely so output stays bit-identical to the pre-EQ
         // engine. No allocation: the EQ runs through the block view.
+        // Analyzer tap wraps the call so Pre and Post exist even when the
+        // EQ is bypassed (both rings then carry the identical input block).
+        channel->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), frames);
         if (!channel->eqBypassed.get()) {
             channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
         }
+        channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
         for (auto& insert : channel->inserts) {
             insert->pluginHost.processBlock(block, insert->bypassed.get());
         }
@@ -153,10 +208,13 @@ void AudioEngine::render(int frames) {
     for (auto& output : outputs) {
         juce::AudioBuffer<float> block(output->buffer.getArrayOfWritePointers(), 2, 0, frames);
         // Output EQ before the output inserts (pre-master-write), mirroring
-        // core's output tap and the channel tap above. Same lock rules.
+        // core's output tap and the channel tap above. Same lock rules; the
+        // analyzer tap wraps the call exactly like the channel loop does.
+        output->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), frames);
         if (!output->eqBypassed.get()) {
             output->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
         }
+        output->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
         for (auto& insert : output->inserts) {
             insert->pluginHost.processBlock(block, insert->bypassed.get());
         }

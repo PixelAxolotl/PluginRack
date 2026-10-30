@@ -26,6 +26,36 @@ public:
         int latencySamples = 0;
     };
 
+    // Task 6 analyzer tap: when an EQ window turns the spectrum on, render()
+    // memcpy-copies the block around its EQ call into these fixed rings; the
+    // window's UI-thread timer snapshot-copies a ring and runs the FFT there.
+    // Audio-thread work is mode-gated and allocation-free (rings are sized at
+    // strip construction); analyzer math never touches the audio thread. The
+    // UI read races the audio write by design (peak/meters precedent): a
+    // torn sample only shifts one visual frame, so mode and cursors are
+    // atomics and the rings are never resized.
+    struct AnalyzerTap {
+        static constexpr int kSamples = 8192; // == EQWindow::kAnalyzerFftSize
+        static constexpr std::uint32_t kOff = 0;  // mirrors kAnalyzerOff
+        static constexpr std::uint32_t kPre = 1;  // mirrors kAnalyzerPre
+        static constexpr std::uint32_t kPost = 2; // mirrors kAnalyzerPost
+
+        void setMode(std::uint32_t newMode) noexcept {
+            mode.set(newMode);
+        }
+        // Audio thread: copy the block into the ring of the tapped side.
+        void writeTap(bool postEq, const float* inL, const float* inR, int frames) noexcept;
+        // UI thread: copy the newest maxFrames samples (oldest first) of one
+        // side into destL/destR; dest capacity is assumed to be maxFrames.
+        void snapshot(bool postEq, float* destL, float* destR, int maxFrames) const noexcept;
+
+        juce::AudioBuffer<float> pre{ 2, kSamples };
+        juce::AudioBuffer<float> post{ 2, kSamples };
+        juce::Atomic<std::uint32_t> mode{ kOff };
+        juce::Atomic<std::uint32_t> preWrite{ 0 };  // next write index (ring cursor)
+        juce::Atomic<std::uint32_t> postWrite{ 0 };
+    };
+
     struct Channel {
         std::uint32_t id = 0;
         juce::String name;
@@ -47,6 +77,7 @@ public:
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
+        AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         juce::String inputDeviceName;
         juce::String inputError;
         pluginrack::SourceKind sourceKind = pluginrack::SourceKind::Hardware;
@@ -73,6 +104,7 @@ public:
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
+        AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         juce::String outputDeviceName;
         juce::String outputError;
         std::unique_ptr<OutputPlayback> output;
@@ -182,6 +214,20 @@ public:
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
+    Channel* getChannelById(std::uint32_t channelId) {
+        for (auto& c : channels) {
+            if (c->id == channelId) return c.get();
+        }
+        return nullptr;
+    }
+
+    Output* getOutputById(std::uint32_t outputId) {
+        for (auto& o : outputs) {
+            if (o->id == outputId) return o.get();
+        }
+        return nullptr;
+    }
+
     LatencyReport getLatencyReport() const;
 
     FifoDiagnostics getFifoDiagnostics() const;
@@ -202,6 +248,10 @@ private:
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
+    // Audio-thread silence feed: pushes the pre-allocated silenceBuffer_ to
+    // every open output. Never allocates; used by render() when it loses the
+    // state lock or gets an oversized block.
+    void pushSilenceToOutputs(int frames);
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -232,7 +282,11 @@ private:
     int requestedBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
-    juce::AudioBuffer<float> silenceBuffer_;
+    // Read-only silent scratch for render()'s lock-loss and oversized-block
+    // paths. Allocated once at construction and never resized: the lock-loss
+    // path reads it while prepareToPlay may hold stateLock on the UI thread.
+    // 16384 frames covers every block size the UI offers (max 2048) 8-fold.
+    juce::AudioBuffer<float> silenceBuffer_{ 2, 16384 };
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
 

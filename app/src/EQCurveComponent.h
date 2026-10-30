@@ -42,6 +42,19 @@ public:
     // draws, exposed for verification (sine-vs-curve checks).
     double magnitudeDbAt(double hz) const;
 
+    // Live analyzer spectrum behind the curve (Task 6). magnitudeDb holds one
+    // FFT-bin magnitude in dBFS, bin i covering i * nyquist / (numBins - 1)
+    // Hz at the reference rate; nullptr/0 clears it (analyzer off). UI thread
+    // only, like the rest of the component.
+    void setSpectrum(const float* magnitudeDb, int numBins);
+
+    // RTA display offset in dB, added to every analyzer bin before it is
+    // mapped to Y (UI thread only). Lets the user lift quiet program
+    // material into the +/-15 dB view or push hot signals down; the EQ
+    // curves themselves are unaffected.
+    void setSpectrumOffsetDb(float offsetDb);
+    float getSpectrumOffsetDb() const { return spectrumOffsetDb; }
+
     // Fires after any user edit (node drag) so EQWindow can push the bands
     // to the audio engine and refresh the owning strip's EQ button.
     std::function<void()> onBandsChanged;
@@ -67,14 +80,24 @@ private:
     float freqToX(double hz) const;
     double yToGain(float y) const;
     float gainToY(double gainDb) const;
+    // Y of the analyzer fill at hz: linear interpolation between FFT-bin
+    // magnitudes, clamped to the +/-15 dB view (0 when no spectrum is set).
+    float spectrumY(double hz) const;
 
     std::vector<pluginrack::EqBand> bands{pluginrack::defaultSixBands()};
     int selectedBand = 2; // first peak band: a meaningful default selection
     int dragBand = -1;    // band being dragged this gesture, -1 when idle
+    // Analyzer magnitudes in dBFS per FFT bin (empty = off). UI thread only,
+    // written by EQWindow's timer through setSpectrum, read by paint().
+    std::vector<float> spectrumDb;
     // Curve reference rate: the live device rate injected by EQWindow at
     // open (setSampleRateHz). 48000 is the pre-injection fallback matching
     // the engine default; non-positive rates never land here. UI-thread only.
     double sampleRateHz = 48000.0;
+    // Added to each analyzer bin in spectrumY before the view clamp, so the
+    // RTA fill can be shifted up/down without touching the EQ response.
+    // Session-only (resets per window); the engine never sees it.
+    float spectrumOffsetDb = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQCurveComponent)
 };

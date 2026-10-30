@@ -17,6 +17,11 @@ constexpr double kCoreMinFreqHz = 10.0;
 constexpr double kCoreMinQ = 0.1;
 constexpr double kCoreMaxQ = 20.0;
 constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
+// RTA display compressor: above the knee the analyzer follows the dB grid
+// 1:1 (a -6 dBFS tone sits on the -6 line); below it a 2:1 slope lifts
+// valleys into the +/-15 dB view instead of crushing them on the floor.
+constexpr double kRtaKneeDb = -6.0;
+constexpr double kRtaCompSlope = 0.5;
 
 // Grid vertical lines: 1-2-5(ish) per decade over the 20 Hz - 20 kHz span.
 constexpr double kGridFreqs[] = {
@@ -186,6 +191,22 @@ double EQCurveComponent::magnitudeDbAt(double hz) const {
     return totalDb;
 }
 
+void EQCurveComponent::setSpectrum(const float* magnitudeDb, int numBins) {
+    if (magnitudeDb == nullptr || numBins <= 0) {
+        if (spectrumDb.empty()) return;
+        spectrumDb.clear();
+    } else {
+        spectrumDb.assign(magnitudeDb, magnitudeDb + static_cast<std::size_t>(numBins));
+    }
+    repaint();
+}
+
+void EQCurveComponent::setSpectrumOffsetDb(float offsetDb) {
+    if (spectrumOffsetDb == offsetDb) return;
+    spectrumOffsetDb = offsetDb;
+    repaint();
+}
+
 double EQCurveComponent::xToFreq(float x) const {
     const double t = juce::jlimit(0.0, 1.0, static_cast<double>(x) / static_cast<double>(juce::jmax(1, getWidth())));
     return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, t);
@@ -205,6 +226,24 @@ double EQCurveComponent::yToGain(float y) const {
 float EQCurveComponent::gainToY(double gainDb) const {
     const double h = getHeight();
     return static_cast<float>(h * 0.5 - gainDb / kMaxGainDb * h * 0.5);
+}
+
+float EQCurveComponent::spectrumY(double hz) const {
+    // Bin centres are linear from 0 Hz to nyquist of the reference rate.
+    const double nyquist = sampleRateHz * 0.5;
+    const double last = static_cast<double>(spectrumDb.size() - 1);
+    const double pos = juce::jlimit(0.0, last, hz / nyquist * last);
+    const std::size_t low = static_cast<std::size_t>(pos);
+    const std::size_t high = juce::jmin(low + 1, spectrumDb.size() - 1);
+    const double frac = pos - static_cast<double>(low);
+    double db = (static_cast<double>(spectrumDb[low]) * (1.0 - frac)
+                    + static_cast<double>(spectrumDb[high]) * frac)
+                    + static_cast<double>(spectrumOffsetDb);
+    // Display-range compression: truthful above the knee, 2:1 below it so
+    // quiet valleys lift into view instead of hugging the floor. The EQ
+    // curves themselves never pass through here.
+    if (db < kRtaKneeDb) db = kRtaKneeDb + (db - kRtaKneeDb) * kRtaCompSlope;
+    return gainToY(juce::jlimit(-kMaxGainDb, kMaxGainDb, db));
 }
 
 void EQCurveComponent::paint(juce::Graphics& g) {
@@ -233,6 +272,23 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         const float y = gainToY(static_cast<double>(db));
         g.setColour(db == 0 ? theme::line().withAlpha(0.8f) : theme::border().withAlpha(0.4f));
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
+    }
+
+    // --- analyzer spectrum (Task 6): grey fill behind the curves, Pro-Q
+    // look. Bin magnitudes arrive from EQWindow's UI-timer FFT; below the
+    // view's -15 dB floor the fill simply rests on the bottom edge.
+    if (!spectrumDb.empty()) {
+        juce::Path spectrum;
+        for (int x = 0; x <= w; x += kCurveStepPx) {
+            const float y = spectrumY(xToFreq(static_cast<float>(x)));
+            if (x == 0) spectrum.startNewSubPath(0.0f, y);
+            else spectrum.lineTo(static_cast<float>(x), y);
+        }
+        spectrum.lineTo(static_cast<float>(w), static_cast<float>(h));
+        spectrum.lineTo(0.0f, static_cast<float>(h));
+        spectrum.closeSubPath();
+        g.setColour(juce::Colours::grey.withAlpha(0.35f));
+        g.fillPath(spectrum);
     }
 
     // --- combined magnitude (yellow): dB sum of the active bands' responses,

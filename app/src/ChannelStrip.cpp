@@ -195,13 +195,16 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
     eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Open the channel EQ editor");
+    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
     eqButton.onClick = [this] {
-        if (eqWindow == nullptr) {
-            openEqWindow();
-        } else {
-            closeEqWindow();
-        }
+        // Left-click toggles the EQ engine on/off (Voicemeeter-style).
+        const bool bypassed = channel.eqBypassed.get();
+        audioEngine.setChannelEqBypassed(channel.id, !bypassed);
+        refreshEqButton();
+    };
+    eqButton.onRightClick = [this] {
+        // Right-click opens the editor (fronts it if already open).
+        openEqWindow();
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
@@ -238,6 +241,22 @@ void ChannelStrip::openEqWindow() {
             safe->refreshEqButton();
         },
         liveRateHz);
+    // Analyzer wiring (Task 6): the window pulls this channel's tap ring copy
+    // on its UI timer and gates which side render() memcpy-copies; the
+    // kAnalyzer* mode codes mirror AudioEngine::AnalyzerTap::kOff/kPre/kPost.
+    window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
+        if (safe == nullptr) return;
+        safe->channel.analyzerTap.snapshot(postEq, destL, destR,
+                                           EQWindow::kAnalyzerFftSize);
+    };
+    window->setAnalyzerTapMode = [safe](int mode) {
+        if (safe == nullptr) return;
+        safe->channel.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+    };
+    // Start the analyzer AFTER the tap callbacks above are wired: the mode
+    // call forwards into the ring, and before this point it addressed no one
+    // (this ordering was the "dead RTA until mode toggle" bug). Fixed Post.
+    window->setAnalyzerMode(EQWindow::kAnalyzerPost);
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
@@ -543,4 +562,8 @@ void ChannelStrip::paint(juce::Graphics& g) {
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+}
+
+void ChannelStrip::mouseDown(const juce::MouseEvent&) {
+    if (onSelected) onSelected();
 }
