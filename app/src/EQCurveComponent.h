@@ -48,6 +48,13 @@ public:
     // only, like the rest of the component.
     void setSpectrum(const float* magnitudeDb, int numBins);
 
+    // RTA display offset in dB, added to every analyzer bin before it is
+    // mapped to Y (UI thread only). Lets the user lift quiet program
+    // material into the +/-15 dB view or push hot signals down; the EQ
+    // curves themselves are unaffected.
+    void setSpectrumOffsetDb(float offsetDb);
+    float getSpectrumOffsetDb() const { return spectrumOffsetDb; }
+
     // Fires after any user edit (node drag) so EQWindow can push the bands
     // to the audio engine and refresh the owning strip's EQ button.
     std::function<void()> onBandsChanged;
@@ -87,6 +94,10 @@ private:
     // open (setSampleRateHz). 48000 is the pre-injection fallback matching
     // the engine default; non-positive rates never land here. UI-thread only.
     double sampleRateHz = 48000.0;
+    // Added to each analyzer bin in spectrumY before the view clamp, so the
+    // RTA fill can be shifted up/down without touching the EQ response.
+    // Session-only (resets per window); the engine never sees it.
+    float spectrumOffsetDb = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQCurveComponent)
 };

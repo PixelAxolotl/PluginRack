@@ -196,6 +196,12 @@ void EQCurveComponent::setSpectrum(const float* magnitudeDb, int numBins) {
     repaint();
 }
 
+void EQCurveComponent::setSpectrumOffsetDb(float offsetDb) {
+    if (spectrumOffsetDb == offsetDb) return;
+    spectrumOffsetDb = offsetDb;
+    repaint();
+}
+
 double EQCurveComponent::xToFreq(float x) const {
     const double t = juce::jlimit(0.0, 1.0, static_cast<double>(x) / static_cast<double>(juce::jmax(1, getWidth())));
     return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, t);
@@ -225,8 +231,9 @@ float EQCurveComponent::spectrumY(double hz) const {
     const std::size_t low = static_cast<std::size_t>(pos);
     const std::size_t high = juce::jmin(low + 1, spectrumDb.size() - 1);
     const double frac = pos - static_cast<double>(low);
-    const double db = static_cast<double>(spectrumDb[low]) * (1.0 - frac)
-                    + static_cast<double>(spectrumDb[high]) * frac;
+    const double db = (static_cast<double>(spectrumDb[low]) * (1.0 - frac)
+                    + static_cast<double>(spectrumDb[high]) * frac)
+                    + static_cast<double>(spectrumOffsetDb);
     return gainToY(juce::jlimit(-kMaxGainDb, kMaxGainDb, db));
 }
 

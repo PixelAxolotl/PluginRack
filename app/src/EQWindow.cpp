@@ -145,7 +145,29 @@ EQWindow::EQWindow(const juce::String& title,
     analyzerLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     analyzerLabel.setColour(juce::Label::textColourId, theme::dim());
     Component::addAndMakeVisible(analyzerLabel);
-    analyzerOffButton.setToggleState(true);
+    // RTA display offset (Task 6 follow-up): +/- buttons shift the analyzer
+    // fill up/down in the view so quiet program material can be lifted into
+    // the +/-15 dB window. Session-only; the engine never sees it.
+    rtaMinusButton.setTooltip("RTA display: shift the analyzer down");
+    rtaMinusButton.setClickAction([this] {
+        setRtaOffsetDb(curve.getSpectrumOffsetDb() - kRtaOffsetStepDb);
+    });
+    Component::addAndMakeVisible(rtaMinusButton);
+    rtaPlusButton.setTooltip("RTA display: shift the analyzer up");
+    rtaPlusButton.setClickAction([this] {
+        setRtaOffsetDb(curve.getSpectrumOffsetDb() + kRtaOffsetStepDb);
+    });
+    Component::addAndMakeVisible(rtaPlusButton);
+    rtaOffsetLabel.setJustificationType(juce::Justification::centred);
+    rtaOffsetLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    rtaOffsetLabel.setColour(juce::Label::textColourId, theme::dim());
+    rtaOffsetLabel.setTooltip("RTA display offset in dB (view only)");
+    Component::addAndMakeVisible(rtaOffsetLabel);
+    setRtaOffsetDb(kDefaultRtaOffsetDb);
+    // Analyzer on by default (Pre): the RTA is the reason the window has a
+    // spectrum at all, and the tap writes only while a window is open.
+    // Routes through setAnalyzerMode so the UI timer actually starts.
+    setAnalyzerMode(kAnalyzerPre);
 
     centreWithSize(kWidth, kHeight);
     setVisible(true);
@@ -169,6 +191,14 @@ void EQWindow::setAnalyzerMode(int mode) {
         return;
     }
     startTimerHz(reducedToFps30 ? 30 : 60); // spec: 30-60 fps; timerCallback slows to 30 on overload
+}
+
+void EQWindow::setRtaOffsetDb(float offsetDb) {
+    const float clamped = juce::jlimit(kRtaOffsetMinDb, kRtaOffsetMaxDb, offsetDb);
+    curve.setSpectrumOffsetDb(clamped);
+    const float shown = curve.getSpectrumOffsetDb();
+    rtaOffsetLabel.setText((shown >= 0.0f ? "+" : "") + juce::String(static_cast<int>(shown)),
+                           juce::dontSendNotification);
 }
 
 void EQWindow::timerCallback() {
@@ -268,6 +298,12 @@ void EQWindow::resized() {
         button->setBounds(analyzerRow.removeFromLeft(44).reduced(2, 1));
         analyzerRow.removeFromLeft(2);
     }
+    // RTA display offset, right-aligned: value label flanked by -/+ steppers.
+    rtaPlusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
+    analyzerRow.removeFromRight(2);
+    rtaOffsetLabel.setBounds(analyzerRow.removeFromRight(34));
+    analyzerRow.removeFromRight(2);
+    rtaMinusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
     curve.setBounds(area);
 
     auto left = controlsRow.removeFromLeft(64);

@@ -133,6 +133,16 @@ private:
     MiniButton analyzerPostButton{"Post"};
     MiniButton analyzerOffButton{"Off"};
     juce::Label analyzerLabel{"", "Analyzer"};
+    // RTA display offset: shifts the analyzer fill up/down in the view
+    // without touching the EQ response. Session-only, per window.
+    MiniButton rtaMinusButton{"-"};
+    MiniButton rtaPlusButton{"+"};
+    juce::Label rtaOffsetLabel{"", "+12"};
+    static constexpr float kRtaOffsetMinDb = -30.0f;
+    static constexpr float kRtaOffsetMaxDb = 30.0f;
+    static constexpr float kRtaOffsetStepDb = 3.0f;
+    static constexpr float kDefaultRtaOffsetDb = 12.0f;
+    void setRtaOffsetDb(float offsetDb);
     int analyzerMode = kAnalyzerOff;
     bool reducedToFps30 = false;
     int slowTicks = 0;
