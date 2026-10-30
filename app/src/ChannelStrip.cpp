@@ -195,13 +195,16 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
     eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Open the channel EQ editor");
+    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
     eqButton.onClick = [this] {
-        if (eqWindow == nullptr) {
-            openEqWindow();
-        } else {
-            closeEqWindow();
-        }
+        // Left-click toggles the EQ engine on/off (Voicemeeter-style).
+        const bool bypassed = channel.eqBypassed.get();
+        audioEngine.setChannelEqBypassed(channel.id, !bypassed);
+        refreshEqButton();
+    };
+    eqButton.onRightClick = [this] {
+        // Right-click opens the editor (fronts it if already open).
+        openEqWindow();
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
@@ -555,4 +558,8 @@ void ChannelStrip::paint(juce::Graphics& g) {
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+}
+
+void ChannelStrip::mouseDown(const juce::MouseEvent&) {
+    if (onSelected) onSelected();
 }

@@ -21,6 +21,19 @@ class EqButton final : public juce::TextButton {
 public:
     explicit EqButton(const juce::String& text) : juce::TextButton(text) {}
 
+    // Right-click hook: strips use it to open the editor while left-click
+    // toggles the EQ on/off. Right presses are swallowed here so they never
+    // enter the button-press state (which would also fire onClick on release).
+    std::function<void()> onRightClick;
+
+    void mouseDown(const juce::MouseEvent& e) override {
+        if (e.mods.isRightButtonDown() && onRightClick) {
+            onRightClick();
+            return;
+        }
+        juce::TextButton::mouseDown(e);
+    }
+
     void setRingVisible(bool visible) {
         if (ringVisible == visible) return;
         ringVisible = visible;

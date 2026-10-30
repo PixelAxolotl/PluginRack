@@ -124,13 +124,16 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
 
     eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
     eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Open the output EQ editor");
+    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
     eqButton.onClick = [this] {
-        if (eqWindow == nullptr) {
-            openEqWindow();
-        } else {
-            closeEqWindow();
-        }
+        // Left-click toggles the EQ engine on/off (Voicemeeter-style).
+        const bool bypassed = output.eqBypassed.get();
+        audioEngine.setOutputEqBypassed(outputIndex, !bypassed);
+        refreshEqButton();
+    };
+    eqButton.onRightClick = [this] {
+        // Right-click opens the editor (fronts it if already open).
+        openEqWindow();
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
@@ -271,6 +274,10 @@ void MixerComponent::OutputStrip::refreshInserts() {
     repaint();
 }
 
+void MixerComponent::OutputStrip::mouseDown(const juce::MouseEvent&) {
+    if (onSelected) onSelected();
+}
+
 juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
     const auto error = audioEngine.addOutputPlugin(output.id, file);
     refreshAfterInsertChange();
@@ -409,6 +416,9 @@ void MixerComponent::rebuild() {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
+        s->onSelected = [this, id] {
+            if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), false);
+        };
         stripContent.addAndMakeVisible(*s);
     }
 
@@ -429,6 +439,9 @@ void MixerComponent::rebuild() {
         s->onRenamed = [this] {
             rebuild();
             if (onStructureChanged) onStructureChanged();
+        };
+        s->onSelected = [this, id] {
+            if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), true);
         };
         masterContent.addAndMakeVisible(*s);
     }
