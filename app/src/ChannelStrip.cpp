@@ -253,6 +253,10 @@ void ChannelStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->channel.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
     };
+    // Start the analyzer AFTER the tap callbacks above are wired: the mode
+    // call forwards into the ring, and before this point it addressed no one
+    // (this ordering was the "dead RTA until mode toggle" bug). Fixed Post.
+    window->setAnalyzerMode(EQWindow::kAnalyzerPost);
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

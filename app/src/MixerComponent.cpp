@@ -184,6 +184,9 @@ void MixerComponent::OutputStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->output.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
     };
+    // Same ordering fix as ChannelStrip: start Post-EQ analysis after the
+    // tap callbacks are wired, otherwise the mode call addresses no one.
+    window->setAnalyzerMode(EQWindow::kAnalyzerPost);
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

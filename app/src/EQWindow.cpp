@@ -133,15 +133,11 @@ EQWindow::EQWindow(const juce::String& title,
     tapR.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
     spectrumDb.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, 0.0f);
     spectrumAvg.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, -100.0f);
-    analyzerPreButton.setTooltip("Analyzer: spectrum before the EQ tap");
-    analyzerPreButton.setClickAction([this] { setAnalyzerMode(kAnalyzerPre); });
-    Component::addAndMakeVisible(analyzerPreButton);
-    analyzerPostButton.setTooltip("Analyzer: spectrum after the EQ tap");
-    analyzerPostButton.setClickAction([this] { setAnalyzerMode(kAnalyzerPost); });
-    Component::addAndMakeVisible(analyzerPostButton);
-    analyzerOffButton.setTooltip("Analyzer: hide the spectrum");
-    analyzerOffButton.setClickAction([this] { setAnalyzerMode(kAnalyzerOff); });
-    Component::addAndMakeVisible(analyzerOffButton);
+    // Analyzer mode is fixed to Post (no Pre/Post/Off switch): the window
+    // always shows the post-EQ spectrum. The owning strip starts it via
+    // setAnalyzerMode after wiring the tap callbacks, because the ctor runs
+    // before those callbacks exist and starting it here would address no one
+    // (this was the "dead RTA until mode toggle" bug).
     analyzerLabel.setJustificationType(juce::Justification::centredRight);
     analyzerLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     analyzerLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -165,10 +161,6 @@ EQWindow::EQWindow(const juce::String& title,
     rtaOffsetLabel.setTooltip("RTA display offset in dB (view only)");
     Component::addAndMakeVisible(rtaOffsetLabel);
     setRtaOffsetDb(kDefaultRtaOffsetDb);
-    // Analyzer on by default (Pre): the RTA is the reason the window has a
-    // spectrum at all, and the tap writes only while a window is open.
-    // Routes through setAnalyzerMode so the UI timer actually starts.
-    setAnalyzerMode(kAnalyzerPre);
 
     centreWithSize(kWidth, kHeight);
     setVisible(true);
@@ -180,12 +172,12 @@ EQWindow::~EQWindow() {
 }
 
 void EQWindow::setAnalyzerMode(int mode) {
+    // Fixed to Post by the owners (no mode switch in the UI): the strip
+    // calls this once after wiring the tap callbacks. Kept as a function
+    // (rather than inlining) so the start/stop/tap-gating stays in one place.
     if (mode == analyzerMode) return;
     analyzerMode = mode;
     if (setAnalyzerTapMode) setAnalyzerTapMode(mode);
-    analyzerPreButton.setToggleState(mode == kAnalyzerPre);
-    analyzerPostButton.setToggleState(mode == kAnalyzerPost);
-    analyzerOffButton.setToggleState(mode == kAnalyzerOff);
     if (mode == kAnalyzerOff) {
         stopTimer();
         curve.setSpectrum(nullptr, 0); // Off hides the grey fill
@@ -304,10 +296,8 @@ void EQWindow::resized() {
     auto analyzerRow = area.removeFromTop(20);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
     analyzerRow.removeFromLeft(4);
-    for (MiniButton* button : { &analyzerPreButton, &analyzerPostButton, &analyzerOffButton }) {
-        button->setBounds(analyzerRow.removeFromLeft(44).reduced(2, 1));
-        analyzerRow.removeFromLeft(2);
-    }
+    // (Mode buttons removed: analyzer is fixed to Post. The freed space
+    // stays empty; the offset steppers are right-aligned below.)
     // RTA display offset, right-aligned: value label flanked by -/+ steppers.
     rtaPlusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
     analyzerRow.removeFromRight(2);

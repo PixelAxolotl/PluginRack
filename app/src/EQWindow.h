@@ -129,14 +129,9 @@ private:
 
     // Analyzer state, all sized once at construction (message thread): one
     // FFT instance per open window (spec), reused every tick.
-    MiniButton analyzerPreButton{"Pre"};
-    MiniButton analyzerPostButton{"Post"};
-    MiniButton analyzerOffButton{"Off"};
-    juce::Label analyzerLabel{"", "Analyzer"};
-    // RTA display offset: shifts the analyzer fill up/down in the view
-    // without touching the EQ response. Session-only, per window.
     MiniButton rtaMinusButton{"-"};
     MiniButton rtaPlusButton{"+"};
+    juce::Label analyzerLabel{"", "Analyzer"};
     juce::Label rtaOffsetLabel{"", "+12"};
     static constexpr float kRtaOffsetMinDb = -60.0f;
     static constexpr float kRtaOffsetMaxDb = 60.0f;
