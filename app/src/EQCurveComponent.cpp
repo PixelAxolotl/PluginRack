@@ -17,6 +17,11 @@ constexpr double kCoreMinFreqHz = 10.0;
 constexpr double kCoreMinQ = 0.1;
 constexpr double kCoreMaxQ = 20.0;
 constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
+// RTA display compressor: above the knee the analyzer follows the dB grid
+// 1:1 (a -6 dBFS tone sits on the -6 line); below it a 2:1 slope lifts
+// valleys into the +/-15 dB view instead of crushing them on the floor.
+constexpr double kRtaKneeDb = -6.0;
+constexpr double kRtaCompSlope = 0.5;
 
 // Grid vertical lines: 1-2-5(ish) per decade over the 20 Hz - 20 kHz span.
 constexpr double kGridFreqs[] = {
@@ -231,9 +236,13 @@ float EQCurveComponent::spectrumY(double hz) const {
     const std::size_t low = static_cast<std::size_t>(pos);
     const std::size_t high = juce::jmin(low + 1, spectrumDb.size() - 1);
     const double frac = pos - static_cast<double>(low);
-    const double db = (static_cast<double>(spectrumDb[low]) * (1.0 - frac)
+    double db = (static_cast<double>(spectrumDb[low]) * (1.0 - frac)
                     + static_cast<double>(spectrumDb[high]) * frac)
                     + static_cast<double>(spectrumOffsetDb);
+    // Display-range compression: truthful above the knee, 2:1 below it so
+    // quiet valleys lift into view instead of hugging the floor. The EQ
+    // curves themselves never pass through here.
+    if (db < kRtaKneeDb) db = kRtaKneeDb + (db - kRtaKneeDb) * kRtaCompSlope;
     return gainToY(juce::jlimit(-kMaxGainDb, kMaxGainDb, db));
 }
 

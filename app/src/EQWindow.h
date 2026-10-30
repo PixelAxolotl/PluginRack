@@ -85,7 +85,7 @@ public:
     static constexpr int kAnalyzerOff = 0;
     static constexpr int kAnalyzerPre = 1;
     static constexpr int kAnalyzerPost = 2;
-    static constexpr int kAnalyzerFftSize = 2048; // == AnalyzerTap::kSamples
+    static constexpr int kAnalyzerFftSize = 8192; // == AnalyzerTap::kSamples
 
     EQWindow(const juce::String& title,
              const std::vector<pluginrack::EqBand>& initialBands,

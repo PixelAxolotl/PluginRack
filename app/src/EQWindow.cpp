@@ -122,7 +122,7 @@ EQWindow::EQWindow(const juce::String& title,
     // here on the message thread so the timer callback never touches the
     // heap. A Hann window keeps spectral leakage down; the tap rings arrive
     // through pullAnalyzerTap, wired by the owning strip.
-    analyzerFft = std::make_unique<juce::dsp::FFT>(11); // 2^11 = 2048
+    analyzerFft = std::make_unique<juce::dsp::FFT>(13); // 2^13 = 8192
     hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const double t = juce::MathConstants<double>::twoPi * i / kAnalyzerFftSize;

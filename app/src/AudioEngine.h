@@ -35,7 +35,7 @@ public:
     // torn sample only shifts one visual frame, so mode and cursors are
     // atomics and the rings are never resized.
     struct AnalyzerTap {
-        static constexpr int kSamples = 2048; // == EQWindow::kAnalyzerFftSize
+        static constexpr int kSamples = 8192; // == EQWindow::kAnalyzerFftSize
         static constexpr std::uint32_t kOff = 0;  // mirrors kAnalyzerOff
         static constexpr std::uint32_t kPre = 1;  // mirrors kAnalyzerPre
         static constexpr std::uint32_t kPost = 2; // mirrors kAnalyzerPost
@@ -214,6 +214,20 @@ public:
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
+    Channel* getChannelById(std::uint32_t channelId) {
+        for (auto& c : channels) {
+            if (c->id == channelId) return c.get();
+        }
+        return nullptr;
+    }
+
+    Output* getOutputById(std::uint32_t outputId) {
+        for (auto& o : outputs) {
+            if (o->id == outputId) return o.get();
+        }
+        return nullptr;
+    }
+
     LatencyReport getLatencyReport() const;
 
     FifoDiagnostics getFifoDiagnostics() const;
@@ -234,6 +248,10 @@ private:
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
+    // Audio-thread silence feed: pushes the pre-allocated silenceBuffer_ to
+    // every open output. Never allocates; used by render() when it loses the
+    // state lock or gets an oversized block.
+    void pushSilenceToOutputs(int frames);
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -264,7 +282,11 @@ private:
     int requestedBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
-    juce::AudioBuffer<float> silenceBuffer_;
+    // Read-only silent scratch for render()'s lock-loss and oversized-block
+    // paths. Allocated once at construction and never resized: the lock-loss
+    // path reads it while prepareToPlay may hold stateLock on the UI thread.
+    // 16384 frames covers every block size the UI offers (max 2048) 8-fold.
+    juce::AudioBuffer<float> silenceBuffer_{ 2, 16384 };
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
 
