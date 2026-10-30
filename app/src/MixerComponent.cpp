@@ -170,6 +170,17 @@ void MixerComponent::OutputStrip::openEqWindow() {
             safe->refreshEqButton();
         },
         liveRateHz);
+    // Analyzer wiring (Task 6), same contract as ChannelStrip's hunks: pull
+    // copies this output's tap ring, setMode gates the render-side write.
+    window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
+        if (safe == nullptr) return;
+        safe->output.analyzerTap.snapshot(postEq, destL, destR,
+                                          EQWindow::kAnalyzerFftSize);
+    };
+    window->setAnalyzerTapMode = [safe](int mode) {
+        if (safe == nullptr) return;
+        safe->output.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+    };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

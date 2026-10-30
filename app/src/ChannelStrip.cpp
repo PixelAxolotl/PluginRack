@@ -238,6 +238,18 @@ void ChannelStrip::openEqWindow() {
             safe->refreshEqButton();
         },
         liveRateHz);
+    // Analyzer wiring (Task 6): the window pulls this channel's tap ring copy
+    // on its UI timer and gates which side render() memcpy-copies; the
+    // kAnalyzer* mode codes mirror AudioEngine::AnalyzerTap::kOff/kPre/kPost.
+    window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
+        if (safe == nullptr) return;
+        safe->channel.analyzerTap.snapshot(postEq, destL, destR,
+                                           EQWindow::kAnalyzerFftSize);
+    };
+    window->setAnalyzerTapMode = [safe](int mode) {
+        if (safe == nullptr) return;
+        safe->channel.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+    };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;

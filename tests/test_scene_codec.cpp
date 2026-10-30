@@ -155,6 +155,14 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->outputs.size() == 1);
     REQUIRE(loaded.scene->outputs.front().inserts.empty());
+
+    // Task 6 Step 2 gap fill: v1 predates the EQ, so loading it must yield
+    // the same flat default bands as v2 (mirrors "v2 scene loads flat EQ").
+    const pluginrack::Channel& channel = loaded.scene->channels.front();
+    REQUIRE(channel.eqEnabled == false);
+    REQUIRE(channel.eqBands == pluginrack::defaultSixBands());
+    REQUIRE(loaded.scene->outputs.front().eqEnabled == false);
+    REQUIRE(loaded.scene->outputs.front().eqBands == pluginrack::defaultSixBands());
 }
 
 TEST_CASE("unknown fields are ignored on load and dropped on save") {

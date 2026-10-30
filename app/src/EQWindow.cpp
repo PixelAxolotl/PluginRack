@@ -1,5 +1,7 @@
 #include "EQWindow.h"
 
+#include <cmath>
+
 EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
                    std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback,
@@ -116,8 +118,97 @@ EQWindow::EQWindow(const juce::String& title,
 
     syncControls();
 
+    // --- analyzer (Task 6): one FFT per open window, everything allocated
+    // here on the message thread so the timer callback never touches the
+    // heap. A Hann window keeps spectral leakage down; the tap rings arrive
+    // through pullAnalyzerTap, wired by the owning strip.
+    analyzerFft = std::make_unique<juce::dsp::FFT>(11); // 2^11 = 2048
+    hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const double t = juce::MathConstants<double>::twoPi * i / kAnalyzerFftSize;
+        hannCoeffs[static_cast<std::size_t>(i)] = static_cast<float>(0.5 - 0.5 * std::cos(t));
+    }
+    fftScratch.assign(static_cast<std::size_t>(kAnalyzerFftSize) * 2, 0.0f);
+    tapL.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
+    tapR.assign(static_cast<std::size_t>(kAnalyzerFftSize), 0.0f);
+    spectrumDb.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, 0.0f);
+    analyzerPreButton.setTooltip("Analyzer: spectrum before the EQ tap");
+    analyzerPreButton.setClickAction([this] { setAnalyzerMode(kAnalyzerPre); });
+    Component::addAndMakeVisible(analyzerPreButton);
+    analyzerPostButton.setTooltip("Analyzer: spectrum after the EQ tap");
+    analyzerPostButton.setClickAction([this] { setAnalyzerMode(kAnalyzerPost); });
+    Component::addAndMakeVisible(analyzerPostButton);
+    analyzerOffButton.setTooltip("Analyzer: hide the spectrum");
+    analyzerOffButton.setClickAction([this] { setAnalyzerMode(kAnalyzerOff); });
+    Component::addAndMakeVisible(analyzerOffButton);
+    analyzerLabel.setJustificationType(juce::Justification::centredRight);
+    analyzerLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    analyzerLabel.setColour(juce::Label::textColourId, theme::dim());
+    Component::addAndMakeVisible(analyzerLabel);
+    analyzerOffButton.setToggleState(true);
+
     centreWithSize(kWidth, kHeight);
     setVisible(true);
+}
+
+EQWindow::~EQWindow() {
+    stopTimer();
+    if (setAnalyzerTapMode) setAnalyzerTapMode(kAnalyzerOff); // silence the tap
+}
+
+void EQWindow::setAnalyzerMode(int mode) {
+    if (mode == analyzerMode) return;
+    analyzerMode = mode;
+    if (setAnalyzerTapMode) setAnalyzerTapMode(mode);
+    analyzerPreButton.setToggleState(mode == kAnalyzerPre);
+    analyzerPostButton.setToggleState(mode == kAnalyzerPost);
+    analyzerOffButton.setToggleState(mode == kAnalyzerOff);
+    if (mode == kAnalyzerOff) {
+        stopTimer();
+        curve.setSpectrum(nullptr, 0); // Off hides the grey fill
+        return;
+    }
+    startTimerHz(reducedToFps30 ? 30 : 60); // spec: 30-60 fps; timerCallback slows to 30 on overload
+}
+
+void EQWindow::timerCallback() {
+    const auto startTicks = juce::Time::getHighResolutionTicks();
+
+    // Pull the ring copy (a plain memcpy out of preallocated engine memory)
+    // and mix down to mono through the Hann window. The back half of the
+    // scratch is FFT workspace; only the first N floats are input.
+    if (pullAnalyzerTap) {
+        pullAnalyzerTap(analyzerMode == kAnalyzerPost,
+                        tapL.data(), tapR.data());
+    }
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
+    }
+    analyzerFft->performFrequencyOnlyForwardTransform(fftScratch.data(),
+                                                      true /* non-negative bins only */);
+
+    // Bin magnitudes in dBFS. Normalisation: 2/N for the real-signal single-
+    // sided peak amplitude, 1/0.5 for the Hann coherent gain. Silence floors
+    // at -100 dB so the fill rests at the bottom of the view.
+    constexpr float kNorm = 4.0f / static_cast<float>(kAnalyzerFftSize);
+    for (std::size_t bin = 0; bin < spectrumDb.size(); ++bin) {
+        const float mag = fftScratch[bin] * kNorm;
+        spectrumDb[bin] = juce::jmax(-100.0f, 20.0f * std::log10(juce::jmax(1e-5f, mag)));
+    }
+    curve.setSpectrum(spectrumDb.data(), static_cast<int>(spectrumDb.size()));
+
+    // Overload auto-drop (spec: never drops audio, only frames): if the pull
+    // + FFT alone costs more than half the 30 fps budget five ticks running,
+    // settle at 30 fps for the rest of this window's life.
+    const double spent = juce::Time::highResolutionTicksToSeconds(
+        juce::Time::getHighResolutionTicks() - startTicks);
+    if (!reducedToFps30 && spent > 1.0 / 60.0) {
+        if (++slowTicks >= 5) {
+            reducedToFps30 = true;
+            startTimerHz(30); // re-targets the running timer's fps
+        }
+    }
 }
 
 void EQWindow::applyFromControls() {
@@ -170,6 +261,13 @@ void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
     auto area = getLocalBounds().reduced(4);
     auto controlsRow = area.removeFromBottom(104);
+    auto analyzerRow = area.removeFromTop(20);
+    analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
+    analyzerRow.removeFromLeft(4);
+    for (MiniButton* button : { &analyzerPreButton, &analyzerPostButton, &analyzerOffButton }) {
+        button->setBounds(analyzerRow.removeFromLeft(44).reduced(2, 1));
+        analyzerRow.removeFromLeft(2);
+    }
     curve.setBounds(area);
 
     auto left = controlsRow.removeFromLeft(64);
