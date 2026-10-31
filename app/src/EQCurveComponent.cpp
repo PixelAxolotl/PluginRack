@@ -272,6 +272,12 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         const float y = gainToY(static_cast<double>(db));
         g.setColour(db == 0 ? theme::line().withAlpha(0.8f) : theme::border().withAlpha(0.4f));
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
+        g.setColour(theme::dim().withAlpha(0.9f));
+        g.fillRect(0.0f, y - 0.5f, 6.0f, 1.0f);
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        g.drawText((db > 0 ? "+" : "") + juce::String(db) + " dB",
+                   juce::Rectangle<int>(7, static_cast<int>(y) - 6, 34, 12),
+                   juce::Justification::left, false);
     }
 
     // --- analyzer spectrum (Task 6): grey fill behind the curves, Pro-Q

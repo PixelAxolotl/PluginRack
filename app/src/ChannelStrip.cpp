@@ -20,6 +20,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     channelLabel.setJustificationType(juce::Justification::centredLeft);
     channelLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
     channelLabel.setColour(juce::Label::textColourId, theme::dim());
+    channelLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(channelLabel);
 
     removeChannelButton.setFontSize(13.0f);
@@ -54,6 +55,9 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
                     }
                 });
             });
+            deviceControl.setOnDoubleClick([this] {
+                if (onDoubleClicked) onDoubleClicked();
+            });
         });
     });
     deviceControl.setOnRename([this] {
@@ -74,11 +78,11 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     });
     addAndMakeVisible(deviceControl);
 
-    modeCombo.addItem("Mono", 1);
-    modeCombo.addItem("Stereo", 2);
+    modeCombo.addItem("MONO", 1);
+    modeCombo.addItem("ST", 2);
     for (int i = 1; i <= 16; ++i) {
-        inputComboA.addItem(juce::String(i), i);
-        inputComboB.addItem(juce::String(i), i);
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
     }
     inputComboA.setTooltip("Physical input for this channel (1-based)");
     inputComboB.setTooltip("Physical input for the right side (1-based)");
@@ -115,13 +119,14 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     addVstButton.onClick = [this] { openPicker(); };
     addAndMakeVisible(addVstButton);
 
+    levelLabel.setText("TRIM", juce::dontSendNotification);
     levelLabel.setJustificationType(juce::Justification::centred);
     levelLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     levelLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(levelLabel);
 
     levelKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
+    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     levelKnob.setRange(-12.0, 12.0, 0.1);
     levelKnob.setTextValueSuffix(" dB");
     levelKnob.setDoubleClickReturnValue(true, 0.0);
@@ -133,15 +138,17 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     levelKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::deepGreen());
     levelKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     levelKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    levelKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(levelKnob);
 
+    panLabel.setText("PAN", juce::dontSendNotification);
     panLabel.setJustificationType(juce::Justification::centred);
     panLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     panLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(panLabel);
 
     panKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
+    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     panKnob.setRange(-1.0, 1.0, 0.01);
     panKnob.setDoubleClickReturnValue(true, 0.0);
     panKnob.setValue(channel.pan.get(), juce::dontSendNotification);
@@ -152,12 +159,13 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     panKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
     panKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     panKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    panKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(panKnob);
 
     rebuildRoutingButtons();
 
     faderSlider.setSliderStyle(juce::Slider::LinearVertical);
-    faderSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 44, 16);
+    faderSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 64, 20);
     faderSlider.setRange(-60.0, 12.0, 0.1);
     faderSlider.setTextValueSuffix(" dB");
     faderSlider.setDoubleClickReturnValue(true, 0.0);
@@ -170,6 +178,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     faderSlider.setColour(juce::Slider::thumbColourId, theme::green());
     faderSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     faderSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    faderSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(faderSlider);
 
     addAndMakeVisible(levelMeter);
@@ -310,28 +319,23 @@ void ChannelStrip::resized() {
     // input channel mapping row
     auto inputRow = area.removeFromTop(20);
     inputRow.removeFromTop(1);
-    modeCombo.setBounds(inputRow.removeFromLeft(58));
+    modeCombo.setBounds(inputRow.removeFromLeft(50));
     if (inputComboB.isVisible()) {
-        inputComboB.setBounds(inputRow.removeFromRight(34));
+        inputComboB.setBounds(inputRow.removeFromRight(40));
         inputRow.removeFromRight(4);
     }
-    inputComboA.setBounds(inputRow.removeFromRight(34));
+    inputComboA.setBounds(inputRow.removeFromRight(40));
     if (inputErrorLabel.isVisible()) {
         inputErrorLabel.setBounds(area.removeFromTop(14));
     }
     area.removeFromTop(2);
 
-    // Gain row: trim knob (left) + mono combo (right)
+    // Gain row: trim knob with the input mapping kept above it.
     auto gainRow = area.removeFromTop(74);
     auto gainLeft = gainRow.removeFromLeft((gainRow.getWidth() * 2) / 5);
     gainRow.removeFromLeft(4);
     levelLabel.setBounds(gainLeft.removeFromTop(14));
     levelKnob.setBounds(gainLeft.reduced(2));
-    // right side: mono combo at top (wireframe "mono v")
-    modeCombo.setBounds(gainRow.removeFromTop(20)); // reuse mode combo? already placed; keep here instead
-    // (modeCombo already positioned above; re-position is fine, last wins)
-    gainRow.removeFromTop(4);
-    // input combos already placed above; leave remaining
     area.removeFromTop(4);
 
     // Pan row: pan knob (left) + EQ button (right)
@@ -418,12 +422,15 @@ void ChannelStrip::refreshRouting() {
 
 void ChannelStrip::refreshInput() {
     const bool mono = channel.layout == pluginrack::ChannelLayout::Mono;
+    const bool hasInputDevice = channel.inputDeviceName.isNotEmpty();
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
     inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
     const int b = channel.inputChannels.size() > 1 ? channel.inputChannels[1] + 1 : a;
     inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
-    inputComboB.setVisible(!mono);
+    modeCombo.setVisible(hasInputDevice);
+    inputComboA.setVisible(hasInputDevice);
+    inputComboB.setVisible(hasInputDevice && !mono);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
     inputErrorLabel.setText(channel.inputError, juce::dontSendNotification);
@@ -572,6 +579,9 @@ void ChannelStrip::rebuildRoutingButtons() {
 
 void ChannelStrip::paint(juce::Graphics& g) {
     g.fillAll(theme::strip());
+    auto content = getLocalBounds().reduced(1);
+    g.setColour(theme::panel().withAlpha(0.42f));
+    g.fillRect(content.removeFromTop(24));
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
@@ -579,4 +589,8 @@ void ChannelStrip::paint(juce::Graphics& g) {
 
 void ChannelStrip::mouseDown(const juce::MouseEvent&) {
     if (onSelected) onSelected();
+}
+
+void ChannelStrip::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onDoubleClicked) onDoubleClicked();
 }

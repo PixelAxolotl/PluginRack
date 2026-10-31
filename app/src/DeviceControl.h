@@ -14,6 +14,7 @@ public:
     void setDeviceName(const juce::String& n) { deviceName = n; updateTooltip(); repaint(); }
     void setError(const juce::String& e) { error = e; updateTooltip(); repaint(); }
     void setOnClick(std::function<void()> cb) { onClick = std::move(cb); }
+    void setOnDoubleClick(std::function<void()> cb) { onDoubleClick = std::move(cb); }
     void setOnRename(std::function<void()> cb) { onRename = std::move(cb); }
 
     juce::String getTitle() const { return title; }
@@ -35,6 +36,7 @@ private:
     juce::String deviceName;
     juce::String error;
     std::function<void()> onClick;
+    std::function<void()> onDoubleClick;
     std::function<void()> onRename;
     bool hovered = false;
     bool pressed = false;

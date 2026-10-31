@@ -21,6 +21,7 @@ public:
     ~RackView() override;
 
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void rebuild();
     void mouseDown(const juce::MouseEvent& e) override;
 

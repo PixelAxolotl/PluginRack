@@ -9,6 +9,7 @@ public:
     explicit RoutingMatrixComponent(AudioEngine& engine);
 
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void rebuild();
 
 private:

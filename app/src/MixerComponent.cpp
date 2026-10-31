@@ -95,7 +95,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     addAndMakeVisible(addVstButton);
 
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
-    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 40, 14);
+    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 64, 20);
     gainSlider.setRange(-60.0, 12.0, 0.1);
     gainSlider.setTextValueSuffix(" dB");
     gainSlider.setDoubleClickReturnValue(true, 0.0);
@@ -108,6 +108,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     gainSlider.setColour(juce::Slider::thumbColourId, theme::green());
     gainSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     gainSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    gainSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(gainSlider);
 
     addAndMakeVisible(meter);
@@ -446,6 +447,9 @@ void MixerComponent::rebuild() {
         };
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), false);
+        };
+        s->onDoubleClicked = [this, id] {
+            if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), false);
         };
         stripContent.addAndMakeVisible(*s);
     }

@@ -31,6 +31,12 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
     loadButton.setTooltip("Load this save");
     loadButton.onClick = [this] { if (onLoad) onLoad(); };
     addAndMakeVisible(loadButton);
+    for (auto* button : {&defButton, &renameButton, &deleteButton, &loadButton}) {
+        button->setColour(juce::TextButton::buttonColourId, theme::control());
+        button->setColour(juce::TextButton::buttonOnColourId, theme::green());
+        button->setColour(juce::TextButton::textColourOffId, theme::text());
+        button->setColour(juce::TextButton::textColourOnId, theme::bg());
+    }
 }
 
 void SavesView::SaveRowComponent::setDefaultActive(bool isDefaultIn) {
@@ -214,6 +220,8 @@ void SavesView::confirmDelete(const juce::String& name) {
 
 void SavesView::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
+    g.setColour(theme::line().withAlpha(0.25f));
+    g.drawHorizontalLine(56, 12.0f, (float)getWidth() - 12.0f);
 }
 
 void SavesView::resized() {

@@ -18,6 +18,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     subLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     subLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(subLabel);
+    outputHeader.setColour(juce::Label::textColourId, theme::amber());
 
     gainCaption.setText("Gain", juce::dontSendNotification);
     gainCaption.setJustificationType(juce::Justification::centred);
@@ -26,7 +27,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     addAndMakeVisible(gainCaption);
 
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
-    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 52, 16);
+    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 64, 20);
     gainSlider.setRange(-60.0, 12.0, 0.1);
     gainSlider.setTextValueSuffix(" dB");
     gainSlider.setDoubleClickReturnValue(true, 0.0);
@@ -49,7 +50,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     addAndMakeVisible(trimCaption);
 
     trimKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    trimKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 44, 14);
+    trimKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     trimKnob.setRange(-12.0, 12.0, 0.1);
     trimKnob.setTextValueSuffix(" dB");
     trimKnob.setDoubleClickReturnValue(true, 0.0);
@@ -70,7 +71,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     addAndMakeVisible(panCaption);
 
     panSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    panSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 40, 14);
+    panSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     panSlider.setRange(-1.0, 1.0, 0.01);
     panSlider.setDoubleClickReturnValue(true, 0.0);
     panSlider.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
@@ -121,6 +122,10 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
         rebuild();
     };
     addAndMakeVisible(channelCombo);
+    channelCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
+    channelCombo.setColour(juce::ComboBox::textColourId, theme::text());
+    channelCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
+    channelCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
 
     insertsHeader.setText("Inserts", juce::dontSendNotification);
     insertsHeader.setJustificationType(juce::Justification::centredLeft);
@@ -184,7 +189,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     outputHeader.setText("Output", juce::dontSendNotification);
     outputHeader.setJustificationType(juce::Justification::centredLeft);
     outputHeader.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
-    outputHeader.setColour(juce::Label::textColourId, theme::text());
+    outputHeader.setColour(juce::Label::textColourId, theme::amber());
     addAndMakeVisible(outputHeader);
 
     emptyLabel.setText("No chains yet - add a channel or output in the Mixer view.",
@@ -506,6 +511,7 @@ void RackView::focusEq() {
             safe->closeEqWindow();
         };
         refreshEqButton();
+        resized();
     } else if (auto* out = currentOutput()) {
         const std::uint32_t outputId = (std::uint32_t)selectedId;
         juce::Component::SafePointer<RackView> safe(this);
@@ -545,6 +551,7 @@ void RackView::focusEq() {
             safe->closeEqWindow();
         };
         refreshEqButton();
+        resized();
     }
 }
 
@@ -673,6 +680,7 @@ void RackView::resized() {
 
     // left column
     auto la = leftArea.reduced(4);
+    la.removeFromTop(14);
     channelCombo.setBounds(la.removeFromTop(24));
     la.removeFromTop(4);
     nameLabel.setBounds(la.removeFromTop(20));
@@ -684,21 +692,22 @@ void RackView::resized() {
     trimKnob.setBounds(trimArea.withSizeKeepingCentre(52, 52));
     la.removeFromTop(6);
 
-    auto faderRow = la.removeFromTop(150);
+    auto btnRow = la.removeFromBottom(24);
+    la.removeFromBottom(8);
+
+    auto panArea = la.removeFromBottom(92);
+    panCaption.setBounds(panArea.removeFromTop(14));
+    panSlider.setBounds(panArea.withSizeKeepingCentre(64, 64));
+    la.removeFromBottom(8);
+
+    auto faderRow = la;
     auto meterArea = faderRow.removeFromRight(14);
     faderRow.removeFromRight(4);
     gainCaption.setBounds(faderRow.removeFromTop(14));
-    auto faderArea = faderRow; // rest
-    if (meter != nullptr) meter->setBounds(meterArea.removeFromTop(150));
-    gainSlider.setBounds(faderArea.removeFromTop(136));
-    la.removeFromTop(6);
+    auto faderArea = faderRow.reduced(0, 4);
+    if (meter != nullptr) meter->setBounds(meterArea.reduced(0, 4));
+    gainSlider.setBounds(faderArea);
 
-    panCaption.setBounds(la.removeFromTop(14));
-    auto panArea = la.removeFromTop(74);
-    panSlider.setBounds(panArea.withSizeKeepingCentre(64, 64));
-    la.removeFromTop(6);
-
-    auto btnRow = la.removeFromTop(24);
     if (soloButton.isVisible()) {
         const int third = btnRow.getWidth() / 3 - 3;
         muteButton.setBounds(btnRow.removeFromLeft(third));
@@ -715,6 +724,7 @@ void RackView::resized() {
 
     // plugin column
     auto pa = pluginArea.reduced(4);
+    pa.removeFromTop(14);
     insertsHeader.setBounds(pa.removeFromTop(20));
     pa.removeFromTop(4);
     eqButton.setBounds(pa.removeFromTop(30));
@@ -722,13 +732,18 @@ void RackView::resized() {
     slotViewport.setBounds(pa);
     refreshSlots();
 
-    // center
-    editorViewport.setBounds(centerArea);
+    // Keep embedded editors inside the framed center bay. The viewport and
+    // its child editors paint opaque surfaces, so using the panel bounds
+    // directly would cover the panel outline.
+    const auto editorArea = centerArea.reduced(2);
+    editorViewport.setBounds(editorArea);
     const int vw = juce::jmax(0, editorViewport.getWidth());
     const int vh = juce::jmax(0, editorViewport.getHeight());
     if (eqFocused && eqWindow != nullptr) {
-        editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
-        eqWindow->setBounds(editorHolder.getLocalBounds());
+        const int ew = juce::jmax(400, EQWindow::kWidth);
+        const int eh = juce::jmax(320, EQWindow::kHeight);
+        editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
+        eqWindow->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
@@ -736,7 +751,7 @@ void RackView::resized() {
         const int ew = juce::jmax(200, dockedEditor->getWidth());
         const int eh = juce::jmax(150, dockedEditor->getHeight());
         editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
-        dockedEditor->setBounds(0, 0, ew, eh);
+        dockedEditor->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
         noEditorLabel.setBounds(editorHolder.getLocalBounds());
     } else {
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
@@ -750,6 +765,7 @@ void RackView::resized() {
 
     // right column
     auto ra = rightArea.reduced(4);
+    ra.removeFromTop(14);
     outputHeader.setBounds(ra.removeFromTop(20));
     ra.removeFromTop(4);
     int y = ra.getY();
@@ -759,6 +775,48 @@ void RackView::resized() {
         b->setBounds(ra.getX(), y, ra.getWidth(), btnH);
         y += btnH + btnGap;
     }
+}
+
+void RackView::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    if (emptyLabel.isVisible()) return;
+
+    auto area = getLocalBounds().reduced(8);
+    const int leftW = 160;
+    const int pluginW = 220;
+    const int rightW = 110;
+    const int gap = 8;
+    auto leftArea = area.removeFromLeft(leftW);
+    area.removeFromLeft(gap);
+    auto rightArea = area.removeFromRight(rightW);
+    area.removeFromRight(gap);
+    auto pluginArea = area.removeFromLeft(pluginW);
+    area.removeFromLeft(gap);
+    const auto centerArea = area;
+
+    const auto drawPanel = [&g](juce::Rectangle<int> bounds, juce::Colour fill,
+                                juce::Colour outline) {
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds.toFloat(), 3.0f);
+        g.setColour(outline);
+        g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), 3.0f, 1.0f);
+    };
+
+    drawPanel(leftArea, theme::panel().darker(0.08f), theme::border());
+    drawPanel(pluginArea, theme::panel(), theme::border());
+    drawPanel(centerArea, theme::bg().darker(0.16f), theme::line().withAlpha(0.8f));
+    drawPanel(rightArea, theme::panel().darker(0.08f), theme::border());
+
+    g.setColour(theme::dim().withAlpha(0.75f));
+    g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+    g.drawText("INPUT", leftArea.getX() + 8, leftArea.getY() + 4, 60, 12,
+               juce::Justification::left, false);
+    g.drawText("INSERTS", pluginArea.getX() + 8, pluginArea.getY() + 4, 70, 12,
+               juce::Justification::left, false);
+    g.drawText("PLUGIN EDITOR", centerArea.getX() + 10, centerArea.getY() + 6, 100, 12,
+               juce::Justification::left, false);
+    g.drawText("OUTPUT", rightArea.getX() + 8, rightArea.getY() + 4, 60, 12,
+               juce::Justification::left, false);
 }
 
 void RackView::jumpToMixer() {

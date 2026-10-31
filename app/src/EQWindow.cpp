@@ -13,6 +13,7 @@ EQWindow::EQWindow(const juce::String& title,
     setUsingNativeTitleBar(true);
     setResizable(true, true);
     setResizeLimits(400, 320, 1000, 700);
+    setColour(juce::DocumentWindow::backgroundColourId, theme::bg());
 
     curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
     curve.setBands(initialBands);
@@ -25,15 +26,13 @@ EQWindow::EQWindow(const juce::String& title,
     // base-class call documented by ResizableWindow's shadowing overload.
     Component::addAndMakeVisible(curve);
 
-    autoButton.setTooltip("Automatic band assist - visual only in v1");
-    autoButton.setEnabledState(false); // plan: no function in v1
-    Component::addAndMakeVisible(autoButton);
-
     stereoTag.setJustificationType(juce::Justification::centred);
     stereoTag.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     stereoTag.setColour(juce::Label::textColourId, theme::dim());
     stereoTag.setTooltip("Stereo processing - visual only in v1");
     Component::addAndMakeVisible(stereoTag);
+    bypassButton.setFontSize(9.0f);
+    soloButton.setFontSize(9.0f);
 
     bypassButton.setTooltip("Bypass the selected band");
     bypassButton.setClickAction([this] {
@@ -69,7 +68,7 @@ EQWindow::EQWindow(const juce::String& title,
     // Freq/Gain/Q knobs for the selected band, styled like the strip knobs
     // (ConsoleLookAndFeel conventions: control box, themed arcs).
     freqKnob.setSliderStyle(juce::Slider::RotaryHorizontalDrag);
-    freqKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 64, 16);
+    freqKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     freqKnob.setRange(EQCurveComponent::kMinFreqHz, EQCurveComponent::kMaxFreqHz);
     freqKnob.setSkewFactorFromMidPoint(1000.0);
     freqKnob.textFromValueFunction = [](double hz) {
@@ -86,10 +85,11 @@ EQWindow::EQWindow(const juce::String& title,
     freqKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
     freqKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     freqKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    freqKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(freqKnob);
 
     gainKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    gainKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 64, 16);
+    gainKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     gainKnob.setRange(-EQCurveComponent::kMaxGainDb, EQCurveComponent::kMaxGainDb, 0.1);
     gainKnob.setTextValueSuffix(" dB");
     gainKnob.setDoubleClickReturnValue(true, 0.0);
@@ -98,10 +98,11 @@ EQWindow::EQWindow(const juce::String& title,
     gainKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::deepGreen());
     gainKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     gainKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    gainKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(gainKnob);
 
     qKnob.setSliderStyle(juce::Slider::RotaryHorizontalDrag);
-    qKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 64, 16);
+    qKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     qKnob.setRange(EQCurveComponent::kMinQ, EQCurveComponent::kMaxQ);
     qKnob.setSkewFactorFromMidPoint(1.0);
     qKnob.textFromValueFunction = [](double q) { return juce::String(q, 2); };
@@ -116,6 +117,7 @@ EQWindow::EQWindow(const juce::String& title,
     qKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
     qKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     qKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    qKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(qKnob);
 
     syncControls();
@@ -295,11 +297,18 @@ void EQWindow::closeButtonPressed() {
     });
 }
 
+void EQWindow::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    auto content = getLocalBounds().reduced(2);
+    g.setColour(theme::panel().darker(0.04f));
+    g.fillRect(content.removeFromTop(24));
+}
+
 void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
-    auto area = getLocalBounds().reduced(4);
+    auto area = getLocalBounds().reduced(2);
     auto controlsRow = area.removeFromBottom(104);
-    auto analyzerRow = area.removeFromTop(20);
+    auto analyzerRow = area.removeFromTop(24);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
     analyzerRow.removeFromLeft(4);
     // (Mode buttons removed: analyzer is fixed to Post. The freed space
@@ -312,14 +321,12 @@ void EQWindow::resized() {
     rtaMinusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
     curve.setBounds(area);
 
-    auto left = controlsRow.removeFromLeft(64);
+    auto left = controlsRow.removeFromLeft(80);
     left.removeFromTop(6);
-    autoButton.setBounds(left.removeFromTop(22));
-    left.removeFromTop(4);
     stereoTag.setBounds(left.removeFromTop(16));
-    controlsRow.removeFromLeft(8);
+    controlsRow.removeFromLeft(6);
 
-    auto right = controlsRow.removeFromRight(64);
+    auto right = controlsRow.removeFromRight(80);
     right.removeFromTop(6);
     bypassButton.setBounds(right.removeFromTop(22));
     right.removeFromTop(4);
@@ -336,6 +343,9 @@ void EQWindow::resized() {
         auto* label = i == 0 ? &freqLabel : (i == 1 ? &gainLabel : &qLabel);
         auto* knob = i == 0 ? &freqKnob : (i == 1 ? &gainKnob : &qKnob);
         label->setBounds(s.removeFromTop(14));
-        knob->setBounds(s.removeFromTop(66));
+        auto knobArea = s.removeFromTop(90);
+        const int knobWidth = juce::jmin(knobArea.getWidth(),
+                                         juce::jmax(66, juce::roundToInt(knobArea.getWidth() * 0.8f)));
+        knob->setBounds(knobArea.withSizeKeepingCentre(knobWidth, knobArea.getHeight()));
     }
 }

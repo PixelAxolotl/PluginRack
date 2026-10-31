@@ -31,6 +31,7 @@ public:
 
     std::function<void()> onStructureChanged;
     std::function<void(int channelId, bool isOutput)> onSelectionChanged;
+    std::function<void(int channelId, bool isOutput)> onDoubleClicked;
 
 private:
     class OutputStrip final : public juce::Component, public IInsertHost {
