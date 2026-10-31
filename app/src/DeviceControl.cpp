@@ -22,6 +22,7 @@ void DeviceControl::updateTooltip() {
     juce::String text = title;
     if (deviceName.isNotEmpty()) text += "\n" + deviceName;
     if (error.isNotEmpty()) text += "\n" + error;
+    text += "\nDouble-click to rename";
     setTooltip(text);
 }
 
@@ -90,9 +91,13 @@ void DeviceControl::paint(juce::Graphics& g) {
     g.drawText(sub, textArea, juce::Justification::centredLeft, true);
 }
 
-void DeviceControl::mouseDown(const juce::MouseEvent&) {
+void DeviceControl::mouseDown(const juce::MouseEvent& e) {
     pressed = true;
     repaint();
+    if (e.mods.isRightButtonDown()) {
+        if (onRename) onRename();
+        return;
+    }
     if (onClick) onClick();
 }
 

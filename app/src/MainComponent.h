@@ -2,16 +2,18 @@
 
 #include <JuceHeader.h>
 
+#include <atomic>
 #include <functional>
 
 #include "AudioEngine.h"
 #include "MixerComponent.h"
 #include "RackView.h"
 #include "RoutingMatrixComponent.h"
+#include "SavesView.h"
 #include "SettingsView.h"
 #include "Theme.h"
 
-enum class AppView { Rack = 0, Mixer, Routing, Settings };
+enum class AppView { Rack = 0, Mixer, Routing, Saves, Settings };
 
 // Persistent 56 px header: wordmark, view navigation, snapshot placeholder,
 // audio status, error affordance, scene buttons. Paints the same bar the
@@ -30,7 +32,6 @@ public:
 
     std::function<void(AppView)> onViewSelected;
     std::function<void()> onSave;
-    std::function<void()> onLoad;
     std::function<void()> onMenu;
     std::function<void()> onSnapshot;
     std::function<void()> onErrorClicked;
@@ -49,7 +50,7 @@ private:
     juce::Label latencyLabel;
     juce::TextButton errorButton{"!"};
     juce::TextButton saveButton{"Save"};
-    juce::TextButton loadButton{"Load"};
+    juce::TextButton savesButton{"Saves"};
     juce::TextButton menuButton{"Menu"};
     juce::String clockText;
     juce::Colour clockColour = theme::dim();
@@ -72,6 +73,16 @@ public:
 
     std::function<void(AppView)> onViewChanged;
     std::function<void()> onStructureChanged;
+    // Wired by MainComponent to its synchronous scene apply. The Saves view
+    // parses save files but never touches the engine: restoreScene mutates
+    // plugins and JUCE components that belong to the message thread, so the
+    // load request round-trips through the host.
+    std::function<juce::String(const pluginrack::Scene&)> onRestoreRequested;
+
+    // MainComponent calls this before engine strip mutation: the rack's
+    // docked plugin editor is backed by a strip's plugin instance, and an
+    // editor whose processor dies first is unsafe to delete.
+    void releaseDockedEditor() { rackView.closeDockedEditor(); }
 
 private:
     class PlaceholderView final : public juce::Component {
@@ -92,6 +103,7 @@ private:
     MixerComponent& mixerView;
     RackView rackView;
     RoutingMatrixComponent routingView;
+    SavesView savesView;
     SettingsView settingsView;
     AppView currentView = AppView::Rack;
 
@@ -106,10 +118,18 @@ public:
     void resized() override;
     void paint(juce::Graphics& g) override;
     void selectView(AppView view);
+    void saveSceneOnExit();
+    void initialiseAudio();
 
 private:
     void saveScene();
+    void saveSceneAs();
     void loadScene(bool showMissingMessage);
+    // Applies a parsed scene on the message thread and returns plugin load
+    // errors. Guarded by sceneLoading_; callers run it directly (the engine
+    // parks the audio clock around the strip swap, so it is brief).
+    juce::String applyScene(const pluginrack::Scene& scene);
+    void showSavesMenu();
     void showMenu();
     void showAudioErrors();
     void showSnapshotPlaceholder();
@@ -117,11 +137,13 @@ private:
     void showError(const juce::String& message);
     void timerCallback() override;
 
+    std::unique_ptr<juce::FileChooser> fileChooser;
     AudioEngine audioEngine;
     MixerComponent mixer;
     ToolbarComponent toolbar;
     ViewRouter router;
     double smoothedLatencyMs = -1.0;
+    std::atomic<bool> sceneLoading_{false};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

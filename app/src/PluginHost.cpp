@@ -56,6 +56,10 @@ PluginHost::PluginHost() {
 PluginHost::~PluginHost() {
     delete editorWindow;
     editorWindow = nullptr;
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin != nullptr) {
+        plugin->releaseResources();
+    }
 }
 
 bool PluginHost::hasPlugin() const {
@@ -100,6 +104,15 @@ void PluginHost::showEditor() {
         return;
     }
 
+    {
+        // Single-editor rule: the processor allows only one active editor.
+        // The rack dock may already own it — never create a second owner
+        // (reparenting the docked editor into a floating window leaves the
+        // dock with a dangling pointer and double-deletes on remove).
+        const juce::ScopedLock lock(pluginLock);
+        if (plugin != nullptr && plugin->getActiveEditor() != nullptr) return;
+    }
+
     juce::AudioProcessorEditor* ed = nullptr;
     {
         const juce::ScopedLock lock(pluginLock);
@@ -116,6 +129,30 @@ void PluginHost::showEditor() {
 
     auto* window = new PluginWindow(*this, ed);
     editorWindow = window;
+}
+
+juce::AudioProcessorEditor* PluginHost::createEditorForDock() {
+    closeFloatingEditor();
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin != nullptr && plugin->hasEditor()) {
+        return plugin->createEditorAndMakeActive();
+    }
+    return nullptr;
+}
+
+void PluginHost::destroyDockEditor(juce::AudioProcessorEditor* editor) {
+    if (editor == nullptr) return;
+    // The editor may have been reparented into a floating window, which
+    // owns it now: don't delete it out from under the window, just let the
+    // window keep sole ownership.
+    if (editor->getParentComponent() != nullptr) return;
+    editorBeingDeleted(editor);
+    delete editor;
+}
+
+void PluginHost::closeFloatingEditor() {
+    if (editorWindow == nullptr) return;
+    closeEditorWindow(editorWindow);
 }
 
 juce::String PluginHost::loadPlugin(const juce::File& file) {
@@ -144,6 +181,13 @@ juce::String PluginHost::loadPlugin(const juce::File& file) {
         return errorMessage.isNotEmpty() ? errorMessage : "The VST3 could not be instantiated.";
     }
 
+    // The host supplies one stereo audio block. Auxiliary and sidechain
+    // buses must be disabled explicitly; leaving them active makes some VST3
+    // processors interpret the two-channel block with the wrong bus offsets.
+    if (!candidate->disableNonMainBuses()) {
+        return "The selected VST3 could not disable its auxiliary buses.";
+    }
+
     auto layout = candidate->getBusesLayout();
     if (layout.inputBuses.isEmpty() || layout.outputBuses.isEmpty()) {
         return "The selected plugin is not an audio effect with input and output buses.";
@@ -165,17 +209,24 @@ juce::String PluginHost::loadPlugin(const juce::File& file) {
     pluginPath = file.getFullPathName();
     pluginName = candidate->getName();
     plugin = std::move(candidate);
+    prepared = true;
     cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
     return {};
 }
 
 void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
     const juce::ScopedLock lock(pluginLock);
+    const bool unchanged = prepared && currentSampleRate == sampleRate
+        && currentBufferSize == samplesPerBlock;
     currentSampleRate = sampleRate;
     currentBufferSize = samplesPerBlock;
-    if (plugin != nullptr) {
+    if (plugin != nullptr && !unchanged) {
+        if (prepared) {
+            plugin->releaseResources();
+        }
         plugin->setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
         plugin->prepareToPlay(sampleRate, samplesPerBlock);
+        prepared = true;
     }
     cachedLatencySamples_.store(plugin != nullptr ? plugin->getLatencySamples() : 0,
                                 std::memory_order_relaxed);

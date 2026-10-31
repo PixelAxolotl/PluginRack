@@ -25,6 +25,12 @@ public:
     int getLatencySamples() const;
     void refreshLatencyCache();
     void showEditor();
+    // Channel-view docking: create an editor the caller owns and embeds inline
+    // (addAndMakeVisible). Hides any floating window first. Returns null when
+    // the plugin has no editor; destroy with destroyDockEditor.
+    juce::AudioProcessorEditor* createEditorForDock();
+    void destroyDockEditor(juce::AudioProcessorEditor* editor);
+    void closeFloatingEditor();
     void editorBeingDeleted(juce::AudioProcessorEditor* editor);
     void clearEditorWindow(juce::DocumentWindow* window);
     void closeEditorWindow(juce::DocumentWindow* window);
@@ -38,6 +44,7 @@ private:
     juce::String pluginName;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    bool prepared = false;
     std::atomic<int> cachedLatencySamples_{0};
 
     juce::DocumentWindow* editorWindow = nullptr;

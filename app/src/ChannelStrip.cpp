@@ -294,7 +294,7 @@ void ChannelStrip::refreshEqButton() {
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
 
-    // header row
+    // header row: CH label, SPLIT, X
     auto headerRow = area.removeFromTop(22);
     auto btnArea = headerRow.removeFromRight(22);
     auto splitArea = headerRow.removeFromRight(48);
@@ -303,10 +303,11 @@ void ChannelStrip::resized() {
     splitButton.setBounds(splitArea);
     area.removeFromTop(4);
 
-    deviceControl.setBounds(area.removeFromTop(40));
+    // Input source row (Input v)
+    deviceControl.setBounds(area.removeFromTop(32));
     area.removeFromTop(4);
 
-    // input mapping row: [Mono/Stereo] .... [In A][In B]
+    // input channel mapping row
     auto inputRow = area.removeFromTop(20);
     inputRow.removeFromTop(1);
     modeCombo.setBounds(inputRow.removeFromLeft(58));
@@ -320,57 +321,64 @@ void ChannelStrip::resized() {
     }
     area.removeFromTop(2);
 
+    // Gain row: trim knob (left) + mono combo (right)
+    auto gainRow = area.removeFromTop(74);
+    auto gainLeft = gainRow.removeFromLeft((gainRow.getWidth() * 2) / 5);
+    gainRow.removeFromLeft(4);
+    levelLabel.setBounds(gainLeft.removeFromTop(14));
+    levelKnob.setBounds(gainLeft.reduced(2));
+    // right side: mono combo at top (wireframe "mono v")
+    modeCombo.setBounds(gainRow.removeFromTop(20)); // reuse mode combo? already placed; keep here instead
+    // (modeCombo already positioned above; re-position is fine, last wins)
+    gainRow.removeFromTop(4);
+    // input combos already placed above; leave remaining
+    area.removeFromTop(4);
+
+    // Pan row: pan knob (left) + EQ button (right)
+    auto panRow = area.removeFromTop(74);
+    auto panLeft = panRow.removeFromLeft((panRow.getWidth() * 2) / 5);
+    panRow.removeFromLeft(4);
+    panLabel.setBounds(panLeft.removeFromTop(14));
+    panKnob.setBounds(panLeft.reduced(2));
+    eqButton.setBounds(panRow.removeFromTop(24));
+    area.removeFromTop(4);
+
+    // Plugin / insert slot container
     vstHeader.setBounds(area.removeFromTop(14));
-    // slots
-    const int slotH = 22;
-    for (int i = 0; i < slots.size(); ++i) {
+    const int slotH = 20;
+    for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
     }
-    addVstButton.setBounds(area.removeFromTop(20));
-    area.removeFromTop(6);
-
-    // knobs row
-    auto knobRow = area.removeFromTop(88);
-    auto leftKnob = knobRow.removeFromLeft((knobRow.getWidth() - 8) / 2);
-    levelLabel.setBounds(leftKnob.removeFromTop(14));
-    levelKnob.setBounds(leftKnob.removeFromTop(72));
-    knobRow.removeFromLeft(8);
-    panLabel.setBounds(knobRow.removeFromTop(14));
-    panKnob.setBounds(knobRow.removeFromTop(72));
-
+    addVstButton.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
-    // routing buttons grid
+
+    // routing buttons (compact)
     const int rows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
-    const int routingHeight = rows * 22;
+    const int routingHeight = rows * 20;
     auto routingArea = area.removeFromTop(routingHeight);
     const int cellW = juce::jmax(1, routingArea.getWidth() / 4);
     for (int i = 0; i < (int)routingButtons.size(); ++i) {
         const int row = i / 4;
         const int col = i % 4;
         routingButtons[i]->setBounds(routingArea.getX() + col * cellW + 1,
-                                    routingArea.getY() + row * 22,
-                                    juce::jmax(1, cellW - 2), 20);
+                                    routingArea.getY() + row * 20,
+                                    juce::jmax(1, cellW - 2), 18);
     }
     area.removeFromTop(4);
 
-    // fader + meter
-    auto bottom = area.removeFromBottom(30); // eq/mute/solo thirds
-    const int third = (bottom.getWidth() - 8) / 3;
-    auto fm = area; // remaining for fader+meter
-    if (fm.getHeight() < 140) {
-        // keep minimum; area already consumed? leave as is
-    }
+    // fader + meter (bottom, dominant)
+    auto footer = area.removeFromBottom(30); // M / S
+    const int half = (footer.getWidth() - 4) / 2;
+    auto fm = area;
     const int meterW = 12;
     levelMeter.setBounds(fm.removeFromRight(meterW));
     fm.removeFromRight(4);
     faderSlider.setBounds(fm);
 
-    muteButton.setBounds(bottom.removeFromLeft(third));
-    bottom.removeFromLeft(4);
-    soloButton.setBounds(bottom.removeFromLeft(third));
-    bottom.removeFromLeft(4);
-    eqButton.setBounds(bottom);
+    muteButton.setBounds(footer.removeFromLeft(half));
+    footer.removeFromLeft(4);
+    soloButton.setBounds(footer);
 }
 
 void ChannelStrip::refreshInserts() {
@@ -511,6 +519,11 @@ juce::String ChannelStrip::insertPlugin(const juce::File& file) {
 }
 
 void ChannelStrip::erasePlugin(std::uint32_t insertId) {
+    // Mirror OutputStrip: the rack may have docked an editor owned by this
+    // insert. Release-only on purpose (see InsertHost.h): a rebuild here
+    // would re-dock the doomed insert. Null-safe; a second release from the
+    // slot's remove button is a no-op.
+    if (auto release = pluginRemovingHook()) release();
     audioEngine.removePlugin(channel.id, insertId);
 }
 

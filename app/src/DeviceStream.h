@@ -139,6 +139,7 @@ public:
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getOutputDroppedFrames() const { return outputDroppedFrames.load(std::memory_order_relaxed); }
+    std::uint64_t getOutputLowWatermarks() const { return outputLowWatermarks.load(std::memory_order_relaxed); }
 
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
@@ -165,9 +166,11 @@ private:
     std::atomic<int> latencySamples{0};
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
+    std::atomic<std::uint64_t> outputLowWatermarks{0};
+    juce::AudioBuffer<float> lastOutputBlock{ 2, 16384 };
+    int lastOutputFrames = 0;
     std::function<void(int)> renderHook;
     std::atomic<bool> renderActive{true};
     float* const* currentOutputChannels = nullptr;
     int currentNumOutputChannels = 0;
 };
-

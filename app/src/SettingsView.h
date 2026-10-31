@@ -22,8 +22,10 @@ private:
     juce::Label bufferLabel;
     juce::Label errorLabel;
 
-    juce::Label bufferSizeLabel;
-    juce::ComboBox bufferSizeCombo;
+    juce::Label inputBufferSizeLabel;
+    juce::ComboBox inputBufferSizeCombo;
+    juce::Label outputBufferSizeLabel;
+    juce::ComboBox outputBufferSizeCombo;
 
     juce::TextButton measureButton { "Measure Round-Trip Latency" };
     juce::Label measuredLabel;

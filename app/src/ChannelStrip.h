@@ -38,6 +38,9 @@ public:
 public:
     std::function<void()> onRemoveRequested;
     std::function<void()> rebuildCallback;
+    std::function<void()> onSelected;
+
+    void mouseDown(const juce::MouseEvent&) override;
 
 private:
     void layoutSlots();

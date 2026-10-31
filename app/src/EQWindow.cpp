@@ -5,9 +5,11 @@
 EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
                    std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback,
-                   double sampleRateHz)
+                   double sampleRateHz,
+                   bool embeddedMode)
     : juce::DocumentWindow(title, theme::strip(), juce::DocumentWindow::allButtons),
-      applyBands(std::move(applyBandsCallback)) {
+      applyBands(std::move(applyBandsCallback)),
+      embedded(embeddedMode) {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
     setResizeLimits(400, 320, 1000, 700);
@@ -162,8 +164,12 @@ EQWindow::EQWindow(const juce::String& title,
     Component::addAndMakeVisible(rtaOffsetLabel);
     setRtaOffsetDb(kDefaultRtaOffsetDb);
 
-    centreWithSize(kWidth, kHeight);
-    setVisible(true);
+    if (!embedded) {
+        centreWithSize(kWidth, kHeight);
+        setVisible(true);
+    } else {
+        setSize(kWidth, kHeight);
+    }
 }
 
 EQWindow::~EQWindow() {

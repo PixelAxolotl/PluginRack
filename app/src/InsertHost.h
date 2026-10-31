@@ -3,10 +3,24 @@
 #include <JuceHeader.h>
 
 #include <cstdint>
+#include <functional>
 
 #include "AudioEngine.h"
 #include "MiniButton.h"
 #include "Theme.h"
+
+// Release-only hook fired synchronously BEFORE erasePlugin frees the
+// processor, so a docked editor for the doomed insert is destroyed while
+// still alive.
+//
+// A full onStructureChanged round-trip cannot be used here: it would
+// rebuild the rack and re-dock the doomed insert before the erase runs.
+// The view router owns the only docked editor, so it assigns this hook;
+// it stays empty in unit tests, where there is no router.
+inline std::function<void()>& pluginRemovingHook() {
+    static std::function<void()> hook;
+    return hook;
+}
 
 class IInsertHost {
 public:
@@ -16,6 +30,9 @@ public:
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;
     virtual void refreshAfterInsertChange() = 0;
     virtual void openPicker() = 0;
+    // Channel view overrides this to focus the clicked slot inline (returns
+    // true, skipping the floating editor). Default false keeps showEditor().
+    virtual bool insertActivated(AudioEngine::InsertSlot* /*insert*/) { return false; }
 };
 
 class InsertSlotComponent final : public juce::Component, public juce::SettableTooltipClient {
@@ -49,7 +66,18 @@ public:
 
         removeButton.setClickAction([this] {
             if (insert == nullptr) return;
-            host.erasePlugin(insert->id);
+            const std::uint32_t doomedId = insert->id;
+            // Drop the freed pointer before the synchronous erase below:
+            // the engine destroys the insert, and the refresh that rebinds
+            // these slots only runs async afterwards. Greys out at once, so
+            // a second click in that window is a guarded no-op.
+            setInsert(nullptr);
+            // Release-only, synchronous: destroys the rack's docked editor
+            // (if it shows this insert) while the processor is still alive.
+            // Must run before erasePlugin, and must not rebuild (a rebuild
+            // would re-dock the doomed insert before the erase).
+            if (auto release = pluginRemovingHook()) release();
+            host.erasePlugin(doomedId);
             if (hostComponent != nullptr) {
                 juce::Component::SafePointer<juce::Component> safe(hostComponent);
                 juce::MessageManager::callAsync([safe] {
@@ -116,7 +144,7 @@ public:
     void mouseDown(const juce::MouseEvent&) override {
         if (insert == nullptr) {
             host.openPicker();
-        } else {
+        } else if (!host.insertActivated(insert)) {
             insert->pluginHost.showEditor();
         }
     }

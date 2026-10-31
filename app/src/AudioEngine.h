@@ -40,6 +40,13 @@ public:
         static constexpr std::uint32_t kPre = 1;  // mirrors kAnalyzerPre
         static constexpr std::uint32_t kPost = 2; // mirrors kAnalyzerPost
 
+        // JUCE leaves fresh AudioBuffer samples undefined; snapshot() can
+        // read the rings before the first writeTap, so start them silent.
+        AnalyzerTap() {
+            pre.clear();
+            post.clear();
+        }
+
         void setMode(std::uint32_t newMode) noexcept {
             mode.set(newMode);
         }
@@ -144,6 +151,8 @@ public:
         std::uint64_t inputDroppedFrames = 0;
         std::uint64_t outputUnderruns = 0;
         std::uint64_t outputDroppedFrames = 0;
+        std::uint64_t outputLowWatermarks = 0;
+        std::uint64_t renderMisses = 0;
         double inputOccupancy = 0.0;
         double outputOccupancy = 0.0;
     };
@@ -151,6 +160,7 @@ public:
     AudioEngine();
 
     void prepareToPlay(int maxBlockFrames);
+    void openDefaultDevices();
     void render(int frames);
     std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
     void releaseResources();
@@ -165,6 +175,8 @@ public:
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String setDeviceBufferSize(int size);
+    juce::String setInputBufferSize(int size);
+    juce::String setOutputBufferSize(int size);
     bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
     bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
@@ -182,9 +194,9 @@ public:
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);
     void setChannelPan(std::uint32_t channelId, float pan);
+    void setChannelName(std::uint32_t channelId, const juce::String& name);
     void setChannelMuted(std::uint32_t channelId, bool muted);
     void setChannelSoloed(std::uint32_t channelId, bool soloed);
-    void setChannelName(std::uint32_t channelId, const juce::String& name);
     void setChannelLayout(std::uint32_t channelId, pluginrack::ChannelLayout layout);
     void setChannelInputChannels(std::uint32_t channelId, const std::vector<int>& inputChannels);
     void setChannelMapping(std::uint32_t channelId, pluginrack::ChannelLayout layout, const std::vector<int>& inputChannels);
@@ -240,6 +252,12 @@ public:
     double getMeasuredLatencyMs() const;
 
     pluginrack::Scene makeScene() const;
+    // Rebuilds strips, plugins, and devices from a saved scene. MUST run on
+    // the JUCE message thread: plugin instantiation, editor-window
+    // destruction with the old strips, and device open/close are message-
+    // thread operations. The audio clock is parked around the strip swap
+    // so the call stays brief. Returns plugin/device load errors, empty on
+    // full success.
     juce::String restoreScene(const pluginrack::Scene& scene);
 
 private:
@@ -252,6 +270,7 @@ private:
     // every open output. Never allocates; used by render() when it loses the
     // state lock or gets an oversized block.
     void pushSilenceToOutputs(int frames);
+    void pushSilenceToOutputsLocked(int frames);
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -268,6 +287,10 @@ private:
         int requestedBufferSize = 0;
     };
 
+    // Removed plugins stay alive until the audio engine is destroyed. Some
+    // VSTs keep worker callbacks active after removal, so destroying them on
+    // the UI thread during live playback is unsafe.
+    std::vector<std::unique_ptr<InsertSlot>> retiredInserts_;
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
     std::vector<std::unique_ptr<Route>> routes;
@@ -280,8 +303,11 @@ private:
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
     int requestedBufferSize_ = 0;
+    int requestedInputBufferSize_ = 0;
+    int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
+    std::atomic<std::uint64_t> renderMisses_{0};
     // Read-only silent scratch for render()'s lock-loss and oversized-block
     // paths. Allocated once at construction and never resized: the lock-loss
     // path reads it while prepareToPlay may hold stateLock on the UI thread.

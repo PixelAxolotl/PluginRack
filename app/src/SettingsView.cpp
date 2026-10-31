@@ -17,31 +17,40 @@ SettingsView::SettingsView(AudioEngine& engine)
     styleLabel(bufferLabel);
     styleLabel(errorLabel);
 
-    bufferSizeLabel.setText("Buffer size", juce::dontSendNotification);
-    bufferSizeLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
-    bufferSizeLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(bufferSizeLabel);
-
-    bufferSizeCombo.addItem("Auto (driver default)", 0);
-    for (int s : {32, 64, 128, 256, 512, 1024, 2048}) {
-        bufferSizeCombo.addItem(juce::String(s) + " samples", s);
+    for (auto* label : { &inputBufferSizeLabel, &outputBufferSizeLabel }) {
+        label->setFont(juce::Font(juce::FontOptions(12.0f)));
+        label->setColour(juce::Label::textColourId, theme::text());
+        addAndMakeVisible(*label);
     }
-    const int cur = audioEngine.getLatencyReport().valid ? audioEngine.getLatencyReport().inputBufferSize : 0;
-    bufferSizeCombo.setSelectedId(cur, juce::dontSendNotification);
-    if (bufferSizeCombo.getSelectedId() == 0 && cur == 0) bufferSizeCombo.setSelectedId(0, juce::dontSendNotification);
-    bufferSizeCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
-    bufferSizeCombo.setColour(juce::ComboBox::textColourId, theme::text());
-    bufferSizeCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
-    bufferSizeCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
-    bufferSizeCombo.onChange = [this] {
-        const int size = bufferSizeCombo.getSelectedId();
-        const auto err = audioEngine.setDeviceBufferSize(size);
+    inputBufferSizeLabel.setText("Input buffer", juce::dontSendNotification);
+    outputBufferSizeLabel.setText("Output buffer", juce::dontSendNotification);
+
+    for (auto* combo : { &inputBufferSizeCombo, &outputBufferSizeCombo }) {
+        combo->addItem("Auto (driver default)", 0);
+        for (int s : {32, 64, 128, 256, 512, 1024, 2048, 4096}) {
+            combo->addItem(juce::String(s) + " samples", s);
+        }
+        combo->setColour(juce::ComboBox::backgroundColourId, theme::control());
+        combo->setColour(juce::ComboBox::textColourId, theme::text());
+        combo->setColour(juce::ComboBox::arrowColourId, theme::dim());
+        combo->setColour(juce::ComboBox::outlineColourId, theme::border());
+    }
+    inputBufferSizeCombo.onChange = [this] {
+        const auto err = audioEngine.setInputBufferSize(inputBufferSizeCombo.getSelectedId());
         refresh();
         if (err.isNotEmpty()) {
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
         }
     };
-    addAndMakeVisible(bufferSizeCombo);
+    outputBufferSizeCombo.onChange = [this] {
+        const auto err = audioEngine.setOutputBufferSize(outputBufferSizeCombo.getSelectedId());
+        refresh();
+        if (err.isNotEmpty()) {
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+        }
+    };
+    addAndMakeVisible(inputBufferSizeCombo);
+    addAndMakeVisible(outputBufferSizeCombo);
 
     measureButton.onClick = [this] {
         if (audioEngine.isLatencyMeasuring()) {
@@ -71,14 +80,11 @@ void SettingsView::refresh() {
         bufferLabel.setText("Sample rate: " + juce::String((int)report.sampleRate) + " Hz   Buffer: "
                             + juce::String(report.inputBufferSize) + " in / " + juce::String(report.outputBufferSize) + " out",
                             juce::dontSendNotification);
-        if (!bufferSizeCombo.isPopupActive()) {
-            const int actual = report.outputBufferSize > 0 ? report.outputBufferSize : report.inputBufferSize;
-            if (actual == 0) {
-                bufferSizeCombo.setSelectedId(0, juce::dontSendNotification);
-            } else if (actual == 32 || actual == 64 || actual == 128 || actual == 256
-                       || actual == 512 || actual == 1024 || actual == 2048) {
-                bufferSizeCombo.setSelectedId(actual, juce::dontSendNotification);
-            }
+        if (!inputBufferSizeCombo.isPopupActive()) {
+            inputBufferSizeCombo.setSelectedId(report.inputBufferSize, juce::dontSendNotification);
+        }
+        if (!outputBufferSizeCombo.isPopupActive()) {
+            outputBufferSizeCombo.setSelectedId(report.outputBufferSize, juce::dontSendNotification);
         }
     } else {
         latencyLabel.setText("Latency (est.): n/a", juce::dontSendNotification);
@@ -106,6 +112,12 @@ void SettingsView::refresh() {
         if (o->outputError.isNotEmpty()) errors += o->name + ": " + o->outputError + "\n";
     }
     if (report.underruns + report.overruns > 0) errors += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
+    const auto fifo = audioEngine.getFifoDiagnostics();
+    if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0) {
+        errors += "Safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
+            + " low-watermarks / " + juce::String((juce::int64)fifo.renderMisses)
+            + " render misses\n";
+    }
     if (errors.isEmpty()) errors = "No audio errors.";
     errorLabel.setText(errors.trim(), juce::dontSendNotification);
 }
@@ -126,9 +138,13 @@ void SettingsView::resized() {
     area.removeFromTop(12);
 
     auto row = area.removeFromTop(24);
-    bufferSizeLabel.setBounds(row.removeFromLeft(100));
+    inputBufferSizeLabel.setBounds(row.removeFromLeft(100));
     row.removeFromLeft(8);
-    bufferSizeCombo.setBounds(row.removeFromLeft(160));
+    inputBufferSizeCombo.setBounds(row.removeFromLeft(160));
+    row.removeFromLeft(16);
+    outputBufferSizeLabel.setBounds(row.removeFromLeft(105));
+    row.removeFromLeft(8);
+    outputBufferSizeCombo.setBounds(row.removeFromLeft(160));
 
     area.removeFromTop(8);
     auto mrow = area.removeFromTop(24);

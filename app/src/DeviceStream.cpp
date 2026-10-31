@@ -1,6 +1,8 @@
 ﻿#include "DeviceStream.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 juce::String formatKhz(double rate) {
@@ -71,6 +73,13 @@ juce::String openWithWildcardSearch(juce::AudioDeviceManager& manager,
         if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
         if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
         err = manager.setAudioDeviceSetup(setup, true);
+        if (err.isEmpty() && requestedBufferSize > 0) {
+            auto* device = manager.getCurrentAudioDevice();
+            if (device == nullptr || device->getCurrentBufferSizeSamples() != requestedBufferSize) {
+                err = "The device does not support a " + juce::String(requestedBufferSize)
+                    + "-sample buffer.";
+            }
+        }
         if (err.isNotEmpty())
             manager.setAudioDeviceSetup(prev, true);
     }
@@ -117,21 +126,33 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
         // selected endpoint below is the only one that stays open.
         manager.closeAudioDevice();
 
-        juce::AudioDeviceManager::AudioDeviceSetup setup;
-        if (wantInput)
-            setup.inputDeviceName = preferredDeviceName;
-        else
-            setup.outputDeviceName = preferredDeviceName;
-        if (requestedBufferSize >= 0) {
-            setup.sampleRate = engineSampleRate; // 0 = driver default
-            setup.bufferSize = requestedBufferSize > 0 ? requestedBufferSize : 0;
+        const std::vector<int> bufferCandidates{requestedBufferSize};
+        for (const int candidate : bufferCandidates) {
+            juce::AudioDeviceManager::AudioDeviceSetup setup;
+            if (wantInput)
+                setup.inputDeviceName = preferredDeviceName;
+            else
+                setup.outputDeviceName = preferredDeviceName;
+            if (requestedBufferSize >= 0) {
+                setup.sampleRate = engineSampleRate; // 0 = driver default
+                setup.bufferSize = candidate;
+            }
+            auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
+                                          preferredDeviceName, &setup);
+            if (err.isEmpty()) {
+                auto* device = manager.getCurrentAudioDevice();
+                if (requestedBufferSize > 0
+                    && (device == nullptr
+                        || device->getCurrentBufferSizeSamples() != requestedBufferSize)) {
+                    err = "The device does not support a " + juce::String(requestedBufferSize)
+                        + "-sample buffer.";
+                } else {
+                    return typeName;
+                }
+            }
+            lastError = err;
+            manager.closeAudioDevice();
         }
-        auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
-                                      preferredDeviceName, &setup);
-        if (err.isEmpty())
-            return typeName;
-        lastError = err;
-        manager.closeAudioDevice();
     }
 
     // Nothing in the chain opened this device (non-WASAPI backends, DirectSound
@@ -147,7 +168,30 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
 
 namespace DeviceEnumeration {
 namespace {
+struct DeviceCache {
+    juce::StringArray names;
+    juce::int64 timeMs = 0;
+    bool valid = false;
+};
+
+DeviceCache& cacheFor(bool wantInputs) {
+    static DeviceCache inCache;
+    static DeviceCache outCache;
+    return wantInputs ? inCache : outCache;
+}
+
+juce::CriticalSection cacheLock;
+
 juce::StringArray enumerate(bool wantInputs) {
+    const auto now = juce::Time::currentTimeMillis();
+    {
+        const juce::ScopedLock sl(cacheLock);
+        auto& c = cacheFor(wantInputs);
+        if (c.valid && (now - c.timeMs) < 5000) {
+            return c.names;
+        }
+    }
+
     juce::AudioDeviceManager manager;
     juce::OwnedArray<juce::AudioIODeviceType> types;
     manager.createAudioDeviceTypes(types);
@@ -160,6 +204,14 @@ juce::StringArray enumerate(bool wantInputs) {
         }
     }
     names.sort(true);
+
+    {
+        const juce::ScopedLock sl(cacheLock);
+        auto& c = cacheFor(wantInputs);
+        c.names = names;
+        c.timeMs = now;
+        c.valid = true;
+    }
     return names;
 }
 }
@@ -218,13 +270,6 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     deviceInputLatency = dev->getInputLatencyInSamples();
     deviceBufferSize = dev->getCurrentBufferSizeSamples();
     if (deviceBufferSize <= 0) deviceBufferSize = 256;
-    if (requestedBufferSize > 0 && deviceBufferSize != requestedBufferSize) {
-        // setAudioDeviceSetup() clamps to the nearest size from
-        // getAvailableBufferSizes(); accept the rounded value and report it
-        // informationally instead of failing the open.
-        error = "info: device buffer is " + juce::String(deviceBufferSize)
-                + " samples (requested " + juce::String(requestedBufferSize) + ")";
-    }
 
     // Keep every physical input the device actually provides. Requested
     // indexes it does not have are reported via getInputError() and stay
@@ -241,7 +286,9 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    capacity = juce::jmax(1, deviceBufferSize * 2);
+    // 8 device buffers (capped) so transient render pauses cannot drain the
+    // ring between pull() calls. Never smaller than one device block.
+    capacity = juce::jmax(deviceBufferSize, juce::jmin(deviceBufferSize * 8, 16384));
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
     writePos = 0;
@@ -280,6 +327,15 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 
     if (capacity <= 0) {
         latencySamples.store(0, std::memory_order_relaxed);
+        return false;
+    }
+
+    // The writer (audioDeviceIOCallback) holds this spinlock while mutating
+    // storage/writePos/totalWritten. Reading them unlocked races and produces
+    // torn samples (crackling). Take the lock; bail to silence if contended
+    // rather than blocking the audio thread.
+    juce::SpinLock::ScopedTryLockType tryLock(lock);
+    if (!tryLock.isLocked()) {
         return false;
     }
 
@@ -337,7 +393,11 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
     juce::SpinLock::ScopedTryLockType tryLock(lock);
-    if (!tryLock.isLocked()) return; // drop
+    if (!tryLock.isLocked()) {
+        // Counted rather than silent: a held lock here means dropped input.
+        inputDroppedFrames.fetch_add((std::uint64_t) numSamples, std::memory_order_relaxed);
+        return;
+    }
     if (capacity <= 0) return;
 
     // Write to ring buffer (broadcast to all consumers - no FIFO consumption).
@@ -367,7 +427,13 @@ void InputCapture::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     }
 }
 
-void InputCapture::audioDeviceStopped() {}
+void InputCapture::audioDeviceStopped() {
+    // Without this the ring keeps its last window, replayable via pull()
+    // forever; drop it under the writer lock so the next pull() is silence.
+    const juce::SpinLock::ScopedLockType sl(lock);
+    writePos = 0;
+    totalWritten = 0;
+}
 
 // ---------- OutputPlayback ----------
 
@@ -414,18 +480,21 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     sampleRate = actual;
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
-    if (requestedBufferSize > 0 && bufferSize != requestedBufferSize) {
-        // setAudioDeviceSetup() clamps to the nearest size from
-        // getAvailableBufferSizes(); accept the rounded value and report it
-        // informationally instead of failing the open.
-        error = "info: device buffer is " + juce::String(bufferSize)
-                + " samples (requested " + juce::String(requestedBufferSize) + ")";
-    }
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    capacity = juce::jmax(1, bufferSize * 2);
+    // 8 device buffers (capped) so transient render stalls cannot starve a
+    // device callback; never smaller than one device block.
+    capacity = juce::jmax(bufferSize, juce::jmin(bufferSize * 8, 16384));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
+    lastOutputBlock.clear();
+    lastOutputFrames = 0;
+    // Prime with four silent blocks so startup and a single delayed render
+    // callback cannot expose an empty FIFO to the device.
+    const int primeFrames = juce::jmin(bufferSize * 4, capacity);
+    if (primeFrames > 0) {
+        fifo->write(primeFrames);
+    }
 
     manager.addAudioCallback(this);
     return {};
@@ -440,19 +509,21 @@ void OutputPlayback::close() {
     activeDeviceType_.clear();
     deviceOutputLatency = 0;
     latencySamples.store(0, std::memory_order_relaxed);
+    lastOutputFrames = 0;
 }
 
 void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     if (frames <= 0 || fifo == nullptr) return;
-    if (frames > capacity) frames = capacity;
+    if (frames > capacity || fifo->getFreeSpace() < frames) {
+        outputDroppedFrames.fetch_add((std::uint64_t) frames,
+                                      std::memory_order_relaxed);
+        return;
+    }
     auto writeHandle = fifo->write(frames);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
     const int total = b1 + b2;
-    if (total < frames) {
-        outputDroppedFrames.fetch_add((std::uint64_t)(frames - total),
-                                      std::memory_order_relaxed);
-    }
+    if (total != frames) return;
     const int srcChans = juce::jmax(1, src.getNumChannels());
 
     for (int ch = 0; ch < 2; ++ch) {
@@ -500,6 +571,8 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
         outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
                                       std::memory_order_relaxed);
     }
+    if (fifo->getNumReady() < bufferSize * 2)
+        outputLowWatermarks.fetch_add(1, std::memory_order_relaxed);
 
     const int chans = juce::jmin(2, numOutputChannels);
     for (int ch = 0; ch < chans; ++ch) {
@@ -510,6 +583,20 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
         for (int i = 0; i < b2; ++i) {
             outputChannelData[ch][b1 + i] = storage.getSample(ch, readHandle.startIndex2 + i);
         }
+        for (int i = total; i < numSamples; ++i) {
+            outputChannelData[ch][i] = lastOutputFrames > 0
+                ? lastOutputBlock.getSample(ch, i % lastOutputFrames)
+                : 0.0f;
+        }
+    }
+    if (total == numSamples && numSamples <= lastOutputBlock.getNumSamples()) {
+        for (int ch = 0; ch < chans; ++ch) {
+            for (int i = 0; i < numSamples; ++i) {
+                lastOutputBlock.setSample(ch, i, outputChannelData[ch] != nullptr
+                    ? outputChannelData[ch][i] : 0.0f);
+            }
+        }
+        lastOutputFrames = numSamples;
     }
     currentOutputChannels = nullptr;
 }
@@ -524,4 +611,3 @@ void OutputPlayback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 }
 
 void OutputPlayback::audioDeviceStopped() {}
-
