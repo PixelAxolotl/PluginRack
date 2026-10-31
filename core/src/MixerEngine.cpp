@@ -143,12 +143,36 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     }
     eqState_->outputEqs.reserve(scene.outputs.size());
     eqState_->outputEqEnabled.reserve(scene.outputs.size());
+    eqState_->channelEffects.reserve(scene.channels.size());
     for (const Output& output : scene.outputs) {
         EqEngine eq;
         eq.prepare(scene.sampleRate, maxFrames);
         eq.setBands(output.eqBands);
         eqState_->outputEqs.push_back(std::move(eq));
         eqState_->outputEqEnabled.push_back(output.eqEnabled ? 1 : 0);
+    }
+    eqState_->outputEffects.reserve(scene.outputs.size());
+    for (const Channel& channel : scene.channels) {
+        std::vector<DynamicsProcessor> processors;
+        processors.reserve(channel.effects.size());
+        for (const auto& effect : channel.effects) {
+            DynamicsProcessor processor;
+            processor.prepare(scene.sampleRate);
+            processor.setEffect(effect);
+            processors.push_back(std::move(processor));
+        }
+        eqState_->channelEffects.push_back(std::move(processors));
+    }
+    for (const Output& output : scene.outputs) {
+        std::vector<DynamicsProcessor> processors;
+        processors.reserve(output.effects.size());
+        for (const auto& effect : output.effects) {
+            DynamicsProcessor processor;
+            processor.prepare(scene.sampleRate);
+            processor.setEffect(effect);
+            processors.push_back(std::move(processor));
+        }
+        eqState_->outputEffects.push_back(std::move(processors));
     }
 
     stoppedChannels_.assign(channels_.size(), 0);
@@ -322,6 +346,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 flushNonFinite(scratchLeft, scratchRight, frames);
                 eqState_->channelEqs[c].process(scratchLeft, scratchRight, frames);
             }
+            if (c < eqState_->channelEffects.size()) {
+                for (auto& effect : eqState_->channelEffects[c])
+                    effect.process(scratchLeft, scratchRight, frames);
+            }
         }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
@@ -386,16 +414,19 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     if (eqState_ != nullptr) {
         std::scoped_lock lock(eqState_->mutex);
         for (std::size_t o = 0; o < numOutputs; ++o) {
-            if (o >= eqState_->outputEqEnabled.size() ||
-                eqState_->outputEqEnabled[o] == 0 || o >= eqState_->outputEqs.size()) {
-                continue;
-            }
             const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
             float* accLeft =
                 accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
             float* accRight = accLeft + maxFrames;
-            flushNonFinite(accLeft, accRight, frames);
-            eqState_->outputEqs[o].process(accLeft, accRight, frames);
+            if (o < eqState_->outputEqEnabled.size() &&
+                eqState_->outputEqEnabled[o] != 0 && o < eqState_->outputEqs.size()) {
+                flushNonFinite(accLeft, accRight, frames);
+                eqState_->outputEqs[o].process(accLeft, accRight, frames);
+            }
+            if (o < eqState_->outputEffects.size()) {
+                for (auto& effect : eqState_->outputEffects[o])
+                    effect.process(accLeft, accRight, frames);
+            }
         }
     }
 

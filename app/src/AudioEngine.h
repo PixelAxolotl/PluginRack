@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -82,6 +83,8 @@ public:
         // UI can read them without the lock.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
+        std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
@@ -109,6 +112,8 @@ public:
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
+        std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
@@ -148,6 +153,7 @@ public:
 
     struct FifoDiagnostics {
         std::uint64_t inputOverruns = 0;
+        std::uint64_t inputUnderruns = 0;
         std::uint64_t inputDroppedFrames = 0;
         std::uint64_t outputUnderruns = 0;
         std::uint64_t outputDroppedFrames = 0;
@@ -221,6 +227,10 @@ public:
     void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
     void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(int outIdx, bool bypassed);
+    void setChannelEffects(std::uint32_t channelId,
+                           const std::vector<pluginrack::DynamicsEffect>& effects);
+    void setOutputEffects(std::uint32_t outputId,
+                          const std::vector<pluginrack::DynamicsEffect>& effects);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
@@ -266,11 +276,13 @@ private:
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
-    // Audio-thread silence feed: pushes the pre-allocated silenceBuffer_ to
-    // every open output. Never allocates; used by render() when it loses the
-    // state lock or gets an oversized block.
+    // Audio-thread silence feed: pushes a fade-to-silence block to every
+    // published output. Never allocates and never takes stateLock, so it also
+    // works on the render-miss path when the message thread holds the lock.
     void pushSilenceToOutputs(int frames);
     void pushSilenceToOutputsLocked(int frames);
+    // Rebuilds the lock-free playback snapshot. Requires stateLock.
+    void publishRenderOutputsLocked();
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -285,6 +297,8 @@ private:
         // Buffer size the capture was opened with. Drivers may clamp to the
         // nearest supported size, so reuse compares requests, not actuals.
         int requestedBufferSize = 0;
+        // Render block the ring was sized for; growing past it needs a reopen.
+        int renderBlockFrames = 0;
     };
 
     // Removed plugins stay alive until the audio engine is destroyed. Some
@@ -308,11 +322,16 @@ private:
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
-    // Read-only silent scratch for render()'s lock-loss and oversized-block
-    // paths. Allocated once at construction and never resized: the lock-loss
-    // path reads it while prepareToPlay may hold stateLock on the UI thread.
-    // 16384 frames covers every block size the UI offers (max 2048) 8-fold.
-    juce::AudioBuffer<float> silenceBuffer_{ 2, 16384 };
+    // Lock-free playback snapshot for the render-miss silence path. Slots are
+    // published under stateLock and never freed until the engine is destroyed
+    // (retiredOutputs_), so the audio thread can load a pointer and push to it
+    // without racing an output swap. Closed playbacks ignore the push.
+    static constexpr std::size_t kMaxRenderOutputs = 64;
+    std::array<std::atomic<OutputPlayback*>, kMaxRenderOutputs> renderOutputs_{};
+    std::vector<std::unique_ptr<OutputPlayback>> retiredOutputs_;
+    // Incremented once per rendered block; channels sharing an InputCapture
+    // use it to read one window per block instead of consuming it per channel.
+    std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
 

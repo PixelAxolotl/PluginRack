@@ -10,6 +10,7 @@
 
 #include "pluginrack/AudioBlock.h"
 #include "pluginrack/EqEngine.h"
+#include "pluginrack/DynamicsEffect.h"
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
@@ -73,6 +74,8 @@ private:
         std::vector<EqEngine> outputEqs;
         std::vector<char> channelEqEnabled;
         std::vector<char> outputEqEnabled;
+        std::vector<std::vector<DynamicsProcessor>> channelEffects;
+        std::vector<std::vector<DynamicsProcessor>> outputEffects;
     };
 
     std::vector<ChannelCache> channels_;

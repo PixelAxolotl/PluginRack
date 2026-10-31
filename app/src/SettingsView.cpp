@@ -113,9 +113,14 @@ void SettingsView::refresh() {
     }
     if (report.underruns + report.overruns > 0) errors += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
     const auto fifo = audioEngine.getFifoDiagnostics();
+    if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0) {
+        errors += "Input capture: " + juce::String((juce::int64)fifo.inputUnderruns)
+            + " underruns / " + juce::String((juce::int64)fifo.inputOverruns)
+            + " overruns\n";
+    }
     if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0) {
-        errors += "Safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
-            + " low-watermarks / " + juce::String((juce::int64)fifo.renderMisses)
+        errors += "Output safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
+            + " low-watermark events / " + juce::String((juce::int64)fifo.renderMisses)
             + " render misses\n";
     }
     if (errors.isEmpty()) errors = "No audio errors.";

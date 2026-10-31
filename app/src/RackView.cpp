@@ -1,5 +1,7 @@
 #include "RackView.h"
 
+#include <algorithm>
+
 namespace {
 constexpr int kSlotRowHeight = 36;
 constexpr int kSlotGap = 4;
@@ -116,6 +118,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
         const bool newOut = comboIsOutput[(size_t)i] != 0;
         if (newId == selectedId && newOut == selectedIsOutput) return;
         closeEqWindow();
+        closeDynamicsWindow();
         selectedId = newId;
         selectedIsOutput = newOut;
         focusedInsertId = 0;
@@ -153,6 +156,24 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     };
     eqButton.onRightClick = [this] { focusEq(); };
     addAndMakeVisible(eqButton);
+
+    const auto setupDynamicsButton = [this](EqButton& button,
+                                            pluginrack::DynamicsEffectType type,
+                                            const juce::String& tooltip) {
+        button.setColour(juce::TextButton::buttonColourId, theme::control());
+        button.setColour(juce::TextButton::textColourOffId, theme::text());
+        button.setTooltip(tooltip);
+        button.onClick = [this, type] { toggleDynamicsBypass(type); };
+        button.onRightClick = [this, type] { focusDynamics(type); };
+        addAndMakeVisible(button);
+    };
+    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
+                        "Click: compressor on/off. Right-click: open settings");
+    setupDynamicsButton(limiterButton, pluginrack::DynamicsEffectType::Limiter,
+                        "Click: limiter on/off. Right-click: open settings");
+    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
+                        "Click: gate on/off. Right-click: open settings");
+    refreshDynamicsButtons();
 
     emptySlotsLabel.setJustificationType(juce::Justification::centredLeft);
     emptySlotsLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
@@ -205,6 +226,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
 
 RackView::~RackView() {
     closeEqWindow();
+    closeDynamicsWindow();
     closeDockedEditor();
 }
 
@@ -469,6 +491,7 @@ bool RackView::dockedHostAlive() const {
 }
 
 void RackView::focusEq() {
+    closeDynamicsWindow();
     if (eqWindow != nullptr) {
         eqFocused = true;
         closeDockedEditor();
@@ -588,6 +611,148 @@ void RackView::refreshEqButton() {
     eqButton.setRingVisible(open);
 }
 
+void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
+    if (dynamicsWindow != nullptr) {
+        dynamicsFocused = true;
+        closeEqWindow();
+        if (dynamicsWindow->getParentComponent() != &editorHolder)
+            editorHolder.addAndMakeVisible(dynamicsWindow);
+        refreshDynamicsButtons();
+        resized();
+        return;
+    }
+
+    const auto effectName = [type] {
+        switch (type) {
+            case pluginrack::DynamicsEffectType::Compressor: return juce::String("Compressor");
+            case pluginrack::DynamicsEffectType::Limiter: return juce::String("Limiter");
+            case pluginrack::DynamicsEffectType::Gate: return juce::String("Gate");
+        }
+        return juce::String("Effect");
+    };
+    const auto findEffect = [type](std::vector<pluginrack::DynamicsEffect>& effects) {
+        return std::find_if(effects.begin(), effects.end(),
+                            [type](const auto& effect) { return effect.type == type; });
+    };
+
+    juce::Component::SafePointer<RackView> safe(this);
+    if (auto* ch = currentChannel()) {
+        auto it = findEffect(ch->effects);
+        if (it == ch->effects.end()) return;
+        auto* window = new DynamicsWindow(
+            effectName() + " - " + ch->name, *it,
+            [safe, findEffect](const pluginrack::DynamicsEffect& effect) {
+                if (safe == nullptr) return;
+                auto* channel = safe->currentChannel();
+                if (channel == nullptr) return;
+                auto effects = channel->effects;
+                const auto found = findEffect(effects);
+                if (found != effects.end()) {
+                    *found = effect;
+                    safe->audioEngine.setChannelEffects(channel->id, effects);
+                    safe->refreshDynamicsButtons();
+                }
+            });
+        window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+            if (safe == nullptr) return;
+            if (auto* channel = safe->currentChannel())
+                channel->analyzerTap.snapshot(false, left, right, frames);
+        };
+        ch->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+        dynamicsWindow = window;
+    } else if (auto* out = currentOutput()) {
+        auto it = findEffect(out->effects);
+        if (it == out->effects.end()) return;
+        auto* window = new DynamicsWindow(
+            effectName() + " - " + out->name, *it,
+            [safe, findEffect](const pluginrack::DynamicsEffect& effect) {
+                if (safe == nullptr) return;
+                auto* output = safe->currentOutput();
+                if (output == nullptr) return;
+                auto effects = output->effects;
+                const auto found = findEffect(effects);
+                if (found != effects.end()) {
+                    *found = effect;
+                    safe->audioEngine.setOutputEffects(output->id, effects);
+                    safe->refreshDynamicsButtons();
+                }
+            });
+        window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+            if (safe == nullptr) return;
+            if (auto* output = safe->currentOutput())
+                output->analyzerTap.snapshot(false, left, right, frames);
+        };
+        out->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+        dynamicsWindow = window;
+    } else {
+        return;
+    }
+
+    dynamicsFocused = true;
+    closeEqWindow();
+    closeDockedEditor();
+    editorHolder.addAndMakeVisible(dynamicsWindow);
+    refreshDynamicsButtons();
+    resized();
+}
+
+void RackView::closeDynamicsWindow() {
+    if (dynamicsWindow == nullptr) return;
+    auto* doomed = dynamicsWindow;
+    dynamicsWindow = nullptr;
+    dynamicsFocused = false;
+    if (auto* ch = currentChannel()) {
+        ch->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+    } else if (auto* out = currentOutput()) {
+        out->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+    }
+    editorHolder.removeChildComponent(doomed);
+    delete doomed;
+    refreshDynamicsButtons();
+}
+
+void RackView::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
+    if (auto* ch = currentChannel()) {
+        auto effects = ch->effects;
+        const auto found = std::find_if(effects.begin(), effects.end(),
+                                        [type](const auto& effect) { return effect.type == type; });
+        if (found == effects.end()) return;
+        found->bypassed = !found->bypassed;
+        audioEngine.setChannelEffects(ch->id, effects);
+    } else if (auto* out = currentOutput()) {
+        auto effects = out->effects;
+        const auto found = std::find_if(effects.begin(), effects.end(),
+                                        [type](const auto& effect) { return effect.type == type; });
+        if (found == effects.end()) return;
+        found->bypassed = !found->bypassed;
+        audioEngine.setOutputEffects(out->id, effects);
+    } else {
+        return;
+    }
+    refreshDynamicsButtons();
+}
+
+void RackView::refreshDynamicsButtons() {
+    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
+        const std::vector<pluginrack::DynamicsEffect>* effects = nullptr;
+        if (auto* ch = currentChannel()) effects = &ch->effects;
+        else if (auto* out = currentOutput()) effects = &out->effects;
+        bool active = false;
+        if (effects != nullptr) {
+            const auto found = std::find_if(effects->begin(), effects->end(),
+                                            [type](const auto& effect) { return effect.type == type; });
+            active = found != effects->end() && !found->bypassed;
+        }
+        button.setColour(juce::TextButton::buttonColourId,
+                         active ? theme::amber() : theme::control());
+        button.setColour(juce::TextButton::textColourOffId,
+                         active ? theme::bg() : theme::text());
+    };
+    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
+    apply(limiterButton, pluginrack::DynamicsEffectType::Limiter);
+    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+}
+
 void RackView::refreshOutputButtons() {
     outputButtons.clear();
     const auto* ch = currentChannel();
@@ -636,6 +801,9 @@ void RackView::rebuild() {
     channelCombo.setVisible(true);
     insertsHeader.setVisible(hasChain);
     eqButton.setVisible(hasChain);
+    compressorButton.setVisible(hasChain);
+    limiterButton.setVisible(hasChain);
+    gateButton.setVisible(hasChain);
     slotViewport.setVisible(hasChain);
     editorViewport.setVisible(hasChain);
     outputHeader.setVisible(hasChain);
@@ -643,6 +811,7 @@ void RackView::rebuild() {
 
     if (!hasChain) {
         closeEqWindow();
+        closeDynamicsWindow();
         closeDockedEditor();
         slots.clear();
         outputButtons.clear();
@@ -655,6 +824,7 @@ void RackView::rebuild() {
     refreshSlots();
     refreshEditor();
     refreshOutputButtons();
+    refreshDynamicsButtons();
     resized();
 }
 
@@ -727,7 +897,13 @@ void RackView::resized() {
     pa.removeFromTop(14);
     insertsHeader.setBounds(pa.removeFromTop(20));
     pa.removeFromTop(4);
-    eqButton.setBounds(pa.removeFromTop(30));
+    eqButton.setBounds(pa.removeFromTop(26));
+    pa.removeFromTop(3);
+    compressorButton.setBounds(pa.removeFromTop(22));
+    pa.removeFromTop(3);
+    limiterButton.setBounds(pa.removeFromTop(22));
+    pa.removeFromTop(3);
+    gateButton.setBounds(pa.removeFromTop(22));
     pa.removeFromTop(4);
     slotViewport.setBounds(pa);
     refreshSlots();
@@ -744,6 +920,11 @@ void RackView::resized() {
         const int eh = juce::jmax(320, EQWindow::kHeight);
         editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
         eqWindow->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
+        noEditorLabel.setVisible(false);
+        noEditorBypass.setVisible(false);
+    }
+    if (dynamicsFocused && dynamicsWindow != nullptr) {
+        dynamicsWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }

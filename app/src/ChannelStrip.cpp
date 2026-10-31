@@ -217,6 +217,23 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
+    const auto setupDynamicsButton = [this](EqButton& button,
+                                             pluginrack::DynamicsEffectType type,
+                                             const juce::String& tooltip) {
+        button.setColour(juce::TextButton::buttonColourId, theme::control());
+        button.setColour(juce::TextButton::textColourOffId, theme::text());
+        button.setTooltip(tooltip);
+        button.onClick = [this, type] { toggleDynamicsBypass(type); };
+        button.onRightClick = [this, type] { openDynamicsWindow(type); };
+        addAndMakeVisible(button);
+    };
+    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
+                        "Click: compressor on/off. Right-click: open settings");
+    setupDynamicsButton(limiterButton, pluginrack::DynamicsEffectType::Limiter,
+                        "Click: limiter on/off. Right-click: open settings");
+    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
+                        "Click: gate on/off. Right-click: open settings");
+    refreshDynamicsButtons();
 
     refreshInserts();
     refreshRouting();
@@ -225,6 +242,53 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
 ChannelStrip::~ChannelStrip() {
     closeEqWindow();
+    if (dynamicsWindow != nullptr) {
+        delete dynamicsWindow;
+        dynamicsWindow = nullptr;
+    }
+}
+
+void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
+    if (dynamicsWindow != nullptr) {
+        dynamicsWindow->toFront(true);
+        return;
+    }
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
+                           [type](const auto& effect) { return effect.type == type; });
+    if (it == channel.effects.end()) return;
+    dynamicsWindow = new DynamicsWindow(
+        "Dynamics - " + juce::String(it->type == pluginrack::DynamicsEffectType::Compressor ? "Compressor" :
+                                     it->type == pluginrack::DynamicsEffectType::Limiter ? "Limiter" :
+                                     "Gate"),
+        *it,
+        [safe](const pluginrack::DynamicsEffect& effect) {
+            if (safe == nullptr) return;
+            auto effects = safe->channel.effects;
+            const auto found = std::find_if(effects.begin(), effects.end(),
+                                            [&effect](const auto& candidate) {
+                                                return candidate.id == effect.id;
+                                            });
+            if (found != effects.end()) {
+                *found = effect;
+                safe->audioEngine.setChannelEffects(safe->channel.id, effects);
+                safe->refreshDynamicsButtons();
+            }
+        });
+    dynamicsWindow->onClose = [safe] {
+        if (safe != nullptr && safe->dynamicsWindow != nullptr) {
+            safe->channel.analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* window = safe->dynamicsWindow;
+            safe->dynamicsWindow = nullptr;
+            delete window;
+        }
+    };
+    dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+        if (safe != nullptr)
+            safe->channel.analyzerTap.snapshot(false, left, right, frames);
+    };
+    channel.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+    dynamicsWindow->setVisible(true);
 }
 
 void ChannelStrip::openEqWindow() {
@@ -300,6 +364,31 @@ void ChannelStrip::refreshEqButton() {
     eqButton.setRingVisible(open);
 }
 
+void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
+    auto effects = channel.effects;
+    const auto found = std::find_if(effects.begin(), effects.end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == effects.end()) return;
+    found->bypassed = !found->bypassed;
+    audioEngine.setChannelEffects(channel.id, effects);
+    refreshDynamicsButtons();
+}
+
+void ChannelStrip::refreshDynamicsButtons() {
+    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
+        const auto found = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                        [type](const auto& effect) { return effect.type == type; });
+        const bool active = found != channel.effects.end() && !found->bypassed;
+        button.setColour(juce::TextButton::buttonColourId,
+                         active ? theme::amber() : theme::control());
+        button.setColour(juce::TextButton::textColourOffId,
+                         active ? theme::bg() : theme::text());
+    };
+    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
+    apply(limiterButton, pluginrack::DynamicsEffectType::Limiter);
+    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+}
+
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
 
@@ -344,7 +433,17 @@ void ChannelStrip::resized() {
     panRow.removeFromLeft(4);
     panLabel.setBounds(panLeft.removeFromTop(14));
     panKnob.setBounds(panLeft.reduced(2));
-    eqButton.setBounds(panRow.removeFromTop(24));
+    area.removeFromTop(4);
+
+    auto effectStack = area.removeFromTop(4 * 20 + 3 * 3);
+    auto placeEffectButton = [&effectStack](juce::Component& button) {
+        button.setBounds(effectStack.removeFromTop(20));
+        effectStack.removeFromTop(3);
+    };
+    placeEffectButton(eqButton);
+    placeEffectButton(compressorButton);
+    placeEffectButton(limiterButton);
+    placeEffectButton(gateButton);
     area.removeFromTop(4);
 
     // Plugin / insert slot container

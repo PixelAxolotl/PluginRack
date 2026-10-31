@@ -69,12 +69,14 @@ TEST_CASE("OutputPlayback FIFO holds eight device buffers and starts primed",
           "[underrun]") {
     const auto body = functionBody(readSource("app/src/DeviceStream.cpp"),
                                    "OutputPlayback::open");
-    // Depth: 8x the device buffer, clamped so a large buffer cannot balloon.
+    // Depth: a four-block target plus two spare blocks, capped so a large
+    // buffer cannot balloon, and never smaller than the target.
+    CHECK(contains(body, "targetFillFrames = bufferSize * 4"));
     CHECK(contains(body, "bufferSize * 8"));
-    CHECK(contains(body, "16384"));
+    CHECK(contains(body, "65536"));
     // Prime with four silent blocks before the device callback can read, so a
     // delayed first render cannot expose an empty FIFO.
-    const auto prime = body.find("bufferSize * 4");
+    const auto prime = body.find("capacity - bufferSize");
     const auto callback = body.find("addAudioCallback");
     CHECK(prime != std::string::npos);
     CHECK(callback != std::string::npos);
@@ -88,33 +90,51 @@ TEST_CASE("OutputPlayback never publishes a partial FIFO block", "[underrun]") {
     CHECK(contains(body, "return"));
 }
 
-TEST_CASE("OutputPlayback replays the last complete block on a short read",
+TEST_CASE("OutputPlayback fades short reads instead of repeating a block",
           "[underrun]") {
     const auto body = functionBody(
         readSource("app/src/DeviceStream.cpp"),
         "void OutputPlayback::audioDeviceIOCallbackWithContext");
-    CHECK(contains(body, "lastOutputBlock"));
-    CHECK(contains(body, "i % lastOutputFrames"));
+    // The shortfall fades to silence and the next block fades back in; a
+    // repeated block would step at both seams.
+    CHECK(contains(body, "deviceFadeInRemaining = 64"));
+    CHECK(contains(body, "last * (1.0f -"));
+    CHECK(contains(body, "out[i] *= "));
+    CHECK_FALSE(contains(body, "lastOutputBlock"));
+    // Low watermarks count one event per starvation episode, not per block.
+    CHECK(contains(body, "if (!lowWatermarkActive)"));
     CHECK(contains(body, "outputLowWatermarks.fetch_add"));
 }
 
 TEST_CASE("InputCapture ring buffer gets the same depth clamp", "[underrun]") {
     const auto body = functionBody(readSource("app/src/DeviceStream.cpp"),
                                    "InputCapture::open");
-    CHECK(contains(body, "deviceBufferSize * 8"));
-    CHECK(contains(body, "16384"));
+    // The ring is sized from the larger of the input device buffer and the
+    // output render block, so mismatched buffer settings cannot starve it.
+    CHECK(contains(body, "blockFrames * 4"));
+    CHECK(contains(body, "65536"));
+    CHECK(contains(body, "blockFrames * 2"));
+    CHECK(contains(body, "readCursor.prepare"));
 }
 
-TEST_CASE("InputCapture counts callback drops instead of swallowing them",
+TEST_CASE("InputCapture publishes lock-free and counts real underruns",
           "[underrun][telemetry]") {
-    const auto body = functionBody(
-        readSource("app/src/DeviceStream.cpp"),
-        "InputCapture::audioDeviceIOCallbackWithContext");
-    CHECK(contains(body, "inputDroppedFrames.fetch_add"));
-    // The drop path must still be the early return: counted, then dropped.
-    REQUIRE(body.find("tryLock.isLocked()") != std::string::npos);
-    CHECK(body.find("inputDroppedFrames.fetch_add") > body.find("tryLock.isLocked()"));
-    CHECK(body.find("inputDroppedFrames.fetch_add") < body.find("if (capacity <= 0)"));
+    const auto cpp = readSource("app/src/DeviceStream.cpp");
+    const auto writer = functionBody(
+        cpp, "void InputCapture::audioDeviceIOCallbackWithContext");
+    CHECK(contains(writer, "totalWritten.store"));
+    CHECK(contains(writer, "std::memory_order_release"));
+    // No spinlock on the capture path: a busy UI must never make the device
+    // callback drop input.
+    CHECK_FALSE(contains(writer, "SpinLock"));
+
+    const auto reader = functionBody(cpp, "bool InputCapture::pull");
+    CHECK(contains(reader, "totalWritten.load"));
+    CHECK(contains(reader, "std::memory_order_acquire"));
+    CHECK(contains(reader, "readCursor.nextBlock"));
+    CHECK(contains(reader, "inputUnderruns.fetch_add"));
+    CHECK(contains(reader, "inputDroppedFrames.fetch_add"));
+    CHECK(contains(reader, "fadeInEpoch_"));
 }
 
 TEST_CASE("AudioEngine::render never allocates on the audio thread", "[underrun][rt]") {
@@ -124,8 +144,8 @@ TEST_CASE("AudioEngine::render never allocates on the audio thread", "[underrun]
     // AudioBuffer<float> uses are non-owning views over preallocated data.
     CHECK_FALSE(contains(body, "AudioBuffer<float> silence"));
     CHECK_FALSE(contains(body, "(2, frames)"));
-    // Both silent-output paths still exist and route through the prepared
-    // scratch buffer instead of allocating one.
+    // Both silent-output paths still exist and route through the
+    // published playback snapshot instead of allocating a buffer.
     CHECK(countOccurrences(body, "pushSilenceToOutputs(frames)") >= 1);
     CHECK(contains(body, "pushSilenceToOutputsLocked(frames)"));
     // Preserved semantics: oversized blocks are counted, lock loss is not.
@@ -134,20 +154,53 @@ TEST_CASE("AudioEngine::render never allocates on the audio thread", "[underrun]
     CHECK(contains(body, "renderMisses_.fetch_add"));
 }
 
-TEST_CASE("silence scratch is fixed at construction and never resized",
+TEST_CASE("render-miss silence path is lock-free on published outputs",
           "[underrun][rt]") {
-    // render()'s lock-loss path reads the scratch WITHOUT stateLock, so any
-    // resize from the UI thread would be a data race. The buffer must be
-    // allocated once, be big enough for every block a callback can deliver,
-    // and only ever be read after construction.
-    const auto header = readSource("app/src/AudioEngine.h");
-    CHECK(contains(header, "silenceBuffer_{ 2, 16384 }"));
+    // This path runs exactly when the message thread holds stateLock, so it
+    // must not take it again or it would silently feed nothing and let the
+    // output FIFO starve.
     const auto cpp = readSource("app/src/AudioEngine.cpp");
-    const auto prepare = functionBody(cpp, "void AudioEngine::prepareToPlay(int maxBlockFrames)");
-    CHECK_FALSE(contains(prepare, "silenceBuffer_"));
-    const auto helper = functionBody(cpp, "void AudioEngine::pushSilenceToOutputs(int frames)");
-    CHECK_FALSE(contains(helper, "setSize"));
-    CHECK_FALSE(contains(helper, "clear"));
+    const auto helper = functionBody(
+        cpp, "void AudioEngine::pushSilenceToOutputs(int frames)");
+    CHECK_FALSE(contains(helper, "stateLock"));
+    CHECK_FALSE(contains(helper, "ScopedTryLock"));
+    CHECK_FALSE(contains(helper, "ScopedLock"));
+    CHECK(contains(helper, "renderOutputs_"));
+    CHECK(contains(helper, "pushSilence"));
+
+    const auto publish = functionBody(
+        cpp, "void AudioEngine::publishRenderOutputsLocked()");
+    CHECK(contains(publish, "memory_order_release"));
+    CHECK(contains(publish, "output->output.get()"));
+}
+
+TEST_CASE("render waits briefly for the state lock before dropping a block",
+          "[underrun][rt]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto guard = functionBody(cpp, "struct BriefTryLock");
+    CHECK(contains(guard, "tryEnter"));
+    CHECK(contains(guard, "juce::Thread::yield"));
+    const auto render = functionBody(cpp, "void AudioEngine::render(int frames)");
+    CHECK(contains(render, "BriefTryLock lock(stateLock, "));
+    CHECK(contains(render, "renderMisses_.fetch_add"));
+}
+
+TEST_CASE("plugin prepare and release run outside the state lock",
+          "[underrun][rt]") {
+    // Holding stateLock across a VST3 prepareToPlay is the longest known
+    // render-miss source (device reopen / scene restore).
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto prepare = functionBody(
+        cpp, "void AudioEngine::prepareToPlay(int maxBlockFrames)");
+    CHECK_FALSE(contains(prepare, "insert->pluginHost.prepareToPlay"));
+    CHECK(contains(prepare, "std::vector<PluginHost*> hosts"));
+    CHECK(contains(prepare, "host->prepareToPlay"));
+    // A render-block change must also resize the capture rings.
+    CHECK(contains(prepare, "prepareInputs()"));
+
+    const auto release = functionBody(cpp, "void AudioEngine::releaseResources()");
+    CHECK_FALSE(contains(release, "insert->pluginHost.releaseResources"));
+    CHECK(contains(release, "host->releaseResources"));
 }
 
 TEST_CASE("Clock reopen keeps feeding other outputs until the new clock runs",
