@@ -14,12 +14,26 @@
 
 class DynamicsWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
+    // `apply` gets the edited effect plus whether the bypass switch itself
+    // moved; a parameter-only apply must leave the strip's bypass alone.
+    using ApplyCallback = std::function<void(const pluginrack::DynamicsEffect&, bool bypassChanged)>;
+
     DynamicsWindow(const juce::String& title,
                    const pluginrack::DynamicsEffect& initialEffect,
-                   std::function<void(const pluginrack::DynamicsEffect&)> apply);
+                   ApplyCallback apply,
+                   // Optional channel gate, shown as a second knob row on the
+                   // compressor panel and drawn under its curve.
+                   const pluginrack::DynamicsEffect* gate = nullptr);
     ~DynamicsWindow() override = default;
     void resized() override;
     void timerCallback() override;
+
+    // Mirrors a bypass change made on the strip so the panel cannot re-apply a
+    // stale switch state.
+    void setBypassed(bool bypassed);
+    // Keeps the gate row (and its curve) in step with the strip.
+    void setGate(const pluginrack::DynamicsEffect& newGate);
+    pluginrack::DynamicsEffectType getType() const { return type; }
 
     void closeButtonPressed() override {
         if (onClose) onClose();
@@ -29,20 +43,60 @@ public:
     std::function<void(float*, float*, int)> pullAnalyzerTap;
 
 private:
+    // Half-circle gain reduction meter; 0 dB at rest on the right, kMax on the left.
+    class GainReductionGauge final : public juce::Component {
+    public:
+        void setReductionDb(float reduction) {
+            const float clamped = juce::jlimit(0.0f, kMaxReductionDb, reduction);
+            if (juce::approximatelyEqual(clamped, reductionDb)) return;
+            reductionDb = clamped;
+            repaint();
+        }
+        void paint(juce::Graphics& g) override;
+
+    private:
+        static constexpr float kMaxReductionDb = 24.0f;
+        float reductionDb = 0.0f;
+    };
+
+    void applyPreset(int itemId);
+    void applyGatePreset(int itemId);
+    void syncControls();
+    void syncGateControls();
+
     pluginrack::DynamicsEffect effect;
     pluginrack::DynamicsEffectType type;
-    std::function<void(const pluginrack::DynamicsEffect&)> apply;
+    ApplyCallback apply;
+    // Gate row (compressor panel only)
+    bool hasGate = false;
+    pluginrack::DynamicsEffect gateEffect;
+    juce::Label gateCaption{"", "GATE"};
+    juce::Label gateThresholdLabel{"", "Threshold"};
+    juce::Label gateRangeLabel{"", "Range"};
+    juce::Label gateAttackLabel{"", "Attack"};
+    juce::Label gateReleaseLabel{"", "Release"};
+    juce::Slider gateThreshold;
+    juce::Slider gateRange;
+    juce::Slider gateAttack;
+    juce::Slider gateRelease;
+
+    // Simulated detector gain (<= 0 dB, makeup excluded) so the dot lags the
+    // curve through attack and overshoots it on release.
+    float smoothedGainDb = 0.0f;
+    float smoothedGateGainDb = 0.0f;
     juce::Component content;
     DynamicsCurveComponent curve;
+    GainReductionGauge gauge;
     juce::Label modeLabel{"", ""};
     juce::Label thresholdLabel{"", "Threshold"};
     juce::Label ratioLabel{"", "Ratio"};
     juce::Label attackLabel{"", "Attack"};
     juce::Label releaseLabel{"", "Release"};
-    juce::Label makeupLabel{"", "Makeup"};
+    juce::Label makeupLabel{"", "Output"};
     juce::Label inputGainLabel{"", "Input"};
     juce::Label kneeLabel{"", "Knee"};
-    MiniButton bypassButton{"Bypass"};
+    juce::ComboBox presetCombo;
+    juce::ComboBox gatePresetCombo;
     juce::Slider threshold;
     juce::Slider ratio;
     juce::Slider attack;

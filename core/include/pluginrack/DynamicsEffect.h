@@ -5,7 +5,7 @@
 
 namespace pluginrack {
 
-enum class DynamicsEffectType { Compressor, Limiter, Gate };
+enum class DynamicsEffectType { Compressor, Gate };
 
 struct DynamicsEffect {
     std::uint32_t id = 0;

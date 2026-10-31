@@ -80,6 +80,9 @@ private:
 
     std::vector<ChannelCache> channels_;
     std::vector<RouteCache> routes_;
+    // Output fader/mute, applied after the output inserts like the app.
+    std::vector<float> outputGains_;
+    std::vector<char> outputMuted_;
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;

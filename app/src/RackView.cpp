@@ -45,7 +45,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     };
     addAndMakeVisible(gainSlider);
 
-    trimCaption.setText("Gain", juce::dontSendNotification);
+    trimCaption.setText("Trim", juce::dontSendNotification);
     trimCaption.setJustificationType(juce::Justification::centred);
     trimCaption.setFont(juce::Font(juce::FontOptions(10.0f)));
     trimCaption.setColour(juce::Label::textColourId, theme::dim());
@@ -72,7 +72,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     panCaption.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(panCaption);
 
-    panSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+    panSlider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     panSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     panSlider.setRange(-1.0, 1.0, 0.01);
     panSlider.setDoubleClickReturnValue(true, 0.0);
@@ -130,11 +130,17 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     channelCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
     channelCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
 
-    insertsHeader.setText("Inserts", juce::dontSendNotification);
-    insertsHeader.setJustificationType(juce::Justification::centredLeft);
-    insertsHeader.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
-    insertsHeader.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(insertsHeader);
+    const auto styleSectionHeader = [this](juce::Label& label, const juce::String& text) {
+        label.setText(text, juce::dontSendNotification);
+        label.setJustificationType(juce::Justification::centredLeft);
+        label.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        label.setColour(juce::Label::textColourId, theme::dim());
+        addAndMakeVisible(label);
+    };
+    // Two different concepts live in this column: the channel's own processors
+    // and the VST inserts, so they get their own headings.
+    styleSectionHeader(fxHeader, "Channel FX");
+    styleSectionHeader(insertsHeader, "Inserts");
 
     eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
     eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
@@ -169,10 +175,10 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     };
     setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
                         "Click: compressor on/off. Right-click: open settings");
-    setupDynamicsButton(limiterButton, pluginrack::DynamicsEffectType::Limiter,
-                        "Click: limiter on/off. Right-click: open settings");
     setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
-                        "Click: gate on/off. Right-click: open settings");
+                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
+    // The gate lives in the compressor panel now, so both right-clicks land there.
+    gateButton.onRightClick = [this] { focusDynamics(pluginrack::DynamicsEffectType::Compressor); };
     refreshDynamicsButtons();
 
     emptySlotsLabel.setJustificationType(juce::Justification::centredLeft);
@@ -237,6 +243,9 @@ std::uint32_t RackView::selectedChainId() const {
 void RackView::setSelectedChannel(int channelId, bool isOutput) {
     if (channelId == selectedId && isOutput == selectedIsOutput && channelId >= 0) return;
     closeEqWindow();
+    // The dynamics panel is bound to the strip it was opened on; leaving it up
+    // would push its edits into whatever strip becomes selected next.
+    closeDynamicsWindow();
     selectedId = channelId;
     selectedIsOutput = isOutput;
     focusedInsertId = 0;
@@ -391,9 +400,20 @@ void RackView::refreshSlots() {
 
 void RackView::refreshEditor() {
     if (eqFocused && eqWindow != nullptr) {
-        closeDockedEditor();
+        hideDockedEditor();
         if (eqWindow->getParentComponent() != &editorHolder)
             editorHolder.addAndMakeVisible(eqWindow);
+        noEditorLabel.setVisible(false);
+        noEditorBypass.setVisible(false);
+        resized();
+        return;
+    }
+    // The dynamics panel owns the bay while it is open; docking an insert
+    // editor here would paint it on top of the panel.
+    if (dynamicsFocused && dynamicsWindow != nullptr) {
+        hideDockedEditor();
+        if (dynamicsWindow->getParentComponent() != &editorHolder)
+            editorHolder.addAndMakeVisible(dynamicsWindow);
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
         resized();
@@ -402,7 +422,6 @@ void RackView::refreshEditor() {
     if (eqFocused) {
         eqFocused = false;
     }
-    closeDockedEditor();
     if (eqWindow != nullptr) {
         auto* doomed = eqWindow;
         eqWindow = nullptr;
@@ -418,6 +437,7 @@ void RackView::refreshEditor() {
         }
     }
     if (focus == nullptr) {
+        closeDockedEditor();
         noEditorLabel.setText("No plugins - click + Add VST3 above", juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(false);
@@ -426,6 +446,19 @@ void RackView::refreshEditor() {
         resized();
         return;
     }
+
+    // Already docked for this insert: reuse the live editor (it may only be
+    // hidden behind an EQ/dynamics panel) instead of rebuilding the VST UI.
+    if (dockedEditor != nullptr && dockedHost == &focus->pluginHost) {
+        noEditorLabel.setVisible(false);
+        noEditorBypass.setVisible(false);
+        if (dockedEditor->getParentComponent() != &editorHolder)
+            editorHolder.addAndMakeVisible(dockedEditor);
+        dockedEditor->setVisible(true);
+        resized();
+        return;
+    }
+    closeDockedEditor();
 
     dockedHost = &focus->pluginHost;
     dockedHost->closeFloatingEditor();
@@ -439,6 +472,10 @@ void RackView::refreshEditor() {
         resized();
         return;
     }
+
+    // Whatever the plugin sized itself to before any layout pass; reused for
+    // every later pass so the editor is never stretched by the bay.
+    dockedEditorSize = dockedEditor->getBounds();
 
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
@@ -458,6 +495,7 @@ void RackView::closeDockedEditor() {
         && dockedEditor->getParentComponent() != &editorHolder) {
         dockedEditor = nullptr;
         dockedHost = nullptr;
+        dockedEditorSize = {};
         return;
     }
     editorHolder.removeChildComponent(dockedEditor);
@@ -474,6 +512,19 @@ void RackView::closeDockedEditor() {
     }
     dockedEditor = nullptr;
     dockedHost = nullptr;
+    dockedEditorSize = {};
+}
+
+void RackView::hideDockedEditor() {
+    if (dockedEditor != nullptr) dockedEditor->setVisible(false);
+}
+
+// Brings the insert editor back once no panel owns the bay any more.
+void RackView::showDockedEditor() {
+    if (dockedEditor == nullptr || eqFocused || dynamicsFocused) return;
+    if (dockedEditor->getParentComponent() != &editorHolder) return;
+    dockedEditor->setVisible(true);
+    resized();
 }
 
 bool RackView::dockedHostAlive() const {
@@ -494,7 +545,7 @@ void RackView::focusEq() {
     closeDynamicsWindow();
     if (eqWindow != nullptr) {
         eqFocused = true;
-        closeDockedEditor();
+        hideDockedEditor();
         if (eqWindow->getParentComponent() != &editorHolder)
             editorHolder.addAndMakeVisible(eqWindow);
         refreshEqButton();
@@ -525,9 +576,19 @@ void RackView::focusEq() {
                 c->analyzerTap.setMode(static_cast<std::uint32_t>(mode));
         };
         window->setAnalyzerMode(EQWindow::kAnalyzerPost);
+        // Delay knob: seed from the channel and persist through the engine,
+        // engaging the EQ on edit (same rule as a band drag).
+        window->setDelayMs(ch->eqDelayMs);
+        window->applyDelayMs = [safe](float delayMs) {
+            if (safe == nullptr) return;
+            const auto channelId = safe->selectedChainId();
+            safe->audioEngine.setChannelEqBypassed(channelId, false);
+            safe->audioEngine.setChannelEqDelay(channelId, delayMs);
+            safe->refreshEqButton();
+        };
         eqWindow = window;
         eqFocused = true;
-        closeDockedEditor();
+        hideDockedEditor();
         editorHolder.addAndMakeVisible(eqWindow);
         window->onCloseRequest = [safe] {
             if (safe == nullptr) return;
@@ -565,9 +626,23 @@ void RackView::focusEq() {
                 o->analyzerTap.setMode(static_cast<std::uint32_t>(mode));
         };
         window->setAnalyzerMode(EQWindow::kAnalyzerPost);
+        // Delay knob, same contract as the channel branch above.
+        window->setDelayMs(out->eqDelayMs);
+        window->applyDelayMs = [safe, outputId](float delayMs) {
+            if (safe == nullptr) return;
+            const auto& outs = safe->audioEngine.getOutputs();
+            for (int i = 0; i < (int)outs.size(); ++i) {
+                if (outs[(size_t)i]->id == outputId) {
+                    safe->audioEngine.setOutputEqBypassed(i, false);
+                    safe->audioEngine.setOutputEqDelay(i, delayMs);
+                    break;
+                }
+            }
+            safe->refreshEqButton();
+        };
         eqWindow = window;
         eqFocused = true;
-        closeDockedEditor();
+        hideDockedEditor();
         editorHolder.addAndMakeVisible(eqWindow);
         window->onCloseRequest = [safe] {
             if (safe == nullptr) return;
@@ -586,18 +661,22 @@ void RackView::closeEqWindow() {
     editorHolder.removeChildComponent(doomed);
     delete doomed;
     refreshEqButton();
+    showDockedEditor();
 }
 
 void RackView::refreshEqButton() {
     bool active = false;
     if (auto* ch = currentChannel()) {
         if (!ch->eqBypassed.get()) {
+            // A delay-only EQ still does audible work, so it lights the button.
+            active = ch->eqDelayMs > 0.0f;
             for (const auto& band : ch->eqBands) {
                 if (band.enabled) { active = true; break; }
             }
         }
     } else if (auto* out = currentOutput()) {
         if (!out->eqBypassed.get()) {
+            active = out->eqDelayMs > 0.0f;
             for (const auto& band : out->eqBands) {
                 if (band.enabled) { active = true; break; }
             }
@@ -613,19 +692,22 @@ void RackView::refreshEqButton() {
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {
-        dynamicsFocused = true;
-        closeEqWindow();
-        if (dynamicsWindow->getParentComponent() != &editorHolder)
-            editorHolder.addAndMakeVisible(dynamicsWindow);
-        refreshDynamicsButtons();
-        resized();
-        return;
+        if (dynamicsWindow->getType() != type) {
+            closeDynamicsWindow();
+        } else {
+            dynamicsFocused = true;
+            closeEqWindow();
+            if (dynamicsWindow->getParentComponent() != &editorHolder)
+                editorHolder.addAndMakeVisible(dynamicsWindow);
+            refreshDynamicsButtons();
+            resized();
+            return;
+        }
     }
 
     const auto effectName = [type] {
         switch (type) {
             case pluginrack::DynamicsEffectType::Compressor: return juce::String("Compressor");
-            case pluginrack::DynamicsEffectType::Limiter: return juce::String("Limiter");
             case pluginrack::DynamicsEffectType::Gate: return juce::String("Gate");
         }
         return juce::String("Effect");
@@ -634,53 +716,81 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         return std::find_if(effects.begin(), effects.end(),
                             [type](const auto& effect) { return effect.type == type; });
     };
+    // The panel edits its own effect and the strip's gate, so apply matches on
+    // the id it was handed rather than on the opened type.
+    const auto findEffectById = [](std::vector<pluginrack::DynamicsEffect>& effects,
+                                   std::uint32_t id) {
+        return std::find_if(effects.begin(), effects.end(),
+                            [id](const auto& effect) { return effect.id == id; });
+    };
+    const auto findGate = [](std::vector<pluginrack::DynamicsEffect>& effects) {
+        return std::find_if(effects.begin(), effects.end(), [](const auto& effect) {
+            return effect.type == pluginrack::DynamicsEffectType::Gate;
+        });
+    };
 
     juce::Component::SafePointer<RackView> safe(this);
     if (auto* ch = currentChannel()) {
         auto it = findEffect(ch->effects);
         if (it == ch->effects.end()) return;
+        auto gateIt = findGate(ch->effects);
         auto* window = new DynamicsWindow(
             effectName() + " - " + ch->name, *it,
-            [safe, findEffect](const pluginrack::DynamicsEffect& effect) {
+            [safe, findEffectById](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
                 if (safe == nullptr) return;
                 auto* channel = safe->currentChannel();
                 if (channel == nullptr) return;
                 auto effects = channel->effects;
-                const auto found = findEffect(effects);
+                const auto found = findEffectById(effects, effect.id);
                 if (found != effects.end()) {
+                    const bool bypassed = found->bypassed;
                     *found = effect;
+                    // Knob edits keep whatever the strip's bypass says; only
+                    // the panel's own switch may change it.
+                    if (!bypassChanged) found->bypassed = bypassed;
                     safe->audioEngine.setChannelEffects(channel->id, effects);
                     safe->refreshDynamicsButtons();
                 }
-            });
+            },
+            gateIt != ch->effects.end() ? &*gateIt : nullptr);
         window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
             if (safe == nullptr) return;
-            if (auto* channel = safe->currentChannel())
+            if (auto* channel = safe->currentChannel()) {
+                // Re-arm every tick: the tap is shared, so closing an EQ or a
+                // panel in another view can switch it off under us.
+                channel->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
                 channel->analyzerTap.snapshot(false, left, right, frames);
+            }
         };
         ch->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
         dynamicsWindow = window;
     } else if (auto* out = currentOutput()) {
         auto it = findEffect(out->effects);
         if (it == out->effects.end()) return;
+        auto gateIt = findGate(out->effects);
         auto* window = new DynamicsWindow(
             effectName() + " - " + out->name, *it,
-            [safe, findEffect](const pluginrack::DynamicsEffect& effect) {
+            [safe, findEffectById](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
                 if (safe == nullptr) return;
                 auto* output = safe->currentOutput();
                 if (output == nullptr) return;
                 auto effects = output->effects;
-                const auto found = findEffect(effects);
+                const auto found = findEffectById(effects, effect.id);
                 if (found != effects.end()) {
+                    const bool bypassed = found->bypassed;
                     *found = effect;
+                    if (!bypassChanged) found->bypassed = bypassed;
                     safe->audioEngine.setOutputEffects(output->id, effects);
                     safe->refreshDynamicsButtons();
                 }
-            });
+            },
+            gateIt != out->effects.end() ? &*gateIt : nullptr);
         window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
             if (safe == nullptr) return;
-            if (auto* output = safe->currentOutput())
+            if (auto* output = safe->currentOutput()) {
+                output->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
                 output->analyzerTap.snapshot(false, left, right, frames);
+            }
         };
         out->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
         dynamicsWindow = window;
@@ -690,7 +800,7 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
 
     dynamicsFocused = true;
     closeEqWindow();
-    closeDockedEditor();
+    hideDockedEditor();
     editorHolder.addAndMakeVisible(dynamicsWindow);
     refreshDynamicsButtons();
     resized();
@@ -709,6 +819,7 @@ void RackView::closeDynamicsWindow() {
     editorHolder.removeChildComponent(doomed);
     delete doomed;
     refreshDynamicsButtons();
+    showDockedEditor();
 }
 
 void RackView::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
@@ -742,6 +853,17 @@ void RackView::refreshDynamicsButtons() {
             const auto found = std::find_if(effects->begin(), effects->end(),
                                             [type](const auto& effect) { return effect.type == type; });
             active = found != effects->end() && !found->bypassed;
+            if (found != effects->end() && dynamicsWindow != nullptr &&
+                dynamicsWindow->getType() == type) {
+                dynamicsWindow->setBypassed(found->bypassed);
+                if (type == pluginrack::DynamicsEffectType::Compressor) {
+                    const auto gateIt = std::find_if(
+                        effects->begin(), effects->end(), [](const auto& effect) {
+                            return effect.type == pluginrack::DynamicsEffectType::Gate;
+                        });
+                    if (gateIt != effects->end()) dynamicsWindow->setGate(*gateIt);
+                }
+            }
         }
         button.setColour(juce::TextButton::buttonColourId,
                          active ? theme::amber() : theme::control());
@@ -749,7 +871,6 @@ void RackView::refreshDynamicsButtons() {
                          active ? theme::bg() : theme::text());
     };
     apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
-    apply(limiterButton, pluginrack::DynamicsEffectType::Limiter);
     apply(gateButton, pluginrack::DynamicsEffectType::Gate);
 }
 
@@ -800,9 +921,9 @@ void RackView::rebuild() {
     mixerButton.setVisible(hasChain);
     channelCombo.setVisible(true);
     insertsHeader.setVisible(hasChain);
+    fxHeader.setVisible(hasChain);
     eqButton.setVisible(hasChain);
     compressorButton.setVisible(hasChain);
-    limiterButton.setVisible(hasChain);
     gateButton.setVisible(hasChain);
     slotViewport.setVisible(hasChain);
     editorViewport.setVisible(hasChain);
@@ -855,20 +976,21 @@ void RackView::resized() {
     la.removeFromTop(4);
     nameLabel.setBounds(la.removeFromTop(20));
     subLabel.setBounds(la.removeFromTop(16));
-    la.removeFromTop(6);
+    la.removeFromTop(10);
 
     trimCaption.setBounds(la.removeFromTop(14));
     auto trimArea = la.removeFromTop(56);
     trimKnob.setBounds(trimArea.withSizeKeepingCentre(52, 52));
     la.removeFromTop(6);
 
+    la.removeFromBottom(6); // breathing room above the panel edge
     auto btnRow = la.removeFromBottom(24);
-    la.removeFromBottom(8);
+    la.removeFromBottom(14);
 
     auto panArea = la.removeFromBottom(92);
     panCaption.setBounds(panArea.removeFromTop(14));
     panSlider.setBounds(panArea.withSizeKeepingCentre(64, 64));
-    la.removeFromBottom(8);
+    la.removeFromBottom(10);
 
     auto faderRow = la;
     auto meterArea = faderRow.removeFromRight(14);
@@ -894,16 +1016,17 @@ void RackView::resized() {
 
     // plugin column
     auto pa = pluginArea.reduced(4);
-    pa.removeFromTop(14);
-    insertsHeader.setBounds(pa.removeFromTop(20));
+    pa.removeFromTop(14); // panel caption band
+    fxHeader.setBounds(pa.removeFromTop(16));
     pa.removeFromTop(4);
-    eqButton.setBounds(pa.removeFromTop(26));
-    pa.removeFromTop(3);
-    compressorButton.setBounds(pa.removeFromTop(22));
-    pa.removeFromTop(3);
-    limiterButton.setBounds(pa.removeFromTop(22));
-    pa.removeFromTop(3);
-    gateButton.setBounds(pa.removeFromTop(22));
+    gateButton.setBounds(pa.removeFromTop(24));
+    pa.removeFromTop(4);
+    eqButton.setBounds(pa.removeFromTop(24));
+    pa.removeFromTop(4);
+    compressorButton.setBounds(pa.removeFromTop(24));
+    // Wider break: inserts are a separate group from the channel's processors.
+    pa.removeFromTop(14);
+    insertsHeader.setBounds(pa.removeFromTop(16));
     pa.removeFromTop(4);
     slotViewport.setBounds(pa);
     refreshSlots();
@@ -916,10 +1039,10 @@ void RackView::resized() {
     const int vw = juce::jmax(0, editorViewport.getWidth());
     const int vh = juce::jmax(0, editorViewport.getHeight());
     if (eqFocused && eqWindow != nullptr) {
-        const int ew = juce::jmax(400, EQWindow::kWidth);
-        const int eh = juce::jmax(320, EQWindow::kHeight);
-        editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
-        eqWindow->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
+        // The EQ fills the editor bay, like the dynamics panel does.
+        editorHolder.setSize(juce::jmax(vw, EQWindow::kWidth),
+                             juce::jmax(vh, EQWindow::kHeight));
+        eqWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
@@ -929,8 +1052,11 @@ void RackView::resized() {
         noEditorBypass.setVisible(false);
     }
     if (dockedEditor != nullptr) {
-        const int ew = juce::jmax(200, dockedEditor->getWidth());
-        const int eh = juce::jmax(150, dockedEditor->getHeight());
+        // Keep the size the plugin declared; only the empty fallback tracks it.
+        const auto preferred = dockedEditorSize.isEmpty() ? dockedEditor->getBounds()
+                                                          : dockedEditorSize;
+        const int ew = juce::jmax(200, preferred.getWidth());
+        const int eh = juce::jmax(150, preferred.getHeight());
         editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
         dockedEditor->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
         noEditorLabel.setBounds(editorHolder.getLocalBounds());
@@ -1119,6 +1245,9 @@ bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
         delete doomed;
         refreshEqButton();
     }
+    // Clicking a slot opens that insert in the bay, so the compressor panel
+    // has to give it up instead of staying underneath.
+    closeDynamicsWindow();
     focusedInsertId = insert->id;
     refreshEditor();
     return true;

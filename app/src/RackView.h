@@ -59,6 +59,11 @@ private:
     void refreshSlots();
     void refreshEditor();
     bool dockedHostAlive() const;
+    // Focus switches only hide the docked plugin editor: destroying and
+    // recreating a VST UI on every EQ/dynamics switch stalls the message
+    // thread and some plugins hang while being torn down.
+    void hideDockedEditor();
+    void showDockedEditor();
     void jumpToMixer();
 
     void rebuildChannelCombo();
@@ -97,11 +102,11 @@ private:
     juce::TextButton mixerButton{"Mixer"};
 
     // Plugin column
+    juce::Label fxHeader;
     juce::Label insertsHeader;
+    EqButton gateButton{"GATE"};
     EqButton eqButton{"EQ"};
     EqButton compressorButton{"COMP"};
-    EqButton limiterButton{"LIMIT"};
-    EqButton gateButton{"GATE"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
     bool eqFocused = false;
@@ -127,6 +132,9 @@ private:
     // Docked editor
     juce::AudioProcessorEditor* dockedEditor = nullptr;
     PluginHost* dockedHost = nullptr;
+    // Size the plugin asked for when it was docked; layout reuses it so the
+    // bay can never stretch the editor to fill.
+    juce::Rectangle<int> dockedEditorSize;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

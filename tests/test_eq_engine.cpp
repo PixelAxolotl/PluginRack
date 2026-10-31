@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -161,4 +162,124 @@ TEST_CASE("eq solo isolates band") {
     // And the soloed band actually changed the signal.
     REQUIRE(L[0] != offL[0]);
     REQUIRE(R[0] != offR[0]);
+}
+
+TEST_CASE("eq delay shifts the signal by the requested samples") {
+    EqEngine e;
+    e.prepare(48000.0, 512);
+    auto bands = defaultSixBands();
+    for (auto& band : bands) {
+        band.enabled = false; // delay only: no band may touch the block
+    }
+    e.setBands(bands);
+    e.setDelayMs(1.0f); // 48 samples at 48 kHz
+
+    constexpr int kFrames = 256;
+    std::vector<float> L(static_cast<std::size_t>(kFrames), 0.0f);
+    std::vector<float> R(static_cast<std::size_t>(kFrames), 0.0f);
+    L[0] = 1.0f;
+    R[0] = -0.5f;
+    e.process(L.data(), R.data(), kFrames);
+
+    for (int i = 0; i < 48; ++i) {
+        REQUIRE(L[static_cast<std::size_t>(i)] == 0.0f);
+        REQUIRE(R[static_cast<std::size_t>(i)] == 0.0f);
+    }
+    REQUIRE(L[48] == Catch::Approx(1.0f));
+    REQUIRE(R[48] == Catch::Approx(-0.5f));
+}
+
+TEST_CASE("eq delay holds across render blocks") {
+    EqEngine e;
+    e.prepare(48000.0, 512);
+    auto bands = defaultSixBands();
+    for (auto& band : bands) {
+        band.enabled = false;
+    }
+    e.setBands(bands);
+    e.setDelayMs(250.0f); // 12000 samples at 48 kHz
+
+    constexpr int kBlock = 512;
+    constexpr int kTotal = 13000;
+    std::vector<float> L(static_cast<std::size_t>(kTotal), 0.0f);
+    std::vector<float> R(static_cast<std::size_t>(kTotal), 0.0f);
+    L[0] = 1.0f;
+    R[0] = 1.0f;
+    for (int offset = 0; offset < kTotal; offset += kBlock) {
+        const int frames = std::min(kBlock, kTotal - offset);
+        e.process(L.data() + offset, R.data() + offset, frames);
+    }
+
+    for (int i = 0; i < 12000; ++i) {
+        REQUIRE(L[static_cast<std::size_t>(i)] == 0.0f);
+    }
+    REQUIRE(L[12000] == Catch::Approx(1.0f));
+    REQUIRE(R[12000] == Catch::Approx(1.0f));
+}
+
+TEST_CASE("eq zero delay is bit-identical") {
+    EqEngine e;
+    e.prepare(48000.0, 512);
+    e.setDelayMs(0.0f);
+    auto bands = defaultSixBands();
+    for (auto& band : bands) {
+        band.enabled = false;
+    }
+    e.setBands(bands);
+
+    constexpr int kFrames = 64;
+    std::vector<float> L(static_cast<std::size_t>(kFrames));
+    std::vector<float> R(static_cast<std::size_t>(kFrames));
+    fillSignal(L.data(), R.data(), kFrames);
+    const std::vector<float> origL = L;
+    const std::vector<float> origR = R;
+    e.process(L.data(), R.data(), kFrames);
+
+    REQUIRE(L == origL);
+    REQUIRE(R == origR);
+}
+
+TEST_CASE("eq delay clamps to the 0-1 s range") {
+    EqEngine e;
+    e.prepare(48000.0, 256);
+
+    e.setDelayMs(5000.0f);
+    REQUIRE(e.delayMs() == Catch::Approx(EqEngine::kMaxDelayMs));
+    e.setDelayMs(-5.0f);
+    REQUIRE(e.delayMs() == 0.0f);
+    e.setDelayMs(kNan);
+    REQUIRE(e.delayMs() == 0.0f);
+    e.setDelayMs(250.0f);
+    REQUIRE(e.delayMs() == Catch::Approx(250.0f));
+}
+
+TEST_CASE("eq delay change mid-stream glides without blowing up") {
+    EqEngine e;
+    e.prepare(48000.0, 512);
+    auto bands = defaultSixBands();
+    for (auto& band : bands) {
+        band.enabled = false;
+    }
+    e.setBands(bands);
+    e.setDelayMs(10.0f);
+
+    constexpr int kFrames = 8192;
+    std::vector<float> L(static_cast<std::size_t>(kFrames));
+    std::vector<float> R(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        const float v = 0.5f * std::sin(0.05f * static_cast<float>(i));
+        L[static_cast<std::size_t>(i)] = v;
+        R[static_cast<std::size_t>(i)] = v;
+    }
+
+    e.process(L.data(), R.data(), 512);
+    e.setDelayMs(500.0f); // the glide must stay bounded across the change
+    e.process(L.data() + 512, R.data() + 512, kFrames - 512);
+
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(std::isfinite(L[static_cast<std::size_t>(i)]));
+        REQUIRE(std::isfinite(R[static_cast<std::size_t>(i)]));
+        REQUIRE(std::fabs(L[static_cast<std::size_t>(i)]) < 1.0f);
+    }
+    REQUIRE(e.delayMs() == Catch::Approx(500.0f));
 }

@@ -13,6 +13,8 @@ namespace {
 
 constexpr float kMinGainDb = -60.0f;
 constexpr float kMaxGainDb = 12.0f;
+constexpr float kMinTrimDb = -12.0f;
+constexpr float kMaxTrimDb = 12.0f;
 constexpr float kMinPan = -1.0f;
 constexpr float kMaxPan = 1.0f;
 constexpr float kMinEqFreqHz = 10.0f;
@@ -21,6 +23,8 @@ constexpr float kMinEqGainDb = -15.0f;
 constexpr float kMaxEqGainDb = 15.0f;
 constexpr float kMinEqQ = 0.1f;
 constexpr float kMaxEqQ = 20.0f;
+constexpr float kMinEqDelayMs = 0.0f;
+constexpr float kMaxEqDelayMs = 1000.0f;
 constexpr std::size_t kMaxEqBands = 6;
 constexpr std::size_t kMaxEffects = 4;
 
@@ -77,6 +81,15 @@ void validateEqBands(const char* kind, std::uint32_t id, const std::vector<EqBan
     }
 }
 
+void validateEqDelay(const char* kind, std::uint32_t id, float delayMs,
+                     std::vector<SceneError>& errors) {
+    if (!std::isfinite(delayMs) || delayMs < kMinEqDelayMs || delayMs > kMaxEqDelayMs) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                          std::string(kind) + " " + std::to_string(id) +
+                              " eqDelayMs out of range [0, 1000]"});
+    }
+}
+
 std::string describeMapping(const std::vector<int>& mapping) {
     std::string text = "[";
     for (std::size_t i = 0; i < mapping.size(); ++i) {
@@ -123,6 +136,12 @@ std::vector<SceneError> validate(const Scene& scene) {
                               "channel " + std::to_string(channel.id) +
                                   " gainDb out of range [-60, 12]"});
         }
+        if (!std::isfinite(channel.trimDb) || channel.trimDb < kMinTrimDb ||
+            channel.trimDb > kMaxTrimDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
+                              "channel " + std::to_string(channel.id) +
+                                  " trimDb out of range [-12, 12]"});
+        }
         if (!std::isfinite(channel.pan) || channel.pan < kMinPan || channel.pan > kMaxPan) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
                               "channel " + std::to_string(channel.id) +
@@ -151,6 +170,7 @@ std::vector<SceneError> validate(const Scene& scene) {
                                   " must contain exactly two distinct non-negative indexes"});
         }
         validateEqBands("channel", channel.id, channel.eqBands, errors);
+        validateEqDelay("channel", channel.id, channel.eqDelayMs, errors);
         validateEffects("channel", channel.id, channel.effects, errors);
     }
 
@@ -165,6 +185,12 @@ std::vector<SceneError> validate(const Scene& scene) {
             errors.push_back({SceneErrorCode::DuplicateOutputId, output.id,
                               "duplicate output id " + std::to_string(output.id)});
         }
+        if (!std::isfinite(output.gainDb) || output.gainDb < kMinGainDb ||
+            output.gainDb > kMaxGainDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, output.id,
+                              "output " + std::to_string(output.id) +
+                                  " gainDb out of range [-60, 12]"});
+        }
         for (const InsertSlot& slot : output.inserts) {
             if (slot.id == 0) {
                 errors.push_back({SceneErrorCode::ValueOutOfRange, output.id,
@@ -173,6 +199,7 @@ std::vector<SceneError> validate(const Scene& scene) {
             }
         }
         validateEqBands("output", output.id, output.eqBands, errors);
+        validateEqDelay("output", output.id, output.eqDelayMs, errors);
         validateEffects("output", output.id, output.effects, errors);
     }
 

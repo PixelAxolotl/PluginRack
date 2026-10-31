@@ -67,6 +67,14 @@ bool PluginHost::hasPlugin() const {
     return plugin != nullptr;
 }
 
+juce::String PluginHost::getStateAsBase64() const {
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin == nullptr) return {};
+    juce::MemoryBlock state;
+    plugin->getStateInformation(state);
+    return state.getSize() > 0 ? state.toBase64Encoding() : juce::String{};
+}
+
 int PluginHost::getLatencySamples() const {
     return cachedLatencySamples_.load(std::memory_order_relaxed);
 }
@@ -155,7 +163,7 @@ void PluginHost::closeFloatingEditor() {
     closeEditorWindow(editorWindow);
 }
 
-juce::String PluginHost::loadPlugin(const juce::File& file) {
+juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& stateBase64) {
     if (!file.exists()) {
         return "The selected VST3 does not exist.";
     }
@@ -200,6 +208,15 @@ juce::String PluginHost::loadPlugin(const juce::File& file) {
     }
 
     candidate->setRateAndBufferSizeDetails(sampleRate, bufferSize);
+    // Apply saved state before activation: that is the host flow plugins see
+    // when a project is reopened, and it avoids a default-parameters render
+    // pass slipping through before the restore takes effect.
+    if (stateBase64.isNotEmpty()) {
+        juce::MemoryBlock state;
+        if (state.fromBase64Encoding(stateBase64)) {
+            candidate->setStateInformation(state.getData(), (int) state.getSize());
+        }
+    }
     candidate->prepareToPlay(sampleRate, bufferSize);
 
     const juce::ScopedLock lock(pluginLock);

@@ -12,7 +12,9 @@ EQWindow::EQWindow(const juce::String& title,
       embedded(embeddedMode) {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
-    setResizeLimits(400, 320, 1000, 700);
+    // Width floor leaves room for the four knob slots (Freq/Gain/Q/Delay)
+    // with their 72 px value boxes intact.
+    setResizeLimits(480, 320, 10000, 10000);
     setColour(juce::DocumentWindow::backgroundColourId, theme::bg());
 
     curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
@@ -58,7 +60,7 @@ EQWindow::EQWindow(const juce::String& title,
     });
     Component::addAndMakeVisible(soloButton);
 
-    for (auto* label : { &freqLabel, &gainLabel, &qLabel }) {
+    for (auto* label : { &freqLabel, &gainLabel, &qLabel, &delayLabel }) {
         label->setJustificationType(juce::Justification::centred);
         label->setFont(juce::Font(juce::FontOptions(11.0f)));
         label->setColour(juce::Label::textColourId, theme::dim());
@@ -67,7 +69,7 @@ EQWindow::EQWindow(const juce::String& title,
 
     // Freq/Gain/Q knobs for the selected band, styled like the strip knobs
     // (ConsoleLookAndFeel conventions: control box, themed arcs).
-    freqKnob.setSliderStyle(juce::Slider::RotaryHorizontalDrag);
+    freqKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     freqKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     freqKnob.setRange(EQCurveComponent::kMinFreqHz, EQCurveComponent::kMaxFreqHz);
     freqKnob.setSkewFactorFromMidPoint(1000.0);
@@ -101,7 +103,7 @@ EQWindow::EQWindow(const juce::String& title,
     gainKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(gainKnob);
 
-    qKnob.setSliderStyle(juce::Slider::RotaryHorizontalDrag);
+    qKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     qKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     qKnob.setRange(EQCurveComponent::kMinQ, EQCurveComponent::kMaxQ);
     qKnob.setSkewFactorFromMidPoint(1.0);
@@ -119,6 +121,30 @@ EQWindow::EQWindow(const juce::String& title,
     qKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     qKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(qKnob);
+
+    // Per-EQ delay (not per band): 0-1000 ms with a skew that gives the
+    // short, alignment-relevant range most of the rotation. Editing engages
+    // the EQ through the owner, exactly like a band edit does.
+    delayKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    delayKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
+    delayKnob.setRange(0.0, static_cast<double>(pluginrack::EqEngine::kMaxDelayMs), 0.1);
+    delayKnob.setSkewFactorFromMidPoint(100.0);
+    delayKnob.textFromValueFunction = [](double ms) {
+        return juce::String(ms, ms < 10.0 ? 1 : 0) + " ms";
+    };
+    delayKnob.valueFromTextFunction = [](const juce::String& text) {
+        return juce::jlimit(0.0, static_cast<double>(pluginrack::EqEngine::kMaxDelayMs),
+                            text.getDoubleValue());
+    };
+    delayKnob.setDoubleClickReturnValue(true, 0.0);
+    delayKnob.setTooltip("Post-EQ delay in ms (0-1000)");
+    delayKnob.onValueChange = [this] { applyDelayFromControl(); };
+    delayKnob.setColour(juce::Slider::rotarySliderFillColourId, theme::amber());
+    delayKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
+    delayKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
+    delayKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    delayKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    Component::addAndMakeVisible(delayKnob);
 
     syncControls();
 
@@ -209,6 +235,9 @@ void EQWindow::timerCallback() {
     // and mix down to mono through the Hann window. The back half of the
     // scratch is FFT workspace; only the first N floats are input.
     if (pullAnalyzerTap) {
+        // Re-arm the shared tap: closing a dynamics panel elsewhere switches it off.
+        if (setAnalyzerTapMode && analyzerMode != kAnalyzerOff)
+            setAnalyzerTapMode(analyzerMode);
         pullAnalyzerTap(analyzerMode == kAnalyzerPost,
                         tapL.data(), tapR.data());
     }
@@ -267,6 +296,16 @@ void EQWindow::applyFromControls() {
     if (applyBands) applyBands(curve.getBands());
 }
 
+void EQWindow::applyDelayFromControl() {
+    if (applyDelayMs) applyDelayMs(static_cast<float>(delayKnob.getValue()));
+}
+
+void EQWindow::setDelayMs(float delayMs) {
+    delayKnob.setValue(juce::jlimit(0.0, static_cast<double>(pluginrack::EqEngine::kMaxDelayMs),
+                                    static_cast<double>(delayMs)),
+                       juce::dontSendNotification);
+}
+
 void EQWindow::syncControls() {
     const auto& bands = curve.getBands();
     const int sel = curve.getSelectedBand();
@@ -307,7 +346,9 @@ void EQWindow::paint(juce::Graphics& g) {
 void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
     auto area = getLocalBounds().reduced(2);
-    auto controlsRow = area.removeFromBottom(104);
+    // Tall enough for a label, the dial and its value box without clipping the
+    // box against the window edge.
+    auto controlsRow = area.removeFromBottom(120);
     auto analyzerRow = area.removeFromTop(24);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
     analyzerRow.removeFromLeft(4);
@@ -319,31 +360,36 @@ void EQWindow::resized() {
     rtaOffsetLabel.setBounds(analyzerRow.removeFromRight(34));
     analyzerRow.removeFromRight(2);
     rtaMinusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
+    area.removeFromTop(6); // air between the analyzer row and the dB scale
     curve.setBounds(area);
 
-    auto left = controlsRow.removeFromLeft(80);
-    left.removeFromTop(6);
+    auto left = controlsRow.removeFromLeft(84);
+    left.removeFromTop(8);
+    left.removeFromLeft(6);
     stereoTag.setBounds(left.removeFromTop(16));
-    controlsRow.removeFromLeft(6);
+    controlsRow.removeFromLeft(4);
 
     auto right = controlsRow.removeFromRight(80);
-    right.removeFromTop(6);
+    right.removeFromTop(8);
+    right.removeFromLeft(6);
     bypassButton.setBounds(right.removeFromTop(22));
     right.removeFromTop(4);
     soloButton.setBounds(right.removeFromTop(22));
 
-    // Three label+knob slots across the remaining middle.
-    const int knobW = juce::jmax(1, controlsRow.getWidth() / 3);
+    // Four label+knob slots across the remaining middle (bands, then delay).
+    const int knobW = juce::jmax(1, controlsRow.getWidth() / 4);
     auto slot = [&](int i) {
         return juce::Rectangle<int>(controlsRow.getX() + i * knobW, controlsRow.getY(),
                                     knobW, controlsRow.getHeight());
     };
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         auto s = slot(i);
-        auto* label = i == 0 ? &freqLabel : (i == 1 ? &gainLabel : &qLabel);
-        auto* knob = i == 0 ? &freqKnob : (i == 1 ? &gainKnob : &qKnob);
+        auto* label = i == 0 ? &freqLabel
+                             : (i == 1 ? &gainLabel : (i == 2 ? &qLabel : &delayLabel));
+        auto* knob = i == 0 ? &freqKnob
+                            : (i == 1 ? &gainKnob : (i == 2 ? &qKnob : &delayKnob));
         label->setBounds(s.removeFromTop(14));
-        auto knobArea = s.removeFromTop(90);
+        auto knobArea = s.withTrimmedBottom(6);
         const int knobWidth = juce::jmin(knobArea.getWidth(),
                                          juce::jmax(66, juce::roundToInt(knobArea.getWidth() * 0.8f)));
         knob->setBounds(knobArea.withSizeKeepingCentre(knobWidth, knobArea.getHeight()));
