@@ -16,12 +16,20 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     deviceControl.setError(channel.inputError);
     refreshInput();
 
-    channelLabel.setText("CH " + juce::String(channel.id), juce::dontSendNotification);
-    channelLabel.setJustificationType(juce::Justification::centredLeft);
-    channelLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
-    channelLabel.setColour(juce::Label::textColourId, theme::dim());
-    channelLabel.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(channelLabel);
+    // The strip header carries the name and the device; the input chip below
+    // states which physical inputs it listens to and turns into the mapping
+    // controls when clicked.
+    inputChip.setColour(juce::TextButton::buttonColourId, theme::control());
+    inputChip.setColour(juce::TextButton::buttonOnColourId, theme::line());
+    inputChip.setColour(juce::TextButton::textColourOffId, theme::text());
+    inputChip.setColour(juce::TextButton::textColourOnId, theme::text());
+    inputChip.setClickingTogglesState(true);
+    inputChip.setTooltip("Input channels - click to change");
+    inputChip.onClick = [this] {
+        inputEditing = inputChip.getToggleState();
+        refreshInput();
+    };
+    addAndMakeVisible(inputChip);
 
     removeChannelButton.setFontSize(13.0f);
     removeChannelButton.setClickAction([this] {
@@ -108,16 +116,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     vstHeader.setColour(juce::Label::textColourId, theme::violet());
     addAndMakeVisible(vstHeader);
-
-    for (int i = 0; i < 4; ++i) {
-        auto* slot = slots.add(new InsertSlotComponent(*this, i));
-        addAndMakeVisible(*slot);
-    }
-
-    addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
-    addVstButton.onClick = [this] { openPicker(); };
-    addAndMakeVisible(addVstButton);
 
     levelLabel.setText("TRIM", juce::dontSendNotification);
     levelLabel.setJustificationType(juce::Justification::centred);
@@ -423,67 +421,65 @@ void ChannelStrip::refreshDynamicsButtons() {
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
 
-    // header row: CH label, SPLIT, X
-    auto headerRow = area.removeFromTop(22);
-    auto btnArea = headerRow.removeFromRight(22);
-    auto splitArea = headerRow.removeFromRight(48);
-    channelLabel.setBounds(headerRow);
-    removeChannelButton.setBounds(btnArea);
-    splitButton.setBounds(splitArea);
+    // Header: the strip's own buttons take a short row of their own so the
+    // channel name keeps the full width instead of collapsing to "Cha...".
+    auto actionsRow = area.removeFromTop(theme::metrics::kActionH);
+    removeChannelButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
+    actionsRow.removeFromRight(2);
+    splitButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    area.removeFromTop(2);
+    deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
 
-    // Input source row (Input v)
-    deviceControl.setBounds(area.removeFromTop(32));
-    area.removeFromTop(4);
-
-    // input channel mapping row
-    auto inputRow = area.removeFromTop(20);
-    inputRow.removeFromTop(1);
-    modeCombo.setBounds(inputRow.removeFromLeft(50));
-    if (inputComboB.isVisible()) {
-        inputComboB.setBounds(inputRow.removeFromRight(40));
-        inputRow.removeFromRight(4);
+    // Input chip, or the mapping controls it swaps into when clicked.
+    auto inputRow = area.removeFromTop(theme::metrics::kFieldH);
+    if (inputEditing) {
+        modeCombo.setBounds(inputRow.removeFromLeft(44));
+        inputRow.removeFromLeft(2);
+        inputComboA.setBounds(inputRow.removeFromLeft(36));
+        inputRow.removeFromLeft(2);
+        if (inputComboB.isVisible()) {
+            inputComboB.setBounds(inputRow.removeFromLeft(36));
+            inputRow.removeFromLeft(2);
+        }
+        inputChip.setBounds(inputRow);
+    } else {
+        inputChip.setBounds(inputRow);
     }
-    inputComboA.setBounds(inputRow.removeFromRight(40));
     if (inputErrorLabel.isVisible()) {
         inputErrorLabel.setBounds(area.removeFromTop(14));
     }
     area.removeFromTop(2);
 
-    // Gain row: trim knob with the input mapping kept above it.
+    gateButton.setVisible(false);
+    eqButton.setVisible(false);
+    compressorButton.setVisible(false);
+
+    // Trim and Pan share one row, above the chain: the first two things a
+    // channel is reached for sit where the eye lands, not below eight slots.
     auto gainRow = area.removeFromTop(74);
-    auto gainLeft = gainRow.removeFromLeft((gainRow.getWidth() * 2) / 5);
+    const int knobCellW = (gainRow.getWidth() - 4) / 2;
+    auto trimCell = gainRow.removeFromLeft(knobCellW);
     gainRow.removeFromLeft(4);
-    levelLabel.setBounds(gainLeft.removeFromTop(14));
-    levelKnob.setBounds(gainLeft.reduced(2));
+    auto panCell = gainRow.removeFromLeft(knobCellW);
+    levelLabel.setBounds(trimCell.removeFromTop(14));
+    levelKnob.setBounds(trimCell.reduced(2));
+    panLabel.setBounds(panCell.removeFromTop(14));
+    panKnob.setBounds(panCell.reduced(2));
     area.removeFromTop(4);
 
-    // Pan row: pan knob (left) + EQ button (right)
-    auto panRow = area.removeFromTop(74);
-    auto panLeft = panRow.removeFromLeft((panRow.getWidth() * 2) / 5);
-    panRow.removeFromLeft(4);
-    panLabel.setBounds(panLeft.removeFromTop(14));
-    panKnob.setBounds(panLeft.reduced(2));
-    area.removeFromTop(4);
-
-    auto effectStack = area.removeFromTop(3 * 20 + 2 * 3);
-    auto placeEffectButton = [&effectStack](juce::Component& button) {
-        button.setBounds(effectStack.removeFromTop(20));
-        effectStack.removeFromTop(3);
-    };
-    placeEffectButton(gateButton);
-    placeEffectButton(eqButton);
-    placeEffectButton(compressorButton);
-    area.removeFromTop(4);
-
-    // Plugin / insert slot container
+    // Unified built-in and VST chain: 3 built-ins + 5 VST slots, always.
+    // The rows give height back before they squeeze the fader out of the strip.
     vstHeader.setBounds(area.removeFromTop(14));
-    const int slotH = 20;
+    const int routingRows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
+    const int reservedBelow = routingRows * 20 + 4 + 150;  // routing + fader
+    const int rowCount = juce::jmax(1, slots.size());
+    const int chainSpace = juce::jmax(0, area.getHeight() - 4 - reservedBelow);
+    const int slotH = juce::jlimit(14, 20, (chainSpace - 2 * rowCount) / rowCount);
     for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
     }
-    addVstButton.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
 
     // routing buttons (compact)
@@ -501,7 +497,7 @@ void ChannelStrip::resized() {
     area.removeFromTop(4);
 
     // fader + meter (bottom, dominant)
-    auto footer = area.removeFromBottom(30); // M / S
+    auto footer = area.removeFromBottom(theme::metrics::kRowH); // M / S
     const int half = (footer.getWidth() - 4) / 2;
     auto fm = area;
     const int meterW = 12;
@@ -515,11 +511,32 @@ void ChannelStrip::resized() {
 }
 
 void ChannelStrip::refreshInserts() {
-    // update slots
-    for (int i = 0; i < slots.size(); ++i) {
-        AudioEngine::InsertSlot* ins = nullptr;
-        if (i < (int)channel.inserts.size()) ins = channel.inserts[i].get();
-        slots[i]->setInsert(ins);
+    chainRowCount = static_cast<int>(channel.chain.size());
+    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    while (slots.size() < totalRows) {
+        auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
+        addAndMakeVisible(*slot);
+    }
+    while (slots.size() > totalRows) {
+        removeChildComponent(slots.getLast());
+        slots.removeLast();
+    }
+    for (int i = chainRowCount; i < slots.size(); ++i)
+        slots[i]->setAddSlot(i == chainRowCount);
+    for (int i = 0; i < chainRowCount; ++i) {
+        const auto item = channel.chain[static_cast<std::size_t>(i)];
+        if (item.type == pluginrack::ChainItemType::Insert) {
+            auto it = std::find_if(channel.inserts.begin(), channel.inserts.end(),
+                                   [id = item.id](const auto& insert) { return insert->id == id; });
+            slots[i]->setInsert(it == channel.inserts.end() ? nullptr : it->get());
+        } else if (item.type == pluginrack::ChainItemType::Eq) {
+            slots[i]->setBuiltIn(item, "EQ", channel.eqBypassed.get());
+        } else {
+            const auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                         [id = item.id](const auto& effect) { return effect.id == id; });
+            slots[i]->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+                                 it != channel.effects.end() && it->bypassed);
+        }
     }
     const auto hottest = audioEngine.getHighestLatencyInsert(channel.id);
     if (hottest.latencySamples > 0) {
@@ -557,9 +574,15 @@ void ChannelStrip::refreshInput() {
     inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
     const int b = channel.inputChannels.size() > 1 ? channel.inputChannels[1] + 1 : a;
     inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
-    modeCombo.setVisible(hasInputDevice);
-    inputComboA.setVisible(hasInputDevice);
-    inputComboB.setVisible(hasInputDevice && !mono);
+    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    if (!hasInputDevice) inputChip.setButtonText("No input");
+    else if (inputEditing) inputChip.setButtonText("Done");
+    else if (mono) inputChip.setButtonText(aText);
+    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+    inputChip.setToggleState(inputEditing, juce::dontSendNotification);
+    modeCombo.setVisible(hasInputDevice && inputEditing);
+    inputComboA.setVisible(hasInputDevice && inputEditing);
+    inputComboB.setVisible(hasInputDevice && inputEditing && !mono);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
     inputErrorLabel.setText(channel.inputError, juce::dontSendNotification);
@@ -667,6 +690,68 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     audioEngine.setPluginBypassed(channel.id, insertId, bypassed);
 }
 
+void ChannelStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
+    audioEngine.moveChannelChainItem(channel.id, {pluginrack::ChainItemType::Insert, insertId},
+                                     targetIndex);
+    refreshAfterInsertChange();
+}
+
+void ChannelStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
+    audioEngine.moveChannelChainItem(channel.id, item, targetIndex);
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        // Copy the callback: the rebuild destroys this strip.
+        auto callback = safe->rebuildCallback;
+        safe->chainDropTarget = -1;
+        safe->refreshInserts();
+        if (callback) callback();
+    });
+}
+
+int ChannelStrip::chainBoundaryY(int targetIndex) const {
+    if (chainRowCount <= 0) return vstHeader.getBottom() + 1;
+    const int target = juce::jlimit(0, chainRowCount, targetIndex);
+    if (target < chainRowCount) return juce::jmax(0, slots[target]->getY() - 2);
+    return slots[chainRowCount - 1]->getBottom();
+}
+
+int ChannelStrip::chainDropIndexAt(juce::Point<int> parentPoint) {
+    int index = 0;
+    for (int i = 0; i < chainRowCount; ++i)
+        if (parentPoint.y > slots[i]->getBounds().getCentreY()) index = i + 1;
+    return index;
+}
+
+void ChannelStrip::previewChainItem(int targetIndex) {
+    chainDropTarget = juce::jlimit(0, chainRowCount, targetIndex);
+    repaint();
+}
+
+void ChannelStrip::clearChainPreview() {
+    chainDropTarget = -1;
+    repaint();
+}
+
+void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        audioEngine.setChannelEqBypassed(channel.id, bypassed);
+        return;
+    }
+    auto effects = channel.effects;
+    for (auto& effect : effects)
+        if (effect.id == item.id) effect.bypassed = bypassed;
+    audioEngine.setChannelEffects(channel.id, effects);
+}
+
+void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {
+    if (item.type == pluginrack::ChainItemType::Eq)
+        openEqWindow();
+    // Gate and Compressor share one panel; it is where the gate row lives.
+    else
+        openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
+}
+
 void ChannelStrip::refreshAfterInsertChange() {
     refreshInserts();
     juce::Component::SafePointer<ChannelStrip> safe(this);
@@ -714,6 +799,11 @@ void ChannelStrip::paint(juce::Graphics& g) {
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+    if (chainDropTarget >= 0) {
+        g.setColour(theme::cyan());
+        g.fillRoundedRectangle(4.0f, static_cast<float>(chainBoundaryY(chainDropTarget)),
+                               static_cast<float>(juce::jmax(0, getWidth() - 8)), 2.0f, 1.0f);
+    }
 }
 
 void ChannelStrip::mouseDown(const juce::MouseEvent&) {

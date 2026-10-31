@@ -167,6 +167,32 @@ void from_json(const nlohmann::json& j, InsertSlot& slot) {
     slot.pluginState = j.value("pluginState", std::string{});
 }
 
+void to_json(nlohmann::json& j, ChainItemType type) {
+    switch (type) {
+        case ChainItemType::Eq: j = "Eq"; break;
+        case ChainItemType::Dynamics: j = "Dynamics"; break;
+        case ChainItemType::Insert: j = "Insert"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, ChainItemType& type) {
+    const auto name = j.get<std::string>();
+    if (name == "Eq") type = ChainItemType::Eq;
+    else if (name == "Dynamics") type = ChainItemType::Dynamics;
+    else if (name == "Insert") type = ChainItemType::Insert;
+    else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const ChainItem& item) {
+    j = nlohmann::json{{"type", item.type}, {"id", item.id}};
+}
+
+void from_json(const nlohmann::json& j, ChainItem& item) {
+    item = ChainItem{};
+    j.at("type").get_to(item.type);
+    j.at("id").get_to(item.id);
+}
+
 void to_json(nlohmann::json& j, const Channel& channel) {
     j = nlohmann::json{
         {"id", channel.id},
@@ -182,6 +208,7 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"soloed", channel.soloed},
         {"inserts", channel.inserts},
         {"effects", channel.effects},
+        {"chain", channel.chain},
         {"eqEnabled", channel.eqEnabled},
         {"eqBands", channel.eqBands},
         {"eqDelayMs", channel.eqDelayMs},
@@ -223,6 +250,7 @@ void from_json(const nlohmann::json& j, Channel& channel) {
             if (entry.value("type", std::string()) == "Limiter") continue;
             channel.effects.push_back(entry.get<DynamicsEffect>());
         }
+        if (j.contains("chain")) j.at("chain").get_to(channel.chain);
     }
     // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
     // the flat defaultSixBands() from Channel{} above, and v3 files written
@@ -246,6 +274,7 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"muted", output.muted},
         {"inserts", output.inserts},
         {"effects", output.effects},
+        {"chain", output.chain},
         {"eqEnabled", output.eqEnabled},
         {"eqBands", output.eqBands},
         {"eqDelayMs", output.eqDelayMs},
@@ -275,6 +304,7 @@ void from_json(const nlohmann::json& j, Output& output) {
             if (entry.value("type", std::string()) == "Limiter") continue;
             output.effects.push_back(entry.get<DynamicsEffect>());
         }
+        if (j.contains("chain")) j.at("chain").get_to(output.chain);
     }
     // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
     // the flat defaultSixBands() from Output{} above, and v3 files written

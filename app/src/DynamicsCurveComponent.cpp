@@ -37,9 +37,10 @@ void DynamicsCurveComponent::setEffect(const pluginrack::DynamicsEffect& newEffe
     repaint();
 }
 
-void DynamicsCurveComponent::setGate(const pluginrack::DynamicsEffect& newGate, bool visible) {
+void DynamicsCurveComponent::setGate(const pluginrack::DynamicsEffect& newGate, bool active) {
     gate = newGate;
-    gateVisible = visible;
+    gatePresent = true;
+    gateActive = active;
     repaint();
 }
 
@@ -118,9 +119,11 @@ void DynamicsCurveComponent::paint(juce::Graphics& g) {
     g.setColour(theme::dim().withAlpha(0.45f));
     g.strokePath(identity, juce::PathStrokeType(1.0f));
 
-    if (gateVisible) {
+    if (gatePresent) {
         // Only the part that deviates from unity: past the threshold the gate
         // is the identity line the compressor curve is already drawn over.
+        // A bypassed gate still draws, dimmed, so the shape stays readable
+        // while its switch is off.
         const float gateEndDb = juce::jlimit(
             kMinDb, kMaxDb, gate.thresholdDb + std::max(gate.kneeDb, 0.0f) * 0.5f);
         juce::Path gatePath;
@@ -132,7 +135,7 @@ void DynamicsCurveComponent::paint(juce::Graphics& g) {
         // Close the step back onto unity: without this the vertical edge that
         // lifts the muted level to the threshold is missing.
         gatePath.lineTo(toPoint(gateEndDb, gateEndDb));
-        g.setColour(theme::green());
+        g.setColour(theme::green().withAlpha(gateActive ? 1.0f : 0.4f));
         g.strokePath(gatePath, juce::PathStrokeType(2.0f));
     }
 

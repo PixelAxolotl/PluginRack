@@ -73,6 +73,9 @@ DynamicsWindow::DynamicsWindow(
     setUsingNativeTitleBar(true);
     setResizable(false, false);
     setContentOwned(&content, false);
+    // Used as-is when this opens as a floating window (the mixer strips);
+    // the rack docks it into the editor bay and overrides the bounds.
+    setSize(kMinWidth, kMinHeight);
     // The gate row edits the strip's gate effect, which lives alongside the
     // compressor; only the compressor panel shows it.
     hasGate = type == pluginrack::DynamicsEffectType::Compressor && gate != nullptr;
@@ -321,12 +324,17 @@ void DynamicsWindow::resized() {
 
     if (type == pluginrack::DynamicsEffectType::Compressor) {
         if (hasGate) {
-            placeKnobs(area.removeFromBottom(96), gateKnobs);
-            area.removeFromBottom(4);
-            auto gateHeader = area.removeFromBottom(24);
-            gateCaption.setBounds(gateHeader.removeFromLeft(56));
-            gatePresetCombo.setBounds(gateHeader.removeFromLeft(170));
-            area.removeFromBottom(4);
+            // The gate row needs its own breathing room: a labelled header
+            // separated from both the compressor knobs above and its own
+            // knobs below, instead of a caption wedged against the combo.
+            placeKnobs(area.removeFromBottom(92), gateKnobs);
+            area.removeFromBottom(10);
+            auto gateHeader = area.removeFromBottom(26);
+            gateHeader.removeFromLeft(2);
+            gateCaption.setBounds(gateHeader.removeFromLeft(58));
+            gateHeader.removeFromLeft(6);
+            gatePresetCombo.setBounds(gateHeader.removeFromLeft(176));
+            area.removeFromBottom(14);
         }
         auto knobsRow = area.removeFromBottom(96);
         area.removeFromBottom(8);

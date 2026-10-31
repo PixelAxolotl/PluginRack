@@ -185,8 +185,9 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
         rackView.setSelectedChannel(id, isOutput);
     };
     mixerView.onDoubleClicked = [this](int id, bool isOutput) {
+        // Channels and outputs both open on their rack page.
         rackView.setSelectedChannel(id, isOutput);
-        if (!isOutput) setView(AppView::Rack);
+        setView(AppView::Rack);
     };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
