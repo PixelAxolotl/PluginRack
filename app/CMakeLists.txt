@@ -41,6 +41,8 @@ target_sources(pluginrack_app PRIVATE
     src/RackView.h
     src/RoutingMatrixComponent.cpp
     src/RoutingMatrixComponent.h
+    src/SavesView.cpp
+    src/SavesView.h
     src/SceneBridge.cpp
     src/SceneBridge.h
     src/SettingsView.cpp

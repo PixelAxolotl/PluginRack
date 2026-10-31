@@ -94,6 +94,10 @@ public:
     }
 
     void shutdown() override {
+        if (mainWindow != nullptr) {
+            if (auto* mainComponent = dynamic_cast<MainComponent*>(mainWindow->getContentComponent()))
+                mainComponent->saveSceneOnExit();
+        }
         mainWindow.reset();
         tooltipWindow.reset();
         juce::LookAndFeel::setDefaultLookAndFeel(nullptr);

@@ -21,7 +21,16 @@ public:
     void resized() override;
     void rebuild();
 
+    // Closes every open channel/output EQ window synchronously. Call this
+    // while the engine strips are still alive (before any removeChannel /
+    // removeOutput): the strips hold Channel&/Output& refs and their EQ
+    // windows call back into those refs on destruction (analyzerTap), so
+    // destroying the engine strips first and rebuilding after would leave
+    // the teardown reading freed channels/outputs.
+    void closeAllEqWindows();
+
     std::function<void()> onStructureChanged;
+    std::function<void(int channelId, bool isOutput)> onSelectionChanged;
 
 private:
     class OutputStrip final : public juce::Component, public IInsertHost {
@@ -32,6 +41,7 @@ private:
         OutputStrip(AudioEngine::Output& output, int outputIndex, AudioEngine& engine);
         ~OutputStrip() override;
         void resized() override;
+        void paint(juce::Graphics& g) override;
         void refresh();
         void openEqWindow();
         void closeEqWindow();
@@ -47,6 +57,9 @@ private:
 
         std::function<void()> onRemoveRequested;
         std::function<void()> onRenamed;
+        std::function<void()> onSelected;
+
+        void mouseDown(const juce::MouseEvent&) override;
 
     private:
         void refreshInserts();

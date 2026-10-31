@@ -227,7 +227,7 @@ void MixerComponent::OutputStrip::resized() {
     auto btnArea = headerRow.removeFromRight(22);
     removeOutputButton.setBounds(btnArea);
     area.removeFromTop(4);
-    deviceControl.setBounds(area.removeFromTop(46));
+    deviceControl.setBounds(area.removeFromTop(40));
     area.removeFromTop(4);
 
     auto modeRow = area.removeFromTop(20);
@@ -236,26 +236,34 @@ void MixerComponent::OutputStrip::resized() {
     flipButton.setBounds(modeRow);
     area.removeFromTop(4);
 
+    // display block: VST slots + EQ
     vstHeader.setBounds(area.removeFromTop(14));
-    const int slotH = 22;
+    const int slotH = 20;
     for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
     }
-    addVstButton.setBounds(area.removeFromTop(20));
-    area.removeFromTop(6);
+    addVstButton.setBounds(area.removeFromTop(18));
+    area.removeFromTop(4);
+    eqButton.setBounds(area.removeFromTop(20));
+    area.removeFromTop(4);
 
-    auto mb = area.removeFromBottom(22);
-    const int half = (mb.getWidth() - 4) / 2;
-    eqButton.setBounds(mb.removeFromLeft(half));
-    mb.removeFromLeft(4);
-    muteButton.setBounds(mb);
+    // mute at very bottom
+    auto muteRow = area.removeFromBottom(22);
+    muteButton.setBounds(muteRow);
+
+    // fader + meter (shorter, ~half of input height) above mute
     area.removeFromBottom(4);
-    // meter right
     auto meterArea = area.removeFromRight(12);
     area.removeFromRight(4);
     meter.setBounds(meterArea);
     gainSlider.setBounds(area);
+}
+
+void MixerComponent::OutputStrip::paint(juce::Graphics& g) {
+    g.fillAll(theme::strip());
+    g.setColour(theme::border());
+    g.drawRect(getLocalBounds(), 1);
 }
 
 void MixerComponent::OutputStrip::refresh() {
@@ -288,6 +296,10 @@ juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
 }
 
 void MixerComponent::OutputStrip::erasePlugin(std::uint32_t insertId) {
+    // The rack may have docked an editor owned by this insert: release it
+    // while the processor is still alive. Release-only on purpose (see
+    // InsertHost.h): a rebuild here would re-dock the doomed insert.
+    if (auto release = pluginRemovingHook()) release();
     audioEngine.removeOutputPlugin(output.id, insertId);
 }
 
@@ -404,12 +416,25 @@ void MixerComponent::resized() {
     }
 }
 
+void MixerComponent::closeAllEqWindows() {
+    for (auto* s : strips) {
+        if (s != nullptr) s->closeEqWindow();
+    }
+    for (auto* s : outputStrips) {
+        if (s != nullptr) s->closeEqWindow();
+    }
+}
+
 void MixerComponent::rebuild() {
     strips.clear();
     for (const auto& ch : audioEngine.getChannels()) {
         auto* s = strips.add(new ChannelStrip(*ch, audioEngine));
         const std::uint32_t id = ch->id;
         s->onRemoveRequested = [this, id] {
+            // The rack may have docked an editor owned by this strip: release it
+            // while the processors are still alive. Release-only on purpose (see
+            // InsertHost.h): a rebuild here would re-dock a doomed insert.
+            if (auto release = pluginRemovingHook()) release();
             audioEngine.removeChannel(id);
             rebuild();
             if (onStructureChanged) onStructureChanged();
@@ -431,6 +456,10 @@ void MixerComponent::rebuild() {
         auto* s = outputStrips.add(new OutputStrip(*out, outputIndex++, audioEngine));
         const std::uint32_t id = out->id;
         s->onRemoveRequested = [this, id] {
+            // The rack may have docked an editor owned by this strip: release it
+            // while the processors are still alive. Release-only on purpose (see
+            // InsertHost.h): a rebuild here would re-dock a doomed insert.
+            if (auto release = pluginRemovingHook()) release();
             const auto err = audioEngine.removeOutput(id);
             if (err.isNotEmpty()) {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);

@@ -25,6 +25,12 @@ public:
     int getLatencySamples() const;
     void refreshLatencyCache();
     void showEditor();
+    // Channel-view docking: create an editor the caller owns and embeds inline
+    // (addAndMakeVisible). Hides any floating window first. Returns null when
+    // the plugin has no editor; destroy with destroyDockEditor.
+    juce::AudioProcessorEditor* createEditorForDock();
+    void destroyDockEditor(juce::AudioProcessorEditor* editor);
+    void closeFloatingEditor();
     void editorBeingDeleted(juce::AudioProcessorEditor* editor);
     void clearEditorWindow(juce::DocumentWindow* window);
     void closeEditorWindow(juce::DocumentWindow* window);

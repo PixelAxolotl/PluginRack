@@ -147,7 +147,30 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
 
 namespace DeviceEnumeration {
 namespace {
+struct DeviceCache {
+    juce::StringArray names;
+    juce::int64 timeMs = 0;
+    bool valid = false;
+};
+
+DeviceCache& cacheFor(bool wantInputs) {
+    static DeviceCache inCache;
+    static DeviceCache outCache;
+    return wantInputs ? inCache : outCache;
+}
+
+juce::CriticalSection cacheLock;
+
 juce::StringArray enumerate(bool wantInputs) {
+    const auto now = juce::Time::currentTimeMillis();
+    {
+        const juce::ScopedLock sl(cacheLock);
+        auto& c = cacheFor(wantInputs);
+        if (c.valid && (now - c.timeMs) < 5000) {
+            return c.names;
+        }
+    }
+
     juce::AudioDeviceManager manager;
     juce::OwnedArray<juce::AudioIODeviceType> types;
     manager.createAudioDeviceTypes(types);
@@ -160,6 +183,14 @@ juce::StringArray enumerate(bool wantInputs) {
         }
     }
     names.sort(true);
+
+    {
+        const juce::ScopedLock sl(cacheLock);
+        auto& c = cacheFor(wantInputs);
+        c.names = names;
+        c.timeMs = now;
+        c.valid = true;
+    }
     return names;
 }
 }
@@ -241,7 +272,9 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    capacity = juce::jmax(1, deviceBufferSize * 2);
+    // 8 device buffers (capped) so transient render pauses cannot drain the
+    // ring between pull() calls. Never smaller than one device block.
+    capacity = juce::jmax(deviceBufferSize, juce::jmin(deviceBufferSize * 8, 16384));
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
     writePos = 0;
@@ -280,6 +313,15 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 
     if (capacity <= 0) {
         latencySamples.store(0, std::memory_order_relaxed);
+        return false;
+    }
+
+    // The writer (audioDeviceIOCallback) holds this spinlock while mutating
+    // storage/writePos/totalWritten. Reading them unlocked races and produces
+    // torn samples (crackling). Take the lock; bail to silence if contended
+    // rather than blocking the audio thread.
+    juce::SpinLock::ScopedTryLockType tryLock(lock);
+    if (!tryLock.isLocked()) {
         return false;
     }
 
@@ -337,7 +379,11 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
     juce::SpinLock::ScopedTryLockType tryLock(lock);
-    if (!tryLock.isLocked()) return; // drop
+    if (!tryLock.isLocked()) {
+        // Counted rather than silent: a held lock here means dropped input.
+        inputDroppedFrames.fetch_add((std::uint64_t) numSamples, std::memory_order_relaxed);
+        return;
+    }
     if (capacity <= 0) return;
 
     // Write to ring buffer (broadcast to all consumers - no FIFO consumption).
@@ -367,7 +413,13 @@ void InputCapture::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     }
 }
 
-void InputCapture::audioDeviceStopped() {}
+void InputCapture::audioDeviceStopped() {
+    // Without this the ring keeps its last window, replayable via pull()
+    // forever; drop it under the writer lock so the next pull() is silence.
+    const juce::SpinLock::ScopedLockType sl(lock);
+    writePos = 0;
+    totalWritten = 0;
+}
 
 // ---------- OutputPlayback ----------
 
@@ -422,10 +474,19 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                 + " samples (requested " + juce::String(requestedBufferSize) + ")";
     }
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    capacity = juce::jmax(1, bufferSize * 2);
+    // 8 device buffers (capped) so transient render stalls cannot starve a
+    // device callback; never smaller than one device block.
+    capacity = juce::jmax(bufferSize, juce::jmin(bufferSize * 8, 16384));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
+    // Prime with one silent block (storage is cleared above) so steady-state
+    // occupancy starts above zero and a consumer that runs before the first
+    // render does not count an underrun. Skipped when the cap left no more
+    // than one block of room: a full FIFO would drop the first real push.
+    if (capacity > bufferSize) {
+        fifo->write(bufferSize);
+    }
 
     manager.addAudioCallback(this);
     return {};

@@ -5,107 +5,117 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "AudioEngine.h"
+#include "EQWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "Theme.h"
 
-// Rack-first workspace: one chain per channel/output. Each chain keeps a
-// fixed header (name, source identity, meter, mute/solo, routing summary)
-// beside horizontally scrolling plugin modules. Module rendering reuses
-// InsertSlotComponent, mirroring the mixer strips.
-class RackView final : public juce::Component {
+// Channel-centric rack view: 4 columns - channel strip | insert chain (EQ + VSTs)
+// | docked plugin editor | output routing. Reuses Mixer fader/meter/EqButton/slots.
+class RackView final : public juce::Component, public IInsertHost {
 public:
     explicit RackView(AudioEngine& engine);
+    ~RackView() override;
 
     void resized() override;
     void rebuild();
-    bool keyPressed(const juce::KeyPress& key) override;
+    void mouseDown(const juce::MouseEvent& e) override;
 
-    bool hasChainSelected() const { return hasSelection; }
-    std::function<void()> onStructureChanged;
-    std::uint32_t selectedChainId() const { return selectedId; }
+    void setSelectedChannel(int channelId, bool isOutput);
+
+    // Releases the docked plugin editor before the engine destroys the
+    // strip that owns its plugin instance (scene restore). The editor's
+    // destructor calls back into its processor, so the processor must
+    // still be alive when it is deleted.
+    void closeDockedEditor();
+
+    bool hasChainSelected() const { return selectedId >= 0; }
+    std::uint32_t selectedChainId() const;
     bool selectedChainIsOutput() const { return selectedIsOutput; }
 
-    // Cross-view link: the shell wires this to ViewRouter::setView(AppView::Mixer).
-    // Selection state (selectedChainId) is untouched by editor open/close.
     std::function<void()> onJumpToMixer;
+    std::function<void()> onStructureChanged;
+
+    // IInsertHost
+    juce::String insertPlugin(const juce::File& file) override;
+    void erasePlugin(std::uint32_t insertId) override;
+    void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
+    void refreshAfterInsertChange() override;
+    void openPicker() override;
+    bool insertActivated(AudioEngine::InsertSlot* insert) override;
 
 private:
-    class ChainRow final : public juce::Component, public IInsertHost {
-    public:
-        ChainRow(AudioEngine& engine, AudioEngine::Channel& channelState);
-        ChainRow(AudioEngine& engine, AudioEngine::Output& outputState);
-
-        void resized() override;
-        void paint(juce::Graphics& g) override;
-        void mouseDown(const juce::MouseEvent&) override;
-        void mouseDoubleClick(const juce::MouseEvent&) override;
-        bool keyPressed(const juce::KeyPress& key) override;
-
-        void refresh();
-        void setSelected(bool isSelected);
-
-        bool isOutput() const { return output != nullptr; }
-        std::uint32_t chainId() const { return channel != nullptr ? channel->id : output->id; }
-
-        // IInsertHost
-        juce::String insertPlugin(const juce::File& file) override;
-        void erasePlugin(std::uint32_t insertId) override;
-        void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
-        void refreshAfterInsertChange() override;
-        void openPicker() override;
-
-        std::function<void(ChainRow*)> onSelected;
-        std::function<void(int)> onMoveSelection;
-        std::function<void()> onJumpToMixer;
-        std::function<void()> onChanged;
-        std::function<void()> onStructureChanged;
-
-    private:
-        void initHeader();
-        void refreshModules();
-        void layoutModules();
-        juce::String buildRoutingSummary() const;
-
-        AudioEngine& audioEngine;
-        AudioEngine::Channel* channel = nullptr;
-        AudioEngine::Output* output = nullptr;
-        bool selected = false;
-
-        juce::Label nameLabel;
-        juce::Label identityLabel;
-        juce::Label routingLabel;
-        std::unique_ptr<LevelMeter> meter;
-        juce::TextButton muteButton{"Mute"};
-        juce::TextButton soloButton{"Solo"};
-        juce::TextButton mixerButton{"Mixer"};
-        juce::ComboBox modeCombo;
-        juce::TextButton flipButton{"Flip"};
-        juce::Viewport moduleViewport;
-        juce::Component moduleContent;
-        juce::OwnedArray<InsertSlotComponent> slots;
-        juce::Label emptyLabel;
-        juce::TextButton addVstButton{"+ Add VST3"};
-        std::unique_ptr<juce::FileChooser> fileChooser;
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChainRow)
-    };
-
-    void selectRow(ChainRow* row);
-    void selectRelative(int delta);
+    AudioEngine::Channel* currentChannel();
+    AudioEngine::Output* currentOutput();
+    const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* currentInserts() const;
+    AudioEngine::InsertSlot* findInsert(std::uint32_t insertId);
+    void ensureSelection();
+    void refreshHeader();
+    void refreshSlots();
+    void refreshEditor();
+    bool dockedHostAlive() const;
     void jumpToMixer();
 
+    void rebuildChannelCombo();
+    void focusEq();
+    void closeEqWindow();
+    void renameSelectedChain();
+    void refreshEqButton();
+    void refreshOutputButtons();
+
     AudioEngine& audioEngine;
-    juce::Viewport listViewport;
-    juce::Component listContent;
-    juce::OwnedArray<ChainRow> rows;
+    int selectedId = -1;
+    bool selectedIsOutput = false;
+    std::uint32_t focusedInsertId = 0;
+
+    // Channel selector
+    juce::ComboBox channelCombo;
+    std::vector<int> comboIds;
+    std::vector<char> comboIsOutput;
+
+    // Left channel strip
+    juce::Label nameLabel;
+    juce::Label subLabel;
+    juce::Label gainCaption;
+    juce::Slider gainSlider;   // vertical
+    juce::Label trimCaption;
+    juce::Slider trimKnob;     // gain/trim rotary
+    std::unique_ptr<LevelMeter> meter;
+    juce::Label panCaption;
+    juce::Slider panSlider;    // rotary
+    juce::TextButton muteButton{"Mute"};
+    juce::TextButton soloButton{"Solo"};
+    juce::TextButton mixerButton{"Mixer"};
+
+    // Plugin column
+    juce::Label insertsHeader;
+    EqButton eqButton{"EQ"};
+    EQWindow* eqWindow = nullptr;
+    bool eqFocused = false;
+    juce::Viewport slotViewport;
+    juce::Component slotContent;
+    juce::OwnedArray<InsertSlotComponent> slots;
+    juce::Label emptySlotsLabel;
+    juce::TextButton addVstButton{"+ Add VST3"};
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
+    // Center editor
+    juce::Viewport editorViewport;
+    juce::Component editorHolder;
+    juce::Label noEditorLabel;
+    juce::TextButton noEditorBypass{"Bypass"};
     juce::Label emptyLabel;
 
-    bool hasSelection = false;
-    bool selectedIsOutput = false;
-    std::uint32_t selectedId = 0;
+    // Right output routing
+    juce::Label outputHeader;
+    juce::OwnedArray<juce::TextButton> outputButtons;
+
+    // Docked editor
+    juce::AudioProcessorEditor* dockedEditor = nullptr;
+    PluginHost* dockedHost = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

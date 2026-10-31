@@ -90,7 +90,8 @@ public:
     EQWindow(const juce::String& title,
              const std::vector<pluginrack::EqBand>& initialBands,
              std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands,
-             double sampleRateHz);
+             double sampleRateHz,
+             bool embedded = false);
     ~EQWindow() override;
 
     // Owner wiring (assign after construction, same pattern as onCloseRequest):
@@ -115,6 +116,7 @@ private:
 
     EQCurveComponent curve;
     std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands;
+    bool embedded = false;
 
     MiniButton autoButton{"Auto"};        // visual only in v1 (plan, Task 5)
     MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
