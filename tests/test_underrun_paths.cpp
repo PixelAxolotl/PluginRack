@@ -72,13 +72,30 @@ TEST_CASE("OutputPlayback FIFO holds eight device buffers and starts primed",
     // Depth: 8x the device buffer, clamped so a large buffer cannot balloon.
     CHECK(contains(body, "bufferSize * 8"));
     CHECK(contains(body, "16384"));
-    // Prime with one silent block before the device callback can read, so a
-    // steady-state consumer never finds an empty FIFO first.
-    const auto prime = body.find("fifo->write(bufferSize");
+    // Prime with four silent blocks before the device callback can read, so a
+    // delayed first render cannot expose an empty FIFO.
+    const auto prime = body.find("bufferSize * 4");
     const auto callback = body.find("addAudioCallback");
     CHECK(prime != std::string::npos);
     CHECK(callback != std::string::npos);
     CHECK(prime < callback);
+}
+
+TEST_CASE("OutputPlayback never publishes a partial FIFO block", "[underrun]") {
+    const auto body = functionBody(readSource("app/src/DeviceStream.cpp"),
+                                   "void OutputPlayback::push");
+    CHECK(contains(body, "fifo->getFreeSpace() < frames"));
+    CHECK(contains(body, "return"));
+}
+
+TEST_CASE("OutputPlayback replays the last complete block on a short read",
+          "[underrun]") {
+    const auto body = functionBody(
+        readSource("app/src/DeviceStream.cpp"),
+        "void OutputPlayback::audioDeviceIOCallbackWithContext");
+    CHECK(contains(body, "lastOutputBlock"));
+    CHECK(contains(body, "i % lastOutputFrames"));
+    CHECK(contains(body, "outputLowWatermarks.fetch_add"));
 }
 
 TEST_CASE("InputCapture ring buffer gets the same depth clamp", "[underrun]") {
@@ -109,10 +126,12 @@ TEST_CASE("AudioEngine::render never allocates on the audio thread", "[underrun]
     CHECK_FALSE(contains(body, "(2, frames)"));
     // Both silent-output paths still exist and route through the prepared
     // scratch buffer instead of allocating one.
-    CHECK(countOccurrences(body, "pushSilenceToOutputs(frames)") >= 2);
+    CHECK(countOccurrences(body, "pushSilenceToOutputs(frames)") >= 1);
+    CHECK(contains(body, "pushSilenceToOutputsLocked(frames)"));
     // Preserved semantics: oversized blocks are counted, lock loss is not.
     CHECK(contains(body, "oversizedBlockCount_.fetch_add"));
     CHECK(contains(body, "lock.isLocked()"));
+    CHECK(contains(body, "renderMisses_.fetch_add"));
 }
 
 TEST_CASE("silence scratch is fixed at construction and never resized",
@@ -146,4 +165,47 @@ TEST_CASE("Clock reopen keeps feeding other outputs until the new clock runs",
     // so no second render hook runs while the old clock still feeds.
     CHECK(contains(body, "newPlayback->setRenderActive(false)"));
     CHECK(contains(body, "setRenderActive(true)"));
+}
+
+TEST_CASE("buffer-size requests must match the device buffer",
+          "[underrun][buffer]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto preferred = functionBody(source, "juce::String openWithPreferredType");
+    const auto wildcard = functionBody(source, "juce::String openWithWildcardSearch");
+    CHECK(contains(preferred, "getCurrentBufferSizeSamples() != requestedBufferSize"));
+    CHECK(contains(wildcard, "getCurrentBufferSizeSamples() != requestedBufferSize"));
+    CHECK(contains(preferred, "manager.closeAudioDevice()"));
+}
+
+TEST_CASE("input and output buffer sizes are independently configurable",
+          "[underrun][buffer]") {
+    const auto header = readSource("app/src/AudioEngine.h");
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(header, "setInputBufferSize"));
+    CHECK(contains(header, "setOutputBufferSize"));
+    CHECK(contains(cpp, "requestedInputBufferSize_"));
+    CHECK(contains(cpp, "requestedOutputBufferSize_"));
+}
+
+TEST_CASE("restored plugins do not reprepare for an unchanged device format",
+          "[plugin][restore]") {
+    const auto header = readSource("app/src/PluginHost.h");
+    const auto body = functionBody(readSource("app/src/PluginHost.cpp"),
+                                   "void PluginHost::prepareToPlay");
+    CHECK(contains(header, "bool prepared = false"));
+    CHECK(contains(body, "const bool unchanged"));
+    CHECK(contains(body, "if (plugin != nullptr && !unchanged)"));
+    CHECK(contains(body, "plugin->releaseResources()"));
+    CHECK(contains(body, "prepared = true"));
+}
+
+TEST_CASE("scene restore loads plugins before the device handoff",
+          "[plugin][restore]") {
+    const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
+                                   "juce::String AudioEngine::restoreScene");
+    const auto load = body.find("loadPlugin(juce::File(insert->pluginPath))");
+    const auto device = body.find("setOutputDevice(id, name)");
+    REQUIRE(load != std::string::npos);
+    REQUIRE(device != std::string::npos);
+    CHECK(load < device);
 }

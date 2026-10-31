@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 
 namespace {
@@ -72,6 +73,10 @@ void AudioEngine::pushSilenceToOutputs(int frames) {
     // concurrent prepareToPlay.
     const juce::ScopedTryLock lock(stateLock);
     if (!lock.isLocked()) return;
+    pushSilenceToOutputsLocked(frames);
+}
+
+void AudioEngine::pushSilenceToOutputsLocked(int frames) {
     const int silentFrames = juce::jmin(frames, silenceBuffer_.getNumSamples());
     for (auto& output : outputs) {
         if (output->output) {
@@ -135,6 +140,7 @@ void AudioEngine::render(int frames) {
 
     const juce::ScopedTryLock lock(stateLock);
     if (!lock.isLocked()) {
+        renderMisses_.fetch_add(1, std::memory_order_relaxed);
         pushSilenceToOutputs(frames);
         return;
     }
@@ -142,7 +148,7 @@ void AudioEngine::render(int frames) {
     // Oversized block: silence it, count once, skip processing.
     if (maxBlockFrames_ > 0 && frames > maxBlockFrames_) {
         oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
-        pushSilenceToOutputs(frames);
+        pushSilenceToOutputsLocked(frames);
         outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
@@ -275,6 +281,10 @@ void AudioEngine::render(int frames) {
         latencyMeasureOutputSample_.store(outputSampleCounter_, std::memory_order_relaxed);
         latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
         latencyMeasureEmitted_.store(true, std::memory_order_relaxed);
+        for (auto& entry : inputCaptures_) {
+            if (entry.second.capture != nullptr)
+                entry.second.capture->setLatencyMeasurementActive(true);
+        }
     }
 
     for (auto& output : outputs) {
@@ -294,11 +304,14 @@ void AudioEngine::render(int frames) {
             }
         }
         if (detected) {
-            const auto now = juce::Time::getMillisecondCounter();
-            const auto start = latencyMeasureStartMs_.load(std::memory_order_relaxed);
-            const std::uint32_t ms = (now >= start) ? (now - start) : 0;
-            const double sr = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
-            latencyMeasuredSamples_.store((int) (ms * sr / 1000.0), std::memory_order_relaxed);
+            const auto emitted = latencyMeasureOutputSample_.load(std::memory_order_relaxed);
+            const auto elapsed = outputSampleCounter_ >= emitted
+                ? outputSampleCounter_ - emitted
+                : 0;
+            latencyMeasuredSamples_.store(
+                static_cast<int>(juce::jmin<std::uint64_t>(
+                    elapsed, static_cast<std::uint64_t>(std::numeric_limits<int>::max()))),
+                std::memory_order_relaxed);
             latencyMeasuredValid_.store(true, std::memory_order_relaxed);
             latencyMeasureActive_.store(false, std::memory_order_relaxed);
             for (auto& entry : inputCaptures_) {
@@ -1102,7 +1115,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
         const juce::ScopedLock sl(stateLock);
         const auto it = inputCaptures_.find(deviceName);
         if (it != inputCaptures_.end() && it->second.requestedChannels >= needed
-            && it->second.requestedBufferSize == requestedBufferSize_) {
+            && it->second.requestedBufferSize == requestedInputBufferSize_) {
             reuse = it->second.capture;
         }
     }
@@ -1124,7 +1137,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     auto capture = std::make_shared<InputCapture>();
     juce::String err;
     const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       currentSampleRate, needed, err, requestedBufferSize_);
+                                       currentSampleRate, needed, err, requestedInputBufferSize_);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         channel->inputError = openErr;
@@ -1141,7 +1154,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
                 c->inputError = capture->getInputError();
             }
         }
-        inputCaptures_[deviceName] = SharedInputCapture{capture, needed, requestedBufferSize_};
+        inputCaptures_[deviceName] = SharedInputCapture{capture, needed, requestedInputBufferSize_};
         pruneUnusedCaptures();
     }
     return {};
@@ -1233,11 +1246,11 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     const auto openName = deviceName == "System Default" ? juce::String() : deviceName;
     // Always offer the engine rate, including for the clock: exclusive-mode
     // WASAPI can only negotiate when a concrete sample rate is requested.
-    auto openErr = newPlayback->open(openName, currentSampleRate, err, requestedBufferSize_);
+    auto openErr = newPlayback->open(openName, currentSampleRate, err, requestedOutputBufferSize_);
     if (isClock && openErr.isNotEmpty() && currentSampleRate > 0.0) {
         // Clock device cannot do the engine rate: fall back to its own default
         // once (old behaviour) before giving up.
-        openErr = newPlayback->open(openName, 0.0, err, requestedBufferSize_);
+        openErr = newPlayback->open(openName, 0.0, err, requestedOutputBufferSize_);
     }
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
@@ -1282,6 +1295,15 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
 
 juce::String AudioEngine::setDeviceBufferSize(int size) {
     requestedBufferSize_ = size;
+    requestedInputBufferSize_ = size;
+    requestedOutputBufferSize_ = size;
+    const auto inputError = setInputBufferSize(size);
+    const auto outputError = setOutputBufferSize(size);
+    return inputError.isNotEmpty() ? inputError : outputError;
+}
+
+juce::String AudioEngine::setInputBufferSize(int size) {
+    requestedInputBufferSize_ = size;
     juce::String firstError;
     for (auto& channel : channels) {
         if (channel->inputDeviceName.isNotEmpty() &&
@@ -1290,6 +1312,12 @@ juce::String AudioEngine::setDeviceBufferSize(int size) {
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }
     }
+    return firstError;
+}
+
+juce::String AudioEngine::setOutputBufferSize(int size) {
+    requestedOutputBufferSize_ = size;
+    juce::String firstError;
     for (auto& output : outputs) {
         if (output->outputDeviceName.isNotEmpty() &&
             output->outputDeviceName != "None - silent") {
@@ -1503,8 +1531,10 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
         if (output->output != nullptr) {
             diagnostics.outputUnderruns += output->output->getOutputUnderruns();
             diagnostics.outputDroppedFrames += output->output->getOutputDroppedFrames();
+            diagnostics.outputLowWatermarks += output->output->getOutputLowWatermarks();
         }
     }
+    diagnostics.renderMisses = renderMisses_.load(std::memory_order_relaxed);
 
     return diagnostics;
 }
@@ -1520,9 +1550,6 @@ void AudioEngine::startLatencyMeasurement() {
     latencyMeasureFailed_.store(false, std::memory_order_relaxed);
     latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     outputSampleCounter_ = 0;
-    for (auto& entry : inputCaptures_) {
-        if (entry.second.capture) entry.second.capture->setLatencyMeasurementActive(true);
-    }
 }
 
 void AudioEngine::cancelLatencyMeasurementImpl() {

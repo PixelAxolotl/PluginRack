@@ -209,17 +209,24 @@ juce::String PluginHost::loadPlugin(const juce::File& file) {
     pluginPath = file.getFullPathName();
     pluginName = candidate->getName();
     plugin = std::move(candidate);
+    prepared = true;
     cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
     return {};
 }
 
 void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
     const juce::ScopedLock lock(pluginLock);
+    const bool unchanged = prepared && currentSampleRate == sampleRate
+        && currentBufferSize == samplesPerBlock;
     currentSampleRate = sampleRate;
     currentBufferSize = samplesPerBlock;
-    if (plugin != nullptr) {
+    if (plugin != nullptr && !unchanged) {
+        if (prepared) {
+            plugin->releaseResources();
+        }
         plugin->setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
         plugin->prepareToPlay(sampleRate, samplesPerBlock);
+        prepared = true;
     }
     cachedLatencySamples_.store(plugin != nullptr ? plugin->getLatencySamples() : 0,
                                 std::memory_order_relaxed);

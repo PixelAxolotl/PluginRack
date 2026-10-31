@@ -151,6 +151,8 @@ public:
         std::uint64_t inputDroppedFrames = 0;
         std::uint64_t outputUnderruns = 0;
         std::uint64_t outputDroppedFrames = 0;
+        std::uint64_t outputLowWatermarks = 0;
+        std::uint64_t renderMisses = 0;
         double inputOccupancy = 0.0;
         double outputOccupancy = 0.0;
     };
@@ -173,6 +175,8 @@ public:
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String setDeviceBufferSize(int size);
+    juce::String setInputBufferSize(int size);
+    juce::String setOutputBufferSize(int size);
     bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
     bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
@@ -266,6 +270,7 @@ private:
     // every open output. Never allocates; used by render() when it loses the
     // state lock or gets an oversized block.
     void pushSilenceToOutputs(int frames);
+    void pushSilenceToOutputsLocked(int frames);
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -298,8 +303,11 @@ private:
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
     int requestedBufferSize_ = 0;
+    int requestedInputBufferSize_ = 0;
+    int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
+    std::atomic<std::uint64_t> renderMisses_{0};
     // Read-only silent scratch for render()'s lock-loss and oversized-block
     // paths. Allocated once at construction and never resized: the lock-loss
     // path reads it while prepareToPlay may hold stateLock on the UI thread.

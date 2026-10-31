@@ -44,6 +44,7 @@ private:
     juce::String pluginName;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
+    bool prepared = false;
     std::atomic<int> cachedLatencySamples_{0};
 
     juce::DocumentWindow* editorWindow = nullptr;
