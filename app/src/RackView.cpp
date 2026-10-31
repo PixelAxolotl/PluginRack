@@ -5,7 +5,6 @@
 namespace {
 constexpr int kSlotRowHeight = 36;
 constexpr int kSlotGap = 4;
-constexpr int kAddButtonWidth = 120;
 } // namespace
 
 RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
@@ -181,16 +180,9 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     gateButton.onRightClick = [this] { focusDynamics(pluginrack::DynamicsEffectType::Compressor); };
     refreshDynamicsButtons();
 
-    emptySlotsLabel.setJustificationType(juce::Justification::centredLeft);
-    emptySlotsLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    emptySlotsLabel.setColour(juce::Label::textColourId, theme::dim());
-    emptySlotsLabel.setText("Empty - chain is clean", juce::dontSendNotification);
-    slotContent.addAndMakeVisible(emptySlotsLabel);
-
-    addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
-    addVstButton.onClick = [this] { openPicker(); };
-    slotContent.addAndMakeVisible(addVstButton);
+    chainMarker.setColour(juce::Label::backgroundColourId, theme::cyan());
+    chainMarker.setInterceptsMouseClicks(false, false);
+    slotContent.addAndMakeVisible(chainMarker);
 
     slotViewport.setViewedComponent(&slotContent, false);
     slotViewport.setScrollBarsShown(true, false);
@@ -374,28 +366,76 @@ void RackView::refreshHeader() {
 
 void RackView::refreshSlots() {
     slots.clear();
+    gateButton.setVisible(false);
+    eqButton.setVisible(false);
+    compressorButton.setVisible(false);
     const auto* inserts = currentInserts();
-    const int count = inserts == nullptr ? 0 : static_cast<int>(inserts->size());
-    for (int i = 0; i < count; ++i) {
-        auto* slot = slots.add(new InsertSlotComponent(*this, i));
-        slot->setInsert((*inserts)[static_cast<std::size_t>(i)].get());
-        slotContent.addAndMakeVisible(*slot);
+    const auto* chain = selectedIsOutput
+                            ? (currentOutput() == nullptr ? nullptr : &currentOutput()->chain)
+                            : (currentChannel() == nullptr ? nullptr : &currentChannel()->chain);
+    std::vector<pluginrack::ChainItem> fallback = {
+        {pluginrack::ChainItemType::Eq, 0},
+        {pluginrack::ChainItemType::Dynamics, 1},
+        {pluginrack::ChainItemType::Dynamics, 2}};
+    const auto& items = (chain != nullptr && !chain->empty()) ? *chain : fallback;
+    int row = 0;
+    for (const auto& item : items) {
+        juce::Component* component = nullptr;
+        if (item.type == pluginrack::ChainItemType::Eq) {
+            auto* slot = slots.add(new InsertSlotComponent(*this, row));
+            slot->setBuiltIn(item, "EQ",
+                             selectedIsOutput ? currentOutput()->eqBypassed.get()
+                                              : currentChannel()->eqBypassed.get());
+            component = slot;
+        } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+            auto* slot = slots.add(new InsertSlotComponent(*this, row));
+            const auto* effects = selectedIsOutput ? &currentOutput()->effects : &currentChannel()->effects;
+            const auto it = std::find_if(effects->begin(), effects->end(),
+                                         [id = item.id](const auto& effect) { return effect.id == id; });
+            slot->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+                             it != effects->end() && it->bypassed);
+            component = slot;
+        } else if (inserts != nullptr) {
+            auto it = std::find_if(inserts->begin(), inserts->end(),
+                                   [id = item.id](const auto& insert) { return insert->id == id; });
+            if (it != inserts->end()) {
+                auto* slot = slots.add(new InsertSlotComponent(*this, row));
+                slot->setInsert(it->get());
+                component = slot;
+            }
+        }
+        if (component != nullptr) {
+            slotContent.addAndMakeVisible(*component);
+            component->setBounds(4, 4 + row * (kSlotRowHeight + kSlotGap),
+                                 juce::jmax(0, slotViewport.getWidth() - 8), kSlotRowHeight);
+            component->setVisible(true);
+            ++row;
+        }
     }
-    emptySlotsLabel.setVisible(slots.isEmpty());
+    chainRowCount = row;
+
+    // Pad the list out to the fixed 8-slot chain; the spare VST rows are the
+    // add control, so the insert list never changes length while you work.
+    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    for (; row < totalRows; ++row) {
+        auto* slot = slots.add(new InsertSlotComponent(*this, row));
+        slot->setAddSlot(row == chainRowCount);
+        slotContent.addAndMakeVisible(*slot);
+        slot->setBounds(4, 4 + row * (kSlotRowHeight + kSlotGap),
+                        juce::jmax(0, slotViewport.getWidth() - 8), kSlotRowHeight);
+        slot->setVisible(true);
+    }
 
     const int innerW = juce::jmax(0, slotViewport.getWidth() - 8);
-    int y = 4;
-    for (auto* slot : slots) {
-        slot->setBounds(4, y, innerW, kSlotRowHeight);
-        y += kSlotRowHeight + kSlotGap;
-    }
-    if (slots.isEmpty()) {
-        emptySlotsLabel.setBounds(4, y, juce::jmax(120, innerW), kSlotRowHeight);
-        y += kSlotRowHeight + kSlotGap;
-    }
-    addVstButton.setBounds(4, y, kAddButtonWidth, kSlotRowHeight);
-    y += kSlotRowHeight + kSlotGap;
+    const int y = 4 + totalRows * (kSlotRowHeight + kSlotGap);
     slotContent.setSize(juce::jmax(0, slotViewport.getWidth()), juce::jmax(0, y));
+    if (chainDropTarget >= 0) {
+        chainMarker.setBounds(4, chainBoundaryY(chainDropTarget), juce::jmax(0, innerW), 2);
+        chainMarker.setVisible(true);
+        chainMarker.toFront(false);
+    } else {
+        chainMarker.setVisible(false);
+    }
 }
 
 void RackView::refreshEditor() {
@@ -1019,12 +1059,7 @@ void RackView::resized() {
     pa.removeFromTop(14); // panel caption band
     fxHeader.setBounds(pa.removeFromTop(16));
     pa.removeFromTop(4);
-    gateButton.setBounds(pa.removeFromTop(24));
-    pa.removeFromTop(4);
-    eqButton.setBounds(pa.removeFromTop(24));
-    pa.removeFromTop(4);
-    compressorButton.setBounds(pa.removeFromTop(24));
-    // Wider break: inserts are a separate group from the channel's processors.
+    // Built-in effects and VST inserts share one ordered list in the rack.
     pa.removeFromTop(14);
     insertsHeader.setBounds(pa.removeFromTop(16));
     pa.removeFromTop(4);
@@ -1047,6 +1082,11 @@ void RackView::resized() {
         noEditorBypass.setVisible(false);
     }
     if (dynamicsFocused && dynamicsWindow != nullptr) {
+        // Size the holder to the bay, not to whatever the last docked VST
+        // editor left behind: the panel's knob rows sit at the bottom and
+        // would otherwise fall outside the visible area.
+        editorHolder.setSize(juce::jmax(vw, DynamicsWindow::kMinWidth),
+                             juce::jmax(vh, DynamicsWindow::kMinHeight));
         dynamicsWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
@@ -1191,6 +1231,101 @@ void RackView::erasePlugin(std::uint32_t insertId) {
 void RackView::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     if (auto* ch = currentChannel()) audioEngine.setPluginBypassed(ch->id, insertId, bypassed);
     else if (auto* out = currentOutput()) audioEngine.setOutputPluginBypassed(out->id, insertId, bypassed);
+}
+
+void RackView::reorderInsert(std::uint32_t insertId, int targetIndex) {
+    if (selectedIsOutput)
+        audioEngine.moveOutputChainItem(selectedId, {pluginrack::ChainItemType::Insert, insertId},
+                                        targetIndex);
+    else
+        audioEngine.moveChannelChainItem(selectedId, {pluginrack::ChainItemType::Insert, insertId},
+                                         targetIndex);
+    juce::Component::SafePointer<RackView> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        safe->chainDropTarget = -1;
+        safe->refreshSlots();
+        if (safe->onStructureChanged) safe->onStructureChanged();
+    });
+}
+
+int RackView::chainBoundaryY(int targetIndex) const {
+    if (chainRowCount <= 0) return 2;
+    const int target = juce::jlimit(0, chainRowCount, targetIndex);
+    if (target < chainRowCount) return juce::jmax(0, slots[target]->getY() - 3);
+    return slots[chainRowCount - 1]->getBottom() + 1;
+}
+
+int RackView::chainDropIndexAt(juce::Point<int> parentPoint) {
+    int index = 0;
+    for (int i = 0; i < chainRowCount; ++i)
+        if (parentPoint.y > slots[i]->getBounds().getCentreY()) index = i + 1;
+    return index;
+}
+
+void RackView::previewChainItem(int targetIndex) {
+    chainDropTarget = juce::jlimit(0, chainRowCount, targetIndex);
+    chainMarker.setBounds(4, chainBoundaryY(chainDropTarget),
+                          juce::jmax(0, slotViewport.getWidth() - 8), 2);
+    chainMarker.setVisible(true);
+    chainMarker.toFront(false);
+}
+
+void RackView::clearChainPreview() {
+    chainDropTarget = -1;
+    chainMarker.setVisible(false);
+}
+
+void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
+    if (selectedIsOutput)
+        audioEngine.moveOutputChainItem(selectedId, item, targetIndex);
+    else
+        audioEngine.moveChannelChainItem(selectedId, item, targetIndex);
+    // The slot that reported this is still inside its own mouseUp() call, so
+    // rebuilding the rows now would delete the component mid-event.
+    juce::Component::SafePointer<RackView> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        auto callback = safe->onStructureChanged;
+        safe->chainDropTarget = -1;
+        safe->chainMarker.setVisible(false);
+        safe->refreshSlots();
+        if (callback) callback();
+    });
+}
+
+void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        if (selectedIsOutput) {
+            const auto& outputs = audioEngine.getOutputs();
+            for (int i = 0; i < static_cast<int>(outputs.size()); ++i)
+                if (outputs[static_cast<std::size_t>(i)]->id == static_cast<std::uint32_t>(selectedId))
+                    audioEngine.setOutputEqBypassed(i, bypassed);
+        } else {
+            audioEngine.setChannelEqBypassed(static_cast<std::uint32_t>(selectedId), bypassed);
+        }
+    } else {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->effects;
+                for (auto& effect : effects)
+                    if (effect.id == item.id) effect.bypassed = bypassed;
+                audioEngine.setOutputEffects(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->effects;
+            for (auto& effect : effects)
+                if (effect.id == item.id) effect.bypassed = bypassed;
+            audioEngine.setChannelEffects(channel->id, effects);
+        }
+    }
+}
+
+void RackView::activateBuiltIn(pluginrack::ChainItem item) {
+    if (item.type == pluginrack::ChainItemType::Eq) focusEq();
+    // Both dynamics rows open the combined panel: it is the only page that
+    // carries the gate row and its curve.
+    else focusDynamics(pluginrack::DynamicsEffectType::Compressor);
 }
 
 void RackView::refreshAfterInsertChange() {

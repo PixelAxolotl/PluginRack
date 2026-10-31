@@ -24,6 +24,15 @@ struct InsertSlot {
     bool operator==(const InsertSlot&) const = default;
 };
 
+enum class ChainItemType { Eq, Dynamics, Insert };
+
+struct ChainItem {
+    ChainItemType type = ChainItemType::Insert;
+    std::uint32_t id = 0;
+
+    bool operator==(const ChainItem&) const = default;
+};
+
 struct Channel {
     std::uint32_t id = 0;
     std::string name;
@@ -38,6 +47,7 @@ struct Channel {
     bool soloed = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
+    std::vector<ChainItem> chain;
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
@@ -58,6 +68,7 @@ struct Output {
     bool muted = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
+    std::vector<ChainItem> chain;
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the

@@ -74,6 +74,7 @@ public:
         juce::Atomic<bool> soloed{false};
         juce::Atomic<float> peak{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
+        std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
         // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
@@ -110,6 +111,7 @@ public:
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
         juce::Atomic<bool> flipped{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
+        std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
@@ -195,11 +197,13 @@ public:
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
+    void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
     juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
     struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
+    void moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item, int targetIndex);
 
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);

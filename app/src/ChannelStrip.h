@@ -38,6 +38,13 @@ public:
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
     void refreshAfterInsertChange() override;
     void openPicker() override;
+    void reorderInsert(std::uint32_t insertId, int targetIndex) override;
+    void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
+    void previewChainItem(int targetIndex) override;
+    void clearChainPreview() override;
+    int chainDropIndexAt(juce::Point<int> parentPoint) override;
+    void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
+    void activateBuiltIn(pluginrack::ChainItem item) override;
 
 public:
     std::function<void()> onRemoveRequested;
@@ -50,24 +57,27 @@ public:
 
 private:
     void layoutSlots();
+    int chainBoundaryY(int targetIndex) const;
     void applyInputMapping();
     void splitIntoMonoChannels();
 
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
     DeviceControl deviceControl;
-    juce::Label channelLabel{"", ""};
     MiniButton removeChannelButton{juce::String::fromUTF8("\xc3\x97")};
     MiniButton splitButton{"Split"};
     juce::Label vstHeader{"", "VST RACK"};
 
+    juce::TextButton inputChip;
+    bool inputEditing = false;
     juce::ComboBox modeCombo;
     juce::ComboBox inputComboA;
     juce::ComboBox inputComboB;
     juce::Label inputErrorLabel{"", ""};
 
     juce::OwnedArray<InsertSlotComponent> slots;
-    juce::TextButton addVstButton{"+ Add VST3"};
+    int chainDropTarget = -1;
+    int chainRowCount = 0;
 
     juce::Label levelLabel{"", "Level"};
     juce::Slider levelKnob;

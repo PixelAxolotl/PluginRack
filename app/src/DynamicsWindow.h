@@ -18,6 +18,11 @@ public:
     // moved; a parameter-only apply must leave the strip's bypass alone.
     using ApplyCallback = std::function<void(const pluginrack::DynamicsEffect&, bool bypassChanged)>;
 
+    // Below these the knob rows collide with the graph, so the bay gives the
+    // panel at least this much room (the EQ page does the same).
+    static constexpr int kMinWidth = 820;
+    static constexpr int kMinHeight = 520;
+
     DynamicsWindow(const juce::String& title,
                    const pluginrack::DynamicsEffect& initialEffect,
                    ApplyCallback apply,

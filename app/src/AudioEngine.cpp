@@ -7,6 +7,12 @@
 #include <map>
 
 namespace {
+std::vector<pluginrack::ChainItem> defaultChain() {
+    return {{pluginrack::ChainItemType::Eq, 0},
+            {pluginrack::ChainItemType::Dynamics, 1},
+            {pluginrack::ChainItemType::Dynamics, 2}};
+}
+
 // Compact label for the clock description: the registered device type names
 // ("Windows Audio (Low Latency Mode)") are too long for the toolbar.
 juce::String shortDeviceTypeTag(const juce::String& type) {
@@ -264,20 +270,34 @@ void AudioEngine::render(int frames) {
         // engine. No allocation: the EQ runs through the block view.
         // Analyzer tap wraps the call so Pre and Post exist even when the
         // EQ is bypassed (both rings then carry the identical input block).
+        const float trim = decibelsToGain(channel->trimDb.get());
+        channel->buffer.applyGain(0, 0, frames, trim);
+        channel->buffer.applyGain(1, 0, frames, trim);
         channel->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), frames);
-        if (!channel->eqBypassed.get()) {
-            channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
-        }
-        for (auto& effect : channel->effectProcessors) {
-            effect.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+        for (const auto& item : channel->chain) {
+            if (item.type == pluginrack::ChainItemType::Eq) {
+                if (!channel->eqBypassed.get())
+                    channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+                auto effect = std::find_if(channel->effects.begin(), channel->effects.end(),
+                                           [id = item.id](const auto& value) { return value.id == id; });
+                if (effect != channel->effects.end()) {
+                    const auto index = static_cast<std::size_t>(effect - channel->effects.begin());
+                    if (index < channel->effectProcessors.size())
+                        channel->effectProcessors[index].process(
+                            block.getWritePointer(0), block.getWritePointer(1), frames);
+                }
+            } else {
+                auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
+                                           [id = item.id](const auto& value) { return value->id == id; });
+                if (insert != channel->inserts.end())
+                    (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+            }
         }
         channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
-        for (auto& insert : channel->inserts) {
-            insert->pluginHost.processBlock(block, insert->bypassed.get());
-        }
 
         const bool silent = channel->muted.get() || (anySolo && !channel->soloed.get());
-        const float gain = silent ? 0.0f : decibelsToGain(channel->gainDb.get() + channel->trimDb.get());
+        const float gain = silent ? 0.0f : decibelsToGain(channel->gainDb.get());
         const float theta = (channel->pan.get() + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
         channel->buffer.applyGain(0, 0, frames, gain * std::cos(theta));
         channel->buffer.applyGain(1, 0, frames, gain * std::sin(theta));
@@ -318,16 +338,27 @@ void AudioEngine::render(int frames) {
         // core's output tap and the channel tap above. Same lock rules; the
         // analyzer tap wraps the call exactly like the channel loop does.
         output->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), frames);
-        if (!output->eqBypassed.get()) {
-            output->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
-        }
-        for (auto& effect : output->effectProcessors) {
-            effect.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+        for (const auto& item : output->chain) {
+            if (item.type == pluginrack::ChainItemType::Eq) {
+                if (!output->eqBypassed.get())
+                    output->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+                auto effect = std::find_if(output->effects.begin(), output->effects.end(),
+                                           [id = item.id](const auto& value) { return value.id == id; });
+                if (effect != output->effects.end()) {
+                    const auto index = static_cast<std::size_t>(effect - output->effects.begin());
+                    if (index < output->effectProcessors.size())
+                        output->effectProcessors[index].process(
+                            block.getWritePointer(0), block.getWritePointer(1), frames);
+                }
+            } else {
+                auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
+                                           [id = item.id](const auto& value) { return value->id == id; });
+                if (insert != output->inserts.end())
+                    (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+            }
         }
         output->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
-        for (auto& insert : output->inserts) {
-            insert->pluginHost.processBlock(block, insert->bypassed.get());
-        }
         if (output->flipped.get()) {
             for (int i = 0; i < frames; ++i) {
                 const float l = output->buffer.getSample(0, i);
@@ -472,6 +503,7 @@ void AudioEngine::addChannel() {
     channel->sourceKind = pluginrack::SourceKind::Hardware;
     channel->layout = pluginrack::ChannelLayout::Stereo;
     channel->inputChannels = {0, 1};
+    channel->chain = defaultChain();
     channel->buffer.setSize(2, currentBufferSize);
     channel->buffer.clear();
     // Preallocate the EQ so internal bands match the member mirror: a strip
@@ -501,6 +533,7 @@ void AudioEngine::addOutput() {
     else output->name = "Output " + juce::String(output->id);
     output->buffer.setSize(2, currentBufferSize);
     output->buffer.clear();
+    output->chain = defaultChain();
     output->eq.prepare(currentSampleRate, currentBufferSize);
     output->eq.setBands(output->eqBands);
     output->eq.setDelayMs(output->eqDelayMs);
@@ -572,8 +605,8 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     if (channel == nullptr) {
         return "The channel no longer exists.";
     }
-    if (channel->inserts.size() >= 4) {
-        return "Each strip holds at most 4 inserts.";
+    if (channel->inserts.size() >= 5) {
+        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
     }
 
     auto insert = std::make_unique<InsertSlot>();
@@ -587,13 +620,15 @@ juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& f
     insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
-    if (channel->inserts.size() >= 4) {
-        return "Each strip holds at most 4 inserts.";
+    if (channel->inserts.size() >= 5) {
+        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
     }
     // The id comes from the same counter restoreScene re-bases under
     // stateLock at swap time, so take it under this lock too.
     insert->id = nextInsertId++;
+    const auto insertId = insert->id;
     channel->inserts.push_back(std::move(insert));
+    channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
     return {};
 }
 
@@ -608,9 +643,30 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
         if ((*it)->id == insertId) {
             retiredInserts_.push_back(std::move(*it));
             inserts.erase(it);
+            channel->chain.erase(std::remove_if(channel->chain.begin(), channel->chain.end(),
+                                                [insertId](const auto& item) {
+                                                    return item.type == pluginrack::ChainItemType::Insert &&
+                                                           item.id == insertId;
+                                                }),
+                                 channel->chain.end());
             return;
         }
+
     }
+}
+
+void AudioEngine::moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item,
+                                       int targetIndex) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    auto& chain = channel->chain;
+    const auto it = std::find(chain.begin(), chain.end(), item);
+    if (it == chain.end()) return;
+    const auto value = *it;
+    chain.erase(it);
+    const auto index = juce::jlimit(0, static_cast<int>(chain.size()), targetIndex);
+    chain.insert(chain.begin() + index, value);
 }
 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
@@ -626,8 +682,8 @@ juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::Fi
     if (output == nullptr) {
         return "The output no longer exists.";
     }
-    if (output->inserts.size() >= 4) {
-        return "Each strip holds at most 4 inserts.";
+    if (output->inserts.size() >= 5) {
+        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
     }
 
     auto insert = std::make_unique<InsertSlot>();
@@ -641,12 +697,14 @@ juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::Fi
     insert->latencySamples = insert->pluginHost.getLatencySamples();
 
     const juce::ScopedLock lock(stateLock);
-    if (output->inserts.size() >= 4) {
-        return "Each strip holds at most 4 inserts.";
+    if (output->inserts.size() >= 5) {
+        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
     }
     // Same counter discipline as addPlugin: id assignment under stateLock.
     insert->id = nextInsertId++;
+    const auto insertId = insert->id;
     output->inserts.push_back(std::move(insert));
+    output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
     return {};
 }
 
@@ -661,9 +719,30 @@ void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t inser
         if ((*it)->id == insertId) {
             retiredInserts_.push_back(std::move(*it));
             inserts.erase(it);
+            output->chain.erase(std::remove_if(output->chain.begin(), output->chain.end(),
+                                               [insertId](const auto& item) {
+                                                   return item.type == pluginrack::ChainItemType::Insert &&
+                                                          item.id == insertId;
+                                               }),
+                                output->chain.end());
             return;
         }
+
     }
+}
+
+void AudioEngine::moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item,
+                                      int targetIndex) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    auto& chain = output->chain;
+    const auto it = std::find(chain.begin(), chain.end(), item);
+    if (it == chain.end()) return;
+    const auto value = *it;
+    chain.erase(it);
+    const auto index = juce::jlimit(0, static_cast<int>(chain.size()), targetIndex);
+    chain.insert(chain.begin() + index, value);
 }
 
 void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {
@@ -997,6 +1076,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedChannel.eqBands = channel->eqBands;
         savedChannel.eqDelayMs = channel->eqDelayMs;
         savedChannel.effects = channel->effects;
+        savedChannel.chain = channel->chain;
         for (const auto& insert : channel->inserts) {
             pluginrack::InsertSlot savedInsert;
             savedInsert.id = insert->id;
@@ -1023,6 +1103,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedOutput.eqBands = output->eqBands;
         savedOutput.eqDelayMs = output->eqDelayMs;
         savedOutput.effects = output->effects;
+        savedOutput.chain = output->chain;
         for (const auto& insert : output->inserts) {
             pluginrack::InsertSlot savedInsert;
             savedInsert.id = insert->id;
@@ -1097,6 +1178,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         channel->eqDirty = false;
         channel->eq.setDelayMs(channel->eqDelayMs);
         channel->effects = savedChannel.effects;
+        channel->chain = savedChannel.chain.empty() ? defaultChain() : savedChannel.chain;
         channel->effectProcessors.clear();
         channel->effectProcessors.reserve(channel->effects.size());
         for (const auto& effect : channel->effects) {
@@ -1120,6 +1202,13 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             insert->latencySamples = insert->pluginHost.getLatencySamples();
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             channel->inserts.push_back(std::move(insert));
+            if (std::none_of(channel->chain.begin(), channel->chain.end(),
+                             [id = savedInsert.id](const auto& item) {
+                                 return item.type == pluginrack::ChainItemType::Insert &&
+                                        item.id == id;
+                             })) {
+                channel->chain.push_back({pluginrack::ChainItemType::Insert, savedInsert.id});
+            }
         }
         maxChannelId = juce::jmax(maxChannelId, channel->id + 1);
         restoredMeters.observeChannel(channel->id, 0.0f);
@@ -1144,6 +1233,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         output->eqDirty = false;
         output->eq.setDelayMs(output->eqDelayMs);
         output->effects = savedOutput.effects;
+        output->chain = savedOutput.chain.empty() ? defaultChain() : savedOutput.chain;
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());
         for (const auto& effect : output->effects) {
@@ -1167,6 +1257,13 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             insert->latencySamples = insert->pluginHost.getLatencySamples();
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             output->inserts.push_back(std::move(insert));
+            if (std::none_of(output->chain.begin(), output->chain.end(),
+                             [id = savedInsert.id](const auto& item) {
+                                 return item.type == pluginrack::ChainItemType::Insert &&
+                                        item.id == id;
+                             })) {
+                output->chain.push_back({pluginrack::ChainItemType::Insert, savedInsert.id});
+            }
         }
         maxOutputId = juce::jmax(maxOutputId, output->id + 1);
         restoredMeters.observeOutput(output->id, 0.0f);
