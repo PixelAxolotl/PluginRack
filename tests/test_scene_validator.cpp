@@ -71,6 +71,19 @@ TEST_CASE("out of range values are reported") {
     }
 }
 
+TEST_CASE("out of range trim and output gain are reported") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().trimDb = 13.0f;
+    scene.outputs.front().gainDb = -61.0f;
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 2);
+    for (const pluginrack::SceneError& error : errors) {
+        REQUIRE(error.code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    }
+    REQUIRE(errors[0].message.find("trimDb") != std::string::npos);
+    REQUIRE(errors[1].message.find("gainDb") != std::string::npos);
+}
+
 TEST_CASE("scene with no outputs is rejected") {
     pluginrack::Scene scene = makeValidScene();
     scene.outputs.clear();
@@ -140,6 +153,42 @@ TEST_CASE("scene rejects out-of-range output eq bands") {
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
     REQUIRE(errors[0].entityId == 1);
     REQUIRE(errors[0].message.find("eqBands") != std::string::npos);
+}
+
+TEST_CASE("scene accepts eq delay at both ends of the range") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 3;
+    scene.channels.front().eqEnabled = true;
+    scene.channels.front().eqDelayMs = 1000.0f;
+    scene.outputs.front().eqEnabled = true;
+    scene.outputs.front().eqDelayMs = 0.0f;
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("scene rejects out-of-range eq delay") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = 3;
+    scene.channels.front().eqEnabled = true;
+    scene.outputs.front().eqEnabled = true;
+
+    SECTION("channel above ceiling") {
+        scene.channels.front().eqDelayMs = 1000.5f;
+    }
+    SECTION("channel below floor") {
+        scene.channels.front().eqDelayMs = -0.5f;
+    }
+    SECTION("channel non-finite") {
+        scene.channels.front().eqDelayMs = std::numeric_limits<float>::quiet_NaN();
+    }
+    SECTION("output above ceiling") {
+        scene.outputs.front().eqDelayMs = 2000.0f;
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].entityId == 1);
+    REQUIRE(errors[0].message.find("eqDelayMs") != std::string::npos);
 }
 
 TEST_CASE("zero entity ids are rejected") {

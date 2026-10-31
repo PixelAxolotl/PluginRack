@@ -17,9 +17,11 @@ float smoothing(double rate, float ms) noexcept {
 
 std::vector<DynamicsEffect> defaultDynamicsEffects() {
     return {
-        DynamicsEffect{1, DynamicsEffectType::Compressor, true},
-        DynamicsEffect{2, DynamicsEffectType::Limiter, true, -1.0f, 20.0f, 0.1f, 50.0f},
-        DynamicsEffect{3, DynamicsEffectType::Gate, true, -40.0f, 10.0f, 1.0f, 100.0f}
+        // Session default compressor: -12 dB threshold, 8:1, 40 ms attack,
+        // 300 ms release, 8 dB knee, unity trim and output.
+        DynamicsEffect{1, DynamicsEffectType::Compressor, true, -12.0f, 8.0f, 40.0f, 300.0f,
+                       0.0f, 0.0f, 8.0f},
+        DynamicsEffect{2, DynamicsEffectType::Gate, true, -48.0f, 5.0f, 1.0f, 100.0f}
     };
 }
 
@@ -40,10 +42,10 @@ void DynamicsProcessor::reset() noexcept {
 void DynamicsProcessor::process(float* left, float* right, int frames) noexcept {
     if (left == nullptr || right == nullptr || frames <= 0 || effect_.bypassed) return;
     const bool gate = effect_.type == DynamicsEffectType::Gate;
-    const bool limiter = effect_.type == DynamicsEffectType::Limiter;
-    const float ratio = limiter ? 20.0f : std::max(effect_.ratio, 1.0f);
+    const float ratio = std::max(effect_.ratio, 1.0f);
     const float attack = smoothing(sampleRate_, effect_.attackMs);
-    const float release = smoothing(sampleRate_, effect_.releaseMs);
+    // Anything faster than 10 ms release zippers on musical material.
+    const float release = smoothing(sampleRate_, std::max(effect_.releaseMs, 10.0f));
     const float inputGain = dbToGain(effect_.inputGainDb);
     const float makeup = dbToGain(effect_.makeupDb);
 
@@ -55,7 +57,16 @@ void DynamicsProcessor::process(float* left, float* right, int frames) noexcept 
         const float levelDb = gainToDb(envelope_);
         float targetDb = 0.0f;
         if (gate) {
-            if (levelDb < effect_.thresholdDb) targetDb = -80.0f;
+            // Downward expander: below the threshold the output drops by Range
+            // dB (stored in ratio), and the knee spreads that corner.
+            const float range = std::max(effect_.ratio, 0.0f);
+            const float knee = std::max(effect_.kneeDb, 0.0f);
+            const float distance = levelDb - effect_.thresholdDb;
+            if (knee > 0.0f && distance < knee * 0.5f && distance > -knee * 0.5f) {
+                targetDb = -range * (knee * 0.5f - distance) / knee;
+            } else if (distance <= -knee * 0.5f) {
+                targetDb = -range;
+            }
         } else {
             const float knee = std::max(effect_.kneeDb, 0.0f);
             const float distance = levelDb - effect_.thresholdDb;

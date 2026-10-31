@@ -152,10 +152,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     };
     setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
                         "Click: compressor on/off. Right-click: open settings");
-    setupDynamicsButton(limiterButton, pluginrack::DynamicsEffectType::Limiter,
-                        "Click: limiter on/off. Right-click: open settings");
     setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
-                        "Click: gate on/off. Right-click: open settings");
+                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
+    // The gate lives in the compressor panel now, so both right-clicks land there.
+    gateButton.onRightClick = [this] { openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor); };
     refreshDynamicsButtons();
 
     refreshInserts();
@@ -179,9 +179,13 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
     auto it = std::find_if(output.effects.begin(), output.effects.end(),
                            [type](const auto& effect) { return effect.type == type; });
     if (it == output.effects.end()) return;
+    const auto gateIt = std::find_if(output.effects.begin(), output.effects.end(),
+                                     [](const auto& effect) {
+                                         return effect.type == pluginrack::DynamicsEffectType::Gate;
+                                     });
     dynamicsWindow = new DynamicsWindow(
         "Dynamics - " + output.name, *it,
-        [safe, outputId](const pluginrack::DynamicsEffect& effect) {
+        [safe, outputId](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->output.effects;
             const auto found = std::find_if(effects.begin(), effects.end(),
@@ -189,11 +193,14 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
                                                 return candidate.id == effect.id;
                                             });
             if (found != effects.end()) {
+                const bool bypassed = found->bypassed;
                 *found = effect;
+                if (!bypassChanged) found->bypassed = bypassed;
                 safe->audioEngine.setOutputEffects(outputId, effects);
                 safe->refreshDynamicsButtons();
             }
-        });
+        },
+        gateIt != output.effects.end() ? &*gateIt : nullptr);
     dynamicsWindow->onClose = [safe] {
         if (safe != nullptr && safe->dynamicsWindow != nullptr) {
             safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
@@ -203,8 +210,10 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
         }
     };
     dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
-        if (safe != nullptr)
+        if (safe != nullptr) {
+            safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
             safe->output.analyzerTap.snapshot(false, left, right, frames);
+        }
     };
     output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
     dynamicsWindow->setVisible(true);
@@ -252,6 +261,21 @@ void MixerComponent::OutputStrip::openEqWindow() {
     // Same ordering fix as ChannelStrip: start Post-EQ analysis after the
     // tap callbacks are wired, otherwise the mode call addresses no one.
     window->setAnalyzerMode(EQWindow::kAnalyzerPost);
+    // Delay knob, same contract as the channel strip's: seed from the strip
+    // and persist through the engine, engaging the EQ on edit.
+    window->setDelayMs(output.eqDelayMs);
+    window->applyDelayMs = [safe, outputId](float delayMs) {
+        if (safe == nullptr) return;
+        const auto& outs = safe->audioEngine.getOutputs();
+        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                safe->audioEngine.setOutputEqBypassed(i, false);
+                safe->audioEngine.setOutputEqDelay(i, delayMs);
+                break;
+            }
+        }
+        safe->refreshEqButton();
+    };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
@@ -271,6 +295,8 @@ void MixerComponent::OutputStrip::closeEqWindow() {
 void MixerComponent::OutputStrip::refreshEqButton() {
     bool active = false;
     if (!output.eqBypassed.get()) {
+        // A delay-only EQ still does audible work, so it lights the button.
+        active = output.eqDelayMs > 0.0f;
         for (const auto& band : output.eqBands) {
             if (band.enabled) {
                 active = true;
@@ -301,13 +327,23 @@ void MixerComponent::OutputStrip::refreshDynamicsButtons() {
         const auto found = std::find_if(output.effects.begin(), output.effects.end(),
                                         [type](const auto& effect) { return effect.type == type; });
         const bool active = found != output.effects.end() && !found->bypassed;
+        if (found != output.effects.end() && dynamicsWindow != nullptr &&
+            dynamicsWindow->getType() == type) {
+            dynamicsWindow->setBypassed(found->bypassed);
+            if (type == pluginrack::DynamicsEffectType::Compressor) {
+                const auto gateIt = std::find_if(
+                    output.effects.begin(), output.effects.end(), [](const auto& effect) {
+                        return effect.type == pluginrack::DynamicsEffectType::Gate;
+                    });
+                if (gateIt != output.effects.end()) dynamicsWindow->setGate(*gateIt);
+            }
+        }
         button.setColour(juce::TextButton::buttonColourId,
                          active ? theme::amber() : theme::control());
         button.setColour(juce::TextButton::textColourOffId,
                          active ? theme::bg() : theme::text());
     };
     apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
-    apply(limiterButton, pluginrack::DynamicsEffectType::Limiter);
     apply(gateButton, pluginrack::DynamicsEffectType::Gate);
 }
 
@@ -335,15 +371,14 @@ void MixerComponent::OutputStrip::resized() {
     }
     addVstButton.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
-    auto effectStack = area.removeFromTop(4 * 20 + 3 * 3);
+    auto effectStack = area.removeFromTop(3 * 20 + 2 * 3);
     auto placeEffectButton = [&effectStack](juce::Component& button) {
         button.setBounds(effectStack.removeFromTop(20));
         effectStack.removeFromTop(3);
     };
+    placeEffectButton(gateButton);
     placeEffectButton(eqButton);
     placeEffectButton(compressorButton);
-    placeEffectButton(limiterButton);
-    placeEffectButton(gateButton);
     area.removeFromTop(4);
     area.removeFromTop(4);
 

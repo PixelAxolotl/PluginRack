@@ -83,6 +83,9 @@ public:
         // UI can read them without the lock.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
+        // like eqBands, mirrored into eq via setDelayMs under stateLock.
+        float eqDelayMs = 0.0f;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
@@ -112,6 +115,7 @@ public:
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        float eqDelayMs = 0.0f; // post-EQ delay, same rules as Channel
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
@@ -222,11 +226,15 @@ public:
     // (bypass state kept) and rebuild coefficients on the message thread
     // under stateLock; the bypass setters take effect live, no re-prepare,
     // and reset filter state when engaging so re-enabling starts clean.
+    // The delay setters size the line on first use and glide the read
+    // distance, so they are equally safe to call while render() runs.
     // Outputs are indexed by scene-order position like core; channels by id.
     void setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands);
     void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
+    void setChannelEqDelay(std::uint32_t channelId, float delayMs);
     void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(int outIdx, bool bypassed);
+    void setOutputEqDelay(int outIdx, float delayMs);
     void setChannelEffects(std::uint32_t channelId,
                            const std::vector<pluginrack::DynamicsEffect>& effects);
     void setOutputEffects(std::uint32_t outputId,

@@ -9,7 +9,13 @@ public:
     PluginHost();
     ~PluginHost();
 
-    juce::String loadPlugin(const juce::File& file);
+    // stateBase64 is an opaque blob previously returned by getStateAsBase64;
+    // when non-empty it is applied before the plugin is prepared to play, so
+    // a restored slot comes back with the settings it was saved with.
+    juce::String loadPlugin(const juce::File& file, const juce::String& stateBase64 = {});
+    // Captures the plugin's own state (parameters, programs) as base64 text.
+    // Empty when no plugin is loaded or the plugin exposes no state.
+    juce::String getStateAsBase64() const;
     void prepareToPlay(double sampleRate, int samplesPerBlock);
     void releaseResources();
     void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed = false);

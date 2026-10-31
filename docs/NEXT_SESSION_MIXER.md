@@ -95,6 +95,6 @@ Run checker before commit.
 - JUCE `Atomic<float>` has no `.load()` in this version; use `audioEngine.getSendGain(ch, out)` instead of reading routes directly.
 - `ChannelStrip` stores `channel` by reference; rebuilds destroy and recreate strips — preserve indices.
 - Output EQ is keyed by scene position (index), not id; resolve by id at edit time (see `MixerComponent::OutputStrip::openEqWindow`).
-- Scene v3: `eqBypassed` defaults true; `trimDb` is session-only (not persisted).
+- Scene v3: `eqBypassed` defaults true; channel fader, TRIM, pan, output fader and output mute are persisted.
 - Do not add 48V phantom (software router, not hardware).
 - Avoid `Co-authored-by` / AI attribution trailers in commits.

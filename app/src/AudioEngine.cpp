@@ -76,7 +76,8 @@ void AudioEngine::prepareToPlay(int maxBlockFrames) {
             channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
             channel->buffer.clear();
             // EqEngine::prepare only stores the rate/size and recomputes cached
-            // coefficients; bands set via setChannelEq survive a rate change.
+            // coefficients; bands set via setChannelEq and the delay set via
+            // setChannelEqDelay survive a rate change.
             channel->eq.prepare(currentSampleRate, maxBlockFrames_);
             if (channel->effectProcessors.size() != channel->effects.size()) {
                 channel->effectProcessors.clear();
@@ -165,8 +166,9 @@ void AudioEngine::publishRenderOutputsLocked() {
 // to race (worst case: one visually torn block).
 void AudioEngine::AnalyzerTap::writeTap(bool postEq, const float* inL, const float* inR,
                                         int frames) noexcept {
-    const std::uint32_t active = mode.get();
-    if (postEq ? (active != kPost) : (active != kPre)) return; // off or other side
+    if (mode.get() == kOff) return;
+    // Both rings stay current while the tap is on: the EQ reads Post and the
+    // dynamics panel reads Pre, and they may be open at different times.
     const int total = pre.getNumSamples(); // == kSamples; rings are fixed
     if (total <= 0 || frames <= 0) return;
     const int skip = juce::jmax(0, frames - total); // ring keeps the newest window
@@ -476,6 +478,7 @@ void AudioEngine::addChannel() {
     // created mid-session is usable the moment the UI un-bypasses it.
     channel->eq.prepare(currentSampleRate, currentBufferSize);
     channel->eq.setBands(channel->eqBands);
+    channel->eq.setDelayMs(channel->eqDelayMs);
     meters.observeChannel(channel->id, 0.0f);
     for (const auto& output : outputs) {
         auto route = std::make_unique<Route>();
@@ -500,6 +503,7 @@ void AudioEngine::addOutput() {
     output->buffer.clear();
     output->eq.prepare(currentSampleRate, currentBufferSize);
     output->eq.setBands(output->eqBands);
+    output->eq.setDelayMs(output->eqDelayMs);
     meters.observeOutput(output->id, 0.0f);
     for (const auto& channel : channels) {
         auto route = std::make_unique<Route>();
@@ -841,6 +845,16 @@ void AudioEngine::setChannelEqBypassed(std::uint32_t channelId, bool bypassed) {
     }
 }
 
+void AudioEngine::setChannelEqDelay(std::uint32_t channelId, float delayMs) {
+    // Message thread: same lock as setChannelEq so the allocation the first
+    // non-zero delay performs cannot race render()'s EQ tap.
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) {
+        channel->eqDelayMs = delayMs;
+        channel->eq.setDelayMs(delayMs);
+    }
+}
+
 void AudioEngine::setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands) {
     const juce::ScopedLock lock(stateLock);
     // Out-of-range indexes are ignored, matching core's setOutputEq.
@@ -867,12 +881,29 @@ void AudioEngine::setOutputEqBypassed(int outIdx, bool bypassed) {
     }
 }
 
+void AudioEngine::setOutputEqDelay(int outIdx, float delayMs) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
+    output->eqDelayMs = delayMs;
+    output->eq.setDelayMs(delayMs);
+}
+
 void AudioEngine::setChannelEffects(
     std::uint32_t channelId, const std::vector<pluginrack::DynamicsEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
     channel->effects = effects;
+    // Rebuild only when the count changes: recreating the processors resets
+    // their envelopes, which clicks on every knob move.
+    if (channel->effectProcessors.size() == effects.size()) {
+        for (std::size_t i = 0; i < effects.size(); ++i)
+            channel->effectProcessors[i].setEffect(effects[i]);
+        return;
+    }
     channel->effectProcessors.clear();
     channel->effectProcessors.reserve(effects.size());
     for (const auto& effect : effects) {
@@ -889,6 +920,11 @@ void AudioEngine::setOutputEffects(
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
     output->effects = effects;
+    if (output->effectProcessors.size() == effects.size()) {
+        for (std::size_t i = 0; i < effects.size(); ++i)
+            output->effectProcessors[i].setEffect(effects[i]);
+        return;
+    }
     output->effectProcessors.clear();
     output->effectProcessors.reserve(effects.size());
     for (const auto& effect : effects) {
@@ -953,16 +989,24 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedChannel.layout = channel->layout;
         savedChannel.inputChannels = channel->inputChannels;
         savedChannel.gainDb = channel->gainDb.get();
+        savedChannel.trimDb = channel->trimDb.get();
         savedChannel.pan = channel->pan.get();
         savedChannel.muted = channel->muted.get();
         savedChannel.soloed = channel->soloed.get();
-        // EQ persists; trimDb stays session-only (not a scene field).
         savedChannel.eqEnabled = !channel->eqBypassed.get();
         savedChannel.eqBands = channel->eqBands;
+        savedChannel.eqDelayMs = channel->eqDelayMs;
         savedChannel.effects = channel->effects;
         for (const auto& insert : channel->inserts) {
-            savedChannel.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
-                                            insert->pluginName.toStdString(), insert->bypassed.get()});
+            pluginrack::InsertSlot savedInsert;
+            savedInsert.id = insert->id;
+            savedInsert.pluginPath = insert->pluginPath.toStdString();
+            savedInsert.pluginName = insert->pluginName.toStdString();
+            savedInsert.bypassed = insert->bypassed.get();
+            // Capture the live parameter/program state so reopening the scene
+            // does not reset every insert to its defaults.
+            savedInsert.pluginState = insert->pluginHost.getStateAsBase64().toStdString();
+            savedChannel.inserts.push_back(std::move(savedInsert));
         }
         scene.channels.push_back(std::move(savedChannel));
     }
@@ -972,13 +1016,21 @@ pluginrack::Scene AudioEngine::makeScene() const {
         savedOutput.name = output->name.toStdString();
         savedOutput.layout = output->layout;
         savedOutput.flipped = output->flipped.get();
+        savedOutput.gainDb = output->gainDb.get();
+        savedOutput.muted = output->muted.get();
         savedOutput.deviceId = output->outputDeviceName.toStdString();
         savedOutput.eqEnabled = !output->eqBypassed.get();
         savedOutput.eqBands = output->eqBands;
+        savedOutput.eqDelayMs = output->eqDelayMs;
         savedOutput.effects = output->effects;
         for (const auto& insert : output->inserts) {
-            savedOutput.inserts.push_back({insert->id, insert->pluginPath.toStdString(),
-                                           insert->pluginName.toStdString(), insert->bypassed.get()});
+            pluginrack::InsertSlot savedInsert;
+            savedInsert.id = insert->id;
+            savedInsert.pluginPath = insert->pluginPath.toStdString();
+            savedInsert.pluginName = insert->pluginName.toStdString();
+            savedInsert.bypassed = insert->bypassed.get();
+            savedInsert.pluginState = insert->pluginHost.getStateAsBase64().toStdString();
+            savedOutput.inserts.push_back(std::move(savedInsert));
         }
         scene.outputs.push_back(std::move(savedOutput));
     }
@@ -1018,6 +1070,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         channel->id = savedChannel.id;
         channel->name = savedChannel.name;
         channel->gainDb = savedChannel.gainDb;
+        channel->trimDb = savedChannel.trimDb;
         channel->pan = savedChannel.pan;
         channel->muted = savedChannel.muted;
         channel->soloed = savedChannel.soloed;
@@ -1033,13 +1086,16 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         channel->buffer.setSize(2, bufferSize);
         channel->buffer.clear();
         // EQ bands are scene state; rebuild coefficients here on the message
-        // thread before the strip goes live (never in render).
+        // thread before the strip goes live (never in render). The delay line
+        // is sized here for the same reason.
         channel->eqBands = savedChannel.eqBands;
+        channel->eqDelayMs = savedChannel.eqDelayMs;
         channel->eqBypassed = !savedChannel.eqEnabled;
         channel->eq.prepare(sampleRate, bufferSize);
         channel->eqDirty = true;
         channel->eq.setBands(channel->eqBands);
         channel->eqDirty = false;
+        channel->eq.setDelayMs(channel->eqDelayMs);
         channel->effects = savedChannel.effects;
         channel->effectProcessors.clear();
         channel->effectProcessors.reserve(channel->effects.size());
@@ -1056,7 +1112,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             insert->pluginName = savedInsert.pluginName;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath));
+            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
+                                                             juce::String(savedInsert.pluginState));
             if (error.isNotEmpty()) {
                 loadErrors += channel->name + ": " + error + "\n";
             }
@@ -1074,14 +1131,18 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
         output->name = savedOutput.name;
         output->layout = savedOutput.layout;
         output->flipped = savedOutput.flipped;
+        output->gainDb = savedOutput.gainDb;
+        output->muted = savedOutput.muted;
         output->buffer.setSize(2, bufferSize);
         output->buffer.clear();
         output->eqBands = savedOutput.eqBands;
+        output->eqDelayMs = savedOutput.eqDelayMs;
         output->eqBypassed = !savedOutput.eqEnabled;
         output->eq.prepare(sampleRate, bufferSize);
         output->eqDirty = true;
         output->eq.setBands(output->eqBands);
         output->eqDirty = false;
+        output->eq.setDelayMs(output->eqDelayMs);
         output->effects = savedOutput.effects;
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());
@@ -1098,7 +1159,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene) {
             insert->pluginName = savedInsert.pluginName;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath));
+            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
+                                                             juce::String(savedInsert.pluginState));
             if (error.isNotEmpty()) {
                 loadErrors += output->name + ": " + error + "\n";
             }

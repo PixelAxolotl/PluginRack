@@ -124,6 +124,72 @@ TEST_CASE("send gain of -6 dB scales the route") {
     }
 }
 
+TEST_CASE("channel trim adds to the fader gain") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels.front().trimDb = 6.0f;
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.25f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    // +6 dB trim on top of the constant-power center gain.
+    const float expected = 0.25f * 1.9952623f * kCenterPanGain;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+    }
+}
+
+TEST_CASE("output fader gain scales the summed bus") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    scene.outputs.front().gainDb = -6.0f;
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.5f * kCenterPanGain * 0.5011872f;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+    }
+}
+
+TEST_CASE("muted output is silent") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    scene.outputs.front().muted = true;
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == 0.0f);
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == 0.0f);
+    }
+}
+
 TEST_CASE("one channel reaches two outputs independently") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
@@ -427,6 +493,56 @@ TEST_CASE("mixer render with active eq allocates nothing") {
     scene.channels[0].eqBands = pluginrack::defaultSixBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f;
     scene.outputs[0].eqEnabled = true;
+
+    AllocCounter::reset();
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    AllocCounter::reset();
+    engine.render(inputs, outputs);
+
+    REQUIRE(AllocCounter::allocations() == 0);
+}
+
+TEST_CASE("mixer scene eq delay shifts the channel output") {
+    pluginrack::Scene scene = eqTestScene();
+    scene.channels[0].eqEnabled = true;
+    for (auto& band : scene.channels[0].eqBands) {
+        band.enabled = false; // isolate the delay
+    }
+    scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.0f);
+    in.left[0] = 1.0f;
+    in.right[4] = 0.5f; // offset tap proves the two delay lines stay independent
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    for (int i = 0; i < 48; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == 0.0f);
+    }
+    REQUIRE(out.left[48] == Catch::Approx(kCenterPanGain));
+
+    for (int i = 0; i < 52; ++i) {
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == 0.0f);
+    }
+    REQUIRE(out.right[52] == Catch::Approx(0.5f * kCenterPanGain));
+}
+
+TEST_CASE("mixer render with active eq delay allocates nothing") {
+    pluginrack::Scene scene = eqTestScene();
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].eqDelayMs = 500.0f;
+    scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].eqDelayMs = 100.0f;
 
     AllocCounter::reset();
     pluginrack::MixerEngine engine = prepareEngine(scene);

@@ -154,6 +154,6 @@ void SettingsView::resized() {
     area.removeFromTop(8);
     auto mrow = area.removeFromTop(24);
     measureButton.setBounds(mrow.removeFromLeft(220));
-    mrow.removeFromLeft(8);
+    mrow.removeFromLeft(16); // keep the result clear of the button
     measuredLabel.setBounds(mrow);
 }

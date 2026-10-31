@@ -83,10 +83,9 @@ private:
 
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
+    EqButton gateButton{"GATE"};
     EqButton eqButton{"EQ"};
     EqButton compressorButton{"COMP"};
-    EqButton limiterButton{"LIMIT"};
-    EqButton gateButton{"GATE"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
 

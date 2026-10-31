@@ -391,6 +391,7 @@ void MainComponent::showMenu() {
                                                         audioEngine.removePlugin(c->id, insertId);
                                                     audioEngine.setChannelEq(c->id, pluginrack::defaultSixBands());
                                                     audioEngine.setChannelEqBypassed(c->id, true);
+                                                    audioEngine.setChannelEqDelay(c->id, 0.0f);
                                                     audioEngine.setChannelGain(c->id, 0.0f);
                                                     audioEngine.setChannelTrim(c->id, 0.0f);
                                                     audioEngine.setChannelPan(c->id, 0.0f);
@@ -407,6 +408,7 @@ void MainComponent::showMenu() {
                                                         audioEngine.removeOutputPlugin(outputId, insertId);
                                                     audioEngine.setOutputEq((int)i, pluginrack::defaultSixBands());
                                                     audioEngine.setOutputEqBypassed((int)i, true);
+                                                    audioEngine.setOutputEqDelay((int)i, 0.0f);
                                                     audioEngine.setOutputGain(outputId, 0.0f);
                                                     audioEngine.setOutputMuted(outputId, false);
                                                     audioEngine.setOutputLayout(outputId, pluginrack::ChannelLayout::Stereo);

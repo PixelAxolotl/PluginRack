@@ -256,9 +256,35 @@ TEST_CASE("scene restore loads plugins before the device handoff",
           "[plugin][restore]") {
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
                                    "juce::String AudioEngine::restoreScene");
-    const auto load = body.find("loadPlugin(juce::File(insert->pluginPath))");
+    const auto load = body.find("loadPlugin(juce::File(insert->pluginPath)");
     const auto device = body.find("setOutputDevice(id, name)");
     REQUIRE(load != std::string::npos);
     REQUIRE(device != std::string::npos);
     CHECK(load < device);
+    // Restored slots hand their saved state back to the plugin instance.
+    CHECK(contains(body, "savedInsert.pluginState"));
+}
+
+TEST_CASE("scene save and restore carry every mix level", "[plugin][restore]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto save = functionBody(cpp, "pluginrack::Scene AudioEngine::makeScene");
+    const auto restore = functionBody(cpp, "juce::String AudioEngine::restoreScene");
+
+    CHECK(contains(save, "savedChannel.gainDb"));
+    CHECK(contains(save, "savedChannel.trimDb"));
+    CHECK(contains(save, "savedChannel.pan"));
+    CHECK(contains(save, "savedOutput.gainDb"));
+    CHECK(contains(save, "savedOutput.muted"));
+
+    CHECK(contains(restore, "channel->gainDb = savedChannel.gainDb"));
+    CHECK(contains(restore, "channel->trimDb = savedChannel.trimDb"));
+    CHECK(contains(restore, "output->gainDb = savedOutput.gainDb"));
+    CHECK(contains(restore, "output->muted = savedOutput.muted"));
+}
+
+TEST_CASE("scene save captures the live plugin state", "[plugin][restore]") {
+    const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
+                                   "pluginrack::Scene AudioEngine::makeScene");
+    CHECK(contains(body, "getStateAsBase64"));
+    CHECK(contains(body, "pluginState"));
 }

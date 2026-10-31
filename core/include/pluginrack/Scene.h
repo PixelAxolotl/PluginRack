@@ -15,6 +15,11 @@ struct InsertSlot {
     std::string pluginPath;
     std::string pluginName;
     bool bypassed = false;
+    // Opaque base64 blob of the plugin's own state (parameters, programs,
+    // samples). The core engine never interprets it; the host layer captures
+    // it on save and feeds it back to the plugin when the slot is rebuilt.
+    // Empty means the plugin keeps its defaults.
+    std::string pluginState;
 
     bool operator==(const InsertSlot&) const = default;
 };
@@ -27,6 +32,7 @@ struct Channel {
     ChannelLayout layout = ChannelLayout::Mono;
     std::vector<int> inputChannels{0};
     float gainDb = 0.0f;
+    float trimDb = 0.0f;
     float pan = 0.0f;
     bool muted = false;
     bool soloed = false;
@@ -34,6 +40,9 @@ struct Channel {
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
+    // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
+    // chain undelayed. Like the bands it only runs while eqEnabled.
+    float eqDelayMs = 0.0f;
 
     bool operator==(const Channel&) const = default;
 };
@@ -45,10 +54,15 @@ struct Output {
     std::string deviceId;
     ChannelLayout layout = ChannelLayout::Stereo;
     bool flipped = false;
+    float gainDb = 0.0f;
+    bool muted = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
+    // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
+    // chain undelayed. Like the bands it only runs while eqEnabled.
+    float eqDelayMs = 0.0f;
 
     bool operator==(const Output&) const = default;
 };

@@ -83,10 +83,9 @@ private:
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
+        EqButton gateButton{"GATE"};
         EqButton eqButton{"EQ"};
         EqButton compressorButton{"COMP"};
-        EqButton limiterButton{"LIMIT"};
-        EqButton gateButton{"GATE"};
         EQWindow* eqWindow = nullptr;
         DynamicsWindow* dynamicsWindow = nullptr;
     };

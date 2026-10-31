@@ -17,6 +17,7 @@ inline juce::Colour deepGreen() { return juce::Colour(0xff4a9b74); }
 inline juce::Colour red()       { return juce::Colour(0xffe2574c); }
 inline juce::Colour amber()     { return juce::Colour(0xffe8b84b); }
 inline juce::Colour cyan()      { return juce::Colour(0xff4fb3c9); }
+inline juce::Colour blue()      { return juce::Colour(0xff3f7ef7); }
 inline juce::Colour violet()    { return juce::Colour(0xff8f7fd4); }
 
 } // namespace theme
