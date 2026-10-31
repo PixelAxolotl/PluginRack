@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "pluginrack/EqEngine.h"
+#include "pluginrack/DynamicsEffect.h"
 #include "pluginrack/Types.h"
 
 namespace pluginrack {
@@ -30,6 +31,7 @@ struct Channel {
     bool muted = false;
     bool soloed = false;
     std::vector<InsertSlot> inserts;
+    std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
 
@@ -44,6 +46,7 @@ struct Output {
     ChannelLayout layout = ChannelLayout::Stereo;
     bool flipped = false;
     std::vector<InsertSlot> inserts;
+    std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultSixBands();
 

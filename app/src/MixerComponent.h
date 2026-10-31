@@ -8,6 +8,7 @@
 #include "ChannelStrip.h"
 #include "DeviceControl.h"
 #include "EQWindow.h"
+#include "DynamicsWindow.h"
 #include "InsertHost.h"
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
@@ -47,6 +48,9 @@ private:
         void openEqWindow();
         void closeEqWindow();
         void refreshEqButton();
+        void openDynamicsWindow(pluginrack::DynamicsEffectType type);
+        void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+        void refreshDynamicsButtons();
         int getOutputIndex() const { return outputIndex; }
 
         // IInsertHost
@@ -80,7 +84,11 @@ private:
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
         EqButton eqButton{"EQ"};
+        EqButton compressorButton{"COMP"};
+        EqButton limiterButton{"LIMIT"};
+        EqButton gateButton{"GATE"};
         EQWindow* eqWindow = nullptr;
+        DynamicsWindow* dynamicsWindow = nullptr;
     };
 
     AudioEngine& audioEngine;

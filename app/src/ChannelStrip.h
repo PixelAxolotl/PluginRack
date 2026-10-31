@@ -8,6 +8,7 @@
 #include "DeviceControl.h"
 #include "DeviceMenu.h"
 #include "EQWindow.h"
+#include "DynamicsWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
@@ -27,6 +28,9 @@ public:
     void openEqWindow();
     void closeEqWindow();
     void refreshEqButton();
+    void openDynamicsWindow(pluginrack::DynamicsEffectType type);
+    void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+    void refreshDynamicsButtons();
 
     // IInsertHost
     juce::String insertPlugin(const juce::File&) override;
@@ -80,7 +84,11 @@ private:
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
     EqButton eqButton{"EQ"};
+    EqButton compressorButton{"COMP"};
+    EqButton limiterButton{"LIMIT"};
+    EqButton gateButton{"GATE"};
     EQWindow* eqWindow = nullptr;
+    DynamicsWindow* dynamicsWindow = nullptr;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
 

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "DynamicsWindow.h"
 #include "EQWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
@@ -63,6 +64,10 @@ private:
     void rebuildChannelCombo();
     void focusEq();
     void closeEqWindow();
+    void focusDynamics(pluginrack::DynamicsEffectType type);
+    void closeDynamicsWindow();
+    void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+    void refreshDynamicsButtons();
     void renameSelectedChain();
     void refreshEqButton();
     void refreshOutputButtons();
@@ -94,8 +99,13 @@ private:
     // Plugin column
     juce::Label insertsHeader;
     EqButton eqButton{"EQ"};
+    EqButton compressorButton{"COMP"};
+    EqButton limiterButton{"LIMIT"};
+    EqButton gateButton{"GATE"};
     EQWindow* eqWindow = nullptr;
+    DynamicsWindow* dynamicsWindow = nullptr;
     bool eqFocused = false;
+    bool dynamicsFocused = false;
     juce::Viewport slotViewport;
     juce::Component slotContent;
     juce::OwnedArray<InsertSlotComponent> slots;

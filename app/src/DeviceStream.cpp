@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -232,7 +233,8 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                double engineSampleRate,
                                int numChannelsNeeded,
                                juce::String& errorOut,
-                               int requestedBufferSize) {
+                               int requestedBufferSize,
+                               int renderBlockFrames) {
     close();
     error.clear();
     inputError.clear();
@@ -286,13 +288,34 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
         inputUnavailable_.store(true, std::memory_order_relaxed);
     }
 
-    // 8 device buffers (capped) so transient render pauses cannot drain the
-    // ring between pull() calls. Never smaller than one device block.
-    capacity = juce::jmax(deviceBufferSize, juce::jmin(deviceBufferSize * 8, 16384));
+    // The render consumes this capture in output-clock blocks, which may be
+    // larger than the input device's own buffer (independent input/output
+    // buffer settings). Size the history for the larger of the two so a
+    // 32-sample input feeding a 4096-sample render block still has a full
+    // window to read.
+    const int blockFrames = juce::jmax(
+        deviceBufferSize, renderBlockFrames > 0 ? renderBlockFrames : deviceBufferSize);
+    capacity = juce::jmax(blockFrames * 4,
+                          juce::jmin(blockFrames * 8, 65536));
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
     writePos = 0;
-    totalWritten = 0;
+    totalWritten.store(0, std::memory_order_relaxed);
+
+    // Two render blocks of read delay absorb callback phase jitter and give
+    // the drift correction room to work without an audible block repeat.
+    const int maxDelay = juce::jmax(0, capacity - blockFrames - 2);
+    const int delay = juce::jlimit(0, maxDelay, blockFrames * 2);
+    readDelaySamples.store(delay, std::memory_order_relaxed);
+    readCursor.prepare(capacity, delay, 0.005);
+    lastPlayed_[0] = 0.0f;
+    lastPlayed_[1] = 0.0f;
+    lastUnderrunEpoch_ = 0;
+    fadeInEpoch_ = 0;
+    latencySamples.store(deviceInputLatency + delay, std::memory_order_relaxed);
+    inputOverruns.store(0, std::memory_order_relaxed);
+    inputUnderruns.store(0, std::memory_order_relaxed);
+    inputDroppedFrames.store(0, std::memory_order_relaxed);
 
     manager.addAudioCallback(this);
     return {};
@@ -310,12 +333,20 @@ void InputCapture::close() {
     availableInputCount_ = 0;
     inputUnavailable_.store(false, std::memory_order_relaxed);
     writePos = 0;
-    totalWritten = 0;
+    totalWritten.store(0, std::memory_order_relaxed);
+    capacity = 0;
+    readCursor.reset();
+    lastPlayed_[0] = 0.0f;
+    lastPlayed_[1] = 0.0f;
+    lastUnderrunEpoch_ = 0;
+    fadeInEpoch_ = 0;
+    readDelaySamples.store(0, std::memory_order_relaxed);
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
 bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
-                        const std::vector<int>& physicalChannels) {
+                        const std::vector<int>& physicalChannels,
+                        std::uint64_t epoch) {
     if (frames <= 0) return true;
 
     // dest is sized by the caller: mono mappings need 1 channel, stereo 2.
@@ -330,57 +361,122 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
         return false;
     }
 
-    // The writer (audioDeviceIOCallback) holds this spinlock while mutating
-    // storage/writePos/totalWritten. Reading them unlocked races and produces
-    // torn samples (crackling). Take the lock; bail to silence if contended
-    // rather than blocking the audio thread.
-    juce::SpinLock::ScopedTryLockType tryLock(lock);
-    if (!tryLock.isLocked()) {
-        return false;
+    // The writer never blocks: it fills the ring and then publishes the new
+    // high-water mark with release semantics. The cursor reads from a fixed
+    // delay behind that mark, so input-device callback jitter cannot repeat
+    // or skip a whole block (the old "read the newest frames" behaviour).
+    const auto written = totalWritten.load(std::memory_order_acquire);
+    const auto window = readCursor.nextBlock(written, frames, epoch);
+    // Startup and a stopped/restarting device legitimately have less than one
+    // block of history; only a starved reader *after* the target delay was
+    // reached counts as a real underrun.
+    const auto targetDelay =
+        static_cast<std::uint64_t>(readDelaySamples.load(std::memory_order_relaxed));
+    const bool primedEnough = written >= targetDelay;
+    if (window.underrun && window.fresh && primedEnough)
+        inputUnderruns.fetch_add(1, std::memory_order_relaxed);
+    if (window.overrun && window.fresh) inputOverruns.fetch_add(1, std::memory_order_relaxed);
+
+    // Declick bookkeeping: mark the epoch that ended in a fade-out, then
+    // designate the first full epoch after it as the ramp-in epoch. Both the
+    // fresh and replayed pulls of that same epoch see the same value.
+    if (window.fresh) {
+        if (window.underrun) {
+            lastUnderrunEpoch_ = epoch;
+        } else if (lastUnderrunEpoch_ != 0 && epoch > lastUnderrunEpoch_) {
+            fadeInEpoch_ = epoch;
+            lastUnderrunEpoch_ = 0;
+        }
     }
+    const bool applyFadeIn = !window.underrun && epoch == fadeInEpoch_;
 
-    // Structural delay only: device latency + one device buffer.
-    latencySamples.store(deviceInputLatency + deviceBufferSize,
-                        std::memory_order_relaxed);
+    latencySamples.store(deviceInputLatency +
+                             readDelaySamples.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
 
+    const int n = juce::jlimit(0, frames, juce::jmin(window.available, frames));
+    const bool exact = window.ratio == 1.0 && window.fraction == 0.0;
+    const int startIdx = capacity > 0 ? (int)(window.start % capacity) : 0;
     bool ok = true;
-    // Read the last `frames` samples from the ring buffer (broadcast, no
-    // consumption). Multiple channels share the same capture.
-    const int available = (totalWritten < frames) ? totalWritten : frames;
-    const int startIdx = (writePos - available + capacity * 4) % capacity;
-    const int offset = frames - available; // leading silence if not enough data
-    // Missing physical inputs leave their dest channel silent (already
-    // cleared). Only flip the flag here - error strings are built in open(),
-    // never on the audio thread.
+    bool missing = false;
+
     for (int i = 0; i < numDest; ++i) {
         const int src = physicalChannels[(size_t)i];
         if (src < 0 || src >= inputChannelCount_) {
+            // Missing physical inputs leave their dest channel silent
+            // (already cleared). Only flip the flag here - error strings are
+            // built in open(), never on the audio thread.
+            missing = true;
             ok = false;
             continue;
         }
-        for (int s = 0; s < available; ++s) {
-            const int idx = (startIdx + s) % capacity;
-            const float v = storage.getSample(src, idx);
-            dest.setSample(i, offset + s, v);
-            // Mono (single physical channel): upmix to both L and R so that
-            // panning works correctly (50/50 at center).
-            if (numDest == 1) {
-                dest.setSample(1, offset + s, v);
+        const float* ring = storage.getReadPointer(src);
+        float* out = dest.getWritePointer(i);
+        if (exact) {
+            const int first = juce::jmin(n, capacity - startIdx);
+            if (first > 0) {
+                std::memcpy(out, ring + startIdx, sizeof(float) * (std::size_t)first);
+            }
+            if (n > first) {
+                std::memcpy(out + first, ring, sizeof(float) * (std::size_t)(n - first));
+            }
+        } else {
+            // Fractional read for clock drift: the cursor moves a fraction of
+            // a sample per block instead of jumping a whole block.
+            double pos = static_cast<double>(window.start) + window.fraction;
+            for (int s = 0; s < n; ++s) {
+                const auto base = (std::int64_t)std::floor(pos);
+                const float frac = static_cast<float>(pos - (double)base);
+                const int i0 = (int)(base % capacity);
+                const int i1 = (i0 + 1 == capacity) ? 0 : i0 + 1;
+                const float v0 = ring[i0];
+                out[s] = v0 + (ring[i1] - v0) * frac;
+                pos += window.ratio;
             }
         }
+
+        // A capture underrun fades the last real sample to silence instead of
+        // ending in a hard step (or repeating the previous block), and the
+        // next complete block ramps back in.
+        if (n < frames) {
+            const float last = n > 0 ? out[n - 1] : lastPlayed_[i];
+            const int gap = frames - n;
+            for (int s = 0; s < gap; ++s) {
+                const float t = 1.0f -
+                                (float)(s + 1) / (float)(gap + 1);
+                out[n + s] = last * t;
+            }
+        } else if (applyFadeIn) {
+            const int fade = juce::jmin(64, frames);
+            for (int s = 0; s < fade; ++s) {
+                out[s] *= (float)(s + 1) / (float)(fade + 1);
+            }
+        }
+        lastPlayed_[i] = out[frames - 1];
+
+        // Mono (single physical channel): upmix to both L and R so that
+        // panning works correctly (50/50 at center).
+        if (numDest == 1 && dest.getNumChannels() >= 2) {
+            float* outR = dest.getWritePointer(1);
+            for (int s = 0; s < frames; ++s) outR[s] = out[s];
+        }
     }
-    if (!ok)
+    if (missing)
         inputUnavailable_.store(true, std::memory_order_relaxed);
+    if (n < frames && primedEnough && window.fresh) {
+        inputDroppedFrames.fetch_add((std::uint64_t)(frames - n),
+                                     std::memory_order_relaxed);
+    }
 
     // Round-trip latency measurement: detect the injected impulse on input.
     if (latencyMeasureActive.load(std::memory_order_relaxed) &&
         !latencyImpulseDetected.load(std::memory_order_relaxed)) {
-        const int base = (totalWritten >= frames) ? (totalWritten - frames) : 0;
         for (int i = 0; i < numDest; ++i) {
-            for (int s = 0; s < available; ++s) {
-                if (std::abs(dest.getSample(i, offset + s)) > 0.9f) {
-                    latencyImpulseInputSample.store((std::uint64_t)(base + s),
-                                                  std::memory_order_relaxed);
+            for (int s = 0; s < n; ++s) {
+                if (std::abs(dest.getSample(i, s)) > 0.9f) {
+                    latencyImpulseInputSample.store(
+                        (std::uint64_t)(window.start + s),
+                        std::memory_order_relaxed);
                     latencyImpulseDetected.store(true, std::memory_order_relaxed);
                     break;
                 }
@@ -392,26 +488,43 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 }
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
-    juce::SpinLock::ScopedTryLockType tryLock(lock);
-    if (!tryLock.isLocked()) {
-        // Counted rather than silent: a held lock here means dropped input.
-        inputDroppedFrames.fetch_add((std::uint64_t) numSamples, std::memory_order_relaxed);
+    if (capacity <= 0 || numSamples <= 0) return;
+    if (numSamples > capacity) {
+        inputDroppedFrames.fetch_add((std::uint64_t) numSamples,
+                                     std::memory_order_relaxed);
         return;
     }
-    if (capacity <= 0) return;
 
-    // Write to ring buffer (broadcast to all consumers - no FIFO consumption).
+    const auto base = totalWritten.load(std::memory_order_relaxed);
+    const int first = juce::jmin(numSamples, capacity - writePos);
+    // Write to the ring (broadcast to all consumers) before publishing the
+    // new total. No lock: the reader only ever consumes data older than the
+    // target delay, so the producer is never blocked.
     for (int ch = 0; ch < inputChannelCount_; ++ch) {
-        int srcCh = (numInputChannels > ch && inputChannelData != nullptr && inputChannelData[ch] != nullptr) ? ch : -1;
-        if (srcCh < 0)
+        const bool have = numInputChannels > ch && inputChannelData != nullptr &&
+                          inputChannelData[ch] != nullptr;
+        if (!have)
             inputUnavailable_.store(true, std::memory_order_relaxed); // silence, never remap to input 0
-        for (int i = 0; i < numSamples; ++i) {
-            const float v = (srcCh >= 0) ? inputChannelData[srcCh][i] : 0.0f;
-            storage.setSample(ch, (writePos + i) % capacity, v);
+        float* dst = storage.getWritePointer(ch);
+        if (have) {
+            const float* src = inputChannelData[ch];
+            std::memcpy(dst + writePos, src,
+                        sizeof(float) * (std::size_t)first);
+            if (numSamples > first) {
+                std::memcpy(dst, src + first,
+                            sizeof(float) * (std::size_t)(numSamples - first));
+            }
+        } else {
+            std::memset(dst + writePos, 0, sizeof(float) * (std::size_t)first);
+            if (numSamples > first) {
+                std::memset(dst, 0,
+                            sizeof(float) * (std::size_t)(numSamples - first));
+            }
         }
     }
     writePos = (writePos + numSamples) % capacity;
-    totalWritten += numSamples;
+    totalWritten.store(base + (std::uint64_t) numSamples,
+                       std::memory_order_release);
     // Channels beyond what the device provides are not stored (storage sized
     // to inputChannelCount_); they are reported via getInputError() and pull()
     // leaves their destination silent.
@@ -424,15 +537,18 @@ void InputCapture::audioDeviceAboutToStart(juce::AudioIODevice* device) {
         deviceInputLatency = device->getInputLatencyInSamples();
         deviceBufferSize = device->getCurrentBufferSizeSamples();
         if (deviceBufferSize <= 0) deviceBufferSize = 256;
+        latencySamples.store(deviceInputLatency +
+                                 readDelaySamples.load(std::memory_order_relaxed),
+                             std::memory_order_relaxed);
     }
 }
 
 void InputCapture::audioDeviceStopped() {
-    // Without this the ring keeps its last window, replayable via pull()
-    // forever; drop it under the writer lock so the next pull() is silence.
-    const juce::SpinLock::ScopedLockType sl(lock);
+    // Publishing a zero total makes the reader re-prime instead of replaying
+    // its last window. The ring contents are stale either way, and the reader
+    // owns the cursor, so no lock is needed here.
     writePos = 0;
-    totalWritten = 0;
+    totalWritten.store(0, std::memory_order_relaxed);
 }
 
 // ---------- OutputPlayback ----------
@@ -481,20 +597,31 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    // 8 device buffers (capped) so transient render stalls cannot starve a
-    // device callback; never smaller than one device block.
-    capacity = juce::jmax(bufferSize, juce::jmin(bufferSize * 8, 16384));
+    // Target four device buffers of headroom with two spare blocks for
+    // bursts. The old fixed 16384 cap could make the ring smaller than the
+    // priming target at large device buffer sizes, so the first push was
+    // always dropped.
+    targetFillFrames = bufferSize * 4;
+    capacity = juce::jmax(targetFillFrames + bufferSize * 2,
+                          juce::jmin(bufferSize * 8, 65536));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
-    lastOutputBlock.clear();
-    lastOutputFrames = 0;
+    pushFadeInPending = false;
+    deviceFadeInRemaining = 0;
+    lowWatermarkActive = false;
+    lastPushedSample[0] = 0.0f;
+    lastPushedSample[1] = 0.0f;
     // Prime with four silent blocks so startup and a single delayed render
-    // callback cannot expose an empty FIFO to the device.
-    const int primeFrames = juce::jmin(bufferSize * 4, capacity);
+    // callback cannot expose an empty FIFO to the device. Leave room for one
+    // rendered block so the first push is never dropped.
+    const int primeFrames = juce::jmin(targetFillFrames, capacity - bufferSize);
     if (primeFrames > 0) {
         fifo->write(primeFrames);
     }
+    fillFrames.store(primeFrames > 0 ? primeFrames : 0, std::memory_order_relaxed);
+    latencySamples.store(deviceOutputLatency + bufferSize,
+                         std::memory_order_relaxed);
 
     manager.addAudioCallback(this);
     return {};
@@ -503,17 +630,32 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
 void OutputPlayback::close() {
     manager.removeAudioCallback(this);
     manager.closeAudioDevice();
-    fifo.reset();
-    storage.setSize(0, 0, false, true, false);
+    {
+        // The clock device's render thread may still be inside push() from an
+        // in-flight render. Keep close() from pulling the FIFO out from under
+        // it; push() only tries this lock and drops its block when contended.
+        const juce::SpinLock::ScopedLockType lock(fifoLock);
+        fifo.reset();
+        storage.setSize(0, 0, false, true, false);
+    }
     sampleRate = 0.0;
     activeDeviceType_.clear();
     deviceOutputLatency = 0;
     latencySamples.store(0, std::memory_order_relaxed);
-    lastOutputFrames = 0;
+    fillFrames.store(0, std::memory_order_relaxed);
+    deviceFadeInRemaining = 0;
+    pushFadeInPending = false;
+    lowWatermarkActive = false;
 }
 
 void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
-    if (frames <= 0 || fifo == nullptr) return;
+    if (frames <= 0) return;
+    const juce::SpinLock::ScopedTryLockType lock(fifoLock);
+    if (!lock.isLocked() || fifo == nullptr) {
+        outputDroppedFrames.fetch_add((std::uint64_t) frames,
+                                      std::memory_order_relaxed);
+        return;
+    }
     if (frames > capacity || fifo->getFreeSpace() < frames) {
         outputDroppedFrames.fetch_add((std::uint64_t) frames,
                                       std::memory_order_relaxed);
@@ -525,22 +667,90 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     const int total = b1 + b2;
     if (total != frames) return;
     const int srcChans = juce::jmax(1, src.getNumChannels());
+    const int fade = pushFadeInPending ? juce::jmin(64, frames) : 0;
 
     for (int ch = 0; ch < 2; ++ch) {
         const int srcCh = juce::jmin(ch, srcChans - 1);
-        for (int i = 0; i < b1; ++i) {
-            storage.setSample(ch, writeHandle.startIndex1 + i, src.getSample(srcCh, i));
+        float* dst = storage.getWritePointer(ch);
+        if (b1 > 0) {
+            std::memcpy(dst + writeHandle.startIndex1, src.getReadPointer(srcCh),
+                        sizeof(float) * (std::size_t)b1);
         }
-        for (int i = 0; i < b2; ++i) {
-            storage.setSample(ch, writeHandle.startIndex2 + i, src.getSample(srcCh, b1 + i));
+        if (b2 > 0) {
+            std::memcpy(dst + writeHandle.startIndex2,
+                        src.getReadPointer(srcCh) + b1,
+                        sizeof(float) * (std::size_t)b2);
         }
+        if (fade > 0) {
+            // Resume after a silent fallback with a short ramp so the first
+            // real block does not start with a step.
+            int seen = 0;
+            for (int i = 0; i < b1; ++i, ++seen) {
+                if (seen < fade) {
+                    dst[writeHandle.startIndex1 + i] *=
+                        (float)(seen + 1) / (float)(fade + 1);
+                }
+            }
+            for (int i = 0; i < b2; ++i, ++seen) {
+                if (seen < fade) {
+                    dst[writeHandle.startIndex2 + i] *=
+                        (float)(seen + 1) / (float)(fade + 1);
+                }
+            }
+        }
+        const int lastIndex = b2 > 0 ? writeHandle.startIndex2 + b2 - 1
+                                     : writeHandle.startIndex1 + b1 - 1;
+        lastPushedSample[ch] = dst[lastIndex];
     }
-    // finishedWrite automatic
+    pushFadeInPending = false;
+    fillFrames.store(fifo->getNumReady(), std::memory_order_relaxed);
     // Structural delay only (see InputCapture::pull): device + one buffer.
-    if (fifo != nullptr) {
-        latencySamples.store(deviceOutputLatency + bufferSize,
-                            std::memory_order_relaxed);
+    // The FIFO fill itself is reported separately by getFillFrames().
+    latencySamples.store(deviceOutputLatency + bufferSize,
+                         std::memory_order_relaxed);
+}
+
+void OutputPlayback::pushSilence(int frames) {
+    if (frames <= 0) return;
+    const juce::SpinLock::ScopedTryLockType lock(fifoLock);
+    if (!lock.isLocked() || fifo == nullptr) return;
+    // Only top the FIFO back up to its target. A single missed render is
+    // already covered by the buffered audio; inserting silence on top of a
+    // full FIFO would both delay the dropout and spam the dropped-frame
+    // counter for the whole stall.
+    if (targetFillFrames > 0 && fifo->getNumReady() >= targetFillFrames) {
+        return;
     }
+    if (frames > capacity || fifo->getFreeSpace() < frames) {
+        outputDroppedFrames.fetch_add((std::uint64_t) frames,
+                                      std::memory_order_relaxed);
+        return;
+    }
+    auto writeHandle = fifo->write(frames);
+    const int b1 = writeHandle.blockSize1;
+    const int b2 = writeHandle.blockSize2;
+    if (b1 + b2 != frames) return;
+    const int fade = juce::jmin(64, frames);
+    for (int ch = 0; ch < 2; ++ch) {
+        float* dst = storage.getWritePointer(ch);
+        const float start = lastPushedSample[ch];
+        int seen = 0;
+        for (int i = 0; i < b1; ++i, ++seen) {
+            const float gain = seen < fade
+                ? 1.0f - (float)(seen + 1) / (float)(fade + 1)
+                : 0.0f;
+            dst[writeHandle.startIndex1 + i] = start * gain;
+        }
+        for (int i = 0; i < b2; ++i, ++seen) {
+            const float gain = seen < fade
+                ? 1.0f - (float)(seen + 1) / (float)(fade + 1)
+                : 0.0f;
+            dst[writeHandle.startIndex2 + i] = start * gain;
+        }
+        lastPushedSample[ch] = 0.0f;
+    }
+    pushFadeInPending = true;
+    fillFrames.store(fifo->getNumReady(), std::memory_order_relaxed);
 }
 
 void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext&) {
@@ -566,37 +776,61 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
     const int total = b1 + b2;
-    if (total < numSamples) {
+    const bool shortRead = total < numSamples;
+    if (shortRead) {
         outputUnderruns.fetch_add(1, std::memory_order_relaxed);
         outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
                                       std::memory_order_relaxed);
+        // Fade the short tail to silence; the next complete block fades back
+        // in instead of starting at an arbitrary amplitude.
+        deviceFadeInRemaining = 64;
     }
-    if (fifo->getNumReady() < bufferSize * 2)
-        outputLowWatermarks.fetch_add(1, std::memory_order_relaxed);
 
     const int chans = juce::jmin(2, numOutputChannels);
     for (int ch = 0; ch < chans; ++ch) {
-        if (outputChannelData[ch] == nullptr) continue;
-        for (int i = 0; i < b1; ++i) {
-            outputChannelData[ch][i] = storage.getSample(ch, readHandle.startIndex1 + i);
+        float* out = outputChannelData[ch];
+        if (out == nullptr) continue;
+        const float* src = storage.getReadPointer(ch);
+        if (b1 > 0) {
+            std::memcpy(out, src + readHandle.startIndex1,
+                        sizeof(float) * (std::size_t)b1);
         }
-        for (int i = 0; i < b2; ++i) {
-            outputChannelData[ch][b1 + i] = storage.getSample(ch, readHandle.startIndex2 + i);
+        if (b2 > 0) {
+            std::memcpy(out + b1, src + readHandle.startIndex2,
+                        sizeof(float) * (std::size_t)b2);
         }
-        for (int i = total; i < numSamples; ++i) {
-            outputChannelData[ch][i] = lastOutputFrames > 0
-                ? lastOutputBlock.getSample(ch, i % lastOutputFrames)
-                : 0.0f;
+        if (shortRead) {
+            const float last = total > 0 ? out[total - 1] : 0.0f;
+            const int gap = numSamples - total;
+            for (int i = 0; i < gap; ++i) {
+                out[total + i] =
+                    last * (1.0f - (float)(i + 1) / (float)(gap + 1));
+            }
+        } else if (deviceFadeInRemaining > 0) {
+            // Continue the same 64-sample ramp across small device blocks so
+            // the gain does not restart at every block boundary.
+            constexpr int kFadeLength = 64;
+            const int done = kFadeLength - deviceFadeInRemaining;
+            const int fade = juce::jmin(deviceFadeInRemaining, numSamples);
+            for (int i = 0; i < fade; ++i) {
+                out[i] *= (float)(done + i + 1) / (float)(kFadeLength + 1);
+            }
+            deviceFadeInRemaining -= fade;
         }
     }
-    if (total == numSamples && numSamples <= lastOutputBlock.getNumSamples()) {
-        for (int ch = 0; ch < chans; ++ch) {
-            for (int i = 0; i < numSamples; ++i) {
-                lastOutputBlock.setSample(ch, i, outputChannelData[ch] != nullptr
-                    ? outputChannelData[ch][i] : 0.0f);
-            }
+
+    const int ready = fifo->getNumReady();
+    fillFrames.store(ready, std::memory_order_relaxed);
+    // Count low-watermark events, not every callback spent below the mark: a
+    // persistent starvation would otherwise inflate the counter forever.
+    const bool low = ready < bufferSize;
+    if (low) {
+        if (!lowWatermarkActive) {
+            outputLowWatermarks.fetch_add(1, std::memory_order_relaxed);
+            lowWatermarkActive = true;
         }
-        lastOutputFrames = numSamples;
+    } else if (ready >= bufferSize * 2) {
+        lowWatermarkActive = false;
     }
     currentOutputChannels = nullptr;
 }
@@ -607,6 +841,8 @@ void OutputPlayback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
         bufferSize = device->getCurrentBufferSizeSamples();
         if (bufferSize <= 0) bufferSize = 256;
         deviceOutputLatency = device->getOutputLatencyInSamples();
+        latencySamples.store(deviceOutputLatency + bufferSize,
+                             std::memory_order_relaxed);
     }
 }
 

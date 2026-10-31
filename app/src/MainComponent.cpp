@@ -290,7 +290,7 @@ void MainComponent::timerCallback() {
                             juce::String(report.inputBufferSize) + " smp) + plugins " +
                             juce::String((int)std::round(report.pluginMs)) + " ms + output " +
                             juce::String((int)std::round(report.outputDeviceMs)) + " ms (buffer " +
-                            juce::String(report.outputBufferSize) + " smp) + FIFO " +
+                            juce::String(report.outputBufferSize) + " smp) + output FIFO " +
                             juce::String((int)std::round(report.fifoMs)) + " ms" +
                             (glitch ? " - dropouts detected" : "");
         juce::String latText;
@@ -449,7 +449,7 @@ void MainComponent::showMenu() {
         menu.addItem("Output device " + ms(report.outputDeviceMs) + " (buffer "
                          + juce::String(report.outputBufferSize) + " smp)",
                      false, false, [] {});
-        menu.addItem("FIFO " + ms(report.fifoMs), false, false, [] {});
+        menu.addItem("Output FIFO " + ms(report.fifoMs), false, false, [] {});
         if (report.measuredValid) {
             menu.addItem("Measured round-trip " + ms(report.measuredMs), false, false, [] {});
         } else if (report.measureFailed) {

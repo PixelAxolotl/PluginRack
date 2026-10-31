@@ -22,10 +22,31 @@ constexpr float kMaxEqGainDb = 15.0f;
 constexpr float kMinEqQ = 0.1f;
 constexpr float kMaxEqQ = 20.0f;
 constexpr std::size_t kMaxEqBands = 6;
+constexpr std::size_t kMaxEffects = 4;
 
 bool isSupportedSampleRate(double sampleRate) {
     return sampleRate == 44100.0 || sampleRate == 48000.0 || sampleRate == 88200.0 ||
            sampleRate == 96000.0;
+}
+
+void validateEffects(const char* kind, std::uint32_t id,
+                     const std::vector<DynamicsEffect>& effects,
+                     std::vector<SceneError>& errors) {
+    if (effects.size() > kMaxEffects) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                          std::string(kind) + " " + std::to_string(id) +
+                              " effects has more than 4 slots"});
+    }
+    for (const auto& effect : effects) {
+        if (effect.id == 0 || !std::isfinite(effect.thresholdDb) ||
+            !std::isfinite(effect.ratio) || effect.ratio < 1.0f ||
+            !std::isfinite(effect.attackMs) || effect.attackMs <= 0.0f ||
+            !std::isfinite(effect.releaseMs) || effect.releaseMs <= 0.0f) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " has invalid dynamics effect parameters"});
+        }
+    }
 }
 
 void validateEqBands(const char* kind, std::uint32_t id, const std::vector<EqBand>& bands,
@@ -130,6 +151,7 @@ std::vector<SceneError> validate(const Scene& scene) {
                                   " must contain exactly two distinct non-negative indexes"});
         }
         validateEqBands("channel", channel.id, channel.eqBands, errors);
+        validateEffects("channel", channel.id, channel.effects, errors);
     }
 
     std::unordered_set<std::uint32_t> outputIds;
@@ -151,6 +173,7 @@ std::vector<SceneError> validate(const Scene& scene) {
             }
         }
         validateEqBands("output", output.id, output.eqBands, errors);
+        validateEffects("output", output.id, output.effects, errors);
     }
 
     std::unordered_set<std::uint64_t> routePairs;
