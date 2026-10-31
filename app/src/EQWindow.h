@@ -106,6 +106,7 @@ public:
 
     void closeButtonPressed() override;
     void resized() override;
+    void paint(juce::Graphics& g) override;
 
     std::function<void()> onCloseRequest;
 
@@ -118,7 +119,6 @@ private:
     std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands;
     bool embedded = false;
 
-    MiniButton autoButton{"Auto"};        // visual only in v1 (plan, Task 5)
     MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
     MiniButton soloButton{"Solo"};        // selected band solo toggle
     juce::Label stereoTag{"", "Stereo"};  // visual only in v1 (plan, Task 5)

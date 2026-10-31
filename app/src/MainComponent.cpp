@@ -184,6 +184,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     mixerView.onSelectionChanged = [this](int id, bool isOutput) {
         rackView.setSelectedChannel(id, isOutput);
     };
+    mixerView.onDoubleClicked = [this](int id, bool isOutput) {
+        rackView.setSelectedChannel(id, isOutput);
+        if (!isOutput) setView(AppView::Rack);
+    };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);

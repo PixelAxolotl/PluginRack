@@ -8,8 +8,8 @@ LevelMeter::LevelMeter(juce::Atomic<float>& peakSource)
 }
 
 void LevelMeter::paint(juce::Graphics& g) {
-    g.fillAll(theme::strip());
-    auto bounds = getLocalBounds().reduced(1);
+    g.fillAll(theme::bg().darker(0.2f));
+    auto bounds = getLocalBounds().reduced(3, 2);
     const int totalH = bounds.getHeight();
     const int meterHeight = juce::roundToInt(static_cast<float>(totalH) * displayedPeak);
 
@@ -18,10 +18,11 @@ void LevelMeter::paint(juce::Graphics& g) {
     grad.addColour(0.7, theme::green());
     grad.addColour(0.85, theme::amber());
     g.setGradientFill(grad);
-    g.fillRect(bounds.getX(), bounds.getBottom() - meterHeight, bounds.getWidth(), meterHeight);
+    g.fillRoundedRectangle((float)bounds.getX(), (float)(bounds.getBottom() - meterHeight),
+                           (float)bounds.getWidth(), (float)meterHeight, 2.0f);
 
-    g.setColour(theme::border());
-    g.drawRect(getLocalBounds());
+    g.setColour(theme::line().withAlpha(0.65f));
+    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 2.0f, 1.0f);
 }
 
 void LevelMeter::timerCallback() {
