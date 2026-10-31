@@ -2,7 +2,10 @@
 
 #include <JuceHeader.h>
 
+#include <pluginrack/CaptureCursor.h>
+
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -25,7 +28,8 @@ public:
                       double engineSampleRate,
                       int numChannelsNeeded,
                       juce::String& errorOut,
-                      int requestedBufferSize = 0);
+                      int requestedBufferSize = 0,
+                      int renderBlockFrames = 0);
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
@@ -63,9 +67,14 @@ public:
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     int getDeviceBufferSize() const { return deviceBufferSize; }
-    double getOccupancy() const { return (double) deviceBufferSize / (double) juce::jmax(1, capacity); }
+    double getOccupancy() const {
+        if (capacity <= 0) return 0.0;
+        return (double) readDelaySamples.load(std::memory_order_relaxed) / (double) capacity;
+    }
     std::uint64_t getInputOverruns() const { return inputOverruns.load(std::memory_order_relaxed); }
+    std::uint64_t getInputUnderruns() const { return inputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
+    int getReadDelaySamples() const { return readDelaySamples.load(std::memory_order_relaxed); }
     void setLatencyMeasurementActive(bool active) {
         latencyMeasureActive.store(active, std::memory_order_relaxed);
         if (!active) latencyImpulseDetected.store(false, std::memory_order_relaxed);
@@ -76,13 +85,14 @@ public:
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
     // here (audio thread). A missing physical input leaves its dest channel
-    // silent and returns false.
+    // silent and returns false. `epoch` identifies one render pass: channels
+    // sharing this capture get the same window instead of consuming it twice.
     bool pull(juce::AudioBuffer<float>& dest, int frames,
-              const std::vector<int>& physicalChannels);
-    bool pull(juce::AudioBuffer<float>& dest, int frames)
+              const std::vector<int>& physicalChannels, std::uint64_t epoch);
+    bool pull(juce::AudioBuffer<float>& dest, int frames, std::uint64_t epoch)
     {
         static const std::vector<int> stereoPassthrough{0, 1};
-        return pull(dest, frames, stereoPassthrough);
+        return pull(dest, frames, stereoPassthrough, epoch);
     }
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext& context) override;
@@ -91,11 +101,22 @@ public:
 
 private:
     juce::AudioDeviceManager manager;
-    juce::SpinLock lock;
     juce::AudioBuffer<float> storage;
     int capacity = 0;
+    // Producer state (input device callback only).
     int writePos = 0;
-    int totalWritten = 0;
+    // Published total; readers use it as the ring's high-water mark without
+    // ever taking a lock, so a capture callback can never block or be dropped.
+    std::atomic<std::uint64_t> totalWritten{0};
+    // Reader state (render/audio thread only).
+    pluginrack::CaptureReadCursor readCursor;
+    float lastPlayed_[2] = {0.0f, 0.0f};
+    // Declick: remember the epoch whose window was short and the next full
+    // epoch that should ramp in. Epoch-scoped so every channel sharing this
+    // capture receives the same fade.
+    std::uint64_t lastUnderrunEpoch_ = 0;
+    std::uint64_t fadeInEpoch_ = 0;
+    std::atomic<int> readDelaySamples{0};
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;
@@ -107,6 +128,7 @@ private:
     int deviceBufferSize = 0;
     std::atomic<int> latencySamples{0};
     std::atomic<std::uint64_t> inputOverruns{0};
+    std::atomic<std::uint64_t> inputUnderruns{0};
     std::atomic<std::uint64_t> inputDroppedFrames{0};
     // Round-trip latency measurement support.
     std::atomic<bool> latencyMeasureActive{false};
@@ -128,9 +150,12 @@ public:
     double getSampleRate() const { return sampleRate; }
     int getBufferSize() const { return bufferSize; }
     double getOccupancy() const {
-        if (fifo == nullptr || capacity <= 0) return 0.0;
-        return (double) fifo->getNumReady() / (double) juce::jmax(1, capacity);
+        if (capacity <= 0) return 0.0;
+        return (double) fillFrames.load(std::memory_order_relaxed) /
+               (double) juce::jmax(1, capacity);
     }
+    int getFillFrames() const { return fillFrames.load(std::memory_order_relaxed); }
+    int getTargetFillFrames() const { return targetFillFrames; }
     juce::String getError() const { return error; }
     // Device type the last successful open() selected (e.g. "Windows Audio
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
@@ -145,6 +170,11 @@ public:
     void setRenderActive(bool active) { renderActive = active; }
 
     void push(const juce::AudioBuffer<float>& src, int frames);
+    // Fills the FIFO with a fade-to-silence block. Used by the engine's
+    // render-miss fallback: keeping the FIFO at its target fill means a UI
+    // stall turns into one clean dropout instead of starving the device and
+    // stuttering the last block. The next real push fades back in.
+    void pushSilence(int frames);
 
     float* const* getDeviceOutputChannels() const { return currentOutputChannels; }
     int getNumDeviceOutputChannels() const { return currentNumOutputChannels; }
@@ -155,20 +185,31 @@ public:
 
 private:
     juce::AudioDeviceManager manager;
+    // Guards fifo/storage against close() racing a push from the clock
+    // device's render thread. push() only tries the lock and drops the block
+    // when contended; the audio thread never blocks.
+    juce::SpinLock fifoLock;
     std::unique_ptr<juce::AbstractFifo> fifo;
     juce::AudioBuffer<float> storage;
     int capacity = 0;
     int bufferSize = 256;
+    int targetFillFrames = 0;
     double sampleRate = 0.0;
     juce::String error;
     juce::String activeDeviceType_;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
+    std::atomic<int> fillFrames{0};
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::atomic<std::uint64_t> outputLowWatermarks{0};
-    juce::AudioBuffer<float> lastOutputBlock{ 2, 16384 };
-    int lastOutputFrames = 0;
+    // Declick state. pushFadeInPending is only touched by push() /
+    // pushSilence() (clock render thread); deviceFadeInRemaining only by the
+    // device callback.
+    bool pushFadeInPending = false;
+    int deviceFadeInRemaining = 0;
+    bool lowWatermarkActive = false;
+    float lastPushedSample[2] = {0.0f, 0.0f};
     std::function<void(int)> renderHook;
     std::atomic<bool> renderActive{true};
     float* const* currentOutputChannels = nullptr;

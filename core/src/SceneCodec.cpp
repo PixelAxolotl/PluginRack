@@ -108,6 +108,42 @@ void from_json(const nlohmann::json& j, EqBand& band) {
     band.solo = j.value("solo", false);
 }
 
+void to_json(nlohmann::json& j, DynamicsEffectType type) {
+    switch (type) {
+        case DynamicsEffectType::Compressor: j = "Compressor"; break;
+        case DynamicsEffectType::Gate: j = "Gate"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, DynamicsEffectType& type) {
+    const auto name = j.get<std::string>();
+    if (name == "Compressor") type = DynamicsEffectType::Compressor;
+    else if (name == "Gate") type = DynamicsEffectType::Gate;
+    else throw nlohmann::json::other_error::create(502, "unknown DynamicsEffectType '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const DynamicsEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"type", effect.type}, {"bypassed", effect.bypassed},
+                       {"thresholdDb", effect.thresholdDb}, {"ratio", effect.ratio},
+                       {"attackMs", effect.attackMs}, {"releaseMs", effect.releaseMs},
+                       {"makeupDb", effect.makeupDb}, {"inputGainDb", effect.inputGainDb},
+                       {"kneeDb", effect.kneeDb}};
+}
+
+void from_json(const nlohmann::json& j, DynamicsEffect& effect) {
+    effect = DynamicsEffect{};
+    j.at("id").get_to(effect.id);
+    j.at("type").get_to(effect.type);
+    effect.bypassed = j.value("bypassed", false);
+    effect.thresholdDb = j.value("thresholdDb", effect.thresholdDb);
+    effect.ratio = j.value("ratio", effect.ratio);
+    effect.attackMs = j.value("attackMs", effect.attackMs);
+    effect.releaseMs = j.value("releaseMs", effect.releaseMs);
+    effect.makeupDb = j.value("makeupDb", effect.makeupDb);
+    effect.inputGainDb = j.value("inputGainDb", effect.inputGainDb);
+    effect.kneeDb = j.value("kneeDb", effect.kneeDb);
+}
+
 void to_json(nlohmann::json& j, const InsertSlot& slot) {
     j = nlohmann::json{
         {"id", slot.id},
@@ -115,6 +151,11 @@ void to_json(nlohmann::json& j, const InsertSlot& slot) {
         {"pluginName", slot.pluginName},
         {"bypassed", slot.bypassed},
     };
+    // Optional: older v3 files have no plugin state and stay compact when a
+    // slot was never saved with one.
+    if (!slot.pluginState.empty()) {
+        j["pluginState"] = slot.pluginState;
+    }
 }
 
 void from_json(const nlohmann::json& j, InsertSlot& slot) {
@@ -123,6 +164,33 @@ void from_json(const nlohmann::json& j, InsertSlot& slot) {
     slot.pluginPath = j.value("pluginPath", std::string{});
     slot.pluginName = j.value("pluginName", std::string{});
     slot.bypassed = j.value("bypassed", false);
+    slot.pluginState = j.value("pluginState", std::string{});
+}
+
+void to_json(nlohmann::json& j, ChainItemType type) {
+    switch (type) {
+        case ChainItemType::Eq: j = "Eq"; break;
+        case ChainItemType::Dynamics: j = "Dynamics"; break;
+        case ChainItemType::Insert: j = "Insert"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, ChainItemType& type) {
+    const auto name = j.get<std::string>();
+    if (name == "Eq") type = ChainItemType::Eq;
+    else if (name == "Dynamics") type = ChainItemType::Dynamics;
+    else if (name == "Insert") type = ChainItemType::Insert;
+    else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const ChainItem& item) {
+    j = nlohmann::json{{"type", item.type}, {"id", item.id}};
+}
+
+void from_json(const nlohmann::json& j, ChainItem& item) {
+    item = ChainItem{};
+    j.at("type").get_to(item.type);
+    j.at("id").get_to(item.id);
 }
 
 void to_json(nlohmann::json& j, const Channel& channel) {
@@ -134,12 +202,16 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"layout", channel.layout},
         {"inputChannels", channel.inputChannels},
         {"gainDb", channel.gainDb},
+        {"trimDb", channel.trimDb},
         {"pan", channel.pan},
         {"muted", channel.muted},
         {"soloed", channel.soloed},
         {"inserts", channel.inserts},
+        {"effects", channel.effects},
+        {"chain", channel.chain},
         {"eqEnabled", channel.eqEnabled},
         {"eqBands", channel.eqBands},
+        {"eqDelayMs", channel.eqDelayMs},
     };
 }
 
@@ -164,15 +236,27 @@ void from_json(const nlohmann::json& j, Channel& channel) {
         }
     }
     channel.gainDb = j.value("gainDb", 0.0f);
+    channel.trimDb = j.value("trimDb", 0.0f);
     channel.pan = j.value("pan", 0.0f);
     channel.muted = j.value("muted", false);
     channel.soloed = j.value("soloed", false);
     if (j.contains("inserts")) {
         j.at("inserts").get_to(channel.inserts);
     }
+    if (j.contains("effects")) {
+        channel.effects.clear();
+        for (const auto& entry : j.at("effects")) {
+            // The limiter was retired; scenes saved with one still load.
+            if (entry.value("type", std::string()) == "Limiter") continue;
+            channel.effects.push_back(entry.get<DynamicsEffect>());
+        }
+        if (j.contains("chain")) j.at("chain").get_to(channel.chain);
+    }
     // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
-    // the flat defaultSixBands() from Channel{} above.
+    // the flat defaultSixBands() from Channel{} above, and v3 files written
+    // before the delay knob have no eqDelayMs (0 ms).
     channel.eqEnabled = j.value("eqEnabled", false);
+    channel.eqDelayMs = j.value("eqDelayMs", 0.0f);
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(channel.eqBands);
     }
@@ -186,9 +270,14 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"deviceId", output.deviceId},
         {"layout", output.layout},
         {"flipped", output.flipped},
+        {"gainDb", output.gainDb},
+        {"muted", output.muted},
         {"inserts", output.inserts},
+        {"effects", output.effects},
+        {"chain", output.chain},
         {"eqEnabled", output.eqEnabled},
         {"eqBands", output.eqBands},
+        {"eqDelayMs", output.eqDelayMs},
     };
 }
 
@@ -204,12 +293,24 @@ void from_json(const nlohmann::json& j, Output& output) {
         j.at("layout").get_to(output.layout);
     }
     output.flipped = j.value("flipped", false);
+    output.gainDb = j.value("gainDb", 0.0f);
+    output.muted = j.value("muted", false);
     if (j.contains("inserts")) {
         j.at("inserts").get_to(output.inserts);
     }
+    if (j.contains("effects")) {
+        output.effects.clear();
+        for (const auto& entry : j.at("effects")) {
+            if (entry.value("type", std::string()) == "Limiter") continue;
+            output.effects.push_back(entry.get<DynamicsEffect>());
+        }
+        if (j.contains("chain")) j.at("chain").get_to(output.chain);
+    }
     // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
-    // the flat defaultSixBands() from Output{} above.
+    // the flat defaultSixBands() from Output{} above, and v3 files written
+    // before the delay knob have no eqDelayMs (0 ms).
     output.eqEnabled = j.value("eqEnabled", false);
+    output.eqDelayMs = j.value("eqDelayMs", 0.0f);
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(output.eqBands);
     }

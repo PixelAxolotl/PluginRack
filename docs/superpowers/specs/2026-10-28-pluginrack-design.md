@@ -115,6 +115,7 @@ struct Channel {
     std::string sourceDeviceId;
     ChannelLayout layout;
     float gainDb;          // -60..+12, default 0
+    float trimDb;          // -12..+12, default 0
     float pan;             // -1..+1, default 0
     bool muted;
     bool soloed;
@@ -126,6 +127,9 @@ struct Output {
     std::string name;
     OutputKind kind;
     std::string deviceId;
+    float gainDb;          // -60..+12, default 0
+    bool muted;
+    std::vector<InsertSlot> inserts;
 };
 
 struct Route {
@@ -175,6 +179,12 @@ struct Scene {
 ## 5. Scene Persistence
 
 - JSON, one file per scene, `schemaVersion: 1`.
+- Each insert slot persists the plugin's own state as an opaque
+  base64 blob (`pluginState`). The core engine never interprets it: the host
+  layer captures it when the scene is saved and replays it via the plugin's
+  `setStateInformation` (before `prepareToPlay`) when the slot is restored.
+  Slots saved without state keep the plugin defaults, so older files load
+  unchanged.
 - Location (host layer): `%APPDATA%\PluginRack\scenes\<name>.json`.
 - Serialization is deterministic: stable key order, stable collection order.
 - Loading never mutates the file and never throws on malformed input; it returns

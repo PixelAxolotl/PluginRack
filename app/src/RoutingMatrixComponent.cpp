@@ -1,5 +1,7 @@
 #include "RoutingMatrixComponent.h"
 
+#include "Theme.h"
+
 namespace {
 constexpr int rowHeaderWidth = 130;
 constexpr int columnWidth = 200;
@@ -12,6 +14,12 @@ RoutingMatrixComponent::RoutingMatrixComponent(AudioEngine& engine)
     gridViewport.setViewedComponent(&gridContent, false);
     addAndMakeVisible(gridViewport);
     rebuild();
+}
+
+void RoutingMatrixComponent::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    g.setColour(theme::line().withAlpha(0.25f));
+    g.drawRect(getLocalBounds().reduced(8), 1);
 }
 
 void RoutingMatrixComponent::resized() {
@@ -56,12 +64,18 @@ void RoutingMatrixComponent::rebuild() {
         header->setText(output->name, juce::dontSendNotification);
         header->setJustificationType(juce::Justification::centred);
         header->setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
+        header->setColour(juce::Label::textColourId, theme::amber());
+        header->setColour(juce::Label::backgroundColourId, theme::panel());
+        header->setColour(juce::Label::outlineColourId, theme::border());
         gridContent.addAndMakeVisible(*header);
     }
     for (const auto& channel : audioEngine.getChannels()) {
         auto* label = channelLabels.add(new juce::Label());
         label->setText(channel->name, juce::dontSendNotification);
         label->setJustificationType(juce::Justification::centredLeft);
+        label->setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+        label->setColour(juce::Label::textColourId, theme::text());
+        label->setColour(juce::Label::backgroundColourId, theme::panel());
         gridContent.addAndMakeVisible(*label);
 
         for (const auto& output : audioEngine.getOutputs()) {
@@ -72,6 +86,11 @@ void RoutingMatrixComponent::rebuild() {
                 slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
                 slider->setRange(-60.0, 12.0, 0.1);
                 slider->setTextValueSuffix(" dB");
+                slider->setColour(juce::Slider::trackColourId, theme::cyan());
+                slider->setColour(juce::Slider::backgroundColourId, theme::control());
+                slider->setColour(juce::Slider::textBoxTextColourId, theme::text());
+                slider->setColour(juce::Slider::textBoxBackgroundColourId, theme::panel());
+                slider->setColour(juce::Slider::textBoxOutlineColourId, theme::border());
                 slider->setDoubleClickReturnValue(true, 0.0);
                 slider->setValue(audioEngine.getSendGainL(channel->id, output->id),
                                   juce::dontSendNotification);
@@ -90,6 +109,11 @@ void RoutingMatrixComponent::rebuild() {
                 slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
                 slider->setRange(-60.0, 12.0, 0.1);
                 slider->setTextValueSuffix(" dB");
+                slider->setColour(juce::Slider::trackColourId, theme::cyan());
+                slider->setColour(juce::Slider::backgroundColourId, theme::control());
+                slider->setColour(juce::Slider::textBoxTextColourId, theme::text());
+                slider->setColour(juce::Slider::textBoxBackgroundColourId, theme::panel());
+                slider->setColour(juce::Slider::textBoxOutlineColourId, theme::border());
                 slider->setDoubleClickReturnValue(true, 0.0);
                 slider->setValue(audioEngine.getSendGainR(channel->id, output->id),
                                   juce::dontSendNotification);

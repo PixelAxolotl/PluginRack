@@ -33,7 +33,8 @@ Supersedes the "6-band EQ on outputs as third build" placeholder in `2026-10-29-
 
 - DSP bands (fixed 6 to start): HP 10 Hz–500 Hz, Low-shelf, Bell x3, High-shelf to 20 kHz. Per band: freq/gain/Q, bypass, solo. Coeff calc off audio thread, preallocated state (respects `AudioEngine.h:192-195` never-allocates rule).
 - Strip button: `EQ` toggle in gap row `ChannelStrip.cpp:238-241` (inputs) + output strips; header row `204-210` fallback. Amber when EQ active, cyan focus ring per DESIGN.md. Routing grid `250-261` untouched.
-- EQWindow popup: log-freq X 20 Hz–20 kHz, ±15 dB Y, Pro-Q grid; draggable nodes with band colors, yellow combined curve; bottom knob row Freq/Gain/Q + Auto + Stereo tag (visual only v1); analyzer Pre+Post/Off switch.
+- EQWindow popup: log-freq X 20 Hz–20 kHz, ±15 dB Y, Pro-Q grid; draggable nodes with band colors, yellow combined curve; bottom knob row Freq/Gain/Q/Delay + Stereo tag (visual only v1); analyzer Pre+Post/Off switch.
+- Delay knob: post-EQ per-strip delay, 0–1000 ms (`EqEngine::kMaxDelayMs`), stored as `eqDelayMs` on `Scene::Channel`/`Scene::Output` with the same optional-key handling as `eqBands`. The engine allocates a one-second line lazily on the first non-zero value and glides the read distance so knob drags do not click; 0 ms keeps the output bit-identical.
 - Analyzer: `juce::dsp::FFT` 2048 Hann, 60 fps decay, grey fill behind curve; one FFT per open window only (not per strip). FFT on UI timer, never audio thread.
 
 ## Data flow

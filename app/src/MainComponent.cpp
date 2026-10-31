@@ -184,6 +184,11 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     mixerView.onSelectionChanged = [this](int id, bool isOutput) {
         rackView.setSelectedChannel(id, isOutput);
     };
+    mixerView.onDoubleClicked = [this](int id, bool isOutput) {
+        // Channels and outputs both open on their rack page.
+        rackView.setSelectedChannel(id, isOutput);
+        setView(AppView::Rack);
+    };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
@@ -286,7 +291,7 @@ void MainComponent::timerCallback() {
                             juce::String(report.inputBufferSize) + " smp) + plugins " +
                             juce::String((int)std::round(report.pluginMs)) + " ms + output " +
                             juce::String((int)std::round(report.outputDeviceMs)) + " ms (buffer " +
-                            juce::String(report.outputBufferSize) + " smp) + FIFO " +
+                            juce::String(report.outputBufferSize) + " smp) + output FIFO " +
                             juce::String((int)std::round(report.fifoMs)) + " ms" +
                             (glitch ? " - dropouts detected" : "");
         juce::String latText;
@@ -387,6 +392,7 @@ void MainComponent::showMenu() {
                                                         audioEngine.removePlugin(c->id, insertId);
                                                     audioEngine.setChannelEq(c->id, pluginrack::defaultSixBands());
                                                     audioEngine.setChannelEqBypassed(c->id, true);
+                                                    audioEngine.setChannelEqDelay(c->id, 0.0f);
                                                     audioEngine.setChannelGain(c->id, 0.0f);
                                                     audioEngine.setChannelTrim(c->id, 0.0f);
                                                     audioEngine.setChannelPan(c->id, 0.0f);
@@ -403,6 +409,7 @@ void MainComponent::showMenu() {
                                                         audioEngine.removeOutputPlugin(outputId, insertId);
                                                     audioEngine.setOutputEq((int)i, pluginrack::defaultSixBands());
                                                     audioEngine.setOutputEqBypassed((int)i, true);
+                                                    audioEngine.setOutputEqDelay((int)i, 0.0f);
                                                     audioEngine.setOutputGain(outputId, 0.0f);
                                                     audioEngine.setOutputMuted(outputId, false);
                                                     audioEngine.setOutputLayout(outputId, pluginrack::ChannelLayout::Stereo);
@@ -445,7 +452,7 @@ void MainComponent::showMenu() {
         menu.addItem("Output device " + ms(report.outputDeviceMs) + " (buffer "
                          + juce::String(report.outputBufferSize) + " smp)",
                      false, false, [] {});
-        menu.addItem("FIFO " + ms(report.fifoMs), false, false, [] {});
+        menu.addItem("Output FIFO " + ms(report.fifoMs), false, false, [] {});
         if (report.measuredValid) {
             menu.addItem("Measured round-trip " + ms(report.measuredMs), false, false, [] {});
         } else if (report.measureFailed) {

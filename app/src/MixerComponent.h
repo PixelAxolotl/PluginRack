@@ -8,6 +8,7 @@
 #include "ChannelStrip.h"
 #include "DeviceControl.h"
 #include "EQWindow.h"
+#include "DynamicsWindow.h"
 #include "InsertHost.h"
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
@@ -31,6 +32,7 @@ public:
 
     std::function<void()> onStructureChanged;
     std::function<void(int channelId, bool isOutput)> onSelectionChanged;
+    std::function<void(int channelId, bool isOutput)> onDoubleClicked;
 
 private:
     class OutputStrip final : public juce::Component, public IInsertHost {
@@ -46,6 +48,9 @@ private:
         void openEqWindow();
         void closeEqWindow();
         void refreshEqButton();
+        void openDynamicsWindow(pluginrack::DynamicsEffectType type);
+        void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+        void refreshDynamicsButtons();
         int getOutputIndex() const { return outputIndex; }
 
         // IInsertHost
@@ -54,15 +59,25 @@ private:
         void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
         void refreshAfterInsertChange() override;
         void openPicker() override;
+        void reorderInsert(std::uint32_t insertId, int targetIndex) override;
+        void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
+        void previewChainItem(int targetIndex) override;
+        void clearChainPreview() override;
+        int chainDropIndexAt(juce::Point<int> parentPoint) override;
+        void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
+        void activateBuiltIn(pluginrack::ChainItem item) override;
 
         std::function<void()> onRemoveRequested;
         std::function<void()> onRenamed;
         std::function<void()> onSelected;
+        std::function<void()> onDoubleClicked;
 
         void mouseDown(const juce::MouseEvent&) override;
+        void mouseDoubleClick(const juce::MouseEvent&) override;
 
     private:
         void refreshInserts();
+        int chainBoundaryY(int targetIndex) const;
 
         AudioEngine::Output& output;
         int outputIndex = 0;
@@ -70,16 +85,20 @@ private:
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::ComboBox modeCombo;
-        juce::TextButton flipButton{"Flip"};
+        MiniButton flipButton{"Flip"};
         juce::OwnedArray<InsertSlotComponent> slots;
+        int chainDropTarget = -1;
+        int chainRowCount = 0;
         juce::Label vstHeader{"", "VST RACK"};
-        juce::TextButton addVstButton{"+ Add VST3"};
         std::unique_ptr<juce::FileChooser> fileChooser;
         juce::Slider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
+        EqButton gateButton{"GATE"};
         EqButton eqButton{"EQ"};
+        EqButton compressorButton{"COMP"};
         EQWindow* eqWindow = nullptr;
+        DynamicsWindow* dynamicsWindow = nullptr;
     };
 
     AudioEngine& audioEngine;

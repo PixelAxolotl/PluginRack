@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "DynamicsWindow.h"
 #include "EQWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
@@ -21,6 +22,7 @@ public:
     ~RackView() override;
 
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void rebuild();
     void mouseDown(const juce::MouseEvent& e) override;
 
@@ -45,6 +47,13 @@ public:
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
     void refreshAfterInsertChange() override;
     void openPicker() override;
+    void reorderInsert(std::uint32_t insertId, int targetIndex) override;
+    void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
+    void previewChainItem(int targetIndex) override;
+    void clearChainPreview() override;
+    int chainDropIndexAt(juce::Point<int> parentPoint) override;
+    void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
+    void activateBuiltIn(pluginrack::ChainItem item) override;
     bool insertActivated(AudioEngine::InsertSlot* insert) override;
 
 private:
@@ -55,13 +64,23 @@ private:
     void ensureSelection();
     void refreshHeader();
     void refreshSlots();
+    int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
     bool dockedHostAlive() const;
+    // Focus switches only hide the docked plugin editor: destroying and
+    // recreating a VST UI on every EQ/dynamics switch stalls the message
+    // thread and some plugins hang while being torn down.
+    void hideDockedEditor();
+    void showDockedEditor();
     void jumpToMixer();
 
     void rebuildChannelCombo();
     void focusEq();
     void closeEqWindow();
+    void focusDynamics(pluginrack::DynamicsEffectType type);
+    void closeDynamicsWindow();
+    void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+    void refreshDynamicsButtons();
     void renameSelectedChain();
     void refreshEqButton();
     void refreshOutputButtons();
@@ -91,15 +110,21 @@ private:
     juce::TextButton mixerButton{"Mixer"};
 
     // Plugin column
+    juce::Label fxHeader;
     juce::Label insertsHeader;
+    EqButton gateButton{"GATE"};
     EqButton eqButton{"EQ"};
+    EqButton compressorButton{"COMP"};
     EQWindow* eqWindow = nullptr;
+    DynamicsWindow* dynamicsWindow = nullptr;
     bool eqFocused = false;
+    bool dynamicsFocused = false;
     juce::Viewport slotViewport;
     juce::Component slotContent;
     juce::OwnedArray<InsertSlotComponent> slots;
-    juce::Label emptySlotsLabel;
-    juce::TextButton addVstButton{"+ Add VST3"};
+    int chainDropTarget = -1;
+    int chainRowCount = 0;
+    juce::Label chainMarker;
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     // Center editor
@@ -116,6 +141,9 @@ private:
     // Docked editor
     juce::AudioProcessorEditor* dockedEditor = nullptr;
     PluginHost* dockedHost = nullptr;
+    // Size the plugin asked for when it was docked; layout reuses it so the
+    // bay can never stretch the editor to fill.
+    juce::Rectangle<int> dockedEditorSize;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

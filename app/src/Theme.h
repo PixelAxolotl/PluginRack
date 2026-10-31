@@ -16,7 +16,20 @@ inline juce::Colour green()     { return juce::Colour(0xff7fd4a8); }
 inline juce::Colour deepGreen() { return juce::Colour(0xff4a9b74); }
 inline juce::Colour red()       { return juce::Colour(0xffe2574c); }
 inline juce::Colour amber()     { return juce::Colour(0xffe8b84b); }
+inline juce::Colour orange()    { return juce::Colour(0xffe08a3c); }
 inline juce::Colour cyan()      { return juce::Colour(0xff4fb3c9); }
+inline juce::Colour blue()      { return juce::Colour(0xff3f7ef7); }
 inline juce::Colour violet()    { return juce::Colour(0xff8f7fd4); }
+
+// Shared strip metrics: input and output strips are read side by side, so a
+// button or field must not change height when it moves between them.
+namespace metrics {
+inline constexpr int kActionH = 18;  // strip buttons beside the close cross (split/flip)
+inline constexpr int kFieldH = 20;   // combos and the input chip
+inline constexpr int kRowH = 22;     // mute / solo row
+inline constexpr int kDeviceH = 30;  // name + device block
+inline constexpr int kActionW = 44;  // split / flip
+inline constexpr int kCloseW = 20;   // the cross
+} // namespace metrics
 
 } // namespace theme

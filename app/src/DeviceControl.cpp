@@ -102,6 +102,7 @@ void DeviceControl::mouseDown(const juce::MouseEvent& e) {
 }
 
 void DeviceControl::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onDoubleClick) onDoubleClick();
     if (onRename) onRename();
 }
 

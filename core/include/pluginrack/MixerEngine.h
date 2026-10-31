@@ -10,6 +10,7 @@
 
 #include "pluginrack/AudioBlock.h"
 #include "pluginrack/EqEngine.h"
+#include "pluginrack/DynamicsEffect.h"
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
@@ -73,10 +74,15 @@ private:
         std::vector<EqEngine> outputEqs;
         std::vector<char> channelEqEnabled;
         std::vector<char> outputEqEnabled;
+        std::vector<std::vector<DynamicsProcessor>> channelEffects;
+        std::vector<std::vector<DynamicsProcessor>> outputEffects;
     };
 
     std::vector<ChannelCache> channels_;
     std::vector<RouteCache> routes_;
+    // Output fader/mute, applied after the output inserts like the app.
+    std::vector<float> outputGains_;
+    std::vector<char> outputMuted_;
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;

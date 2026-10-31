@@ -268,10 +268,19 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         g.drawText(freqLabel(f), juce::Rectangle<int>(static_cast<int>(x) - 20 + edgeBias, h - 13, 40, 12),
                    juce::Justification::centred, false);
     }
-    for (int db = -15; db <= 15; db += 3) {
+    for (int db = -12; db <= 12; db += 3) {
         const float y = gainToY(static_cast<double>(db));
         g.setColour(db == 0 ? theme::line().withAlpha(0.8f) : theme::border().withAlpha(0.4f));
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
+        g.setColour(theme::dim().withAlpha(0.9f));
+        g.fillRect(0.0f, y - 0.5f, 6.0f, 1.0f);
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        // Clamped inside the component: the top and bottom marks used to be
+        // half-drawn outside the curve's bounds.
+        const int labelY = juce::jlimit(0, juce::jmax(0, h - 12), static_cast<int>(y) - 6);
+        g.drawText((db > 0 ? "+" : "") + juce::String(db) + " dB",
+                   juce::Rectangle<int>(7, labelY, 34, 12),
+                   juce::Justification::left, false);
     }
 
     // --- analyzer spectrum (Task 6): grey fill behind the curves, Pro-Q

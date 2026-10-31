@@ -1,5 +1,7 @@
 #include "MixerComponent.h"
 
+#include <algorithm>
+
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
                                                  AudioEngine& engine)
     : output(outputState), outputIndex(outputIdx), audioEngine(engine), meter(outputState.peak) {
@@ -32,6 +34,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }
+
                 });
             });
         });
@@ -68,15 +71,13 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     };
     addAndMakeVisible(modeCombo);
 
-    flipButton.setClickingTogglesState(true);
-    flipButton.setToggleState(output.flipped.get(), juce::dontSendNotification);
-    flipButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    flipButton.setColour(juce::TextButton::buttonOnColourId, theme::cyan());
-    flipButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    flipButton.setToggleState(output.flipped.get());
     flipButton.setTooltip("Flip L/R of this output");
-    flipButton.onClick = [this] {
-        audioEngine.setOutputFlipped(output.id, flipButton.getToggleState());
-    };
+    flipButton.setClickAction([this] {
+        const bool next = !flipButton.getToggleState();
+        flipButton.setToggleState(next);
+        audioEngine.setOutputFlipped(output.id, next);
+    });
     addAndMakeVisible(flipButton);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
@@ -84,18 +85,8 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     vstHeader.setColour(juce::Label::textColourId, theme::violet());
     addAndMakeVisible(vstHeader);
 
-    for (int i = 0; i < 4; ++i) {
-        auto* slot = slots.add(new InsertSlotComponent(*this, i));
-        addAndMakeVisible(*slot);
-    }
-
-    addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
-    addVstButton.onClick = [this] { openPicker(); };
-    addAndMakeVisible(addVstButton);
-
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
-    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 40, 14);
+    gainSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 64, 20);
     gainSlider.setRange(-60.0, 12.0, 0.1);
     gainSlider.setTextValueSuffix(" dB");
     gainSlider.setDoubleClickReturnValue(true, 0.0);
@@ -108,6 +99,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     gainSlider.setColour(juce::Slider::thumbColourId, theme::green());
     gainSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     gainSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    gainSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(gainSlider);
 
     addAndMakeVisible(meter);
@@ -137,12 +129,83 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
+    const auto setupDynamicsButton = [this](EqButton& button,
+                                             pluginrack::DynamicsEffectType type,
+                                             const juce::String& tooltip) {
+        button.setColour(juce::TextButton::buttonColourId, theme::control());
+        button.setColour(juce::TextButton::textColourOffId, theme::text());
+        button.setTooltip(tooltip);
+        button.onClick = [this, type] { toggleDynamicsBypass(type); };
+        button.onRightClick = [this, type] { openDynamicsWindow(type); };
+        addAndMakeVisible(button);
+    };
+    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
+                        "Click: compressor on/off. Right-click: open settings");
+    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
+                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
+    // The gate lives in the compressor panel now, so both right-clicks land there.
+    gateButton.onRightClick = [this] { openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor); };
+    refreshDynamicsButtons();
 
     refreshInserts();
 }
 
 MixerComponent::OutputStrip::~OutputStrip() {
     closeEqWindow();
+    if (dynamicsWindow != nullptr) {
+        delete dynamicsWindow;
+        dynamicsWindow = nullptr;
+    }
+}
+
+void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
+    if (dynamicsWindow != nullptr) {
+        dynamicsWindow->toFront(true);
+        return;
+    }
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    const auto outputId = output.id;
+    auto it = std::find_if(output.effects.begin(), output.effects.end(),
+                           [type](const auto& effect) { return effect.type == type; });
+    if (it == output.effects.end()) return;
+    const auto gateIt = std::find_if(output.effects.begin(), output.effects.end(),
+                                     [](const auto& effect) {
+                                         return effect.type == pluginrack::DynamicsEffectType::Gate;
+                                     });
+    dynamicsWindow = new DynamicsWindow(
+        "Dynamics - " + output.name, *it,
+        [safe, outputId](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->output.effects;
+            const auto found = std::find_if(effects.begin(), effects.end(),
+                                            [&effect](const auto& candidate) {
+                                                return candidate.id == effect.id;
+                                            });
+            if (found != effects.end()) {
+                const bool bypassed = found->bypassed;
+                *found = effect;
+                if (!bypassChanged) found->bypassed = bypassed;
+                safe->audioEngine.setOutputEffects(outputId, effects);
+                safe->refreshDynamicsButtons();
+            }
+        },
+        gateIt != output.effects.end() ? &*gateIt : nullptr);
+    dynamicsWindow->onClose = [safe] {
+        if (safe != nullptr && safe->dynamicsWindow != nullptr) {
+            safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* window = safe->dynamicsWindow;
+            safe->dynamicsWindow = nullptr;
+            delete window;
+        }
+    };
+    dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+        if (safe != nullptr) {
+            safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+            safe->output.analyzerTap.snapshot(false, left, right, frames);
+        }
+    };
+    output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+    dynamicsWindow->setVisible(true);
 }
 
 void MixerComponent::OutputStrip::openEqWindow() {
@@ -187,6 +250,21 @@ void MixerComponent::OutputStrip::openEqWindow() {
     // Same ordering fix as ChannelStrip: start Post-EQ analysis after the
     // tap callbacks are wired, otherwise the mode call addresses no one.
     window->setAnalyzerMode(EQWindow::kAnalyzerPost);
+    // Delay knob, same contract as the channel strip's: seed from the strip
+    // and persist through the engine, engaging the EQ on edit.
+    window->setDelayMs(output.eqDelayMs);
+    window->applyDelayMs = [safe, outputId](float delayMs) {
+        if (safe == nullptr) return;
+        const auto& outs = safe->audioEngine.getOutputs();
+        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                safe->audioEngine.setOutputEqBypassed(i, false);
+                safe->audioEngine.setOutputEqDelay(i, delayMs);
+                break;
+            }
+        }
+        safe->refreshEqButton();
+    };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
@@ -206,6 +284,8 @@ void MixerComponent::OutputStrip::closeEqWindow() {
 void MixerComponent::OutputStrip::refreshEqButton() {
     bool active = false;
     if (!output.eqBypassed.get()) {
+        // A delay-only EQ still does audible work, so it lights the button.
+        active = output.eqDelayMs > 0.0f;
         for (const auto& band : output.eqBands) {
             if (band.enabled) {
                 active = true;
@@ -221,35 +301,76 @@ void MixerComponent::OutputStrip::refreshEqButton() {
     eqButton.setRingVisible(open);
 }
 
+void MixerComponent::OutputStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
+    auto effects = output.effects;
+    const auto found = std::find_if(effects.begin(), effects.end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == effects.end()) return;
+    found->bypassed = !found->bypassed;
+    audioEngine.setOutputEffects(output.id, effects);
+    refreshDynamicsButtons();
+}
+
+void MixerComponent::OutputStrip::refreshDynamicsButtons() {
+    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
+        const auto found = std::find_if(output.effects.begin(), output.effects.end(),
+                                        [type](const auto& effect) { return effect.type == type; });
+        const bool active = found != output.effects.end() && !found->bypassed;
+        if (found != output.effects.end() && dynamicsWindow != nullptr &&
+            dynamicsWindow->getType() == type) {
+            dynamicsWindow->setBypassed(found->bypassed);
+            if (type == pluginrack::DynamicsEffectType::Compressor) {
+                const auto gateIt = std::find_if(
+                    output.effects.begin(), output.effects.end(), [](const auto& effect) {
+                        return effect.type == pluginrack::DynamicsEffectType::Gate;
+                    });
+                if (gateIt != output.effects.end()) dynamicsWindow->setGate(*gateIt);
+            }
+        }
+        button.setColour(juce::TextButton::buttonColourId,
+                         active ? theme::amber() : theme::control());
+        button.setColour(juce::TextButton::textColourOffId,
+                         active ? theme::bg() : theme::text());
+    };
+    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
+    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+}
+
 void MixerComponent::OutputStrip::resized() {
     auto area = getLocalBounds().reduced(4);
-    auto headerRow = area.removeFromTop(22);
-    auto btnArea = headerRow.removeFromRight(22);
-    removeOutputButton.setBounds(btnArea);
-    area.removeFromTop(4);
-    deviceControl.setBounds(area.removeFromTop(40));
+
+    // Same rows and heights as the input strip: cross and flip on the short
+    // action row, name + device under it, then the mode field.
+    auto actionsRow = area.removeFromTop(theme::metrics::kActionH);
+    removeOutputButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
+    actionsRow.removeFromRight(2);
+    flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    area.removeFromTop(2);
+    deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
 
-    auto modeRow = area.removeFromTop(20);
-    modeCombo.setBounds(modeRow.removeFromLeft(modeRow.getWidth() / 2 - 2));
-    modeRow.removeFromLeft(4);
-    flipButton.setBounds(modeRow);
+    modeCombo.setBounds(area.removeFromTop(theme::metrics::kFieldH));
     area.removeFromTop(4);
 
-    // display block: VST slots + EQ
+    // display block: unified 8-slot chain (3 built-in + 5 VST slots).
+    // Rows give height back before they squeeze the fader off the strip.
     vstHeader.setBounds(area.removeFromTop(14));
-    const int slotH = 20;
+    const int reservedBelow = 22 + 4 + 110;
+    const int rowCount = juce::jmax(1, slots.size());
+    const int chainSpace = juce::jmax(0, area.getHeight() - 8 - reservedBelow);
+    const int slotH = juce::jlimit(14, 20, (chainSpace - 2 * rowCount) / rowCount);
     for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
     }
-    addVstButton.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
-    eqButton.setBounds(area.removeFromTop(20));
+    gateButton.setVisible(false);
+    eqButton.setVisible(false);
+    compressorButton.setVisible(false);
     area.removeFromTop(4);
 
-    // mute at very bottom
-    auto muteRow = area.removeFromBottom(22);
+    // mute at very bottom, matching the input strip's mute/solo height
+    auto muteRow = area.removeFromBottom(theme::metrics::kRowH);
     muteButton.setBounds(muteRow);
 
     // fader + meter (shorter, ~half of input height) above mute
@@ -264,6 +385,11 @@ void MixerComponent::OutputStrip::paint(juce::Graphics& g) {
     g.fillAll(theme::strip());
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+    if (chainDropTarget >= 0) {
+        g.setColour(theme::cyan());
+        g.fillRoundedRectangle(4.0f, static_cast<float>(chainBoundaryY(chainDropTarget)),
+                               static_cast<float>(juce::jmax(0, getWidth() - 8)), 2.0f, 1.0f);
+    }
 }
 
 void MixerComponent::OutputStrip::refresh() {
@@ -272,21 +398,47 @@ void MixerComponent::OutputStrip::refresh() {
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
     modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
-    flipButton.setToggleState(output.flipped.get(), juce::dontSendNotification);
+    flipButton.setToggleState(output.flipped.get());
     refreshEqButton();
 }
 
 void MixerComponent::OutputStrip::refreshInserts() {
-    for (int i = 0; i < (int)slots.size(); ++i) {
-        AudioEngine::InsertSlot* ins = nullptr;
-        if (i < (int)output.inserts.size()) ins = output.inserts[i].get();
-        slots[i]->setInsert(ins);
+    chainRowCount = static_cast<int>(output.chain.size());
+    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    while (slots.size() < totalRows) {
+        auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
+        addAndMakeVisible(*slot);
+    }
+    while (slots.size() > totalRows) {
+        removeChildComponent(slots.getLast());
+        slots.removeLast();
+    }
+    for (int i = chainRowCount; i < slots.size(); ++i)
+        slots[i]->setAddSlot(i == chainRowCount);
+    for (int i = 0; i < chainRowCount; ++i) {
+        const auto item = output.chain[static_cast<std::size_t>(i)];
+        if (item.type == pluginrack::ChainItemType::Insert) {
+            auto it = std::find_if(output.inserts.begin(), output.inserts.end(),
+                                   [id = item.id](const auto& insert) { return insert->id == id; });
+            slots[i]->setInsert(it == output.inserts.end() ? nullptr : it->get());
+        } else if (item.type == pluginrack::ChainItemType::Eq) {
+            slots[i]->setBuiltIn(item, "EQ", output.eqBypassed.get());
+        } else {
+            const auto it = std::find_if(output.effects.begin(), output.effects.end(),
+                                         [id = item.id](const auto& effect) { return effect.id == id; });
+            slots[i]->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+                                 it != output.effects.end() && it->bypassed);
+        }
     }
     repaint();
 }
 
 void MixerComponent::OutputStrip::mouseDown(const juce::MouseEvent&) {
     if (onSelected) onSelected();
+}
+
+void MixerComponent::OutputStrip::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onDoubleClicked) onDoubleClicked();
 }
 
 juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
@@ -305,6 +457,68 @@ void MixerComponent::OutputStrip::erasePlugin(std::uint32_t insertId) {
 
 void MixerComponent::OutputStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     audioEngine.setOutputPluginBypassed(output.id, insertId, bypassed);
+}
+
+void MixerComponent::OutputStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
+    audioEngine.moveOutputChainItem(output.id, {pluginrack::ChainItemType::Insert, insertId},
+                                    targetIndex);
+    refreshAfterInsertChange();
+}
+
+void MixerComponent::OutputStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
+    audioEngine.moveOutputChainItem(output.id, item, targetIndex);
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        // Copy the callback: the rebuild destroys this strip.
+        auto callback = safe->onRenamed;
+        safe->chainDropTarget = -1;
+        safe->refreshInserts();
+        if (callback) callback();
+    });
+}
+
+int MixerComponent::OutputStrip::chainBoundaryY(int targetIndex) const {
+    if (chainRowCount <= 0) return vstHeader.getBottom() + 1;
+    const int target = juce::jlimit(0, chainRowCount, targetIndex);
+    if (target < chainRowCount) return juce::jmax(0, slots[target]->getY() - 2);
+    return slots[chainRowCount - 1]->getBottom();
+}
+
+int MixerComponent::OutputStrip::chainDropIndexAt(juce::Point<int> parentPoint) {
+    int index = 0;
+    for (int i = 0; i < chainRowCount; ++i)
+        if (parentPoint.y > slots[i]->getBounds().getCentreY()) index = i + 1;
+    return index;
+}
+
+void MixerComponent::OutputStrip::previewChainItem(int targetIndex) {
+    chainDropTarget = juce::jlimit(0, chainRowCount, targetIndex);
+    repaint();
+}
+
+void MixerComponent::OutputStrip::clearChainPreview() {
+    chainDropTarget = -1;
+    repaint();
+}
+
+void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        audioEngine.setOutputEqBypassed(outputIndex, bypassed);
+        return;
+    }
+    auto effects = output.effects;
+    for (auto& effect : effects)
+        if (effect.id == item.id) effect.bypassed = bypassed;
+    audioEngine.setOutputEffects(output.id, effects);
+}
+
+void MixerComponent::OutputStrip::activateBuiltIn(pluginrack::ChainItem item) {
+    if (item.type == pluginrack::ChainItemType::Eq)
+        openEqWindow();
+    // Gate and Compressor share one panel; it is where the gate row lives.
+    else
+        openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
 }
 
 void MixerComponent::OutputStrip::refreshAfterInsertChange() {
@@ -400,8 +614,8 @@ void MixerComponent::resized() {
 
     // master content
     auto ma = masterPanel.getLocalBounds();
-    masterHeader.setBounds(ma.removeFromTop(24));
-    masterViewport.setBounds(ma);
+    masterHeader.setVisible(false);
+    masterViewport.setBounds(masterPanel.getLocalBounds());
     const int outW = 120;
     const int outGap = 4;
     const int contentW2 = (int)outputStrips.size() * (outW + outGap) + 8;
@@ -447,6 +661,9 @@ void MixerComponent::rebuild() {
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), false);
         };
+        s->onDoubleClicked = [this, id] {
+            if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), false);
+        };
         stripContent.addAndMakeVisible(*s);
     }
 
@@ -474,6 +691,9 @@ void MixerComponent::rebuild() {
         };
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), true);
+        };
+        s->onDoubleClicked = [this, id] {
+            if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), true);
         };
         masterContent.addAndMakeVisible(*s);
     }

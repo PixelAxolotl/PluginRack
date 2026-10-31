@@ -16,11 +16,20 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     deviceControl.setError(channel.inputError);
     refreshInput();
 
-    channelLabel.setText("CH " + juce::String(channel.id), juce::dontSendNotification);
-    channelLabel.setJustificationType(juce::Justification::centredLeft);
-    channelLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
-    channelLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(channelLabel);
+    // The strip header carries the name and the device; the input chip below
+    // states which physical inputs it listens to and turns into the mapping
+    // controls when clicked.
+    inputChip.setColour(juce::TextButton::buttonColourId, theme::control());
+    inputChip.setColour(juce::TextButton::buttonOnColourId, theme::line());
+    inputChip.setColour(juce::TextButton::textColourOffId, theme::text());
+    inputChip.setColour(juce::TextButton::textColourOnId, theme::text());
+    inputChip.setClickingTogglesState(true);
+    inputChip.setTooltip("Input channels - click to change");
+    inputChip.onClick = [this] {
+        inputEditing = inputChip.getToggleState();
+        refreshInput();
+    };
+    addAndMakeVisible(inputChip);
 
     removeChannelButton.setFontSize(13.0f);
     removeChannelButton.setClickAction([this] {
@@ -54,6 +63,9 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
                     }
                 });
             });
+            deviceControl.setOnDoubleClick([this] {
+                if (onDoubleClicked) onDoubleClicked();
+            });
         });
     });
     deviceControl.setOnRename([this] {
@@ -74,11 +86,11 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     });
     addAndMakeVisible(deviceControl);
 
-    modeCombo.addItem("Mono", 1);
-    modeCombo.addItem("Stereo", 2);
+    modeCombo.addItem("MONO", 1);
+    modeCombo.addItem("ST", 2);
     for (int i = 1; i <= 16; ++i) {
-        inputComboA.addItem(juce::String(i), i);
-        inputComboB.addItem(juce::String(i), i);
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
     }
     inputComboA.setTooltip("Physical input for this channel (1-based)");
     inputComboB.setTooltip("Physical input for the right side (1-based)");
@@ -105,23 +117,14 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     vstHeader.setColour(juce::Label::textColourId, theme::violet());
     addAndMakeVisible(vstHeader);
 
-    for (int i = 0; i < 4; ++i) {
-        auto* slot = slots.add(new InsertSlotComponent(*this, i));
-        addAndMakeVisible(*slot);
-    }
-
-    addVstButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    addVstButton.setColour(juce::TextButton::textColourOffId, theme::violet());
-    addVstButton.onClick = [this] { openPicker(); };
-    addAndMakeVisible(addVstButton);
-
+    levelLabel.setText("TRIM", juce::dontSendNotification);
     levelLabel.setJustificationType(juce::Justification::centred);
     levelLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     levelLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(levelLabel);
 
     levelKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
+    levelKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     levelKnob.setRange(-12.0, 12.0, 0.1);
     levelKnob.setTextValueSuffix(" dB");
     levelKnob.setDoubleClickReturnValue(true, 0.0);
@@ -133,15 +136,17 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     levelKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::deepGreen());
     levelKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     levelKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    levelKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(levelKnob);
 
+    panLabel.setText("PAN", juce::dontSendNotification);
     panLabel.setJustificationType(juce::Justification::centred);
     panLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     panLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(panLabel);
 
     panKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 16);
+    panKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
     panKnob.setRange(-1.0, 1.0, 0.01);
     panKnob.setDoubleClickReturnValue(true, 0.0);
     panKnob.setValue(channel.pan.get(), juce::dontSendNotification);
@@ -152,12 +157,13 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     panKnob.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
     panKnob.setColour(juce::Slider::textBoxTextColourId, theme::text());
     panKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    panKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(panKnob);
 
     rebuildRoutingButtons();
 
     faderSlider.setSliderStyle(juce::Slider::LinearVertical);
-    faderSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 44, 16);
+    faderSlider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 64, 20);
     faderSlider.setRange(-60.0, 12.0, 0.1);
     faderSlider.setTextValueSuffix(" dB");
     faderSlider.setDoubleClickReturnValue(true, 0.0);
@@ -170,6 +176,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     faderSlider.setColour(juce::Slider::thumbColourId, theme::green());
     faderSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     faderSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    faderSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(faderSlider);
 
     addAndMakeVisible(levelMeter);
@@ -208,6 +215,23 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     };
     addAndMakeVisible(eqButton);
     refreshEqButton();
+    const auto setupDynamicsButton = [this](EqButton& button,
+                                             pluginrack::DynamicsEffectType type,
+                                             const juce::String& tooltip) {
+        button.setColour(juce::TextButton::buttonColourId, theme::control());
+        button.setColour(juce::TextButton::textColourOffId, theme::text());
+        button.setTooltip(tooltip);
+        button.onClick = [this, type] { toggleDynamicsBypass(type); };
+        button.onRightClick = [this, type] { openDynamicsWindow(type); };
+        addAndMakeVisible(button);
+    };
+    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
+                        "Click: compressor on/off. Right-click: open settings");
+    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
+                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
+    // The gate lives in the compressor panel now, so both right-clicks land there.
+    gateButton.onRightClick = [this] { openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor); };
+    refreshDynamicsButtons();
 
     refreshInserts();
     refreshRouting();
@@ -216,6 +240,62 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
 ChannelStrip::~ChannelStrip() {
     closeEqWindow();
+    if (dynamicsWindow != nullptr) {
+        delete dynamicsWindow;
+        dynamicsWindow = nullptr;
+    }
+}
+
+void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
+    if (dynamicsWindow != nullptr) {
+        dynamicsWindow->toFront(true);
+        return;
+    }
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
+                           [type](const auto& effect) { return effect.type == type; });
+    if (it == channel.effects.end()) return;
+    const auto gateIt = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                     [](const auto& effect) {
+                                         return effect.type == pluginrack::DynamicsEffectType::Gate;
+                                     });
+    dynamicsWindow = new DynamicsWindow(
+        "Dynamics - " + juce::String(it->type == pluginrack::DynamicsEffectType::Compressor
+                                         ? "Compressor"
+                                         : "Gate"),
+        *it,
+        [safe](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->channel.effects;
+            const auto found = std::find_if(effects.begin(), effects.end(),
+                                            [&effect](const auto& candidate) {
+                                                return candidate.id == effect.id;
+                                            });
+            if (found != effects.end()) {
+                const bool bypassed = found->bypassed;
+                *found = effect;
+                if (!bypassChanged) found->bypassed = bypassed;
+                safe->audioEngine.setChannelEffects(safe->channel.id, effects);
+                safe->refreshDynamicsButtons();
+            }
+        },
+        gateIt != channel.effects.end() ? &*gateIt : nullptr);
+    dynamicsWindow->onClose = [safe] {
+        if (safe != nullptr && safe->dynamicsWindow != nullptr) {
+            safe->channel.analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* window = safe->dynamicsWindow;
+            safe->dynamicsWindow = nullptr;
+            delete window;
+        }
+    };
+    dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+        if (safe != nullptr) {
+            safe->channel.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+            safe->channel.analyzerTap.snapshot(false, left, right, frames);
+        }
+    };
+    channel.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+    dynamicsWindow->setVisible(true);
 }
 
 void ChannelStrip::openEqWindow() {
@@ -257,6 +337,16 @@ void ChannelStrip::openEqWindow() {
     // call forwards into the ring, and before this point it addressed no one
     // (this ordering was the "dead RTA until mode toggle" bug). Fixed Post.
     window->setAnalyzerMode(EQWindow::kAnalyzerPost);
+    // Delay knob: seeded from the strip, persisted through the engine.
+    // Editing engages the EQ like a band drag does, so the new delay is
+    // audible in the window the user is looking at.
+    window->setDelayMs(channel.eqDelayMs);
+    window->applyDelayMs = [safe](float delayMs) {
+        if (safe == nullptr) return;
+        safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
+        safe->audioEngine.setChannelEqDelay(safe->channel.id, delayMs);
+        safe->refreshEqButton();
+    };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
@@ -276,6 +366,8 @@ void ChannelStrip::closeEqWindow() {
 void ChannelStrip::refreshEqButton() {
     bool active = false;
     if (!channel.eqBypassed.get()) {
+        // A delay-only EQ still does audible work, so it lights the button.
+        active = channel.eqDelayMs > 0.0f;
         for (const auto& band : channel.eqBands) {
             if (band.enabled) {
                 active = true;
@@ -291,66 +383,103 @@ void ChannelStrip::refreshEqButton() {
     eqButton.setRingVisible(open);
 }
 
+void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
+    auto effects = channel.effects;
+    const auto found = std::find_if(effects.begin(), effects.end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == effects.end()) return;
+    found->bypassed = !found->bypassed;
+    audioEngine.setChannelEffects(channel.id, effects);
+    refreshDynamicsButtons();
+}
+
+void ChannelStrip::refreshDynamicsButtons() {
+    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
+        const auto found = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                        [type](const auto& effect) { return effect.type == type; });
+        const bool active = found != channel.effects.end() && !found->bypassed;
+        if (found != channel.effects.end() && dynamicsWindow != nullptr &&
+            dynamicsWindow->getType() == type) {
+            dynamicsWindow->setBypassed(found->bypassed);
+            if (type == pluginrack::DynamicsEffectType::Compressor) {
+                const auto gateIt = std::find_if(
+                    channel.effects.begin(), channel.effects.end(), [](const auto& effect) {
+                        return effect.type == pluginrack::DynamicsEffectType::Gate;
+                    });
+                if (gateIt != channel.effects.end()) dynamicsWindow->setGate(*gateIt);
+            }
+        }
+        button.setColour(juce::TextButton::buttonColourId,
+                         active ? theme::amber() : theme::control());
+        button.setColour(juce::TextButton::textColourOffId,
+                         active ? theme::bg() : theme::text());
+    };
+    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
+    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+}
+
 void ChannelStrip::resized() {
     auto area = getLocalBounds().reduced(4);
 
-    // header row: CH label, SPLIT, X
-    auto headerRow = area.removeFromTop(22);
-    auto btnArea = headerRow.removeFromRight(22);
-    auto splitArea = headerRow.removeFromRight(48);
-    channelLabel.setBounds(headerRow);
-    removeChannelButton.setBounds(btnArea);
-    splitButton.setBounds(splitArea);
+    // Header: the strip's own buttons take a short row of their own so the
+    // channel name keeps the full width instead of collapsing to "Cha...".
+    auto actionsRow = area.removeFromTop(theme::metrics::kActionH);
+    removeChannelButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
+    actionsRow.removeFromRight(2);
+    splitButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    area.removeFromTop(2);
+    deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
 
-    // Input source row (Input v)
-    deviceControl.setBounds(area.removeFromTop(32));
-    area.removeFromTop(4);
-
-    // input channel mapping row
-    auto inputRow = area.removeFromTop(20);
-    inputRow.removeFromTop(1);
-    modeCombo.setBounds(inputRow.removeFromLeft(58));
-    if (inputComboB.isVisible()) {
-        inputComboB.setBounds(inputRow.removeFromRight(34));
-        inputRow.removeFromRight(4);
+    // Input chip, or the mapping controls it swaps into when clicked.
+    auto inputRow = area.removeFromTop(theme::metrics::kFieldH);
+    if (inputEditing) {
+        modeCombo.setBounds(inputRow.removeFromLeft(44));
+        inputRow.removeFromLeft(2);
+        inputComboA.setBounds(inputRow.removeFromLeft(36));
+        inputRow.removeFromLeft(2);
+        if (inputComboB.isVisible()) {
+            inputComboB.setBounds(inputRow.removeFromLeft(36));
+            inputRow.removeFromLeft(2);
+        }
+        inputChip.setBounds(inputRow);
+    } else {
+        inputChip.setBounds(inputRow);
     }
-    inputComboA.setBounds(inputRow.removeFromRight(34));
     if (inputErrorLabel.isVisible()) {
         inputErrorLabel.setBounds(area.removeFromTop(14));
     }
     area.removeFromTop(2);
 
-    // Gain row: trim knob (left) + mono combo (right)
+    gateButton.setVisible(false);
+    eqButton.setVisible(false);
+    compressorButton.setVisible(false);
+
+    // Trim and Pan share one row, above the chain: the first two things a
+    // channel is reached for sit where the eye lands, not below eight slots.
     auto gainRow = area.removeFromTop(74);
-    auto gainLeft = gainRow.removeFromLeft((gainRow.getWidth() * 2) / 5);
+    const int knobCellW = (gainRow.getWidth() - 4) / 2;
+    auto trimCell = gainRow.removeFromLeft(knobCellW);
     gainRow.removeFromLeft(4);
-    levelLabel.setBounds(gainLeft.removeFromTop(14));
-    levelKnob.setBounds(gainLeft.reduced(2));
-    // right side: mono combo at top (wireframe "mono v")
-    modeCombo.setBounds(gainRow.removeFromTop(20)); // reuse mode combo? already placed; keep here instead
-    // (modeCombo already positioned above; re-position is fine, last wins)
-    gainRow.removeFromTop(4);
-    // input combos already placed above; leave remaining
+    auto panCell = gainRow.removeFromLeft(knobCellW);
+    levelLabel.setBounds(trimCell.removeFromTop(14));
+    levelKnob.setBounds(trimCell.reduced(2));
+    panLabel.setBounds(panCell.removeFromTop(14));
+    panKnob.setBounds(panCell.reduced(2));
     area.removeFromTop(4);
 
-    // Pan row: pan knob (left) + EQ button (right)
-    auto panRow = area.removeFromTop(74);
-    auto panLeft = panRow.removeFromLeft((panRow.getWidth() * 2) / 5);
-    panRow.removeFromLeft(4);
-    panLabel.setBounds(panLeft.removeFromTop(14));
-    panKnob.setBounds(panLeft.reduced(2));
-    eqButton.setBounds(panRow.removeFromTop(24));
-    area.removeFromTop(4);
-
-    // Plugin / insert slot container
+    // Unified built-in and VST chain: 3 built-ins + 5 VST slots, always.
+    // The rows give height back before they squeeze the fader out of the strip.
     vstHeader.setBounds(area.removeFromTop(14));
-    const int slotH = 20;
+    const int routingRows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
+    const int reservedBelow = routingRows * 20 + 4 + 150;  // routing + fader
+    const int rowCount = juce::jmax(1, slots.size());
+    const int chainSpace = juce::jmax(0, area.getHeight() - 4 - reservedBelow);
+    const int slotH = juce::jlimit(14, 20, (chainSpace - 2 * rowCount) / rowCount);
     for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
         area.removeFromTop(2);
     }
-    addVstButton.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
 
     // routing buttons (compact)
@@ -368,7 +497,7 @@ void ChannelStrip::resized() {
     area.removeFromTop(4);
 
     // fader + meter (bottom, dominant)
-    auto footer = area.removeFromBottom(30); // M / S
+    auto footer = area.removeFromBottom(theme::metrics::kRowH); // M / S
     const int half = (footer.getWidth() - 4) / 2;
     auto fm = area;
     const int meterW = 12;
@@ -382,11 +511,32 @@ void ChannelStrip::resized() {
 }
 
 void ChannelStrip::refreshInserts() {
-    // update slots
-    for (int i = 0; i < slots.size(); ++i) {
-        AudioEngine::InsertSlot* ins = nullptr;
-        if (i < (int)channel.inserts.size()) ins = channel.inserts[i].get();
-        slots[i]->setInsert(ins);
+    chainRowCount = static_cast<int>(channel.chain.size());
+    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    while (slots.size() < totalRows) {
+        auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
+        addAndMakeVisible(*slot);
+    }
+    while (slots.size() > totalRows) {
+        removeChildComponent(slots.getLast());
+        slots.removeLast();
+    }
+    for (int i = chainRowCount; i < slots.size(); ++i)
+        slots[i]->setAddSlot(i == chainRowCount);
+    for (int i = 0; i < chainRowCount; ++i) {
+        const auto item = channel.chain[static_cast<std::size_t>(i)];
+        if (item.type == pluginrack::ChainItemType::Insert) {
+            auto it = std::find_if(channel.inserts.begin(), channel.inserts.end(),
+                                   [id = item.id](const auto& insert) { return insert->id == id; });
+            slots[i]->setInsert(it == channel.inserts.end() ? nullptr : it->get());
+        } else if (item.type == pluginrack::ChainItemType::Eq) {
+            slots[i]->setBuiltIn(item, "EQ", channel.eqBypassed.get());
+        } else {
+            const auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                         [id = item.id](const auto& effect) { return effect.id == id; });
+            slots[i]->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+                                 it != channel.effects.end() && it->bypassed);
+        }
     }
     const auto hottest = audioEngine.getHighestLatencyInsert(channel.id);
     if (hottest.latencySamples > 0) {
@@ -418,12 +568,21 @@ void ChannelStrip::refreshRouting() {
 
 void ChannelStrip::refreshInput() {
     const bool mono = channel.layout == pluginrack::ChannelLayout::Mono;
+    const bool hasInputDevice = channel.inputDeviceName.isNotEmpty();
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
     inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
     const int b = channel.inputChannels.size() > 1 ? channel.inputChannels[1] + 1 : a;
     inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
-    inputComboB.setVisible(!mono);
+    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    if (!hasInputDevice) inputChip.setButtonText("No input");
+    else if (inputEditing) inputChip.setButtonText("Done");
+    else if (mono) inputChip.setButtonText(aText);
+    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+    inputChip.setToggleState(inputEditing, juce::dontSendNotification);
+    modeCombo.setVisible(hasInputDevice && inputEditing);
+    inputComboA.setVisible(hasInputDevice && inputEditing);
+    inputComboB.setVisible(hasInputDevice && inputEditing && !mono);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
     inputErrorLabel.setText(channel.inputError, juce::dontSendNotification);
@@ -531,6 +690,68 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     audioEngine.setPluginBypassed(channel.id, insertId, bypassed);
 }
 
+void ChannelStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
+    audioEngine.moveChannelChainItem(channel.id, {pluginrack::ChainItemType::Insert, insertId},
+                                     targetIndex);
+    refreshAfterInsertChange();
+}
+
+void ChannelStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
+    audioEngine.moveChannelChainItem(channel.id, item, targetIndex);
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        // Copy the callback: the rebuild destroys this strip.
+        auto callback = safe->rebuildCallback;
+        safe->chainDropTarget = -1;
+        safe->refreshInserts();
+        if (callback) callback();
+    });
+}
+
+int ChannelStrip::chainBoundaryY(int targetIndex) const {
+    if (chainRowCount <= 0) return vstHeader.getBottom() + 1;
+    const int target = juce::jlimit(0, chainRowCount, targetIndex);
+    if (target < chainRowCount) return juce::jmax(0, slots[target]->getY() - 2);
+    return slots[chainRowCount - 1]->getBottom();
+}
+
+int ChannelStrip::chainDropIndexAt(juce::Point<int> parentPoint) {
+    int index = 0;
+    for (int i = 0; i < chainRowCount; ++i)
+        if (parentPoint.y > slots[i]->getBounds().getCentreY()) index = i + 1;
+    return index;
+}
+
+void ChannelStrip::previewChainItem(int targetIndex) {
+    chainDropTarget = juce::jlimit(0, chainRowCount, targetIndex);
+    repaint();
+}
+
+void ChannelStrip::clearChainPreview() {
+    chainDropTarget = -1;
+    repaint();
+}
+
+void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        audioEngine.setChannelEqBypassed(channel.id, bypassed);
+        return;
+    }
+    auto effects = channel.effects;
+    for (auto& effect : effects)
+        if (effect.id == item.id) effect.bypassed = bypassed;
+    audioEngine.setChannelEffects(channel.id, effects);
+}
+
+void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {
+    if (item.type == pluginrack::ChainItemType::Eq)
+        openEqWindow();
+    // Gate and Compressor share one panel; it is where the gate row lives.
+    else
+        openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
+}
+
 void ChannelStrip::refreshAfterInsertChange() {
     refreshInserts();
     juce::Component::SafePointer<ChannelStrip> safe(this);
@@ -572,11 +793,23 @@ void ChannelStrip::rebuildRoutingButtons() {
 
 void ChannelStrip::paint(juce::Graphics& g) {
     g.fillAll(theme::strip());
+    auto content = getLocalBounds().reduced(1);
+    g.setColour(theme::panel().withAlpha(0.42f));
+    g.fillRect(content.removeFromTop(24));
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+    if (chainDropTarget >= 0) {
+        g.setColour(theme::cyan());
+        g.fillRoundedRectangle(4.0f, static_cast<float>(chainBoundaryY(chainDropTarget)),
+                               static_cast<float>(juce::jmax(0, getWidth() - 8)), 2.0f, 1.0f);
+    }
 }
 
 void ChannelStrip::mouseDown(const juce::MouseEvent&) {
     if (onSelected) onSelected();
+}
+
+void ChannelStrip::mouseDoubleClick(const juce::MouseEvent&) {
+    if (onDoubleClicked) onDoubleClicked();
 }

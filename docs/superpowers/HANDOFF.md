@@ -54,7 +54,27 @@ See `docs/superpowers/plans/2026-10-29-pending-tasks.md` for full list. Summary:
 
 4. **Latency Task 7 (formal)**: Already satisfied (build clean + tests pass + exe shipped).
 
-### How to Build
+#### Audio stability (2026-10-31)
+
+- `InputCapture` is lock-free on the writer side and reads through
+  `pluginrack::CaptureReadCursor` (`core/include/pluginrack/CaptureCursor.h`):
+  a fixed two-device-buffer delay with drift-corrected fractional reads, so
+  input/output callback phase jitter can no longer repeat or skip a whole
+  block (the old "read the newest frames" behaviour). New counters:
+  `getInputUnderruns()`, `getInputOverruns()`, `getInputDroppedFrames()`.
+- `OutputPlayback` keeps a four-buffer target fill, counts low-watermark
+  **events** (not every callback), fades short reads to silence and ramps
+  back in, and `pushSilence()` tops the FIFO back up on a render miss.
+- `AudioEngine::render` uses a bounded `BriefTryLock`: short UI critical
+  sections become a small render delay instead of a dropped block. On a real
+  miss it feeds faded silence from a lock-free published playback snapshot
+  (`renderOutputs_`, with retirements kept alive in `retiredOutputs_`).
+- Plugin `prepareToPlay`/`releaseResources` now run outside `stateLock`, so a
+  device reopen or scene restore no longer starves every output.
+- Tests: `tests/test_capture_cursor.cpp` (real cursor unit tests) plus the
+  updated static invariants in `tests/test_underrun_paths.cpp`.
+
+## How to Build
 
 ```powershell
 # Set up MSVC environment

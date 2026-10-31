@@ -82,7 +82,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         channelIndex.emplace(channel.id, i);
         const float theta = (channel.pan + 1.0f) * kPi / 4.0f;
         ChannelCache cache;
-        cache.gain = dbToLinear(channel.gainDb);
+        cache.gain = dbToLinear(channel.gainDb + channel.trimDb);
         cache.panLeft = std::cos(theta);
         cache.panRight = std::sin(theta);
         cache.muted = channel.muted;
@@ -92,6 +92,14 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     }
     for (std::size_t i = 0; i < scene.outputs.size(); ++i) {
         outputIndex.emplace(scene.outputs[i].id, i);
+    }
+    outputGains_.clear();
+    outputGains_.reserve(scene.outputs.size());
+    outputMuted_.clear();
+    outputMuted_.reserve(scene.outputs.size());
+    for (const Output& output : scene.outputs) {
+        outputGains_.push_back(dbToLinear(output.gainDb));
+        outputMuted_.push_back(output.muted ? 1 : 0);
     }
 
     routes_.clear();
@@ -138,17 +146,43 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         EqEngine eq;
         eq.prepare(scene.sampleRate, maxFrames);
         eq.setBands(channel.eqBands);
+        eq.setDelayMs(channel.eqDelayMs);
         eqState_->channelEqs.push_back(std::move(eq));
         eqState_->channelEqEnabled.push_back(channel.eqEnabled ? 1 : 0);
     }
     eqState_->outputEqs.reserve(scene.outputs.size());
     eqState_->outputEqEnabled.reserve(scene.outputs.size());
+    eqState_->channelEffects.reserve(scene.channels.size());
     for (const Output& output : scene.outputs) {
         EqEngine eq;
         eq.prepare(scene.sampleRate, maxFrames);
         eq.setBands(output.eqBands);
+        eq.setDelayMs(output.eqDelayMs);
         eqState_->outputEqs.push_back(std::move(eq));
         eqState_->outputEqEnabled.push_back(output.eqEnabled ? 1 : 0);
+    }
+    eqState_->outputEffects.reserve(scene.outputs.size());
+    for (const Channel& channel : scene.channels) {
+        std::vector<DynamicsProcessor> processors;
+        processors.reserve(channel.effects.size());
+        for (const auto& effect : channel.effects) {
+            DynamicsProcessor processor;
+            processor.prepare(scene.sampleRate);
+            processor.setEffect(effect);
+            processors.push_back(std::move(processor));
+        }
+        eqState_->channelEffects.push_back(std::move(processors));
+    }
+    for (const Output& output : scene.outputs) {
+        std::vector<DynamicsProcessor> processors;
+        processors.reserve(output.effects.size());
+        for (const auto& effect : output.effects) {
+            DynamicsProcessor processor;
+            processor.prepare(scene.sampleRate);
+            processor.setEffect(effect);
+            processors.push_back(std::move(processor));
+        }
+        eqState_->outputEffects.push_back(std::move(processors));
     }
 
     stoppedChannels_.assign(channels_.size(), 0);
@@ -322,6 +356,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 flushNonFinite(scratchLeft, scratchRight, frames);
                 eqState_->channelEqs[c].process(scratchLeft, scratchRight, frames);
             }
+            if (c < eqState_->channelEffects.size()) {
+                for (auto& effect : eqState_->channelEffects[c])
+                    effect.process(scratchLeft, scratchRight, frames);
+            }
         }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
@@ -386,16 +424,19 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     if (eqState_ != nullptr) {
         std::scoped_lock lock(eqState_->mutex);
         for (std::size_t o = 0; o < numOutputs; ++o) {
-            if (o >= eqState_->outputEqEnabled.size() ||
-                eqState_->outputEqEnabled[o] == 0 || o >= eqState_->outputEqs.size()) {
-                continue;
-            }
             const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
             float* accLeft =
                 accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
             float* accRight = accLeft + maxFrames;
-            flushNonFinite(accLeft, accRight, frames);
-            eqState_->outputEqs[o].process(accLeft, accRight, frames);
+            if (o < eqState_->outputEqEnabled.size() &&
+                eqState_->outputEqEnabled[o] != 0 && o < eqState_->outputEqs.size()) {
+                flushNonFinite(accLeft, accRight, frames);
+                eqState_->outputEqs[o].process(accLeft, accRight, frames);
+            }
+            if (o < eqState_->outputEffects.size()) {
+                for (auto& effect : eqState_->outputEffects[o])
+                    effect.process(accLeft, accRight, frames);
+            }
         }
     }
 
@@ -418,10 +459,13 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         const float* accLeft =
             accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
         const float* accRight = accLeft + maxFrames;
+        const bool outMuted = o < outputMuted_.size() && outputMuted_[o] != 0;
+        const float outGain =
+            outMuted ? 0.0f : (o < outputGains_.size() ? outputGains_[o] : 1.0f);
         float outputPeak = 0.0f;
         for (int i = 0; i < frames; ++i) {
-            const float left = std::fabs(accLeft[i]);
-            const float right = std::fabs(accRight[i]);
+            const float left = std::fabs(accLeft[i] * outGain);
+            const float right = std::fabs(accRight[i] * outGain);
             if (left > outputPeak) {
                 outputPeak = left;
             }
@@ -437,24 +481,24 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         }
         const bool disabled = o < disabledOutputs_.size() && disabledOutputs_[o] != 0;
         if (output.numChannels >= 1 && output.channels[0] != nullptr) {
-            if (disabled) {
+            if (disabled || outGain == 0.0f) {
                 for (int i = 0; i < frames; ++i) {
                     output.channels[0][i] = 0.0f;
                 }
             } else {
                 for (int i = 0; i < frames; ++i) {
-                    output.channels[0][i] = accLeft[i];
+                    output.channels[0][i] = accLeft[i] * outGain;
                 }
             }
         }
         if (output.numChannels >= 2 && output.channels[1] != nullptr) {
-            if (disabled) {
+            if (disabled || outGain == 0.0f) {
                 for (int i = 0; i < frames; ++i) {
                     output.channels[1][i] = 0.0f;
                 }
             } else {
                 for (int i = 0; i < frames; ++i) {
-                    output.channels[1][i] = accRight[i];
+                    output.channels[1][i] = accRight[i] * outGain;
                 }
             }
         }

@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -73,6 +74,7 @@ public:
         juce::Atomic<bool> soloed{false};
         juce::Atomic<float> peak{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
+        std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
         // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
@@ -82,6 +84,11 @@ public:
         // UI can read them without the lock.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
+        // like eqBands, mirrored into eq via setDelayMs under stateLock.
+        float eqDelayMs = 0.0f;
+        std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
+        std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
@@ -104,11 +111,15 @@ public:
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
         juce::Atomic<bool> flipped{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
+        std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        float eqDelayMs = 0.0f; // post-EQ delay, same rules as Channel
+        std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
+        std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
@@ -148,6 +159,7 @@ public:
 
     struct FifoDiagnostics {
         std::uint64_t inputOverruns = 0;
+        std::uint64_t inputUnderruns = 0;
         std::uint64_t inputDroppedFrames = 0;
         std::uint64_t outputUnderruns = 0;
         std::uint64_t outputDroppedFrames = 0;
@@ -185,11 +197,13 @@ public:
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
+    void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
     juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
     struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
+    void moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item, int targetIndex);
 
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);
@@ -216,11 +230,19 @@ public:
     // (bypass state kept) and rebuild coefficients on the message thread
     // under stateLock; the bypass setters take effect live, no re-prepare,
     // and reset filter state when engaging so re-enabling starts clean.
+    // The delay setters size the line on first use and glide the read
+    // distance, so they are equally safe to call while render() runs.
     // Outputs are indexed by scene-order position like core; channels by id.
     void setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands);
     void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
+    void setChannelEqDelay(std::uint32_t channelId, float delayMs);
     void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(int outIdx, bool bypassed);
+    void setOutputEqDelay(int outIdx, float delayMs);
+    void setChannelEffects(std::uint32_t channelId,
+                           const std::vector<pluginrack::DynamicsEffect>& effects);
+    void setOutputEffects(std::uint32_t outputId,
+                          const std::vector<pluginrack::DynamicsEffect>& effects);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
@@ -266,11 +288,13 @@ private:
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
-    // Audio-thread silence feed: pushes the pre-allocated silenceBuffer_ to
-    // every open output. Never allocates; used by render() when it loses the
-    // state lock or gets an oversized block.
+    // Audio-thread silence feed: pushes a fade-to-silence block to every
+    // published output. Never allocates and never takes stateLock, so it also
+    // works on the render-miss path when the message thread holds the lock.
     void pushSilenceToOutputs(int frames);
     void pushSilenceToOutputsLocked(int frames);
+    // Rebuilds the lock-free playback snapshot. Requires stateLock.
+    void publishRenderOutputsLocked();
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
@@ -285,6 +309,8 @@ private:
         // Buffer size the capture was opened with. Drivers may clamp to the
         // nearest supported size, so reuse compares requests, not actuals.
         int requestedBufferSize = 0;
+        // Render block the ring was sized for; growing past it needs a reopen.
+        int renderBlockFrames = 0;
     };
 
     // Removed plugins stay alive until the audio engine is destroyed. Some
@@ -308,11 +334,16 @@ private:
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
-    // Read-only silent scratch for render()'s lock-loss and oversized-block
-    // paths. Allocated once at construction and never resized: the lock-loss
-    // path reads it while prepareToPlay may hold stateLock on the UI thread.
-    // 16384 frames covers every block size the UI offers (max 2048) 8-fold.
-    juce::AudioBuffer<float> silenceBuffer_{ 2, 16384 };
+    // Lock-free playback snapshot for the render-miss silence path. Slots are
+    // published under stateLock and never freed until the engine is destroyed
+    // (retiredOutputs_), so the audio thread can load a pointer and push to it
+    // without racing an output swap. Closed playbacks ignore the push.
+    static constexpr std::size_t kMaxRenderOutputs = 64;
+    std::array<std::atomic<OutputPlayback*>, kMaxRenderOutputs> renderOutputs_{};
+    std::vector<std::unique_ptr<OutputPlayback>> retiredOutputs_;
+    // Incremented once per rendered block; channels sharing an InputCapture
+    // use it to read one window per block instead of consuming it per channel.
+    std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
 

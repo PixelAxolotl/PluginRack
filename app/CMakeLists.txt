@@ -22,6 +22,10 @@ target_sources(pluginrack_app PRIVATE
     src/DeviceMenu.cpp
     src/InsertHost.h
     src/DeviceMenu.h
+    src/DynamicsWindow.cpp
+    src/DynamicsWindow.h
+    src/DynamicsCurveComponent.cpp
+    src/DynamicsCurveComponent.h
     src/DeviceStream.cpp
     src/DeviceStream.h
     src/EQCurveComponent.cpp

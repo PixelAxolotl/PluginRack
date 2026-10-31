@@ -65,6 +65,8 @@ private:
 // open time (same semantics as the title), and every edit funnels through
 // applyBands, which the owner wires to setChannelEq/setOutputEq plus
 // refreshEqButton so the strip's amber state tracks in-window changes.
+// The Delay knob is per-EQ, not per-band: it routes through applyDelayMs to
+// the owner's setChannelEqDelay/setOutputEqDelay (0..1000 ms).
 // sampleRateHz is the owner's live device rate at open, injected into the
 // curve's magnitude maths so the drawn response matches the engine's.
 //
@@ -101,33 +103,41 @@ public:
     std::function<void(bool postEq, float* destL, float* destR)> pullAnalyzerTap;
     std::function<void(int mode)> setAnalyzerTapMode;
 
+    // Delay knob wiring: the owner seeds the current value with setDelayMs()
+    // and persists edits through applyDelayMs (0..EqEngine::kMaxDelayMs).
+    std::function<void(float delayMs)> applyDelayMs;
+    void setDelayMs(float delayMs);
+
     // Switches between kAnalyzerOff/Pre/Post; button clicks route through it.
     void setAnalyzerMode(int mode);
 
     void closeButtonPressed() override;
     void resized() override;
+    void paint(juce::Graphics& g) override;
 
     std::function<void()> onCloseRequest;
 
 private:
     void timerCallback() override;
     void applyFromControls(); // knob/button edits -> curve repaint + apply
+    void applyDelayFromControl(); // delay knob -> owner (not a band value)
     void syncControls();      // reflect the selected band into knobs/buttons
 
     EQCurveComponent curve;
     std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands;
     bool embedded = false;
 
-    MiniButton autoButton{"Auto"};        // visual only in v1 (plan, Task 5)
     MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
     MiniButton soloButton{"Solo"};        // selected band solo toggle
     juce::Label stereoTag{"", "Stereo"};  // visual only in v1 (plan, Task 5)
     juce::Label freqLabel{"", "Freq"};
     juce::Label gainLabel{"", "Gain"};
     juce::Label qLabel{"", "Q"};
+    juce::Label delayLabel{"", "Delay"};
     juce::Slider freqKnob;
     juce::Slider gainKnob;
     juce::Slider qKnob;
+    juce::Slider delayKnob;
 
     // Analyzer state, all sized once at construction (message thread): one
     // FFT instance per open window (spec), reused every tick.
