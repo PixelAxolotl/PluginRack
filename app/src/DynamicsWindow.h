@@ -76,6 +76,10 @@ private:
     bool hasGate = false;
     pluginrack::DynamicsEffect gateEffect;
     juce::Label gateCaption{"", "GATE"};
+    // The gate is bypassed by default and the strip's chain row is its only
+    // other switch, so the panel needs its own enable control: without one the
+    // gate knobs change a processor that never runs.
+    juce::TextButton gateEnableButton{"Enable"};
     juce::Label gateThresholdLabel{"", "Threshold"};
     juce::Label gateRangeLabel{"", "Range"};
     juce::Label gateAttackLabel{"", "Attack"};
