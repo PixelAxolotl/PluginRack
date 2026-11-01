@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "AudioEngine.h"
+#include "IoView.h"
 #include "MixerComponent.h"
 #include "RackView.h"
 #include "RoutingMatrixComponent.h"
@@ -13,7 +14,7 @@
 #include "SettingsView.h"
 #include "Theme.h"
 
-enum class AppView { Rack = 0, Mixer, Routing, Saves, Settings };
+enum class AppView { Rack = 0, Mixer, Routing, IO, Saves, Settings };
 
 // Persistent 56 px header: wordmark, view navigation, snapshot placeholder,
 // audio status, error affordance, scene buttons. Paints the same bar the
@@ -45,6 +46,7 @@ private:
     juce::TextButton racksButton{"Racks"};
     juce::TextButton mixerButton{"Mixer"};
     juce::TextButton routingButton{"Routing"};
+    juce::TextButton ioButton{"I/O"};
     juce::TextButton settingsButton{"Settings"};
     juce::TextButton snapshotButton{"Snapshot"};
     juce::Label latencyLabel;
@@ -103,6 +105,7 @@ private:
     MixerComponent& mixerView;
     RackView rackView;
     RoutingMatrixComponent routingView;
+    IoView ioView;
     SavesView savesView;
     SettingsView settingsView;
     AppView currentView = AppView::Rack;

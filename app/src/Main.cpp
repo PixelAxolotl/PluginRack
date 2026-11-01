@@ -64,6 +64,8 @@ public:
                 if (tok == "mixer") shotView = AppView::Mixer;
                 else if (tok == "rack" || tok == "racks") shotView = AppView::Rack;
                 else if (tok == "routing") shotView = AppView::Routing;
+                else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
+                else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
                 else if (tok.containsOnly("0123456789")) {
                     if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
