@@ -126,9 +126,10 @@ private:
     void saveSceneAs();
     void loadScene(bool showMissingMessage);
     // Applies a parsed scene on the message thread and returns plugin load
-    // errors. Guarded by sceneLoading_; callers run it directly (the engine
-    // parks the audio clock around the strip swap, so it is brief).
-    juce::String applyScene(const pluginrack::Scene& scene);
+    // errors. Guarded by sceneLoading_; callers run it directly (the strip
+    // swap itself is brief). openDevicesNow=false defers the stream opens to
+    // the engine's startup worker so the UI is not blocked by slow drivers.
+    juce::String applyScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
     void showSavesMenu();
     void showMenu();
     void showAudioErrors();
@@ -144,6 +145,9 @@ private:
     ViewRouter router;
     double smoothedLatencyMs = -1.0;
     std::atomic<bool> sceneLoading_{false};
+    // Startup: the audio restore is queued from the first paint, never from
+    // the constructor, so the window is on screen before any device work.
+    bool audioInitQueued_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

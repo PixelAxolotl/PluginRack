@@ -29,7 +29,12 @@ public:
                       int numChannelsNeeded,
                       juce::String& errorOut,
                       int requestedBufferSize = 0,
-                      int renderBlockFrames = 0);
+                      int renderBlockFrames = 0,
+                      // Read delay in render blocks: 2 absorbs callback phase
+                      // jitter, 1 is the low-latency choice.
+                      int readDelayBlocks = 2,
+                      // Try exclusive mode before the shared modes.
+                      bool preferExclusive = false);
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
@@ -144,7 +149,17 @@ public:
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
-                      int requestedBufferSize = 0);
+                      int requestedBufferSize = 0,
+                      // FIFO depth to keep filled, in device buffers. The
+                      // clock output renders and drains in the same callback,
+                      // so it needs far less headroom than a stream drained
+                      // by an independent device clock.
+                      int targetFillBlocks = 4,
+                      // Blocks written before the device callback can read.
+                      // -1 = same as targetFillBlocks.
+                      int primeBlocks = -1,
+                      // Try exclusive mode before the shared modes.
+                      bool preferExclusive = false);
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -200,6 +215,10 @@ private:
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
     std::atomic<int> fillFrames{0};
+    // Set while close() is retiring this stream: its callback may still run
+    // until the device thread stops, but it must not read or count a FIFO the
+    // engine no longer feeds.
+    std::atomic<bool> closing_{false};
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::atomic<std::uint64_t> outputLowWatermarks{0};

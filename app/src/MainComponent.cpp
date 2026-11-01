@@ -258,23 +258,30 @@ MainComponent::MainComponent()
 
     mixer.onStructureChanged = [this] { refreshViews(); };
 
-    // Defer all device/plugin loading until after the window is visible so the
-    // UI paints first; loading devices synchronously here blocked the message
-    // thread and froze the audio pipeline on startup.
+    // All device/plugin work is deferred to the first paint (see paint()):
+    // starting it from the constructor ran it before the window had drawn,
+    // which is what made startup look like a hang.
     startTimerHz(4);
     timerCallback(); // populate the toolbar readouts before the first tick
     setSize(1600, 900);
-
-    juce::Component::SafePointer<MainComponent> safe(this);
-    juce::MessageManager::callAsync([safe] {
-        if (safe == nullptr) return;
-        safe->initialiseAudio();
-    });
 }
 
 void MainComponent::timerCallback() {
-    const auto clockDesc = audioEngine.getClockDescription();
-    toolbar.setClockText(clockDesc, clockDesc.startsWith("No output"));
+    if (audioEngine.isOpeningDevices()) {
+        const auto total = audioEngine.getDeviceOpenTotal();
+        const auto done = audioEngine.getDeviceOpenProgress();
+        toolbar.setClockText("Starting audio... " + juce::String(done) + "/"
+                                 + juce::String(total),
+                             true);
+    } else {
+        if (audioEngine.consumeDeviceOpenFinished()) {
+            const auto deviceErrors = audioEngine.takeDeviceOpenErrors();
+            if (deviceErrors.isNotEmpty())
+                showError("Some audio devices could not be opened:\n" + deviceErrors);
+        }
+        const auto clockDesc = audioEngine.getClockDescription();
+        toolbar.setClockText(clockDesc, clockDesc.startsWith("No output"));
+    }
 
     const auto report = audioEngine.getLatencyReport();
     if (!report.valid) {
@@ -334,6 +341,15 @@ void MainComponent::selectView(AppView view) {
 
 void MainComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
+    // Queue the audio startup only once the first frame has been drawn: a
+    // restore running from the constructor paints nothing until it finishes.
+    if (!audioInitQueued_) {
+        audioInitQueued_ = true;
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr) safe->initialiseAudio();
+        });
+    }
 }
 
 void MainComponent::resized() {
@@ -353,6 +369,10 @@ void MainComponent::showMenu() {
     });
     menu.addSeparator();
     menu.addItem("Reset to Defaults", [this] {
+        if (audioEngine.isOpeningDevices()) {
+            showError("Audio is still starting up. Please try again in a moment.");
+            return;
+        }
         juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
                                             "PluginRack",
                                             "Reset engine to defaults (1 channel, 3 outputs)?",
@@ -616,15 +636,20 @@ void MainComponent::loadScene(bool showMissingMessage) {
         showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
 }
 
-juce::String MainComponent::applyScene(const pluginrack::Scene& scene) {
+juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool openDevicesNow) {
     // All of restoreScene runs here, on the message thread: it
-    // instantiates plugins, closes and opens devices, swaps the strip
-    // vectors, and destroys the old strips whose PluginHosts own JUCE
-    // editor windows - none of which may happen on a worker thread. The
-    // engine parks the audio clock around the swap, so the synchronous
-    // load is brief. The flag serialises overlapping menu/Saves loads and
-    // resets on every path; dialogs stay on the message thread too.
+    // instantiates plugins, swaps the strip vectors, and destroys the old
+    // strips whose PluginHosts own JUCE editor windows - none of which may
+    // happen on a worker thread. The device streams themselves are opened by
+    // the engine's startup worker when openDevicesNow is false. The flag
+    // serialises overlapping menu/Saves loads and resets on every path;
+    // dialogs stay on the message thread too.
     if (sceneLoading_.exchange(true)) return {};
+    if (audioEngine.isOpeningDevices()) {
+        sceneLoading_.store(false);
+        showError("Audio is still starting up. Please try again in a moment.");
+        return {};
+    }
     // The rack may dock an editor from a strip whose plugin dies inside
     // restoreScene; release it first (an editor outliving its processor
     // is unsafe to delete). refreshViews below re-docks against the new
@@ -634,7 +659,7 @@ juce::String MainComponent::applyScene(const pluginrack::Scene& scene) {
     // frees the refs the pending rebuild would otherwise tear down.
     router.releaseDockedEditor();
     mixer.closeAllEqWindows();
-    const juce::String pluginErrors = audioEngine.restoreScene(scene);
+    const juce::String pluginErrors = audioEngine.restoreScene(scene, openDevicesNow);
     sceneLoading_.store(false);
     refreshViews();
     return pluginErrors;
@@ -645,13 +670,17 @@ void MainComponent::initialiseAudio() {
     auto saved = SceneBridge::loadDefaultOrLast(error);
     if (error.isNotEmpty()) {
         showError(error);
-        audioEngine.openDefaultDevices();
+        audioEngine.openDefaultDevicesAsync();
     } else if (saved.has_value()) {
-        const auto pluginErrors = applyScene(*saved);
+        // Build the strips and load the plugins now (fast), then let the
+        // engine open the streams on its worker: a slow WASAPI probe must not
+        // take the message thread with it.
+        const auto pluginErrors = applyScene(*saved, /*openDevicesNow=*/false);
         if (pluginErrors.isNotEmpty())
             showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+        audioEngine.openStripsDevicesAsync();
     } else {
-        audioEngine.openDefaultDevices();
+        audioEngine.openDefaultDevicesAsync();
     }
     timerCallback();
 }

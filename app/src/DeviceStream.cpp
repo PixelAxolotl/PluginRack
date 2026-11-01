@@ -104,9 +104,13 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    int numOutputChannels,
                                    double engineSampleRate,
                                    int requestedBufferSize,
-                                   juce::String& errorOut) {
-    static const juce::StringArray typeOrder { kTypeLowLatency, kTypeExclusive,
-                                               kTypeShared, kTypeAsio };
+                                   juce::String& errorOut,
+                                   bool preferExclusive = false) {
+    juce::StringArray typeOrder { kTypeLowLatency, kTypeExclusive, kTypeShared, kTypeAsio };
+    if (preferExclusive) {
+        typeOrder.removeString(kTypeExclusive);
+        typeOrder.insert(0, kTypeExclusive);
+    }
 
     juce::String lastError;
     for (const auto& typeName : typeOrder) {
@@ -234,7 +238,9 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                int numChannelsNeeded,
                                juce::String& errorOut,
                                int requestedBufferSize,
-                               int renderBlockFrames) {
+                               int renderBlockFrames,
+                               int readDelayBlocks,
+                               bool preferExclusive) {
     close();
     error.clear();
     inputError.clear();
@@ -244,7 +250,8 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ true,
                                               numInputChannels, 0,
-                                              engineSampleRate, requestedBufferSize, errorOut);
+                                              engineSampleRate, requestedBufferSize, errorOut,
+                                              preferExclusive);
     if (activeDeviceType_.isEmpty()) {
         error = errorOut;
         return errorOut;
@@ -302,10 +309,11 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     writePos = 0;
     totalWritten.store(0, std::memory_order_relaxed);
 
-    // Two render blocks of read delay absorb callback phase jitter and give
-    // the drift correction room to work without an audible block repeat.
+    // Read delay absorbs callback phase jitter and gives the drift correction
+    // room to work without an audible block repeat. Low-latency mode uses one
+    // block instead of two.
     const int maxDelay = juce::jmax(0, capacity - blockFrames - 2);
-    const int delay = juce::jlimit(0, maxDelay, blockFrames * 2);
+    const int delay = juce::jlimit(0, maxDelay, blockFrames * juce::jmax(1, readDelayBlocks));
     readDelaySamples.store(delay, std::memory_order_relaxed);
     readCursor.prepare(capacity, delay, 0.005);
     lastPlayed_[0] = 0.0f;
@@ -562,15 +570,20 @@ OutputPlayback::~OutputPlayback() {
 juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                  double engineSampleRate,
                                  juce::String& errorOut,
-                                 int requestedBufferSize) {
+                                 int requestedBufferSize,
+                                 int targetFillBlocks,
+                                 int primeBlocks,
+                                 bool preferExclusive) {
     close();
+    closing_.store(false, std::memory_order_relaxed);
     error.clear();
 
     // Pick the lowest-latency device type that carries this device before
     // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
                                               0, 2,
-                                              engineSampleRate, requestedBufferSize, errorOut);
+                                              engineSampleRate, requestedBufferSize, errorOut,
+                                              preferExclusive);
     if (activeDeviceType_.isEmpty()) {
         error = errorOut;
         return errorOut;
@@ -597,11 +610,11 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     deviceOutputLatency = dev->getOutputLatencyInSamples();
-    // Target four device buffers of headroom with two spare blocks for
-    // bursts. The old fixed 16384 cap could make the ring smaller than the
-    // priming target at large device buffer sizes, so the first push was
-    // always dropped.
-    targetFillFrames = bufferSize * 4;
+    // Target the requested number of device buffers of headroom with two
+    // spare blocks for bursts. The old fixed 16384 cap could make the ring
+    // smaller than the priming target at large device buffer sizes, so the
+    // first push was always dropped.
+    targetFillFrames = bufferSize * juce::jmax(0, targetFillBlocks);
     capacity = juce::jmax(targetFillFrames + bufferSize * 2,
                           juce::jmin(bufferSize * 8, 65536));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
@@ -612,10 +625,14 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     lowWatermarkActive = false;
     lastPushedSample[0] = 0.0f;
     lastPushedSample[1] = 0.0f;
-    // Prime with four silent blocks so startup and a single delayed render
-    // callback cannot expose an empty FIFO to the device. Leave room for one
-    // rendered block so the first push is never dropped.
-    const int primeFrames = juce::jmin(targetFillFrames, capacity - bufferSize);
+    // Prime the FIFO so startup and a single delayed render callback cannot
+    // expose an empty FIFO to the device. Leave room for one rendered block
+    // so the first push is never dropped. primeBlocks = 0 is used by the
+    // minimal-latency clock: the render/drain happen in the same callback, so
+    // a primed block would only add latency there.
+    const int prime = primeBlocks >= 0 ? primeBlocks : targetFillBlocks;
+    const int primeFrames = juce::jlimit(0, juce::jmax(0, capacity - bufferSize),
+                                         bufferSize * juce::jmax(0, prime));
     if (primeFrames > 0) {
         fifo->write(primeFrames);
     }
@@ -628,6 +645,7 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
 }
 
 void OutputPlayback::close() {
+    closing_.store(true, std::memory_order_relaxed);
     manager.removeAudioCallback(this);
     manager.closeAudioDevice();
     {
@@ -754,6 +772,15 @@ void OutputPlayback::pushSilence(int frames) {
 }
 
 void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext&) {
+    if (closing_.load(std::memory_order_relaxed)) {
+        for (int ch = 0; ch < numOutputChannels; ++ch) {
+            if (outputChannelData[ch] != nullptr) {
+                juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
+            }
+        }
+        return;
+    }
+
     currentOutputChannels = outputChannelData;
     currentNumOutputChannels = numOutputChannels;
 
@@ -773,6 +800,7 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
         return;
     }
     auto readHandle = fifo->read(numSamples);
+    fillFrames.store(fifo->getNumReady(), std::memory_order_relaxed);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
     const int total = b1 + b2;
