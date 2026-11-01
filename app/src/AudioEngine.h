@@ -222,6 +222,8 @@ public:
         bool lowLatencyOutputs = false;
         bool minimalClockFifo = false;
         bool fullDuplexInput = false;
+        // Not a stream option: kept here so it saves and loads with the rest.
+        bool autoReloadDevices = false;
     };
     DeviceSettings getDeviceSettings() const;
     // Reopens every device with these settings on the background opener. If a
@@ -230,6 +232,13 @@ public:
     void applyDeviceSettings(const DeviceSettings& settings);
     // Reopens every device with the current settings (no setting change).
     void reloadAllDevicesAsync();
+
+    // Auto-reload: the watcher lives in Settings, but the flag and the watched
+    // strips are session state, so they belong to the engine that saves them.
+    void setAutoReloadDevices(bool enabled);
+    bool getAutoReloadDevices() const { return autoReloadDevices_.load(); }
+    void setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices);
+    std::vector<pluginrack::WatchedDevice> getWatchedDevices() const;
 
     struct ReloadableDevice {
         juce::String label;
@@ -263,6 +272,9 @@ public:
     bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
     bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
+    // The device name behind the clock output; empty when no output owns the
+    // clock. I/O uses it to name the stream the measurement travels through.
+    juce::String getClockOutputDeviceName() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
@@ -337,8 +349,18 @@ public:
 
     FifoDiagnostics getFifoDiagnostics() const;
 
-    void startLatencyMeasurement();
+    // listenDevice selects the capture that listens for the returning click
+    // (an open input device name). Empty means any open input.
+    void startLatencyMeasurement(const juce::String& listenDevice = {});
     void cancelLatencyMeasurement();
+    // Message-thread watchdog for a measurement that can never finish: no
+    // clock output renders, no input capture is open, or the audio clock is
+    // stopped. The render path times out a hunt it started; this covers the
+    // case where nothing renders at all. Safe to call at UI refresh rate.
+    void pollLatencyMeasurement();
+    // Drops a stale result; called whenever the device graph or its buffer
+    // configuration changes, because the old figure no longer describes it.
+    void resetLatencyMeasurement();
     bool isLatencyMeasuring() const { return latencyMeasureActive_.load(std::memory_order_relaxed); }
     bool hasMeasuredLatency() const { return latencyMeasuredValid_.load(std::memory_order_relaxed); }
     bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
@@ -379,7 +401,6 @@ private:
     void startDeviceJob(std::function<void(const std::function<bool()>&)> job);
     void applySettingsValues(const DeviceSettings& settings);
     void stopDeviceOpenThread();
-    juce::String getClockOutputDeviceName() const;
     // Audio-thread silence feed: pushes a fade-to-silence block to every
     // published output. Never allocates and never takes stateLock, so it also
     // works on the render-miss path when the message thread holds the lock.
@@ -458,17 +479,24 @@ private:
     std::atomic<bool> lowLatencyOutputs_{false};
     std::atomic<bool> minimalClockFifo_{false};
     std::atomic<bool> fullDuplexInput_{false};
+    std::atomic<bool> autoReloadDevices_{false};
+    juce::CriticalSection watchedDevicesLock_;
+    std::vector<pluginrack::WatchedDevice> watchedDevices_;
 
     // Round-trip latency measurement state.
     std::atomic<bool> latencyMeasureActive_{false};
     std::atomic<bool> latencyMeasureEmitted_{false};
-    std::atomic<std::uint64_t> latencyMeasureOutputSample_{0};
-    std::atomic<int> latencyMeasureBlocks_{0};
     std::atomic<bool> latencyMeasuredValid_{false};
     std::atomic<int> latencyMeasuredSamples_{0};
+    std::atomic<double> latencyMeasuredRate_{0.0};
     std::atomic<std::uint32_t> latencyMeasureStartMs_{0};
     std::atomic<bool> latencyMeasureFailed_{false};
+    // Which capture listens for the return. Written by startLatencyMeasurement
+    // under stateLock and read by render(), which also holds it.
+    juce::String latencyListenDevice_;
     std::uint64_t outputSampleCounter_ = 0;
+
+    void resetLatencyMeasurementLocked();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

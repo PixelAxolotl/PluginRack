@@ -242,8 +242,9 @@ TEST_CASE("settings apply fails safe and reloads single devices",
     CHECK(contains(settings, "applyDeviceSettings"));
     const auto header = readSource("app/src/SettingsView.h");
     CHECK(contains(header, "Reload All Audio Devices"));
-    CHECK(contains(header, "Reload Selected Device"));
+    CHECK(contains(header, "Auto-reload checked devices on error"));
     CHECK(contains(header, "reloadDeviceToggles"));
+    CHECK(contains(header, "autoReloadToggle"));
     CHECK(contains(engine, "AudioEngine::reloadDevicesAsync"));
     CHECK(contains(engine, "attempt < 3"));
     CHECK(contains(engine, "juce::Thread::sleep(400)"));
@@ -333,4 +334,17 @@ TEST_CASE("scene save captures the live plugin state", "[plugin][restore]") {
                                    "pluginrack::Scene AudioEngine::makeScene");
     CHECK(contains(body, "getStateAsBase64"));
     CHECK(contains(body, "pluginState"));
+}
+
+TEST_CASE("scene save and restore carry the audio tuning", "[plugin][restore]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto save = functionBody(cpp, "pluginrack::Scene AudioEngine::makeScene");
+    const auto restore = functionBody(cpp, "juce::String AudioEngine::restoreScene");
+
+    CHECK(contains(save, "pluginrack::AudioSettings audio"));
+    CHECK(contains(save, "audio.autoReloadDevices"));
+    CHECK(contains(save, "getWatchedDevices"));
+    CHECK(contains(restore, "scene.audio.has_value()"));
+    CHECK(contains(restore, "applySettingsValues(settings)"));
+    CHECK(contains(restore, "setWatchedDevices(scene.audio->watchedDevices)"));
 }
