@@ -80,12 +80,29 @@ public:
     std::uint64_t getInputUnderruns() const { return inputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
     int getReadDelaySamples() const { return readDelaySamples.load(std::memory_order_relaxed); }
-    void setLatencyMeasurementActive(bool active) {
-        latencyMeasureActive.store(active, std::memory_order_relaxed);
-        if (!active) latencyImpulseDetected.store(false, std::memory_order_relaxed);
+    // Round-trip measurement: the render thread starts the hunt on every
+    // capture at the moment the impulse is placed on the clock output, so the
+    // capture clock is snapshot before the impulse can come back. The result
+    // is measured in captured samples, not in render blocks.
+    void beginLatencyMeasurement() {
+        latencyMeasureStartSample.store(totalWritten.load(std::memory_order_acquire),
+                                        std::memory_order_relaxed);
+        latencyImpulseDetected.store(false, std::memory_order_relaxed);
+        latencyMeasureActive.store(true, std::memory_order_relaxed);
+    }
+    void endLatencyMeasurement() {
+        latencyMeasureActive.store(false, std::memory_order_relaxed);
+        latencyImpulseDetected.store(false, std::memory_order_relaxed);
     }
     bool isLatencyImpulseDetected() const { return latencyImpulseDetected.load(std::memory_order_relaxed); }
     std::uint64_t getLatencyImpulseInputSample() const { return latencyImpulseInputSample.load(std::memory_order_relaxed); }
+    // Captured samples between the impulse leaving the render callback and
+    // the captured copy of it; 0 until the impulse is seen.
+    std::uint64_t getLatencyRoundTripSamples() const {
+        const auto start = latencyMeasureStartSample.load(std::memory_order_relaxed);
+        const auto hit = latencyImpulseInputSample.load(std::memory_order_relaxed);
+        return hit > start ? hit - start : 0;
+    }
 
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
@@ -138,6 +155,8 @@ private:
     // Round-trip latency measurement support.
     std::atomic<bool> latencyMeasureActive{false};
     std::atomic<bool> latencyImpulseDetected{false};
+    // Capture-clock position at the moment the impulse was emitted.
+    std::atomic<std::uint64_t> latencyMeasureStartSample{0};
     std::atomic<std::uint64_t> latencyImpulseInputSample{0};
 };
 

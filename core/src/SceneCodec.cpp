@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 3;
+constexpr int kSchemaVersion = 4;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -331,8 +331,50 @@ void from_json(const nlohmann::json& j, Route& route) {
     route.sendGainDb = j.value("sendGainDb", 0.0f);
 }
 
+void to_json(nlohmann::json& j, const WatchedDevice& device) {
+    j = nlohmann::json{
+        {"isInput", device.isInput},
+        {"stripId", device.stripId},
+    };
+}
+
+void from_json(const nlohmann::json& j, WatchedDevice& device) {
+    device = WatchedDevice{};
+    device.isInput = j.value("isInput", false);
+    device.stripId = j.value("stripId", 0u);
+}
+
+void to_json(nlohmann::json& j, const AudioSettings& settings) {
+    j = nlohmann::json{
+        {"inputBuffer", settings.inputBuffer},
+        {"outputBuffer", settings.outputBuffer},
+        {"lowLatencyInput", settings.lowLatencyInput},
+        {"preferExclusive", settings.preferExclusive},
+        {"lowLatencyOutputs", settings.lowLatencyOutputs},
+        {"minimalClockFifo", settings.minimalClockFifo},
+        {"fullDuplexInput", settings.fullDuplexInput},
+        {"autoReloadDevices", settings.autoReloadDevices},
+        {"watchedDevices", settings.watchedDevices},
+    };
+}
+
+void from_json(const nlohmann::json& j, AudioSettings& settings) {
+    settings = AudioSettings{};
+    settings.inputBuffer = j.value("inputBuffer", 0);
+    settings.outputBuffer = j.value("outputBuffer", 0);
+    settings.lowLatencyInput = j.value("lowLatencyInput", false);
+    settings.preferExclusive = j.value("preferExclusive", false);
+    settings.lowLatencyOutputs = j.value("lowLatencyOutputs", false);
+    settings.minimalClockFifo = j.value("minimalClockFifo", false);
+    settings.fullDuplexInput = j.value("fullDuplexInput", false);
+    settings.autoReloadDevices = j.value("autoReloadDevices", false);
+    if (j.contains("watchedDevices")) {
+        j.at("watchedDevices").get_to(settings.watchedDevices);
+    }
+}
+
 std::string toJson(const Scene& scene) {
-    const nlohmann::json j = {
+    nlohmann::json j = {
         {"schemaVersion", kSchemaVersion},
         {"name", scene.name},
         {"sampleRate", scene.sampleRate},
@@ -341,6 +383,7 @@ std::string toJson(const Scene& scene) {
         {"outputs", scene.outputs},
         {"routes", scene.routes},
     };
+    if (scene.audio.has_value()) j["audio"] = *scene.audio;
     return j.dump();
 }
 
@@ -349,9 +392,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 3) {
+        if (schemaVersion < 1 || schemaVersion > 4) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1, 2 or 3");
+                                    ", expected 1 to 4");
             return result;
         }
         Scene scene;
@@ -367,6 +410,11 @@ SceneLoadResult fromJson(std::string_view text) {
         }
         if (j.contains("routes")) {
             j.at("routes").get_to(scene.routes);
+        }
+        if (j.contains("audio")) {
+            pluginrack::AudioSettings settings;
+            j.at("audio").get_to(settings);
+            scene.audio = std::move(settings);
         }
         result.scene = scene;
     } catch (const std::exception& e) {

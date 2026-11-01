@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -86,14 +87,43 @@ struct Route {
     bool operator==(const Route&) const = default;
 };
 
+// One stream the Settings page watches for auto-reload. Identified by the
+// strip that owns it, so renaming a strip does not lose the selection.
+struct WatchedDevice {
+    bool isInput = false;
+    std::uint32_t stripId = 0;
+
+    bool operator==(const WatchedDevice&) const = default;
+};
+
+// The audio engine settings a session is tuned with: buffer sizes, the
+// low-latency trade-offs, and whether watched devices reopen themselves after
+// an error. Saved with the scene so a load restores the same running setup.
+struct AudioSettings {
+    int inputBuffer = 0;
+    int outputBuffer = 0;
+    bool lowLatencyInput = false;
+    bool preferExclusive = false;
+    bool lowLatencyOutputs = false;
+    bool minimalClockFifo = false;
+    bool fullDuplexInput = false;
+    bool autoReloadDevices = false;
+    std::vector<WatchedDevice> watchedDevices;
+
+    bool operator==(const AudioSettings&) const = default;
+};
+
 struct Scene {
-    int schemaVersion = 3;
+    int schemaVersion = 4;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;
     std::vector<Channel> channels;
     std::vector<Output> outputs;
     std::vector<Route> routes;
+    // Absent in scenes written before schema 4; loading one then leaves the
+    // live tuning alone instead of resetting it to the defaults.
+    std::optional<AudioSettings> audio;
 
     bool operator==(const Scene&) const = default;
 };

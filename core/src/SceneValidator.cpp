@@ -107,7 +107,7 @@ std::string describeMapping(const std::vector<int>& mapping) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion < 1 || scene.schemaVersion > 3) {
+    if (scene.schemaVersion < 1 || scene.schemaVersion > 4) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
                               "; expected 1, 2 or 3"});

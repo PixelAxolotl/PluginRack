@@ -22,6 +22,11 @@
 #endif
 
 namespace {
+// A loopback either answers inside this window or the hunt is abandoned.
+constexpr std::uint32_t kLatencyMeasureTimeoutMs = 3000;
+// A detected impulse further away than this cannot be the loopback.
+constexpr double kLatencyMeasureMaxSeconds = 5.0;
+
 std::vector<pluginrack::ChainItem> defaultChain() {
     return {{pluginrack::ChainItemType::Eq, 0},
             {pluginrack::ChainItemType::Dynamics, 1},
@@ -427,19 +432,30 @@ void AudioEngine::render(int frames) {
     // clock output after all processing, then detect it on input.
     if (latencyMeasureActive_.load(std::memory_order_relaxed) &&
         !latencyMeasureEmitted_.load(std::memory_order_relaxed)) {
+        bool emitted = false;
         for (auto& output : outputs) {
             if (output->id == clockOutputId && output->output != nullptr) {
                 output->buffer.setSample(0, 0, 1.0f);
                 output->buffer.setSample(1, 0, 1.0f);
+                emitted = true;
             }
         }
-        latencyMeasureOutputSample_.store(outputSampleCounter_, std::memory_order_relaxed);
-        latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
-        latencyMeasureEmitted_.store(true, std::memory_order_relaxed);
-        for (auto& entry : inputCaptures_) {
-            if (entry.second.capture != nullptr)
-                entry.second.capture->setLatencyMeasurementActive(true);
+        if (emitted) {
+            latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+            latencyMeasureEmitted_.store(true, std::memory_order_relaxed);
+            // Snapshot the capture clock in the same callback that places the
+            // impulse: the hit index then measures the real round trip in
+            // captured samples instead of a whole-render-block estimate. Only
+            // the selected input listens, so an unrelated device cannot answer.
+            for (auto& entry : inputCaptures_) {
+                if (entry.second.capture == nullptr) continue;
+                if (latencyListenDevice_.isNotEmpty() && entry.first != latencyListenDevice_)
+                    continue;
+                entry.second.capture->beginLatencyMeasurement();
+            }
         }
+        // No clock output renders nothing, so nothing is emitted; the
+        // message-thread watchdog reports that case as a failure.
     }
 
     for (auto& output : outputs) {
@@ -449,42 +465,49 @@ void AudioEngine::render(int frames) {
     }
 
     if (latencyMeasureActive_.load(std::memory_order_relaxed)) {
-        latencyMeasureBlocks_.fetch_add(1, std::memory_order_relaxed);
-        bool detected = false;
+        InputCapture* hit = nullptr;
         for (auto& entry : inputCaptures_) {
             if (entry.second.capture != nullptr &&
                 entry.second.capture->isLatencyImpulseDetected()) {
-                detected = true;
+                hit = entry.second.capture.get();
                 break;
             }
         }
-        if (detected) {
-            const auto emitted = latencyMeasureOutputSample_.load(std::memory_order_relaxed);
-            const auto elapsed = outputSampleCounter_ >= emitted
-                ? outputSampleCounter_ - emitted
-                : 0;
-            latencyMeasuredSamples_.store(
-                static_cast<int>(juce::jmin<std::uint64_t>(
-                    elapsed, static_cast<std::uint64_t>(std::numeric_limits<int>::max()))),
-                std::memory_order_relaxed);
-            latencyMeasuredValid_.store(true, std::memory_order_relaxed);
+        const bool timedOut = latencyMeasureEmitted_.load(std::memory_order_relaxed)
+            && juce::Time::getMillisecondCounter()
+                    - latencyMeasureStartMs_.load(std::memory_order_relaxed)
+                > kLatencyMeasureTimeoutMs;
+        if (hit != nullptr) {
+            const auto samples = hit->getLatencyRoundTripSamples();
+            const double rate = hit->getSampleRate() > 0.0 ? hit->getSampleRate()
+                                                           : currentSampleRate;
+            // A loud input can trip the amplitude test without carrying the
+            // impulse. Reject an answer that lands before the impulse left or
+            // beyond any plausible cable, so the readout never shows a figure
+            // the chain cannot have.
+            const auto maxSamples = static_cast<std::uint64_t>(
+                juce::jmax(1.0, rate * kLatencyMeasureMaxSeconds));
+            const bool plausible = samples > 0 && samples <= maxSamples;
+            if (plausible) {
+                latencyMeasuredSamples_.store(
+                    static_cast<int>(juce::jmin<std::uint64_t>(
+                        samples, static_cast<std::uint64_t>(std::numeric_limits<int>::max()))),
+                    std::memory_order_relaxed);
+                latencyMeasuredRate_.store(rate, std::memory_order_relaxed);
+            }
+            latencyMeasuredValid_.store(plausible, std::memory_order_relaxed);
+            latencyMeasureFailed_.store(!plausible, std::memory_order_relaxed);
             latencyMeasureActive_.store(false, std::memory_order_relaxed);
             for (auto& entry : inputCaptures_) {
                 if (entry.second.capture != nullptr)
-                    entry.second.capture->setLatencyMeasurementActive(false);
+                    entry.second.capture->endLatencyMeasurement();
             }
-        } else {
-            const auto now = juce::Time::getMillisecondCounter();
-            const auto start = latencyMeasureStartMs_.load(std::memory_order_relaxed);
-            const bool timedOut = latencyMeasureEmitted_.load(std::memory_order_relaxed)
-                && (now - start > 3000 || latencyMeasureBlocks_.load(std::memory_order_relaxed) > 200);
-            if (timedOut) {
-                latencyMeasureFailed_.store(true, std::memory_order_relaxed);
-                latencyMeasureActive_.store(false, std::memory_order_relaxed);
-                for (auto& entry : inputCaptures_) {
-                    if (entry.second.capture != nullptr)
-                        entry.second.capture->setLatencyMeasurementActive(false);
-                }
+        } else if (timedOut) {
+            latencyMeasureFailed_.store(true, std::memory_order_relaxed);
+            latencyMeasureActive_.store(false, std::memory_order_relaxed);
+            for (auto& entry : inputCaptures_) {
+                if (entry.second.capture != nullptr)
+                    entry.second.capture->endLatencyMeasurement();
             }
         }
     }
@@ -1159,12 +1182,43 @@ pluginrack::Scene AudioEngine::makeScene() const {
     for (const auto& route : routes) {
         scene.routes.push_back({route->channelId, route->outputId, route->sendGainDbL.get()});
     }
+
+    // The tuning the session runs with travels with the save, so loading it
+    // restores the same buffers, stream modes and device watchdog.
+    const auto settings = getDeviceSettings();
+    pluginrack::AudioSettings audio;
+    audio.inputBuffer = settings.inputBuffer;
+    audio.outputBuffer = settings.outputBuffer;
+    audio.lowLatencyInput = settings.lowLatencyInput;
+    audio.preferExclusive = settings.preferExclusive;
+    audio.lowLatencyOutputs = settings.lowLatencyOutputs;
+    audio.minimalClockFifo = settings.minimalClockFifo;
+    audio.fullDuplexInput = settings.fullDuplexInput;
+    audio.autoReloadDevices = settings.autoReloadDevices;
+    audio.watchedDevices = getWatchedDevices();
+    scene.audio = std::move(audio);
     return scene;
 }
 
 juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool openDevicesNow) {
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Please try again in a moment.";
+    }
+    // Tuning first: the stream open below must already use the saved buffer
+    // sizes and modes. Scenes written before schema 4 carry no tuning block,
+    // and loading one leaves the live settings alone.
+    if (scene.audio.has_value()) {
+        DeviceSettings settings = getDeviceSettings();
+        settings.inputBuffer = scene.audio->inputBuffer;
+        settings.outputBuffer = scene.audio->outputBuffer;
+        settings.lowLatencyInput = scene.audio->lowLatencyInput;
+        settings.preferExclusive = scene.audio->preferExclusive;
+        settings.lowLatencyOutputs = scene.audio->lowLatencyOutputs;
+        settings.minimalClockFifo = scene.audio->minimalClockFifo;
+        settings.fullDuplexInput = scene.audio->fullDuplexInput;
+        settings.autoReloadDevices = scene.audio->autoReloadDevices;
+        applySettingsValues(settings);
+        setWatchedDevices(scene.audio->watchedDevices);
     }
     double sampleRate;
     int bufferSize;
@@ -1476,7 +1530,10 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Try again in a moment.";
     }
-    return setChannelInputDeviceImpl(channelId, deviceName);
+    const auto error = setChannelInputDeviceImpl(channelId, deviceName);
+    // The previous figure described the previous capture chain.
+    if (error.isEmpty()) resetLatencyMeasurement();
+    return error;
 }
 
 juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
@@ -1613,7 +1670,10 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Try again in a moment.";
     }
-    return setOutputDeviceImpl(outputId, deviceName, currentSampleRate);
+    const auto error = setOutputDeviceImpl(outputId, deviceName, currentSampleRate);
+    // The previous figure described the previous output chain.
+    if (error.isEmpty()) resetLatencyMeasurement();
+    return error;
 }
 
 juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
@@ -2052,23 +2112,22 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
     return diagnostics;
 }
 
-void AudioEngine::startLatencyMeasurement() {
+void AudioEngine::startLatencyMeasurement(const juce::String& listenDevice) {
     const juce::ScopedLock lock(stateLock);
+    latencyListenDevice_ = listenDevice;
     latencyMeasureActive_.store(true, std::memory_order_relaxed);
     latencyMeasureEmitted_.store(false, std::memory_order_relaxed);
-    latencyMeasureOutputSample_.store(0, std::memory_order_relaxed);
-    latencyMeasureBlocks_.store(0, std::memory_order_relaxed);
     latencyMeasuredValid_.store(false, std::memory_order_relaxed);
     latencyMeasuredSamples_.store(0, std::memory_order_relaxed);
+    latencyMeasuredRate_.store(currentSampleRate, std::memory_order_relaxed);
     latencyMeasureFailed_.store(false, std::memory_order_relaxed);
     latencyMeasureStartMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
-    outputSampleCounter_ = 0;
 }
 
 void AudioEngine::cancelLatencyMeasurementImpl() {
     latencyMeasureActive_.store(false, std::memory_order_relaxed);
     for (auto& entry : inputCaptures_) {
-        if (entry.second.capture) entry.second.capture->setLatencyMeasurementActive(false);
+        if (entry.second.capture) entry.second.capture->endLatencyMeasurement();
     }
 }
 
@@ -2077,9 +2136,40 @@ void AudioEngine::cancelLatencyMeasurement() {
     cancelLatencyMeasurementImpl();
 }
 
+void AudioEngine::resetLatencyMeasurementLocked() {
+    cancelLatencyMeasurementImpl();
+    latencyMeasureEmitted_.store(false, std::memory_order_relaxed);
+    latencyMeasuredValid_.store(false, std::memory_order_relaxed);
+    latencyMeasuredSamples_.store(0, std::memory_order_relaxed);
+    latencyMeasureFailed_.store(false, std::memory_order_relaxed);
+}
+
+void AudioEngine::resetLatencyMeasurement() {
+    const juce::ScopedLock lock(stateLock);
+    resetLatencyMeasurementLocked();
+}
+
+void AudioEngine::pollLatencyMeasurement() {
+    if (!latencyMeasureActive_.load(std::memory_order_relaxed)) return;
+    const auto started = latencyMeasureStartMs_.load(std::memory_order_relaxed);
+    if (juce::Time::getMillisecondCounter() - started <= kLatencyMeasureTimeoutMs) return;
+
+    const juce::ScopedLock lock(stateLock);
+    if (!latencyMeasureActive_.load(std::memory_order_relaxed)) return;
+    // Nothing rendered the impulse in time: no clock output, no input
+    // capture, or a stopped clock. Report it instead of leaving the button
+    // stuck on "Cancel" forever.
+    latencyMeasureActive_.store(false, std::memory_order_relaxed);
+    latencyMeasureFailed_.store(true, std::memory_order_relaxed);
+    for (auto& entry : inputCaptures_) {
+        if (entry.second.capture) entry.second.capture->endLatencyMeasurement();
+    }
+}
+
 double AudioEngine::getMeasuredLatencyMs() const {
-    const double sr = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
-    return latencyMeasuredSamples_.load(std::memory_order_relaxed) / sr * 1000.0;
+    auto rate = latencyMeasuredRate_.load(std::memory_order_relaxed);
+    if (rate <= 0.0) rate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
+    return latencyMeasuredSamples_.load(std::memory_order_relaxed) / rate * 1000.0;
 }
 
 AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint32_t channelId) const {
@@ -2230,7 +2320,22 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     settings.lowLatencyOutputs = lowLatencyOutputs_.load();
     settings.minimalClockFifo = minimalClockFifo_.load();
     settings.fullDuplexInput = fullDuplexInput_.load();
+    settings.autoReloadDevices = autoReloadDevices_.load();
     return settings;
+}
+
+void AudioEngine::setAutoReloadDevices(bool enabled) {
+    autoReloadDevices_.store(enabled);
+}
+
+void AudioEngine::setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices) {
+    const juce::ScopedLock lock(watchedDevicesLock_);
+    watchedDevices_ = devices;
+}
+
+std::vector<pluginrack::WatchedDevice> AudioEngine::getWatchedDevices() const {
+    const juce::ScopedLock lock(watchedDevicesLock_);
+    return watchedDevices_;
 }
 
 void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
@@ -2241,6 +2346,10 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
     lowLatencyOutputs_.store(settings.lowLatencyOutputs);
     minimalClockFifo_.store(settings.minimalClockFifo);
     fullDuplexInput_.store(settings.fullDuplexInput);
+    autoReloadDevices_.store(settings.autoReloadDevices);
+    // Buffer and stream-mode changes replace every device, so a measurement
+    // taken against the old configuration is no longer true.
+    resetLatencyMeasurement();
 }
 
 void AudioEngine::applyDeviceSettings(const DeviceSettings& settings) {
@@ -2307,6 +2416,8 @@ void AudioEngine::reloadDeviceAsync(const ReloadableDevice& device) {
 
 void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& devices) {
     if (devices.empty()) return;
+    // The stream that produced the last measurement is being replaced.
+    resetLatencyMeasurement();
     startDeviceJob([this, devices](const std::function<bool()>& shouldExit) {
         deviceOpenTotal_.store((int) devices.size());
         deviceOpenProgress_.store(0);
