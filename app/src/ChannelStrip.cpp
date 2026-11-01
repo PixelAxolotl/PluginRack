@@ -63,9 +63,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
                     }
                 });
             });
-            deviceControl.setOnDoubleClick([this] {
-                if (onDoubleClicked) onDoubleClicked();
-            });
         });
     });
     deviceControl.setOnRename([this] {
@@ -742,6 +739,9 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     for (auto& effect : effects)
         if (effect.id == item.id) effect.bypassed = bypassed;
     audioEngine.setChannelEffects(channel.id, effects);
+    // An open dynamics panel mirrors the gate row; a chain-row toggle has to
+    // reach it or the panel keeps showing the old switch state.
+    refreshDynamicsButtons();
 }
 
 void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {

@@ -45,8 +45,8 @@ std::vector<Preset> presetsFor(pluginrack::DynamicsEffectType type) {
         { "Squash",   -30.0f, 12.0f,  3.0f,  80.0f, 0.0f, 8.0f, 0.0f },
     };
     static const std::vector<Preset> gate{
-        { "Tight",  -30.0f, 10.0f, 0.5f,  60.0f, 0.0f, 0.0f, 0.0f },
-        { "Gentle", -45.0f, 10.0f, 5.0f, 250.0f, 0.0f, 0.0f, 0.0f },
+        { "Tight",  -30.0f, 60.0f, 0.5f,  60.0f, 0.0f, 0.0f, 0.0f },
+        { "Gentle", -45.0f, 20.0f, 5.0f, 250.0f, 0.0f, 0.0f, 0.0f },
     };
     const std::vector<Preset>* extras = &compressor;
     switch (type) {
@@ -211,6 +211,20 @@ DynamicsWindow::DynamicsWindow(
         gateCaption.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         gateCaption.setColour(juce::Label::textColourId, theme::dim());
         content.addAndMakeVisible(gateCaption);
+
+        theme::ui::styleButton(gateEnableButton);
+        gateEnableButton.setClickingTogglesState(true);
+        gateEnableButton.setToggleState(!gateEffect.bypassed, juce::dontSendNotification);
+        gateEnableButton.setTooltip("Enable or bypass the gate");
+        gateEnableButton.onClick = [this] {
+            gateEffect.bypassed = !gateEnableButton.getToggleState();
+            curve.setGate(gateEffect, !gateEffect.bypassed);
+            // true: the switch itself moved, so the host must not restore the
+            // bypass state it had before this edit.
+            if (apply) apply(gateEffect, true);
+        };
+        content.addAndMakeVisible(gateEnableButton);
+
         for (auto* label : {&gateThresholdLabel, &gateRangeLabel, &gateAttackLabel,
                             &gateReleaseLabel}) {
             label->setJustificationType(juce::Justification::centred);
@@ -224,7 +238,7 @@ DynamicsWindow::DynamicsWindow(
         setupGate(gateThreshold, -60.0, 0.0, gateEffect.thresholdDb, " dB",
                   gateDefaults.thresholdDb,
                   [this, gateChanged](float value) { gateEffect.thresholdDb = value; gateChanged(); });
-        setupGate(gateRange, 1.0, 20.0, gateEffect.ratio, " dB", gateDefaults.ratio,
+        setupGate(gateRange, 1.0, 80.0, gateEffect.ratio, " dB", gateDefaults.ratio,
                   [this, gateChanged](float value) { gateEffect.ratio = value; gateChanged(); });
         setupGate(gateAttack, 0.1, 200.0, gateEffect.attackMs, " ms", gateDefaults.attackMs,
                   [this, gateChanged](float value) { gateEffect.attackMs = value; gateChanged(); });
@@ -334,6 +348,8 @@ void DynamicsWindow::resized() {
             gateCaption.setBounds(gateHeader.removeFromLeft(58));
             gateHeader.removeFromLeft(6);
             gatePresetCombo.setBounds(gateHeader.removeFromLeft(176));
+            gateHeader.removeFromLeft(10);
+            gateEnableButton.setBounds(gateHeader.removeFromLeft(72).withSizeKeepingCentre(72, 22));
             area.removeFromBottom(14);
         }
         auto knobsRow = area.removeFromBottom(96);
@@ -376,6 +392,7 @@ void DynamicsWindow::syncGateControls() {
     gateRange.setValue(static_cast<double>(gateEffect.ratio), juce::dontSendNotification);
     gateAttack.setValue(static_cast<double>(gateEffect.attackMs), juce::dontSendNotification);
     gateRelease.setValue(static_cast<double>(gateEffect.releaseMs), juce::dontSendNotification);
+    gateEnableButton.setToggleState(!gateEffect.bypassed, juce::dontSendNotification);
 }
 
 void DynamicsWindow::timerCallback() {
