@@ -32,4 +32,92 @@ inline constexpr int kActionW = 44;  // split / flip
 inline constexpr int kCloseW = 20;   // the cross
 } // namespace metrics
 
+// One type scale, one spacing scale and one control vocabulary for every
+// surface. Page views (Settings, Saves, Routing, I/O) share the page header;
+// the Mixer and Rack are full-bleed workspaces and keep their tighter inset,
+// but they draw from the same fonts and control colours so a button or a
+// caption never changes its look when it moves between tabs.
+namespace ui {
+
+inline constexpr float kTitlePt = 18.0f;   // page title
+inline constexpr float kItemPt = 13.0f;    // row / strip title
+inline constexpr float kSectionPt = 10.0f; // uppercase section / column caption
+inline constexpr float kBodyPt = 12.0f;    // body and field text
+inline constexpr float kCaptionPt = 11.0f; // secondary line under a control
+
+inline constexpr int kPagePad = 12;     // page inset for page views
+inline constexpr int kHeaderH = 34;     // page title row
+inline constexpr int kHeaderGap = 10;   // title row to first section
+inline constexpr int kSectionH = 16;    // section caption row
+inline constexpr int kSectionGap = 14;  // between sections
+inline constexpr int kRowGap = 6;       // between controls on one row
+inline constexpr int kControlH = 24;    // standard field / button height
+inline constexpr int kMeasureW = 150;   // standard action button width
+
+inline juce::Font titleFont() {
+    return juce::Font(juce::FontOptions(kTitlePt, juce::Font::bold));
+}
+inline juce::Font itemFont() {
+    return juce::Font(juce::FontOptions(kItemPt, juce::Font::bold));
+}
+inline juce::Font sectionFont() {
+    return juce::Font(juce::FontOptions(kSectionPt, juce::Font::bold));
+}
+inline juce::Font bodyFont() {
+    return juce::Font(juce::FontOptions(kBodyPt));
+}
+inline juce::Font bodyBoldFont() {
+    return juce::Font(juce::FontOptions(kBodyPt, juce::Font::bold));
+}
+inline juce::Font captionFont() {
+    return juce::Font(juce::FontOptions(kCaptionPt));
+}
+
+// Panel fill + hairline, the console's only container treatment.
+inline void drawPanel(juce::Graphics& g, juce::Rectangle<int> bounds,
+                      juce::Colour fill = panel(), juce::Colour outline = border()) {
+    g.setColour(fill);
+    g.fillRoundedRectangle(bounds.toFloat(), 3.0f);
+    g.setColour(outline);
+    g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), 3.0f, 1.0f);
+}
+
+// Uppercase caption that names a panel section (INPUTS, INSERTS, ROUND-TRIP).
+inline void drawSectionCaption(juce::Graphics& g, juce::Rectangle<int> bounds,
+                               const juce::String& text) {
+    g.setColour(dim().withAlpha(0.8f));
+    g.setFont(sectionFont());
+    g.drawText(text.toUpperCase(), bounds, juce::Justification::centredLeft, true);
+}
+
+inline void styleButton(juce::TextButton& button) {
+    button.setColour(juce::TextButton::buttonColourId, control());
+    button.setColour(juce::TextButton::buttonOnColourId, green());
+    button.setColour(juce::TextButton::textColourOffId, theme::text());
+    button.setColour(juce::TextButton::textColourOnId, bg());
+}
+
+inline void styleCombo(juce::ComboBox& combo) {
+    combo.setColour(juce::ComboBox::backgroundColourId, control());
+    combo.setColour(juce::ComboBox::textColourId, theme::text());
+    combo.setColour(juce::ComboBox::arrowColourId, dim());
+    combo.setColour(juce::ComboBox::outlineColourId, border());
+}
+
+inline void styleToggle(juce::ToggleButton& toggle) {
+    toggle.setColour(juce::ToggleButton::textColourId, theme::text());
+    toggle.setColour(juce::ToggleButton::tickColourId, green());
+    toggle.setColour(juce::ToggleButton::tickDisabledColourId, dim());
+}
+
+// Amber BETA tag that sits beside a section caption. Feature is usable, the
+// behaviour is still settling, and the label says so instead of hiding it.
+inline void styleBetaLabel(juce::Label& label) {
+    label.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+    label.setColour(juce::Label::textColourId, amber());
+    label.setJustificationType(juce::Justification::centredLeft);
+}
+
+} // namespace ui
+
 } // namespace theme
