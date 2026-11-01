@@ -189,7 +189,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     addAndMakeVisible(slotViewport);
 
     noEditorLabel.setJustificationType(juce::Justification::centred);
-    noEditorLabel.setFont(juce::Font(juce::FontOptions(13.0f)));
+    noEditorLabel.setFont(theme::ui::bodyFont());
     noEditorLabel.setColour(juce::Label::textColourId, theme::dim());
     editorHolder.addAndMakeVisible(noEditorLabel);
 
@@ -207,14 +207,14 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
 
     outputHeader.setText("Output", juce::dontSendNotification);
     outputHeader.setJustificationType(juce::Justification::centredLeft);
-    outputHeader.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
+    outputHeader.setFont(theme::ui::itemFont());
     outputHeader.setColour(juce::Label::textColourId, theme::amber());
     addAndMakeVisible(outputHeader);
 
     emptyLabel.setText("No chains yet - add a channel or output in the Mixer view.",
                        juce::dontSendNotification);
     emptyLabel.setJustificationType(juce::Justification::centred);
-    emptyLabel.setFont(juce::Font(juce::FontOptions(13.0f)));
+    emptyLabel.setFont(theme::ui::bodyFont());
     emptyLabel.setColour(juce::Label::textColourId, theme::dim());
     emptyLabel.setVisible(false);
     addAndMakeVisible(emptyLabel);
@@ -1143,10 +1143,7 @@ void RackView::paint(juce::Graphics& g) {
 
     const auto drawPanel = [&g](juce::Rectangle<int> bounds, juce::Colour fill,
                                 juce::Colour outline) {
-        g.setColour(fill);
-        g.fillRoundedRectangle(bounds.toFloat(), 3.0f);
-        g.setColour(outline);
-        g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), 3.0f, 1.0f);
+        theme::ui::drawPanel(g, bounds, fill, outline);
     };
 
     drawPanel(leftArea, theme::panel().darker(0.08f), theme::border());
@@ -1154,16 +1151,11 @@ void RackView::paint(juce::Graphics& g) {
     drawPanel(centerArea, theme::bg().darker(0.16f), theme::line().withAlpha(0.8f));
     drawPanel(rightArea, theme::panel().darker(0.08f), theme::border());
 
-    g.setColour(theme::dim().withAlpha(0.75f));
-    g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
-    g.drawText("INPUT", leftArea.getX() + 8, leftArea.getY() + 4, 60, 12,
-               juce::Justification::left, false);
-    g.drawText("INSERTS", pluginArea.getX() + 8, pluginArea.getY() + 4, 70, 12,
-               juce::Justification::left, false);
-    g.drawText("PLUGIN EDITOR", centerArea.getX() + 10, centerArea.getY() + 6, 100, 12,
-               juce::Justification::left, false);
-    g.drawText("OUTPUT", rightArea.getX() + 8, rightArea.getY() + 4, 60, 12,
-               juce::Justification::left, false);
+    theme::ui::drawSectionCaption(g, { leftArea.getX() + 8, leftArea.getY() + 4, 70, 12 }, "INPUT");
+    theme::ui::drawSectionCaption(g, { pluginArea.getX() + 8, pluginArea.getY() + 4, 80, 12 }, "INSERTS");
+    theme::ui::drawSectionCaption(g, { centerArea.getX() + 10, centerArea.getY() + 6, 110, 12 },
+                                  "PLUGIN EDITOR");
+    theme::ui::drawSectionCaption(g, { rightArea.getX() + 8, rightArea.getY() + 4, 70, 12 }, "OUTPUT");
 }
 
 void RackView::jumpToMixer() {

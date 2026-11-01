@@ -68,6 +68,31 @@ void ConsoleLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w
     g.drawLine(indicator, 2.0f);
 }
 
+void ConsoleLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button,
+                                              const juce::Colour& backgroundColour,
+                                              bool shouldDrawButtonAsHighlighted,
+                                              bool shouldDrawButtonAsDown) {
+    auto face = button.getToggleState()
+                    ? button.findColour(juce::TextButton::buttonOnColourId, true)
+                    : backgroundColour;
+    if (!button.isEnabled()) face = face.withMultipliedAlpha(0.5f);
+    else if (shouldDrawButtonAsDown) face = face.darker(0.12f);
+    else if (shouldDrawButtonAsHighlighted) face = face.brighter(0.10f);
+
+    const auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
+    constexpr float radius = 3.0f;
+
+    g.setColour(face);
+    g.fillRoundedRectangle(bounds, radius);
+    g.setColour(theme::border().withMultipliedAlpha(button.isEnabled() ? 1.0f : 0.5f));
+    g.drawRoundedRectangle(bounds, radius, 1.0f);
+
+    if (button.hasKeyboardFocus(true)) {
+        g.setColour(theme::cyan());
+        g.drawRoundedRectangle(bounds.reduced(1.5f), radius, 1.0f);
+    }
+}
+
 void ConsoleLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height,
                                            float sliderPos, float minSliderPos, float maxSliderPos,
                                            juce::Slider::SliderStyle style, juce::Slider& slider) {

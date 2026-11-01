@@ -11,6 +11,7 @@ constexpr int rowHeight = 72;
 
 RoutingMatrixComponent::RoutingMatrixComponent(AudioEngine& engine)
     : audioEngine(engine) {
+    addAndMakeVisible(header);
     gridViewport.setViewedComponent(&gridContent, false);
     addAndMakeVisible(gridViewport);
     rebuild();
@@ -18,12 +19,14 @@ RoutingMatrixComponent::RoutingMatrixComponent(AudioEngine& engine)
 
 void RoutingMatrixComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    g.setColour(theme::line().withAlpha(0.25f));
-    g.drawRect(getLocalBounds().reduced(8), 1);
 }
 
 void RoutingMatrixComponent::resized() {
-    gridViewport.setBounds(getLocalBounds().reduced(8));
+    auto area = getLocalBounds().reduced(theme::ui::kPagePad);
+    header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
+    area.removeFromTop(theme::ui::kHeaderGap);
+    gridViewport.setBounds(area);
+
     const int requiredWidth = rowHeaderWidth
                               + static_cast<int>(audioEngine.getOutputs().size()) * columnWidth;
     const int requiredHeight = headerHeight
@@ -46,8 +49,10 @@ void RoutingMatrixComponent::resized() {
             if (cell * 2 + 1 < sendSliders.size()) {
                 const int x = rowHeaderWidth + output * columnWidth;
                 const int y = headerHeight + channel * rowHeight;
-                sendSliders[cell * 2]->setBounds(x, y + 4, columnWidth - 12, 28);
-                sendSliders[cell * 2 + 1]->setBounds(x, y + 36, columnWidth - 12, 28);
+                sendSideLabels[cell * 2]->setBounds(x + 2, y + 4, 18, 28);
+                sendSliders[cell * 2]->setBounds(x + 20, y + 4, columnWidth - 32, 28);
+                sendSideLabels[cell * 2 + 1]->setBounds(x + 2, y + 36, 18, 28);
+                sendSliders[cell * 2 + 1]->setBounds(x + 20, y + 36, columnWidth - 32, 28);
             }
             ++cell;
         }
@@ -57,30 +62,49 @@ void RoutingMatrixComponent::resized() {
 void RoutingMatrixComponent::rebuild() {
     outputHeaders.clear();
     channelLabels.clear();
+    sendSideLabels.clear();
     sendSliders.clear();
 
+    const int inputCount = (int)audioEngine.getChannels().size();
+    const int outputCount = (int)audioEngine.getOutputs().size();
+    header.setStatus(juce::String(inputCount) + (inputCount == 1 ? " input" : " inputs")
+                     + "  -  " + juce::String(outputCount)
+                     + (outputCount == 1 ? " output" : " outputs"));
+
     for (const auto& output : audioEngine.getOutputs()) {
-        auto* header = outputHeaders.add(new juce::Label());
-        header->setText(output->name, juce::dontSendNotification);
-        header->setJustificationType(juce::Justification::centred);
-        header->setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-        header->setColour(juce::Label::textColourId, theme::amber());
-        header->setColour(juce::Label::backgroundColourId, theme::panel());
-        header->setColour(juce::Label::outlineColourId, theme::border());
-        gridContent.addAndMakeVisible(*header);
+        auto* headerLabel = outputHeaders.add(new juce::Label());
+        headerLabel->setText(output->name, juce::dontSendNotification);
+        headerLabel->setJustificationType(juce::Justification::centred);
+        headerLabel->setFont(theme::ui::itemFont());
+        headerLabel->setColour(juce::Label::textColourId, theme::text());
+        headerLabel->setColour(juce::Label::backgroundColourId, theme::panel());
+        headerLabel->setColour(juce::Label::outlineColourId, theme::border());
+        gridContent.addAndMakeVisible(*headerLabel);
     }
+
+    // One L/R pair per cell; the two bars are otherwise indistinguishable.
+    const auto addSideLabel = [this](const juce::String& text) {
+        auto* label = sendSideLabels.add(new juce::Label());
+        label->setText(text, juce::dontSendNotification);
+        label->setJustificationType(juce::Justification::centred);
+        label->setFont(theme::ui::sectionFont());
+        label->setColour(juce::Label::textColourId, theme::dim());
+        label->setInterceptsMouseClicks(false, false);
+        gridContent.addAndMakeVisible(*label);
+    };
+
     for (const auto& channel : audioEngine.getChannels()) {
         auto* label = channelLabels.add(new juce::Label());
         label->setText(channel->name, juce::dontSendNotification);
         label->setJustificationType(juce::Justification::centredLeft);
-        label->setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+        label->setFont(theme::ui::bodyBoldFont());
         label->setColour(juce::Label::textColourId, theme::text());
         label->setColour(juce::Label::backgroundColourId, theme::panel());
         gridContent.addAndMakeVisible(*label);
 
         for (const auto& output : audioEngine.getOutputs()) {
-            // L slider
-            {
+            const auto addSend = [&](bool rightSide) {
+                addSideLabel(rightSide ? "R" : "L");
                 auto* slider = sendSliders.add(new juce::Slider());
                 slider->setSliderStyle(juce::Slider::LinearBar);
                 slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
@@ -92,39 +116,23 @@ void RoutingMatrixComponent::rebuild() {
                 slider->setColour(juce::Slider::textBoxBackgroundColourId, theme::panel());
                 slider->setColour(juce::Slider::textBoxOutlineColourId, theme::border());
                 slider->setDoubleClickReturnValue(true, 0.0);
-                slider->setValue(audioEngine.getSendGainL(channel->id, output->id),
+                slider->setValue(rightSide ? audioEngine.getSendGainR(channel->id, output->id)
+                                           : audioEngine.getSendGainL(channel->id, output->id),
                                   juce::dontSendNotification);
                 const auto channelId = channel->id;
                 const auto outputId = output->id;
-                slider->onValueChange = [this, slider, channelId, outputId] {
-                    audioEngine.setSendGainL(channelId, outputId,
-                                             static_cast<float>(slider->getValue()));
+                slider->onValueChange = [this, slider, channelId, outputId, rightSide] {
+                    if (rightSide)
+                        audioEngine.setSendGainR(channelId, outputId,
+                                                 static_cast<float>(slider->getValue()));
+                    else
+                        audioEngine.setSendGainL(channelId, outputId,
+                                                 static_cast<float>(slider->getValue()));
                 };
                 gridContent.addAndMakeVisible(*slider);
-            }
-            // R slider
-            {
-                auto* slider = sendSliders.add(new juce::Slider());
-                slider->setSliderStyle(juce::Slider::LinearBar);
-                slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
-                slider->setRange(-60.0, 12.0, 0.1);
-                slider->setTextValueSuffix(" dB");
-                slider->setColour(juce::Slider::trackColourId, theme::cyan());
-                slider->setColour(juce::Slider::backgroundColourId, theme::control());
-                slider->setColour(juce::Slider::textBoxTextColourId, theme::text());
-                slider->setColour(juce::Slider::textBoxBackgroundColourId, theme::panel());
-                slider->setColour(juce::Slider::textBoxOutlineColourId, theme::border());
-                slider->setDoubleClickReturnValue(true, 0.0);
-                slider->setValue(audioEngine.getSendGainR(channel->id, output->id),
-                                  juce::dontSendNotification);
-                const auto channelId = channel->id;
-                const auto outputId = output->id;
-                slider->onValueChange = [this, slider, channelId, outputId] {
-                    audioEngine.setSendGainR(channelId, outputId,
-                                             static_cast<float>(slider->getValue()));
-                };
-                gridContent.addAndMakeVisible(*slider);
-            }
+            };
+            addSend(false);
+            addSend(true);
         }
     }
     resized();
