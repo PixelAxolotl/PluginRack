@@ -67,15 +67,22 @@ int countOccurrences(const std::string& haystack, const std::string& needle) {
 
 TEST_CASE("OutputPlayback FIFO holds eight device buffers and starts primed",
           "[underrun]") {
-    const auto body = functionBody(readSource("app/src/DeviceStream.cpp"),
-                                   "OutputPlayback::open");
-    // Depth: a four-block target plus two spare blocks, capped so a large
-    // buffer cannot balloon, and never smaller than the target.
-    CHECK(contains(body, "targetFillFrames = bufferSize * 4"));
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto body = functionBody(source, "OutputPlayback::open");
+    const auto header = readSource("app/src/DeviceStream.h");
+    // Depth: the requested target plus two spare blocks, capped so a large
+    // buffer cannot balloon, and never smaller than the target. Four blocks
+    // is the default; the startup clock asks for one because it renders and
+    // drains in the same callback.
+    CHECK(contains(header, "int targetFillBlocks = 4"));
+    CHECK(contains(header, "int primeBlocks = -1"));
+    CHECK(contains(body, "targetFillFrames = bufferSize * juce::jmax(0, targetFillBlocks)"));
     CHECK(contains(body, "bufferSize * 8"));
     CHECK(contains(body, "65536"));
-    // Prime with four silent blocks before the device callback can read, so a
-    // delayed first render cannot expose an empty FIFO.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "(isClock && isOpeningDevices())"));
+    // Prime before the device callback can read, so a delayed first render
+    // cannot expose an empty FIFO.
     const auto prime = body.find("capacity - bufferSize");
     const auto callback = body.find("addAudioCallback");
     CHECK(prime != std::string::npos);
@@ -113,7 +120,8 @@ TEST_CASE("InputCapture ring buffer gets the same depth clamp", "[underrun]") {
     // output render block, so mismatched buffer settings cannot starve it.
     CHECK(contains(body, "blockFrames * 4"));
     CHECK(contains(body, "65536"));
-    CHECK(contains(body, "blockFrames * 2"));
+    // Read delay is configurable (1 or 2 blocks); the ring must still clamp.
+    CHECK(contains(body, "blockFrames * juce::jmax(1, readDelayBlocks)"));
     CHECK(contains(body, "readCursor.prepare"));
 }
 
@@ -191,22 +199,60 @@ TEST_CASE("plugin prepare and release run outside the state lock",
     // render-miss source (device reopen / scene restore).
     const auto cpp = readSource("app/src/AudioEngine.cpp");
     const auto prepare = functionBody(
-        cpp, "void AudioEngine::prepareToPlay(int maxBlockFrames)");
+        cpp, "void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs)");
     CHECK_FALSE(contains(prepare, "insert->pluginHost.prepareToPlay"));
     CHECK(contains(prepare, "std::vector<PluginHost*> hosts"));
     CHECK(contains(prepare, "host->prepareToPlay"));
     // A render-block change must also resize the capture rings.
-    CHECK(contains(prepare, "prepareInputs()"));
+    CHECK(contains(prepare, "if (openInputs) prepareInputs()"));
 
     const auto release = functionBody(cpp, "void AudioEngine::releaseResources()");
     CHECK_FALSE(contains(release, "insert->pluginHost.releaseResources"));
     CHECK(contains(release, "host->releaseResources"));
 }
 
-TEST_CASE("Clock reopen keeps feeding other outputs until the new clock runs",
+TEST_CASE("latency tuning options reach the device opens",
+          "[underrun][latency]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "AudioEngine::setLatencyOption"));
+    CHECK(contains(engine, "useLowLatencyInput ? 1 : 2"));
+    CHECK(contains(engine, "minimalClockFifo_.load"));
+    CHECK(contains(engine, "lowLatencyOutputs_.load"));
+    CHECK(contains(engine, "preferExclusive_.load"));
+    CHECK(contains(engine, "fullDuplexInput_.load"));
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    CHECK(contains(device, "blockFrames * juce::jmax(1, readDelayBlocks)"));
+    CHECK(contains(device, "preferExclusive"));
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "LowLatencyInput"));
+    CHECK(contains(settings, "MinimalClockFifo"));
+    CHECK(contains(settings, "showDeviceBuffer"));
+}
+
+TEST_CASE("settings apply fails safe and reloads single devices",
+          "[underrun][latency]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "AudioEngine::applyDeviceSettings"));
+    CHECK(contains(engine, "restored the previous ones"));
+    CHECK(contains(engine, "AudioEngine::reloadAllDevicesAsync"));
+    CHECK(contains(engine, "AudioEngine::reloadDeviceAsync"));
+    CHECK(contains(engine, "forceReopen"));
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "Pending changes - press Apply"));
+    CHECK(contains(settings, "applyDeviceSettings"));
+    const auto header = readSource("app/src/SettingsView.h");
+    CHECK(contains(header, "Reload All Audio Devices"));
+    CHECK(contains(header, "Reload Selected Device"));
+    CHECK(contains(header, "reloadDeviceToggles"));
+    CHECK(contains(engine, "AudioEngine::reloadDevicesAsync"));
+    CHECK(contains(engine, "attempt < 3"));
+    CHECK(contains(engine, "juce::Thread::sleep(400)"));
+}
+
+TEST_CASE("clock reopen keeps feeding other outputs until the new clock runs",
           "[underrun]") {
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
-                                   "juce::String AudioEngine::setOutputDevice");
+                                   "juce::String AudioEngine::setOutputDeviceImpl");
     // The old clock must not be cut off before the new device is open: the
     // prevOutput hand-off stop happens after newPlayback->open succeeds.
     const auto open = body.find("newPlayback->open(");
