@@ -579,6 +579,7 @@ void ChannelStrip::refreshRouting() {
 void ChannelStrip::refreshInput() {
     const bool mono = channel.layout == pluginrack::ChannelLayout::Mono;
     const bool hasInputDevice = channel.inputDeviceName.isNotEmpty();
+    levelMeter.setStereo(!mono);
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
     inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);

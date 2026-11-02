@@ -30,6 +30,12 @@ LevelMeter::LevelMeter(juce::Atomic<float>& leftPeakSource, juce::Atomic<float>&
     startTimerHz(30);
 }
 
+void LevelMeter::setStereo(bool shouldBeStereo) {
+    if (stereo == shouldBeStereo) return;
+    stereo = shouldBeStereo;
+    repaint();
+}
+
 void LevelMeter::paint(juce::Graphics& g) {
     g.fillAll(theme::bg().darker(0.2f));
 
@@ -41,16 +47,17 @@ void LevelMeter::paint(juce::Graphics& g) {
     const auto bars = well.reduced(1);
     if (bars.isEmpty()) return;
     constexpr int gap = 2;
-    const int barWidth = juce::jmax(1, (bars.getWidth() - gap) / 2);
+    const int barWidth = stereo ? juce::jmax(1, (bars.getWidth() - gap) / 2)
+                                : bars.getWidth();
     const juce::Rectangle<int> leftBar{bars.getX(), bars.getY(), barWidth, bars.getHeight()};
     const juce::Rectangle<int> rightBar{bars.getRight() - barWidth, bars.getY(), barWidth,
                                         bars.getHeight()};
 
-    // Each side gets its own dark track, so the pair reads as two columns even
-    // when both are idle.
+    // Each side gets its own dark track in stereo; mono uses the full meter
+    // width and renders only the left/source bar.
     g.setColour(theme::bg());
     g.fillRoundedRectangle(leftBar.toFloat(), 1.5f);
-    g.fillRoundedRectangle(rightBar.toFloat(), 1.5f);
+    if (stereo) g.fillRoundedRectangle(rightBar.toFloat(), 1.5f);
 
     const auto markY = [&bars](int db) {
         const float proportion = (static_cast<float>(db) - kMinDb) / kDbSpan;
@@ -89,14 +96,15 @@ void LevelMeter::paint(juce::Graphics& g) {
     const int labelHeight = juce::jmin(10, bars.getHeight());
     if (labelHeight >= 8) {
         g.setFont(juce::Font(juce::FontOptions(8.0f)));
-        for (int side = 0; side < 2; ++side) {
-            const auto bar = side == 0 ? leftBar : rightBar;
-            const auto chip = bar.withY(bar.getBottom() - labelHeight).withHeight(labelHeight);
-            g.setColour(theme::bg().withAlpha(0.85f));
-            g.fillRect(chip);
-            g.setColour(theme::text());
-            g.drawText(side == 0 ? "L" : "R", chip, juce::Justification::centred, false);
-        }
+            const int sideCount = stereo ? 2 : 0;
+            for (int side = 0; side < sideCount; ++side) {
+                const auto bar = side == 0 ? leftBar : rightBar;
+                const auto chip = bar.withY(bar.getBottom() - labelHeight).withHeight(labelHeight);
+                g.setColour(theme::bg().withAlpha(0.85f));
+                g.fillRect(chip);
+                g.setColour(theme::text());
+                g.drawText(side == 1 ? "R" : "L", chip, juce::Justification::centred, false);
+            }
     }
 
     g.setColour(theme::line().withAlpha(0.65f));

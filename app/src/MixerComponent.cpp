@@ -9,6 +9,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     deviceControl.setTitle(output.name);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
+    meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
 
     removeOutputButton.setFontSize(13.0f);
     removeOutputButton.setClickAction([this] {
@@ -66,9 +67,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     modeCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
     modeCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
     modeCombo.onChange = [this] {
+        const bool mono = modeCombo.getSelectedId() == 1;
         audioEngine.setOutputLayout(output.id,
-            modeCombo.getSelectedId() == 1 ? pluginrack::ChannelLayout::Mono
-                                          : pluginrack::ChannelLayout::Stereo);
+            mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo);
+        meter.setStereo(!mono);
     };
     addAndMakeVisible(modeCombo);
 
@@ -421,7 +423,9 @@ void MixerComponent::OutputStrip::refresh() {
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
-    modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
+    const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
+    modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
+    meter.setStereo(!mono);
     flipButton.setToggleState(output.flipped.get());
     refreshEqButton();
 }
