@@ -5,32 +5,41 @@
 #include "SceneBridge.h"
 
 ToolbarComponent::ToolbarComponent() {
-    for (auto* b : { &racksButton, &mixerButton, &routingButton, &savesButton, &settingsButton })
+    for (auto* b : { &racksButton, &mixerButton, &routingButton, &ioButton,
+                     &savesButton, &settingsButton }) {
         b->setClickingTogglesState(true);
+        theme::ui::styleButton(*b);
+    }
 
     racksButton.onClick = [this] { selectView(AppView::Rack); };
     mixerButton.onClick = [this] { selectView(AppView::Mixer); };
     routingButton.onClick = [this] { selectView(AppView::Routing); };
+    ioButton.onClick = [this] { selectView(AppView::IO); };
     savesButton.onClick = [this] { selectView(AppView::Saves); };
     settingsButton.onClick = [this] { selectView(AppView::Settings); };
 
     racksButton.setTooltip("Rack view: plugin chains");
     mixerButton.setTooltip("Mixer view: faders, meters, inline routing");
     routingButton.setTooltip("Routing view: full channel/output matrix");
+    ioButton.setTooltip("I/O view: input and output devices, round-trip measurement");
     savesButton.setTooltip("Saves view: saved scenes");
-    settingsButton.setTooltip("Settings view: device, buffer, diagnostics");
+    settingsButton.setTooltip("Settings view: buffer, latency tuning, diagnostics");
 
     snapshotButton.setTooltip("Snapshots arrive in a later task");
     snapshotButton.onClick = [this] { if (onSnapshot) onSnapshot(); };
 
     latencyLabel.setJustificationType(juce::Justification::centredRight);
-    latencyLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    latencyLabel.setFont(theme::ui::captionFont());
     latencyLabel.setColour(juce::Label::textColourId, theme::dim());
 
-    errorButton.setColour(juce::TextButton::textColourOffId, theme::red());
     errorButton.setTooltip("Audio errors - click for details");
     errorButton.setVisible(false);
     errorButton.onClick = [this] { if (onErrorClicked) onErrorClicked(); };
+
+    for (auto* b : { &saveButton, &snapshotButton, &menuButton })
+        theme::ui::styleButton(*b);
+    theme::ui::styleButton(errorButton);
+    errorButton.setColour(juce::TextButton::textColourOffId, theme::red());
 
     saveButton.onClick = [this] { if (onSave) onSave(); };
     menuButton.onClick = [this] { if (onMenu) onMenu(); };
@@ -38,6 +47,7 @@ ToolbarComponent::ToolbarComponent() {
     addAndMakeVisible(racksButton);
     addAndMakeVisible(mixerButton);
     addAndMakeVisible(routingButton);
+    addAndMakeVisible(ioButton);
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(snapshotButton);
     addAndMakeVisible(latencyLabel);
@@ -63,6 +73,7 @@ void ToolbarComponent::updateNavToggles() {
     racksButton.setToggleState(currentView == AppView::Rack, juce::dontSendNotification);
     mixerButton.setToggleState(currentView == AppView::Mixer, juce::dontSendNotification);
     routingButton.setToggleState(currentView == AppView::Routing, juce::dontSendNotification);
+    ioButton.setToggleState(currentView == AppView::IO, juce::dontSendNotification);
     savesButton.setToggleState(currentView == AppView::Saves, juce::dontSendNotification);
     settingsButton.setToggleState(currentView == AppView::Settings, juce::dontSendNotification);
 }
@@ -97,7 +108,7 @@ void ToolbarComponent::paint(juce::Graphics& g) {
 
     // clock info (single line, clipped - same as the old header paint)
     g.setColour(clockColour);
-    g.setFont(juce::Font(juce::FontOptions(11.0f)));
+    g.setFont(theme::ui::captionFont());
     g.drawFittedText(clockText, clockBounds, juce::Justification::centredRight, 1);
 }
 
@@ -108,6 +119,8 @@ void ToolbarComponent::resized() {
     racksButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
     mixerButton.setBounds(area.removeFromLeft(64));
+    area.removeFromLeft(4);
+    ioButton.setBounds(area.removeFromLeft(48));
     area.removeFromLeft(4);
     routingButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
@@ -164,6 +177,7 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
     , routingView(audioEngine)
+    , ioView(audioEngine)
     , savesView([this](const pluginrack::Scene& scene) {
           return onRestoreRequested ? onRestoreRequested(scene) : juce::String();
       })
@@ -181,6 +195,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     // processor; a full refreshViews here would re-dock the doomed insert
     // before the erase, so this releases without rebuilding.
     pluginRemovingHook() = [this] { releaseDockedEditor(); };
+    ioView.onStructureChanged = [this] {
+        // Strips added, removed or renamed on the I/O page change every view.
+        if (onStructureChanged) onStructureChanged();
+    };
     mixerView.onSelectionChanged = [this](int id, bool isOutput) {
         rackView.setSelectedChannel(id, isOutput);
     };
@@ -192,6 +210,7 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
+    addAndMakeVisible(ioView);
     addAndMakeVisible(savesView);
     addAndMakeVisible(settingsView);
     refreshViews();
@@ -203,11 +222,13 @@ void ViewRouter::setView(AppView view) {
     if (view == AppView::Rack) rackView.rebuild();
     if (view == AppView::Mixer) mixerView.rebuild();
     if (view == AppView::Routing) routingView.rebuild();
+    if (view == AppView::IO) ioView.rebuild();
     if (view == AppView::Saves) savesView.rebuild();
     if (view == AppView::Settings) settingsView.refresh();
     mixerView.setVisible(view == AppView::Mixer);
     rackView.setVisible(view == AppView::Rack);
     routingView.setVisible(view == AppView::Routing);
+    ioView.setVisible(view == AppView::IO);
     savesView.setVisible(view == AppView::Saves);
     settingsView.setVisible(view == AppView::Settings);
 }
@@ -221,14 +242,21 @@ void ViewRouter::refreshViews() {
     releaseDockedEditor();
     rackView.rebuild();
     routingView.rebuild();
+    ioView.rebuild();
     savesView.rebuild();
     settingsView.refresh();
+}
+
+void ViewRouter::refreshDeviceStrips() {
+    mixerView.refreshStrips();
+    ioView.refreshDeviceStrips();
 }
 
 void ViewRouter::resized() {
     mixerView.setBounds(getLocalBounds());
     rackView.setBounds(getLocalBounds());
     routingView.setBounds(getLocalBounds());
+    ioView.setBounds(getLocalBounds());
     savesView.setBounds(getLocalBounds());
     settingsView.setBounds(getLocalBounds());
 }
@@ -258,23 +286,44 @@ MainComponent::MainComponent()
 
     mixer.onStructureChanged = [this] { refreshViews(); };
 
-    // Defer all device/plugin loading until after the window is visible so the
-    // UI paints first; loading devices synchronously here blocked the message
-    // thread and froze the audio pipeline on startup.
+    // All device/plugin work is deferred to the first paint (see paint()):
+    // starting it from the constructor ran it before the window had drawn,
+    // which is what made startup look like a hang.
     startTimerHz(4);
     timerCallback(); // populate the toolbar readouts before the first tick
     setSize(1600, 900);
-
-    juce::Component::SafePointer<MainComponent> safe(this);
-    juce::MessageManager::callAsync([safe] {
-        if (safe == nullptr) return;
-        safe->initialiseAudio();
-    });
 }
 
 void MainComponent::timerCallback() {
-    const auto clockDesc = audioEngine.getClockDescription();
-    toolbar.setClockText(clockDesc, clockDesc.startsWith("No output"));
+    audioEngine.pollLatencyMeasurement();
+    if (audioEngine.isOpeningDevices()) {
+        const auto total = audioEngine.getDeviceOpenTotal();
+        const auto done = audioEngine.getDeviceOpenProgress();
+        toolbar.setClockText("Starting audio... " + juce::String(done) + "/"
+                                 + juce::String(total),
+                             true);
+    } else {
+        if (audioEngine.consumeDeviceOpenFinished()) {
+            const auto deviceErrors = audioEngine.takeDeviceOpenErrors();
+            // The strips were built before the background open finished, so
+            // their device readouts still show the pre-open state. Refresh them
+            // now: a device that no longer exists has to turn red, not stay
+            // green.
+            router.refreshDeviceStrips();
+            if (deviceErrors.isNotEmpty())
+                showError("Some audio devices could not be opened:\n" + deviceErrors);
+        }
+        const auto clockDesc = audioEngine.getClockDescription();
+        toolbar.setClockText(clockDesc, clockDesc.startsWith("No output"));
+    }
+
+    // A device can vanish while its stream is open (unplugged, disabled in
+    // Windows) and the strips would keep showing it as healthy. Check a few
+    // times a minute and flip the affected strips to red.
+    if (!audioEngine.isOpeningDevices() && ++availabilityTicks_ >= 40) {
+        availabilityTicks_ = 0;
+        if (audioEngine.refreshDeviceAvailability()) router.refreshDeviceStrips();
+    }
 
     const auto report = audioEngine.getLatencyReport();
     if (!report.valid) {
@@ -334,6 +383,15 @@ void MainComponent::selectView(AppView view) {
 
 void MainComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
+    // Queue the audio startup only once the first frame has been drawn: a
+    // restore running from the constructor paints nothing until it finishes.
+    if (!audioInitQueued_) {
+        audioInitQueued_ = true;
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr) safe->initialiseAudio();
+        });
+    }
 }
 
 void MainComponent::resized() {
@@ -353,6 +411,10 @@ void MainComponent::showMenu() {
     });
     menu.addSeparator();
     menu.addItem("Reset to Defaults", [this] {
+        if (audioEngine.isOpeningDevices()) {
+            showError("Audio is still starting up. Please try again in a moment.");
+            return;
+        }
         juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
                                             "PluginRack",
                                             "Reset engine to defaults (1 channel, 3 outputs)?",
@@ -616,15 +678,20 @@ void MainComponent::loadScene(bool showMissingMessage) {
         showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
 }
 
-juce::String MainComponent::applyScene(const pluginrack::Scene& scene) {
+juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool openDevicesNow) {
     // All of restoreScene runs here, on the message thread: it
-    // instantiates plugins, closes and opens devices, swaps the strip
-    // vectors, and destroys the old strips whose PluginHosts own JUCE
-    // editor windows - none of which may happen on a worker thread. The
-    // engine parks the audio clock around the swap, so the synchronous
-    // load is brief. The flag serialises overlapping menu/Saves loads and
-    // resets on every path; dialogs stay on the message thread too.
+    // instantiates plugins, swaps the strip vectors, and destroys the old
+    // strips whose PluginHosts own JUCE editor windows - none of which may
+    // happen on a worker thread. The device streams themselves are opened by
+    // the engine's startup worker when openDevicesNow is false. The flag
+    // serialises overlapping menu/Saves loads and resets on every path;
+    // dialogs stay on the message thread too.
     if (sceneLoading_.exchange(true)) return {};
+    if (audioEngine.isOpeningDevices()) {
+        sceneLoading_.store(false);
+        showError("Audio is still starting up. Please try again in a moment.");
+        return {};
+    }
     // The rack may dock an editor from a strip whose plugin dies inside
     // restoreScene; release it first (an editor outliving its processor
     // is unsafe to delete). refreshViews below re-docks against the new
@@ -634,7 +701,7 @@ juce::String MainComponent::applyScene(const pluginrack::Scene& scene) {
     // frees the refs the pending rebuild would otherwise tear down.
     router.releaseDockedEditor();
     mixer.closeAllEqWindows();
-    const juce::String pluginErrors = audioEngine.restoreScene(scene);
+    const juce::String pluginErrors = audioEngine.restoreScene(scene, openDevicesNow);
     sceneLoading_.store(false);
     refreshViews();
     return pluginErrors;
@@ -645,13 +712,17 @@ void MainComponent::initialiseAudio() {
     auto saved = SceneBridge::loadDefaultOrLast(error);
     if (error.isNotEmpty()) {
         showError(error);
-        audioEngine.openDefaultDevices();
+        audioEngine.openDefaultDevicesAsync();
     } else if (saved.has_value()) {
-        const auto pluginErrors = applyScene(*saved);
+        // Build the strips and load the plugins now (fast), then let the
+        // engine open the streams on its worker: a slow WASAPI probe must not
+        // take the message thread with it.
+        const auto pluginErrors = applyScene(*saved, /*openDevicesNow=*/false);
         if (pluginErrors.isNotEmpty())
             showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+        audioEngine.openStripsDevicesAsync();
     } else {
-        audioEngine.openDefaultDevices();
+        audioEngine.openDefaultDevicesAsync();
     }
     timerCallback();
 }

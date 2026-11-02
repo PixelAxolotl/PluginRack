@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 3;
+constexpr int kSchemaVersion = 4;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -212,6 +212,8 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"eqEnabled", channel.eqEnabled},
         {"eqBands", channel.eqBands},
         {"eqDelayMs", channel.eqDelayMs},
+        {"eqRtaOffsetDb", channel.eqRtaOffsetDb},
+        {"eqRtaWeighting", channel.eqRtaWeighting},
     };
 }
 
@@ -257,6 +259,9 @@ void from_json(const nlohmann::json& j, Channel& channel) {
     // before the delay knob have no eqDelayMs (0 ms).
     channel.eqEnabled = j.value("eqEnabled", false);
     channel.eqDelayMs = j.value("eqDelayMs", 0.0f);
+    // Absent before the offset was saved: 0 is the default view.
+    channel.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
+    channel.eqRtaWeighting = j.value("eqRtaWeighting", 0);
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(channel.eqBands);
     }
@@ -278,6 +283,8 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"eqEnabled", output.eqEnabled},
         {"eqBands", output.eqBands},
         {"eqDelayMs", output.eqDelayMs},
+        {"eqRtaOffsetDb", output.eqRtaOffsetDb},
+        {"eqRtaWeighting", output.eqRtaWeighting},
     };
 }
 
@@ -311,6 +318,8 @@ void from_json(const nlohmann::json& j, Output& output) {
     // before the delay knob have no eqDelayMs (0 ms).
     output.eqEnabled = j.value("eqEnabled", false);
     output.eqDelayMs = j.value("eqDelayMs", 0.0f);
+    output.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
+    output.eqRtaWeighting = j.value("eqRtaWeighting", 0);
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(output.eqBands);
     }
@@ -322,6 +331,11 @@ void to_json(nlohmann::json& j, const Route& route) {
         {"outputId", route.outputId},
         {"sendGainDb", route.sendGainDb},
     };
+    // Optional: only a split L/R send needs the extra key, so matched sends
+    // keep the compact historical form.
+    if (route.sendGainDbR.has_value()) {
+        j["sendGainDbR"] = *route.sendGainDbR;
+    }
 }
 
 void from_json(const nlohmann::json& j, Route& route) {
@@ -329,10 +343,59 @@ void from_json(const nlohmann::json& j, Route& route) {
     j.at("channelId").get_to(route.channelId);
     j.at("outputId").get_to(route.outputId);
     route.sendGainDb = j.value("sendGainDb", 0.0f);
+    if (j.contains("sendGainDbR")) {
+        route.sendGainDbR = j.value("sendGainDbR", route.sendGainDb);
+    }
+}
+
+void to_json(nlohmann::json& j, const WatchedDevice& device) {
+    j = nlohmann::json{
+        {"isInput", device.isInput},
+        {"stripId", device.stripId},
+    };
+}
+
+void from_json(const nlohmann::json& j, WatchedDevice& device) {
+    device = WatchedDevice{};
+    device.isInput = j.value("isInput", false);
+    device.stripId = j.value("stripId", 0u);
+}
+
+void to_json(nlohmann::json& j, const AudioSettings& settings) {
+    j = nlohmann::json{
+        {"inputBuffer", settings.inputBuffer},
+        {"outputBuffer", settings.outputBuffer},
+        {"lowLatencyInput", settings.lowLatencyInput},
+        {"preferExclusive", settings.preferExclusive},
+        {"lowLatencyOutputs", settings.lowLatencyOutputs},
+        {"minimalClockFifo", settings.minimalClockFifo},
+        {"fullDuplexInput", settings.fullDuplexInput},
+        {"autoReloadDevices", settings.autoReloadDevices},
+        {"watchedDevices", settings.watchedDevices},
+        {"rackThumbnailFps", settings.rackThumbnailFps},
+    };
+}
+
+void from_json(const nlohmann::json& j, AudioSettings& settings) {
+    settings = AudioSettings{};
+    settings.inputBuffer = j.value("inputBuffer", 0);
+    settings.outputBuffer = j.value("outputBuffer", 0);
+    settings.lowLatencyInput = j.value("lowLatencyInput", false);
+    settings.preferExclusive = j.value("preferExclusive", false);
+    settings.lowLatencyOutputs = j.value("lowLatencyOutputs", false);
+    settings.minimalClockFifo = j.value("minimalClockFifo", false);
+    settings.fullDuplexInput = j.value("fullDuplexInput", false);
+    settings.autoReloadDevices = j.value("autoReloadDevices", false);
+    // Absent in scenes written before rack thumbnails existed: the default
+    // rate is what those sessions were already running at.
+    settings.rackThumbnailFps = j.value("rackThumbnailFps", 15);
+    if (j.contains("watchedDevices")) {
+        j.at("watchedDevices").get_to(settings.watchedDevices);
+    }
 }
 
 std::string toJson(const Scene& scene) {
-    const nlohmann::json j = {
+    nlohmann::json j = {
         {"schemaVersion", kSchemaVersion},
         {"name", scene.name},
         {"sampleRate", scene.sampleRate},
@@ -341,6 +404,7 @@ std::string toJson(const Scene& scene) {
         {"outputs", scene.outputs},
         {"routes", scene.routes},
     };
+    if (scene.audio.has_value()) j["audio"] = *scene.audio;
     return j.dump();
 }
 
@@ -349,9 +413,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 3) {
+        if (schemaVersion < 1 || schemaVersion > 4) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1, 2 or 3");
+                                    ", expected 1 to 4");
             return result;
         }
         Scene scene;
@@ -367,6 +431,11 @@ SceneLoadResult fromJson(std::string_view text) {
         }
         if (j.contains("routes")) {
             j.at("routes").get_to(scene.routes);
+        }
+        if (j.contains("audio")) {
+            pluginrack::AudioSettings settings;
+            j.at("audio").get_to(settings);
+            scene.audio = std::move(settings);
         }
         result.scene = scene;
     } catch (const std::exception& e) {

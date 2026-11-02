@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 3;
+    original.schemaVersion = 4;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -85,7 +85,7 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 4})");
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 5})");
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
@@ -137,7 +137,7 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     REQUIRE(loaded.scene.has_value());
     // v2 auto-migrates: saving a v2 scene always writes a v3 file.
     pluginrack::Scene expected = original;
-    expected.schemaVersion = 3;
+    expected.schemaVersion = 4;
     REQUIRE(*loaded.scene == expected);
     REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
@@ -176,7 +176,7 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
 
 TEST_CASE("slot plugin state is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 3;
+    original.schemaVersion = 4;
     original.name = "state";
 
     pluginrack::Channel channel;
@@ -261,7 +261,7 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
 
 TEST_CASE("inputChannels round-trips with the channel layout") {
     pluginrack::Scene original;
-    original.schemaVersion = 3;
+    original.schemaVersion = 4;
     original.name = "mapping";
 
     pluginrack::Channel mono;
@@ -343,13 +343,13 @@ TEST_CASE("v2 scene loads flat EQ and saves as v3") {
     }
     REQUIRE(output.eqDelayMs == 0.0f);
 
-    // The loaded scene saves as v3, completing the auto-migration.
-    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":3") != std::string::npos);
+    // The loaded scene saves as v4, completing the auto-migration.
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":4") != std::string::npos);
 }
 
 TEST_CASE("scene v3 round-trip preserves eq bands") {
     pluginrack::Scene original;
-    original.schemaVersion = 3;
+    original.schemaVersion = 4;
     original.name = "eq";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -365,6 +365,8 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     channel.eqBands[3].q = 1.2f;
     channel.eqBands[3].solo = true;
     channel.eqDelayMs = 12.5f;
+    channel.eqRtaOffsetDb = -6.0f;
+    channel.eqRtaWeighting = 2;
     original.channels.push_back(channel);
 
     pluginrack::Output output;
@@ -375,6 +377,8 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     output.eqBands[1].freqHz = 150.25f;
     output.eqBands[5].gainDb = -3.0f;
     output.eqDelayMs = 480.0f;
+    output.eqRtaOffsetDb = 9.0f;
+    output.eqRtaWeighting = 1;
     original.outputs.push_back(output);
 
     pluginrack::Route route;
@@ -383,7 +387,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     original.routes.push_back(route);
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":3") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":4") != std::string::npos);
     REQUIRE(json.find("eqBands") != std::string::npos);
 
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
@@ -394,7 +398,98 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     REQUIRE(loaded.scene->channels.front().eqBands[3].solo == true);
     REQUIRE(loaded.scene->channels.front().eqBands[0].enabled == false);
     REQUIRE(loaded.scene->channels.front().eqDelayMs == 12.5f);
+    REQUIRE(loaded.scene->channels.front().eqRtaOffsetDb == -6.0f);
+    REQUIRE(loaded.scene->channels.front().eqRtaWeighting == 2);
     REQUIRE(loaded.scene->outputs.front().eqEnabled == true);
     REQUIRE(loaded.scene->outputs.front().eqBands[5].gainDb == -3.0f);
     REQUIRE(loaded.scene->outputs.front().eqDelayMs == 480.0f);
+    REQUIRE(loaded.scene->outputs.front().eqRtaOffsetDb == 9.0f);
+    REQUIRE(loaded.scene->outputs.front().eqRtaWeighting == 1);
+}
+
+TEST_CASE("scene audio settings round-trip") {
+    pluginrack::Scene original;
+    original.schemaVersion = 4;
+    original.name = "tuned";
+
+    pluginrack::AudioSettings audio;
+    audio.inputBuffer = 128;
+    audio.outputBuffer = 512;
+    audio.lowLatencyInput = true;
+    audio.minimalClockFifo = true;
+    audio.autoReloadDevices = true;
+    audio.rackThumbnailFps = 24;
+    audio.watchedDevices.push_back(pluginrack::WatchedDevice{false, 2});
+    audio.watchedDevices.push_back(pluginrack::WatchedDevice{true, 1});
+    original.audio = audio;
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"audio\"") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->audio.has_value());
+    REQUIRE(*loaded.scene->audio == audio);
+    REQUIRE(*loaded.scene == original);
+}
+
+TEST_CASE("a scene without an audio block leaves the tuning unset") {
+    const pluginrack::SceneLoadResult loaded =
+        pluginrack::fromJson(R"({"schemaVersion": 3})");
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(!loaded.scene->audio.has_value());
+}
+
+TEST_CASE("a split left and right send survives a round trip") {
+    pluginrack::Scene original;
+    original.schemaVersion = 4;
+    original.name = "split-send";
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    original.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    route.sendGainDb = -6.0f;
+    route.sendGainDbR = -18.0f;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"sendGainDbR\":-18") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->routes.front().sendGainDb == -6.0f);
+    REQUIRE(loaded.scene->routes.front().sendGainDbR.has_value());
+    REQUIRE(*loaded.scene->routes.front().sendGainDbR == -18.0f);
+    REQUIRE(*loaded.scene == original);
+}
+
+TEST_CASE("a matched send stores one level and stays compact") {
+    pluginrack::Scene original;
+    original.schemaVersion = 4;
+    original.channels.push_back(pluginrack::Channel{});
+    original.outputs.push_back(pluginrack::Output{});
+    pluginrack::Route route;
+    route.channelId = 0;
+    route.outputId = 0;
+    route.sendGainDb = -3.0f;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("sendGainDbR") == std::string::npos);
+
+    // A scene written before the split restores a matched pair.
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(!loaded.scene->routes.front().sendGainDbR.has_value());
 }

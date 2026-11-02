@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 
 namespace pluginrack {
 
@@ -41,28 +42,46 @@ bool writeWav(const std::string& path, std::span<const float> interleaved,
     if (numChannels <= 0 || sampleRate <= 0) {
         return false;
     }
+    const auto channels = static_cast<std::uint64_t>(numChannels);
+    if (channels > std::numeric_limits<std::uint16_t>::max() ||
+        interleaved.size() % channels != 0) {
+        return false;
+    }
+    constexpr auto kMaxDataBytes =
+        std::numeric_limits<std::uint32_t>::max() - 36u;
+    if (interleaved.size() >
+        static_cast<std::size_t>(kMaxDataBytes / 2u)) {
+        return false;
+    }
+    const auto dataBytes = static_cast<std::uint64_t>(interleaved.size()) * 2u;
+    const auto byteRate = static_cast<std::uint64_t>(sampleRate) * channels * 2u;
+    if (channels * 2u > std::numeric_limits<std::uint16_t>::max() ||
+        byteRate > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
         return false;
     }
-    const std::uint32_t dataBytes =
-        static_cast<std::uint32_t>(interleaved.size() * 2);
-    const std::uint32_t channels = static_cast<std::uint32_t>(numChannels);
-    const std::uint32_t rate = static_cast<std::uint32_t>(sampleRate);
+    const auto dataBytes32 = static_cast<std::uint32_t>(dataBytes);
+    const auto channels16 = static_cast<std::uint16_t>(channels);
+    const auto rate = static_cast<std::uint32_t>(sampleRate);
+    const auto byteRate32 = static_cast<std::uint32_t>(byteRate);
+    const auto blockAlign = static_cast<std::uint16_t>(channels * 2u);
 
     out.write("RIFF", 4);
-    writeU32(out, 36 + dataBytes);
+    writeU32(out, 36u + dataBytes32);
     out.write("WAVE", 4);
     out.write("fmt ", 4);
     writeU32(out, 16);
     writeU16(out, 1);
-    writeU16(out, static_cast<std::uint16_t>(channels));
+    writeU16(out, channels16);
     writeU32(out, rate);
-    writeU32(out, rate * channels * 2u);
-    writeU16(out, static_cast<std::uint16_t>(channels * 2u));
+    writeU32(out, byteRate32);
+    writeU16(out, blockAlign);
     writeU16(out, 16);
     out.write("data", 4);
-    writeU32(out, dataBytes);
+    writeU32(out, dataBytes32);
     for (const float sample : interleaved) {
         writeSample(out, sample);
     }

@@ -29,7 +29,12 @@ public:
                       int numChannelsNeeded,
                       juce::String& errorOut,
                       int requestedBufferSize = 0,
-                      int renderBlockFrames = 0);
+                      int renderBlockFrames = 0,
+                      // Read delay in render blocks: 2 absorbs callback phase
+                      // jitter, 1 is the low-latency choice.
+                      int readDelayBlocks = 2,
+                      // Try exclusive mode before the shared modes.
+                      bool preferExclusive = false);
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
@@ -75,12 +80,29 @@ public:
     std::uint64_t getInputUnderruns() const { return inputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
     int getReadDelaySamples() const { return readDelaySamples.load(std::memory_order_relaxed); }
-    void setLatencyMeasurementActive(bool active) {
-        latencyMeasureActive.store(active, std::memory_order_relaxed);
-        if (!active) latencyImpulseDetected.store(false, std::memory_order_relaxed);
+    // Round-trip measurement: the render thread starts the hunt on every
+    // capture at the moment the impulse is placed on the clock output, so the
+    // capture clock is snapshot before the impulse can come back. The result
+    // is measured in captured samples, not in render blocks.
+    void beginLatencyMeasurement() {
+        latencyMeasureStartSample.store(totalWritten.load(std::memory_order_acquire),
+                                        std::memory_order_relaxed);
+        latencyImpulseDetected.store(false, std::memory_order_relaxed);
+        latencyMeasureActive.store(true, std::memory_order_relaxed);
+    }
+    void endLatencyMeasurement() {
+        latencyMeasureActive.store(false, std::memory_order_relaxed);
+        latencyImpulseDetected.store(false, std::memory_order_relaxed);
     }
     bool isLatencyImpulseDetected() const { return latencyImpulseDetected.load(std::memory_order_relaxed); }
     std::uint64_t getLatencyImpulseInputSample() const { return latencyImpulseInputSample.load(std::memory_order_relaxed); }
+    // Captured samples between the impulse leaving the render callback and
+    // the captured copy of it; 0 until the impulse is seen.
+    std::uint64_t getLatencyRoundTripSamples() const {
+        const auto start = latencyMeasureStartSample.load(std::memory_order_relaxed);
+        const auto hit = latencyImpulseInputSample.load(std::memory_order_relaxed);
+        return hit > start ? hit - start : 0;
+    }
 
     // Copies physicalChannels (1 entry = mono, 2 = stereo) into dest channels
     // 0/1 in order. dest must already be sized by the caller — no resizing
@@ -133,6 +155,8 @@ private:
     // Round-trip latency measurement support.
     std::atomic<bool> latencyMeasureActive{false};
     std::atomic<bool> latencyImpulseDetected{false};
+    // Capture-clock position at the moment the impulse was emitted.
+    std::atomic<std::uint64_t> latencyMeasureStartSample{0};
     std::atomic<std::uint64_t> latencyImpulseInputSample{0};
 };
 
@@ -144,7 +168,17 @@ public:
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
-                      int requestedBufferSize = 0);
+                      int requestedBufferSize = 0,
+                      // FIFO depth to keep filled, in device buffers. The
+                      // clock output renders and drains in the same callback,
+                      // so it needs far less headroom than a stream drained
+                      // by an independent device clock.
+                      int targetFillBlocks = 4,
+                      // Blocks written before the device callback can read.
+                      // -1 = same as targetFillBlocks.
+                      int primeBlocks = -1,
+                      // Try exclusive mode before the shared modes.
+                      bool preferExclusive = false);
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -200,6 +234,10 @@ private:
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};
     std::atomic<int> fillFrames{0};
+    // Set while close() is retiring this stream: its callback may still run
+    // until the device thread stops, but it must not read or count a FIFO the
+    // engine no longer feeds.
+    std::atomic<bool> closing_{false};
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::atomic<std::uint64_t> outputLowWatermarks{0};

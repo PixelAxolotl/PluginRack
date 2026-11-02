@@ -1,1 +1,286 @@
-# PluginRack — a Voicemeeter-style mixer with user VST plugins.
+# PluginRack
+
+A Windows desktop audio mixer, with real VST3 plugin
+hosting on every input and an open-ended, many-to-many routing matrix.
+
+PluginRack hosts your own VST3 inserts in the live routing path, so a stream or
+recording can run through the plugins you already own instead of a fixed set of
+built-in effects.
+
+> Status: early development, Windows x64 only. Interfaces and the scene format
+> can still change.
+
+## What you can do with it
+
+- **Channel strips** with trim, gain, pan, mute/solo, peak metering, and mono or
+  stereo layout (mono is upmixed for processing).
+- **VST3 inserts** — multiple host slots per channel and per output, hosted in-process,
+  with bypass and plugin editors docked in the Rack view.
+- **Built-in Channel FX** — six-band EQ with delay, plus compressor and gate
+  presented as one Compressor / Gate surface.
+- **Routing matrix** — every channel can feed every output with an independent
+  per-cell send level; outputs can be added and removed while audio is running.
+- **Multiple output devices** — each output strip picks its own device. The first
+  live output owns the engine clock; every stream shares its sample rate and
+  block size.
+- **Scenes** — names, gains, pan, mute/solo, EQ, dynamics, insert plugin state,
+  routing sends, device choices and the audio tuning are saved as JSON and
+  restored exactly.
+- **Latency controls** *(BETA)* — device buffer selection, optional low-latency
+  input, low-latency output FIFOs, a minimal clock FIFO, exclusive WASAPI, and a
+  round-trip latency measurement.
+
+## Using PluginRack
+
+Launch `PluginRack.exe`. Audio devices open on a background thread, so the window
+is usable immediately; the toolbar shows `Starting audio...` with progress while
+the driver is probed.
+
+### Views
+
+The toolbar switches between six views. `I/O` sits next to `Mixer`.
+
+- **Racks** — per-channel strips: name, trim/gain, pan, fader and meter, mute/solo,
+  the insert list, the docked plugin editor, and routing toggles. Every filled
+  insert card carries a read-only thumbnail: the EQ its curve and live spectrum,
+  the single Gate/Comp card both transfer curves and their shared
+  gain-reduction bar, a VST a scaled capture of its editor window. Clicking a
+  card puts that insert in the editor bay, which is the only place it can be
+  edited. The Gate/Comp card has one switch per effect (`C` and `G`); both
+  effects are also switched inside the editor panel.
+- **Mixer** — all channel and output strips side by side, with add/remove
+  channel/output controls.
+- **I/O** — the same strips as the Mixer, split into an **Inputs** tab and an
+  **Outputs** tab so a large rack can be patched one side at a time.
+- **Routing** — the full channel-to-output matrix with an independent send level
+  per cell, L and R.
+- **Saves** — scene save/load and the autosave/last-session entries.
+- **Settings** — clock summary, buffers, round-trip measurement, latency tuning,
+  device reloads, and the Rack thumbnail refresh rate.
+
+### Channel strips, inserts, and built-in FX
+
+Click an empty insert slot to load a VST3. Left-click a loaded slot to open or
+focus its editor, right-click for bypass/removal options. The EQ and Gate/Comp
+cards are always present; the Gate/Comp card opens the panel that carries both
+effects, and each has its own **Enable** switch there. The gate starts bypassed,
+so its knobs do nothing until it is switched on. Insert state is saved with the
+scene.
+
+### Devices and the clock
+
+Each channel and output strip has a device menu: **System Default**, **None -
+silent**, the available WASAPI/ASIO devices, and the app's own device types.
+The first output with a real device becomes the clock; its sample rate and block
+size are used by every stream. Inputs are shared per device, so several channels
+can capture the same endpoint.
+
+The **I/O** view shows the same strips as the Mixer with an **Inputs** / **Outputs**
+tab switch, so either side can fill the window on its own. Device assignment is
+identical in both places.
+
+### Settings
+
+Buffer and latency changes are **staged**: nothing is applied until you press
+**Apply**. **Revert** discards the staged values. The tuning travels with the
+scene: **Save** stores the buffer sizes, the five latency switches and the
+auto-reload state, and loading a save restores them before the devices reopen.
+Scenes written before schema 4 carry no tuning block, so loading one leaves the
+live settings alone.
+
+- **Input / Output buffer** — `Auto (driver default)` or an explicit size. If a
+  device refuses the new size, the previous setting is restored automatically.
+- **Low-latency input** *(BETA)* — the capture keeps one render block of read
+  delay instead of two (about 10 ms).
+- **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI before the shared
+  modes. It can help or hurt depending on the driver; switching reopens every
+  device.
+- **Low-latency outputs** *(BETA)* — non-clock outputs keep two device buffers
+  instead of four (about 20 ms on those outputs).
+- **Minimal clock FIFO** *(BETA)* — the clock starts with no primed FIFO; a
+  missed render is covered by one block of silence (about 10 ms).
+- **Same-device input (full duplex)** *(BETA)* — when the input and the clock
+  output are the same endpoint, use its hardware clock and a one-block read delay.
+
+On the development machine (48 kHz, 480-sample blocks, USB clock output) the
+defaults measured about **70 ms** end-to-end estimate, **60 ms** with low-latency
+input, and **50 ms** with the minimal clock FIFO as well. Exclusive mode measured
+higher here (~80–90 ms) and glitched once while switching; that is driver-dependent.
+
+### Reloading devices
+
+- **Reload All Audio Devices** reopens every stream with the current settings;
+  each device is retried up to three times if it fails, and the previous stream
+  stays in place until a new one opens successfully.
+- The device list allows **multiple selections**. The checked devices are the
+  ones the watchdog watches.
+- **Auto-reload checked devices on error** reopens a checked device by itself
+  when it starts reporting an error, three rounds five seconds apart. After
+  that it stays down until you reload it or the error clears. The switch and the
+  checked set are saved with the scene.
+- If an Apply or reload cannot open a device, the app keeps or restores the
+  previous configuration and reports which device refused it.
+
+### Round-trip latency *(BETA)*
+
+In **Settings**, press **Measure Round-Trip**. The app injects a one-sample
+impulse on the clock output and reports how long it takes to come back through
+the input chosen in **Listen on** (*Any open input* accepts the first one that
+hears it).
+
+This needs a real cable from that output to that input — the app cannot route
+the click internally. The result is measured in captured samples, and it is
+cleared whenever a device or buffer setting changes because the old figure no
+longer describes the open streams.
+
+### Saves
+
+Scenes are stored as JSON under:
+
+```text
+%APPDATA%\PluginRack\scenes
+```
+
+`Save` writes a new named save; **Saves** lists them with **Load**, **Edit**
+(rename), **Delete** and **DEF** (the save opened on startup). The last session
+is written on exit.
+
+### Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| Toolbar says `Starting audio...` for a long time | Wait for the endpoint probe; the window is usable. A USB device can take ~16 s. |
+| A device is silent or disappeared | Open Settings, tick that device, and press **Reload All Audio Devices**. With **Auto-reload checked devices on error** on, checked devices reopen themselves. |
+| New buffer size is rejected | The app restores the previous size and shows the driver's reason in an alert. |
+| Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared low-latency is the default. |
+| Round-trip measurement fails | Connect a physical cable from the clock output to the input chosen in **Listen on**; the app reports "No return" otherwise. |
+
+## Development
+
+Everything below is for building and working on PluginRack.
+
+### Requirements
+
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 x64 | The only tested platform today. The architecture keeps macOS/Linux possible. |
+| CMake ≥ 3.28 | `CMakePresets.json` uses the Ninja generator. |
+| Ninja | Install and make sure `ninja` is on `PATH`, or use another CMake generator. |
+| MSVC (C++20) | Visual Studio 2022+ or Build Tools. Run commands from a Developer Command Prompt / after `vcvars64.bat`. |
+| JUCE source tree | With CMake support (tested against a local JUCE checkout). |
+| VST3 SDK | The SDK is only used for hosting; no VST3s are bundled. |
+| ASIO (optional) | If `JUCE_DIR/modules/juce_audio_devices/native/asio/iasiodrv.h` exists, the build enables ASIO and the device menus expose ASIO devices. |
+
+### Build
+
+The SDK paths default to the author's machine (`C:/Users/thorz/JUCE` and
+`C:/Users/thorz/vst3sdk`). Override them on the configure line.
+
+```powershell
+# From a Visual Studio Developer PowerShell / after vcvars64.bat
+cmake -B build/dev -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DJUCE_DIR="C:/path/to/JUCE" `
+  -DVST3_SDK_DIR="C:/path/to/vst3sdk"
+
+cmake --build build/dev --target pluginrack_app
+```
+
+Or use the checked-in preset for a Debug build:
+
+```powershell
+cmake --preset dev
+cmake --build --preset dev --target pluginrack_app
+```
+
+The executable is written to:
+
+```text
+build/dev/app/pluginrack_app_artefacts/Release/PluginRack.exe   # or Debug/
+```
+
+`tools/build-and-copy.ps1` rebuilds and copies the executable to the repository
+root as `PluginRack.exe` (that copy is git-ignored; the script stops a running
+instance if it has to replace the file).
+
+If `JUCE_DIR` or `VST3_SDK_DIR` is missing, CMake still builds the core library
+and tests, and prints a warning that the app was skipped.
+
+### Tests
+
+Tests use Catch2 (fetched by CMake on first configure) and cover the core engine,
+scene codec/validation, metering, EQ, dynamics, input mapping, offline rendering,
+and source-level invariants of the audio path.
+
+```powershell
+ctest --test-dir build/dev --output-on-failure
+# or
+cmake --build build/dev --target pluginrack_tests
+build/dev/tests/pluginrack_tests.exe
+```
+
+The first CMake configure is slow because Catch2 is fetched from GitHub; JUCE
+and the VST3 SDK are configured from the given paths.
+
+### Project layout
+
+```text
+app/     JUCE GUI application
+  src/   MainComponent views, AudioEngine, DeviceStream (WASAPI/ASIO),
+         PluginHost (VST3), strips, EQ/dynamics windows, I/O and Settings views
+core/    Platform-independent C++20 audio/routing core (no JUCE)
+  include/pluginrack/  Scene model, mixer engine, EQ, dynamics, meters,
+                       offline renderer, WAV writer, validation
+  src/
+tests/   Catch2 tests for the core and source-level audio-path invariants
+tools/   render_cli and the build-and-copy helper
+docs/    Design spec and session handoff notes
+```
+
+### Why the first device open can take a while
+
+Opening a WASAPI endpoint is not instant. JUCE's WASAPI backend probes every
+channel count from 32 down to 2 across every supported sample rate and format
+(`queryMaxNumChannels`) before it can report the device's capabilities, and some
+USB drivers answer each format check slowly.
+
+On the development machine two USB endpoints take about **16 seconds each** in
+that probe; other devices take well under a second. Outputs are therefore opened
+concurrently, so the wall-clock startup is roughly the slowest single endpoint
+rather than the sum. The UI stays responsive and shows progress. Reloading a
+single device avoids paying that cost for every stream.
+
+This is a JUCE backend characteristic, not a hang. If it becomes a problem, the
+options are a local JUCE patch that caps the channel-count probe, caching the
+working device mode per endpoint, or using ASIO where a driver exists.
+
+### Development notes
+
+- The audio thread must not allocate or block. Meter/analyzer paths read from
+  lock-free taps; structural changes take `AudioEngine::stateLock`.
+- The UI must never wait on the audio thread. Device opens run on the background
+  opener (`openStripsDevicesAsync` / `applyDeviceSettings`) and are guarded by
+  `openingDevices_`; structural mutators must respect that guard.
+- Device streams are replaced only after a successful open. A failed open keeps
+  the previous playback/capture, which is what makes Apply and device reloads
+  safe to try.
+- MSVC builds use `/W4 /WX`; keep new code warning-clean.
+- Add core behavior tests next to the existing Catch2 cases. The source-invariant
+  tests in `tests/test_underrun_paths.cpp` protect the audio-path wiring.
+- Scenes are schema-versioned. Bump `kSchemaVersion` and read new fields with
+  defaults; the audio tuning block is `std::optional` so older saves keep the
+  live settings.
+- One type, spacing and control vocabulary lives in `theme::ui` (`app/src/Theme.h`);
+  page views share `PageHeader`, buttons come from `ConsoleLookAndFeel`, and new
+  surfaces should use those instead of local colours and fonts.
+
+### Documentation
+
+- [PRODUCT.md](PRODUCT.md) — product definition, users, and constraints.
+- [docs/superpowers/specs/2026-10-28-pluginrack-design.md](docs/superpowers/specs/2026-10-28-pluginrack-design.md) — approved design.
+- [docs/NEXT_SESSION_MIXER.md](docs/NEXT_SESSION_MIXER.md) — build commands and handoff notes.
+
+## License
+
+No license file is included in this repository. All rights are reserved by the
+repository owner unless a license is added.

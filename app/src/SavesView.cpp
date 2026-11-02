@@ -9,7 +9,7 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
     , isSelected(isSelectedIn) {
     nameLabel.setText(saveName, juce::dontSendNotification);
     nameLabel.setJustificationType(juce::Justification::centredLeft);
-    nameLabel.setFont(juce::Font(juce::FontOptions(18.0f)));
+    nameLabel.setFont(theme::ui::itemFont());
     nameLabel.setColour(juce::Label::textColourId, theme::text());
     nameLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(nameLabel);
@@ -31,12 +31,8 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
     loadButton.setTooltip("Load this save");
     loadButton.onClick = [this] { if (onLoad) onLoad(); };
     addAndMakeVisible(loadButton);
-    for (auto* button : {&defButton, &renameButton, &deleteButton, &loadButton}) {
-        button->setColour(juce::TextButton::buttonColourId, theme::control());
-        button->setColour(juce::TextButton::buttonOnColourId, theme::green());
-        button->setColour(juce::TextButton::textColourOffId, theme::text());
-        button->setColour(juce::TextButton::textColourOnId, theme::bg());
-    }
+    for (auto* button : {&defButton, &renameButton, &deleteButton, &loadButton})
+        theme::ui::styleButton(*button);
 }
 
 void SavesView::SaveRowComponent::setDefaultActive(bool isDefaultIn) {
@@ -88,12 +84,12 @@ void SavesView::SaveRowComponent::mouseUp(const juce::MouseEvent& event) {
 SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestoreIn)
     : onRestore(std::move(onRestoreIn)) {
     titleLabel.setText("Saves", juce::dontSendNotification);
-    titleLabel.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
+    titleLabel.setFont(theme::ui::titleFont());
     titleLabel.setColour(juce::Label::textColourId, theme::text());
     addAndMakeVisible(titleLabel);
 
     statusLabel.setJustificationType(juce::Justification::centredRight);
-    statusLabel.setFont(juce::Font(juce::FontOptions(13.0f)));
+    statusLabel.setFont(theme::ui::captionFont());
     statusLabel.setColour(juce::Label::textColourId, theme::dim());
     addAndMakeVisible(statusLabel);
 
@@ -220,16 +216,18 @@ void SavesView::confirmDelete(const juce::String& name) {
 
 void SavesView::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    g.setColour(theme::line().withAlpha(0.25f));
-    g.drawHorizontalLine(56, 12.0f, (float)getWidth() - 12.0f);
+    g.setColour(theme::border().withAlpha(0.8f));
+    g.drawHorizontalLine(theme::ui::kPagePad + theme::ui::kHeaderH - 1,
+                         (float)theme::ui::kPagePad,
+                         (float)(getWidth() - theme::ui::kPagePad));
 }
 
 void SavesView::resized() {
-    auto area = getLocalBounds().reduced(12);
-    auto top = area.removeFromTop(40);
-    statusLabel.setBounds(top.removeFromRight(160));
+    auto area = getLocalBounds().reduced(theme::ui::kPagePad);
+    auto top = area.removeFromTop(theme::ui::kHeaderH);
+    statusLabel.setBounds(top.removeFromRight(200));
     titleLabel.setBounds(top);
-    area.removeFromTop(4);
+    area.removeFromTop(theme::ui::kHeaderGap);
     viewport.setBounds(area);
     layoutRows();
 }

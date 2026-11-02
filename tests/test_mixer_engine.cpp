@@ -147,6 +147,32 @@ TEST_CASE("channel trim adds to the fader gain") {
     }
 }
 
+TEST_CASE("mixer gate attenuates channel audio below threshold") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+
+    auto& gate = scene.channels.front().effects[1];
+    gate.type = pluginrack::DynamicsEffectType::Gate;
+    gate.bypassed = false;
+    gate.thresholdDb = -11.8f;
+    gate.ratio = 55.8f;
+    gate.attackMs = 1.0f;
+    gate.releaseMs = 10.0f;
+
+    pluginrack::MixerEngine engine = prepareEngine(scene, 48000);
+    constexpr int kFrames = 48000;
+    StereoBuffer in(kFrames, 0.0630957f); // -24 dBFS, below the threshold
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    REQUIRE(std::max(std::fabs(out.left.back()), std::fabs(out.right.back())) <
+            0.0001f);
+}
+
 TEST_CASE("output fader gain scales the summed bus") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);

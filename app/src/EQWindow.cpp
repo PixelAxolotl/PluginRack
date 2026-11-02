@@ -6,7 +6,9 @@ EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
                    std::function<void(const std::vector<pluginrack::EqBand>&)> applyBandsCallback,
                    double sampleRateHz,
-                   bool embeddedMode)
+                   bool embeddedMode,
+                   float initialRtaOffsetDb,
+                   int initialWeighting)
     : juce::DocumentWindow(title, theme::strip(), juce::DocumentWindow::allButtons),
       applyBands(std::move(applyBandsCallback)),
       embedded(embeddedMode) {
@@ -172,25 +174,42 @@ EQWindow::EQWindow(const juce::String& title,
     analyzerLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     analyzerLabel.setColour(juce::Label::textColourId, theme::dim());
     Component::addAndMakeVisible(analyzerLabel);
-    // RTA display offset (Task 6 follow-up): +/- buttons shift the analyzer
-    // fill up/down in the view so quiet program material can be lifted into
-    // the +/-15 dB window. Session-only; the engine never sees it.
+    // RTA display offset: +/- buttons shift the analyzer fill up/down in the
+    // view so quiet program material can be lifted into the +/-15 dB window.
+    // The value is per strip and saved with the scene; 0 is the default view.
     rtaMinusButton.setTooltip("RTA display: shift the analyzer down");
     rtaMinusButton.setClickAction([this] {
-        setRtaOffsetDb(curve.getSpectrumOffsetDb() - kRtaOffsetStepDb);
+        setRtaOffsetDb(rtaOffsetDb - kRtaOffsetStepDb);
     });
     Component::addAndMakeVisible(rtaMinusButton);
     rtaPlusButton.setTooltip("RTA display: shift the analyzer up");
     rtaPlusButton.setClickAction([this] {
-        setRtaOffsetDb(curve.getSpectrumOffsetDb() + kRtaOffsetStepDb);
+        setRtaOffsetDb(rtaOffsetDb + kRtaOffsetStepDb);
     });
     Component::addAndMakeVisible(rtaPlusButton);
     rtaOffsetLabel.setJustificationType(juce::Justification::centred);
     rtaOffsetLabel.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     rtaOffsetLabel.setColour(juce::Label::textColourId, theme::dim());
-    rtaOffsetLabel.setTooltip("RTA display offset in dB (view only)");
+    rtaOffsetLabel.setTooltip("RTA display offset in dB, saved with the scene");
     Component::addAndMakeVisible(rtaOffsetLabel);
-    setRtaOffsetDb(kDefaultRtaOffsetDb);
+
+    // Analyzer weighting: three radio-style buttons, one active at a time.
+    // Display curve only, so the EQ response and the audio path are untouched.
+    const char* weightingTips[3] = {
+        "Z: flat - the spectrum as measured",
+        "A: A-weighting (IEC 61672)",
+        "C: C-weighting (IEC 61672)",
+    };
+    for (int i = 0; i < 3; ++i) {
+        auto* button = weightingButtons[static_cast<std::size_t>(i)];
+        button->setTooltip(weightingTips[i]);
+        button->setFontSize(9.0f);
+        button->setClickAction([this, i] { setWeightingIndex(i); });
+        Component::addAndMakeVisible(*button);
+    }
+    setWeightingIndex(initialWeighting);
+
+    setRtaOffsetDb(initialRtaOffsetDb);
 
     if (!embedded) {
         centreWithSize(kWidth, kHeight);
@@ -220,12 +239,30 @@ void EQWindow::setAnalyzerMode(int mode) {
     startTimerHz(reducedToFps30 ? 30 : 60); // spec: 30-60 fps; timerCallback slows to 30 on overload
 }
 
+void EQWindow::setWeightingIndex(int index) {
+    const int clamped = juce::jlimit(0, 2, index);
+    const bool changed = clamped != weightingIndex;
+    weightingIndex = clamped;
+    for (int i = 0; i < 3; ++i)
+        weightingButtons[static_cast<std::size_t>(i)]->setToggleState(i == clamped);
+    if (!changed) return;
+    curve.setWeighting(EQCurveComponent::weightingFromIndex(clamped));
+    // Empty during construction: owners wire this after the window exists.
+    if (applyWeighting) applyWeighting(clamped);
+}
+
 void EQWindow::setRtaOffsetDb(float offsetDb) {
     const float clamped = juce::jlimit(kRtaOffsetMinDb, kRtaOffsetMaxDb, offsetDb);
-    curve.setSpectrumOffsetDb(clamped);
-    const float shown = curve.getSpectrumOffsetDb();
-    rtaOffsetLabel.setText((shown >= 0.0f ? "+" : "") + juce::String(static_cast<int>(shown)),
+    rtaOffsetDb = clamped;
+    // The saved value is relative to the default view, so 0 shows the same
+    // analyzer height as before the offset existed.
+    curve.setSpectrumOffsetDb(EQCurveComponent::kDefaultSpectrumOffsetDb + clamped);
+    // 0 is the default view, so it reads as plain "0" rather than "+0".
+    const int shown = juce::roundToInt(clamped);
+    rtaOffsetLabel.setText((shown > 0 ? "+" : "") + juce::String(shown),
                            juce::dontSendNotification);
+    // Empty during construction: owners wire this after the window exists.
+    if (applySpectrumOffset) applySpectrumOffset(clamped);
 }
 
 void EQWindow::timerCallback() {
@@ -360,6 +397,13 @@ void EQWindow::resized() {
     rtaOffsetLabel.setBounds(analyzerRow.removeFromRight(34));
     analyzerRow.removeFromRight(2);
     rtaMinusButton.setBounds(analyzerRow.removeFromRight(28).reduced(1, 1));
+    analyzerRow.removeFromRight(6);
+    // Radio group, laid out right-to-left so it reads Z A C left to right.
+    for (int i = 2; i >= 0; --i) {
+        weightingButtons[static_cast<std::size_t>(i)]
+            ->setBounds(analyzerRow.removeFromRight(24).reduced(1, 1));
+        analyzerRow.removeFromRight(2);
+    }
     area.removeFromTop(6); // air between the analyzer row and the dB scale
     curve.setBounds(area);
 

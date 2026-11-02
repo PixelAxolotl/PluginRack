@@ -21,7 +21,10 @@ std::vector<DynamicsEffect> defaultDynamicsEffects() {
         // 300 ms release, 8 dB knee, unity trim and output.
         DynamicsEffect{1, DynamicsEffectType::Compressor, true, -12.0f, 8.0f, 40.0f, 300.0f,
                        0.0f, 0.0f, 8.0f},
-        DynamicsEffect{2, DynamicsEffectType::Gate, true, -48.0f, 5.0f, 1.0f, 100.0f}
+        // Range is the depth below threshold: 30 dB is an audible gate that
+        // still lets a quiet tail through. 5 dB was inaudible on real material,
+        // which made the gate look broken when it was only too gentle.
+        DynamicsEffect{2, DynamicsEffectType::Gate, true, -48.0f, 30.0f, 1.0f, 100.0f}
     };
 }
 

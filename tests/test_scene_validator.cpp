@@ -95,10 +95,21 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 4;
+    scene.schemaVersion = 5;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
+    // The message must name the range the validator actually accepts.
+    REQUIRE(errors[0].message.find("expected 1 to 4") != std::string::npos);
+}
+
+TEST_CASE("scene rejects an out-of-range right send level") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.routes.front().sendGainDbR = -100.0f;
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("sendGainDbR") != std::string::npos);
 }
 
 TEST_CASE("v3 scene with default flat EQ is valid") {
@@ -239,6 +250,26 @@ TEST_CASE("non-finite mixer parameters are rejected") {
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}
+
+TEST_CASE("dynamics parameters are finite and within the UI ranges") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("makeup above ceiling") {
+        scene.channels.front().effects.front().makeupDb = 25.0f;
+    }
+    SECTION("input gain below floor") {
+        scene.channels.front().effects.front().inputGainDb = -25.0f;
+    }
+    SECTION("non-finite knee") {
+        scene.channels.front().effects.front().kneeDb =
+            std::numeric_limits<float>::quiet_NaN();
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("dynamics") != std::string::npos);
 }
 
 

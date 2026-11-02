@@ -73,7 +73,7 @@ void DeviceControl::paint(juce::Graphics& g) {
     // left text
     auto textArea = area;
     g.setColour(theme::text());
-    g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
+    g.setFont(theme::ui::itemFont());
     g.drawText(title, textArea.removeFromTop(textArea.getHeight() / 2), juce::Justification::centredLeft, true);
 
     juce::String sub;
@@ -102,8 +102,10 @@ void DeviceControl::mouseDown(const juce::MouseEvent& e) {
 }
 
 void DeviceControl::mouseDoubleClick(const juce::MouseEvent&) {
-    if (onDoubleClick) onDoubleClick();
+    // One action per double-click: the tooltip promises rename, and a strip
+    // that also navigates on the same gesture would do both at once.
     if (onRename) onRename();
+    else if (onDoubleClick) onDoubleClick();
 }
 
 bool DeviceControl::keyPressed(const juce::KeyPress& key) {

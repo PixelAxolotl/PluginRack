@@ -27,6 +27,12 @@ constexpr float kMinEqDelayMs = 0.0f;
 constexpr float kMaxEqDelayMs = 1000.0f;
 constexpr std::size_t kMaxEqBands = 6;
 constexpr std::size_t kMaxEffects = 4;
+constexpr float kMinDynamicsMakeupDb = -24.0f;
+constexpr float kMaxDynamicsMakeupDb = 24.0f;
+constexpr float kMinDynamicsInputGainDb = -24.0f;
+constexpr float kMaxDynamicsInputGainDb = 24.0f;
+constexpr float kMinDynamicsKneeDb = 0.0f;
+constexpr float kMaxDynamicsKneeDb = 24.0f;
 
 bool isSupportedSampleRate(double sampleRate) {
     return sampleRate == 44100.0 || sampleRate == 48000.0 || sampleRate == 88200.0 ||
@@ -45,9 +51,18 @@ void validateEffects(const char* kind, std::uint32_t id,
         if (effect.id == 0 || !std::isfinite(effect.thresholdDb) ||
             !std::isfinite(effect.ratio) || effect.ratio < 1.0f ||
             !std::isfinite(effect.attackMs) || effect.attackMs <= 0.0f ||
-            !std::isfinite(effect.releaseMs) || effect.releaseMs <= 0.0f) {
+            !std::isfinite(effect.releaseMs) || effect.releaseMs <= 0.0f ||
+            !std::isfinite(effect.makeupDb) ||
+            effect.makeupDb < kMinDynamicsMakeupDb ||
+            effect.makeupDb > kMaxDynamicsMakeupDb ||
+            !std::isfinite(effect.inputGainDb) ||
+            effect.inputGainDb < kMinDynamicsInputGainDb ||
+            effect.inputGainDb > kMaxDynamicsInputGainDb ||
+            !std::isfinite(effect.kneeDb) ||
+            effect.kneeDb < kMinDynamicsKneeDb ||
+            effect.kneeDb > kMaxDynamicsKneeDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, id,
-                              std::string(kind) + " " + std::to_string(id) +
+                                  std::string(kind) + " " + std::to_string(id) +
                                   " has invalid dynamics effect parameters"});
         }
     }
@@ -107,10 +122,10 @@ std::string describeMapping(const std::vector<int>& mapping) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion < 1 || scene.schemaVersion > 3) {
+    if (scene.schemaVersion < 1 || scene.schemaVersion > 4) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
-                              "; expected 1, 2 or 3"});
+                              "; expected 1 to 4"});
     }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
@@ -237,6 +252,14 @@ std::vector<SceneError> validate(const Scene& scene) {
                               "route (" + std::to_string(route.channelId) + ", " +
                                   std::to_string(route.outputId) +
                                   ") sendGainDb out of range [-60, 12]"});
+        }
+        if (route.sendGainDbR.has_value() &&
+            (!std::isfinite(*route.sendGainDbR) || *route.sendGainDbR < kMinGainDb ||
+             *route.sendGainDbR > kMaxGainDb)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, route.channelId,
+                              "route (" + std::to_string(route.channelId) + ", " +
+                                  std::to_string(route.outputId) +
+                                  ") sendGainDbR out of range [-60, 12]"});
         }
     }
 
