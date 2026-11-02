@@ -25,6 +25,22 @@ public:
 
     EQCurveComponent();
 
+    // View offset the analyzer fill starts with, before the user shifts it.
+    // Bins arrive in dBFS while the curve view spans +/-15 dB, so without a
+    // lift the fill would sit clamped on the floor. Every RTA surface adds
+    // this to the saved offset, so the editor and the rack thumbnail agree.
+    static constexpr float kDefaultSpectrumOffsetDb = 24.0f;
+
+    // Analyzer weighting (IEC 61672), display only: it shapes the spectrum the
+    // way a sound level meter would, and never touches the EQ response.
+    enum class Weighting { Z = 0, A = 1, C = 2 };
+    void setWeighting(Weighting newWeighting);
+    Weighting getWeighting() const { return weighting; }
+    // Index order matches the RTA menu and the saved scene value.
+    static Weighting weightingFromIndex(int index) {
+        return static_cast<Weighting>(juce::jlimit(0, 2, index));
+    }
+
     void setBands(const std::vector<pluginrack::EqBand>& newBands);
     const std::vector<pluginrack::EqBand>& getBands() const { return bands; }
 
@@ -96,8 +112,11 @@ private:
     double sampleRateHz = 48000.0;
     // Added to each analyzer bin in spectrumY before the view clamp, so the
     // RTA fill can be shifted up/down without touching the EQ response.
-    // Session-only (resets per window); the engine never sees it.
+    // A per-surface value: EQWindow seeds it from the offset saved on the
+    // strip and writes changes back through the engine, so every EQ view of
+    // that strip draws the same analyzer height.
     float spectrumOffsetDb = 0.0f;
+    Weighting weighting = Weighting::Z;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQCurveComponent)
 };

@@ -17,10 +17,21 @@
 
 class MixerComponent final : public juce::Component {
 public:
+    // Which strip columns this board shows. The Mixer shows both; the I/O page
+    // hosts one board per side so each side gets its own tab.
+    enum class Sections { Both, InputsOnly, OutputsOnly };
+
     explicit MixerComponent(AudioEngine& engine);
+
+    void setSections(Sections sections);
+    Sections getSections() const { return sections_; }
 
     void resized() override;
     void rebuild();
+    // Re-reads the engine's device assignments (and their errors) into the
+    // existing strips without rebuilding them. Used when a background device
+    // open finishes, so a device that no longer exists turns red immediately.
+    void refreshStrips();
 
     // Closes every open channel/output EQ window synchronously. Call this
     // while the engine strips are still alive (before any removeChannel /
@@ -101,15 +112,22 @@ private:
         DynamicsWindow* dynamicsWindow = nullptr;
     };
 
+    void rebuildChannelStrips();
+    void rebuildOutputStrips();
+    void layoutChannelStrips(juce::Rectangle<int> viewportBounds);
+    void layoutOutputStrips(juce::Rectangle<int> panelBounds);
+
     AudioEngine& audioEngine;
+    Sections sections_ = Sections::Both;
     juce::TextButton addChannelButton{"+ Ch"};
     juce::TextButton addOutputButton{"+ Out"};
+    juce::Label inputHeader{"", "INPUTS"};
     juce::Viewport channelViewport;
     juce::Component stripContent;
     juce::OwnedArray<ChannelStrip> strips;
 
     juce::Component masterPanel;
-    juce::Label masterHeader{"", "MASTER"};
+    juce::Label masterHeader{"", "OUTPUTS"};
     juce::Viewport masterViewport;
     juce::Component masterContent;
     juce::OwnedArray<OutputStrip> outputStrips;

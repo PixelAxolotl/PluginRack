@@ -14,7 +14,11 @@ public:
         setWantsKeyboardFocus(true);
     }
 
-    void setToggleState(bool state) { on = state; repaint(); }
+    void setToggleState(bool state) {
+        if (on == state) return;
+        on = state;
+        repaint();
+    }
     bool getToggleState() const { return on; }
     void setClickAction(std::function<void()> action) { clickAction = std::move(action); }
     void setEnabledState(bool state) { active = state; repaint(); }

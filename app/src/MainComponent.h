@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "AudioEngine.h"
+#include "IoView.h"
 #include "MixerComponent.h"
 #include "RackView.h"
 #include "RoutingMatrixComponent.h"
@@ -13,7 +14,7 @@
 #include "SettingsView.h"
 #include "Theme.h"
 
-enum class AppView { Rack = 0, Mixer, Routing, Saves, Settings };
+enum class AppView { Rack = 0, Mixer, Routing, IO, Saves, Settings };
 
 // Persistent 56 px header: wordmark, view navigation, snapshot placeholder,
 // audio status, error affordance, scene buttons. Paints the same bar the
@@ -45,6 +46,7 @@ private:
     juce::TextButton racksButton{"Racks"};
     juce::TextButton mixerButton{"Mixer"};
     juce::TextButton routingButton{"Routing"};
+    juce::TextButton ioButton{"I/O"};
     juce::TextButton settingsButton{"Settings"};
     juce::TextButton snapshotButton{"Snapshot"};
     juce::Label latencyLabel;
@@ -69,6 +71,10 @@ public:
     void setView(AppView view);
     AppView getView() const { return currentView; }
     void refreshViews();
+    // Device state changed underneath the strips (a background open finished):
+    // refresh the device readouts in place so a missing device shows red.
+    void refreshDeviceStrips();
+    SettingsView& getSettingsView() { return settingsView; }
     void resized() override;
 
     std::function<void(AppView)> onViewChanged;
@@ -103,6 +109,7 @@ private:
     MixerComponent& mixerView;
     RackView rackView;
     RoutingMatrixComponent routingView;
+    IoView ioView;
     SavesView savesView;
     SettingsView settingsView;
     AppView currentView = AppView::Rack;
@@ -120,15 +127,17 @@ public:
     void selectView(AppView view);
     void saveSceneOnExit();
     void initialiseAudio();
+    SettingsView& settings() { return router.getSettingsView(); }
 
 private:
     void saveScene();
     void saveSceneAs();
     void loadScene(bool showMissingMessage);
     // Applies a parsed scene on the message thread and returns plugin load
-    // errors. Guarded by sceneLoading_; callers run it directly (the engine
-    // parks the audio clock around the strip swap, so it is brief).
-    juce::String applyScene(const pluginrack::Scene& scene);
+    // errors. Guarded by sceneLoading_; callers run it directly (the strip
+    // swap itself is brief). openDevicesNow=false defers the stream opens to
+    // the engine's startup worker so the UI is not blocked by slow drivers.
+    juce::String applyScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
     void showSavesMenu();
     void showMenu();
     void showAudioErrors();
@@ -144,6 +153,11 @@ private:
     ViewRouter router;
     double smoothedLatencyMs = -1.0;
     std::atomic<bool> sceneLoading_{false};
+    // Counts UI ticks between device-availability checks (see timerCallback).
+    int availabilityTicks_ = 0;
+    // Startup: the audio restore is queued from the first paint, never from
+    // the constructor, so the window is on screen before any device work.
+    bool audioInitQueued_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

@@ -4,10 +4,13 @@
 
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
                                                  AudioEngine& engine)
-    : output(outputState), outputIndex(outputIdx), audioEngine(engine), meter(outputState.peak) {
+    : output(outputState), outputIndex(outputIdx), audioEngine(engine),
+      meter(gainSlider, outputState.peakL, outputState.peakR, outputState.rmsL,
+            outputState.rmsR) {
     deviceControl.setTitle(output.name);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
+    meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
 
     removeOutputButton.setFontSize(13.0f);
     removeOutputButton.setClickAction([this] {
@@ -65,9 +68,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     modeCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
     modeCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
     modeCombo.onChange = [this] {
+        const bool mono = modeCombo.getSelectedId() == 1;
         audioEngine.setOutputLayout(output.id,
-            modeCombo.getSelectedId() == 1 ? pluginrack::ChannelLayout::Mono
-                                          : pluginrack::ChannelLayout::Stereo);
+            mono ? pluginrack::ChannelLayout::Mono : pluginrack::ChannelLayout::Stereo);
+        meter.setStereo(!mono);
     };
     addAndMakeVisible(modeCombo);
 
@@ -235,7 +239,27 @@ void MixerComponent::OutputStrip::openEqWindow() {
             }
             safe->refreshEqButton();
         },
-        liveRateHz);
+        liveRateHz, false, output.eqRtaOffsetDb, output.eqRtaWeighting);
+    window->applySpectrumOffset = [safe, outputId](float offsetDb) {
+        if (safe == nullptr) return;
+        const auto& outs = safe->audioEngine.getOutputs();
+        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                safe->audioEngine.setOutputEqRtaOffset(i, offsetDb);
+                break;
+            }
+        }
+    };
+    window->applyWeighting = [safe, outputId](int weighting) {
+        if (safe == nullptr) return;
+        const auto& outs = safe->audioEngine.getOutputs();
+        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                safe->audioEngine.setOutputEqRtaWeighting(i, weighting);
+                break;
+            }
+        }
+    };
     // Analyzer wiring (Task 6), same contract as ChannelStrip's hunks: pull
     // copies this output's tap ring, setMode gates the render-side write.
     window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
@@ -373,12 +397,14 @@ void MixerComponent::OutputStrip::resized() {
     auto muteRow = area.removeFromBottom(theme::metrics::kRowH);
     muteButton.setBounds(muteRow);
 
-    // fader + meter (shorter, ~half of input height) above mute
+    // fader + meter (shorter, ~half of input height) above mute. The meter
+    // lines its bars up with the fader's travel itself and keeps the readouts
+    // in the strip above the travel, so it takes the fader's full height.
     area.removeFromBottom(4);
-    auto meterArea = area.removeFromRight(12);
+    auto meterColumn = area.removeFromRight(LevelMeter::kPreferredWidth);
     area.removeFromRight(4);
-    meter.setBounds(meterArea);
     gainSlider.setBounds(area);
+    meter.setBounds(meterColumn);
 }
 
 void MixerComponent::OutputStrip::paint(juce::Graphics& g) {
@@ -397,7 +423,9 @@ void MixerComponent::OutputStrip::refresh() {
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
-    modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
+    const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
+    modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
+    meter.setStereo(!mono);
     flipButton.setToggleState(output.flipped.get());
     refreshEqButton();
 }
@@ -511,6 +539,8 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
     for (auto& effect : effects)
         if (effect.id == item.id) effect.bypassed = bypassed;
     audioEngine.setOutputEffects(output.id, effects);
+    // Keep an open dynamics panel's gate row in step with the chain row.
+    refreshDynamicsButtons();
 }
 
 void MixerComponent::OutputStrip::activateBuiltIn(pluginrack::ChainItem item) {
@@ -566,18 +596,23 @@ MixerComponent::MixerComponent(AudioEngine& engine)
         rebuild();
         if (onStructureChanged) onStructureChanged();
     };
-    addOutputButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    addOutputButton.setColour(juce::TextButton::textColourOffId, theme::text());
+    theme::ui::styleButton(addOutputButton);
     addAndMakeVisible(addOutputButton);
 
     channelViewport.setViewedComponent(&stripContent, false);
     channelViewport.setScrollBarsShown(false, true);
     addAndMakeVisible(channelViewport);
 
-    masterHeader.setJustificationType(juce::Justification::centred);
-    masterHeader.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-    masterHeader.setColour(juce::Label::textColourId, theme::amber());
+    masterHeader.setText("OUTPUTS", juce::dontSendNotification);
+    masterHeader.setJustificationType(juce::Justification::centredLeft);
+    masterHeader.setFont(theme::ui::sectionFont());
+    masterHeader.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
     masterPanel.addAndMakeVisible(masterHeader);
+
+    inputHeader.setJustificationType(juce::Justification::centredLeft);
+    inputHeader.setFont(theme::ui::sectionFont());
+    inputHeader.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
+    addAndMakeVisible(inputHeader);
 
     masterViewport.setViewedComponent(&masterContent, false);
     masterViewport.setScrollBarsShown(false, true);
@@ -588,22 +623,47 @@ MixerComponent::MixerComponent(AudioEngine& engine)
 }
 
 void MixerComponent::resized() {
+    const bool showInputs = sections_ != Sections::OutputsOnly;
+    const bool showOutputs = sections_ != Sections::InputsOnly;
+
+    addChannelButton.setVisible(showInputs);
+    addOutputButton.setVisible(showOutputs);
+    inputHeader.setVisible(showInputs);
+    masterHeader.setVisible(showOutputs);
+    channelViewport.setVisible(showInputs);
+    masterPanel.setVisible(showOutputs);
+
     auto area = getLocalBounds().reduced(4);
     auto toolbar = area.removeFromTop(28);
-    addChannelButton.setBounds(toolbar.removeFromLeft(60));
-    toolbar.removeFromLeft(4);
-    addOutputButton.setBounds(toolbar.removeFromLeft(60));
+    if (showInputs) {
+        addChannelButton.setBounds(toolbar.removeFromLeft(60));
+        toolbar.removeFromLeft(4);
+    }
+    if (showOutputs) addOutputButton.setBounds(toolbar.removeFromLeft(60));
     area.removeFromTop(4);
 
-    const int masterW = juce::jlimit(0, area.getWidth(), 3 * (120 + 4) + 24);
-    masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
-    area.removeFromRight(6);
-    channelViewport.setBounds(area);
+    if (showInputs && showOutputs) {
+        const int masterW = juce::jlimit(0, area.getWidth(), 3 * (120 + 4) + 24);
+        masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
+        area.removeFromRight(6);
+        inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
+        channelViewport.setBounds(area);
+        layoutChannelStrips(area);
+        layoutOutputStrips(masterPanel.getLocalBounds());
+    } else if (showInputs) {
+        inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
+        channelViewport.setBounds(area);
+        layoutChannelStrips(area);
+    } else {
+        masterPanel.setBounds(area);
+        layoutOutputStrips(masterPanel.getLocalBounds());
+    }
+}
 
-    // strip content size
+void MixerComponent::layoutChannelStrips(juce::Rectangle<int> viewportBounds) {
     const int stripW = 148 + 6;
-    const int contentW = juce::jmax(area.getWidth(), (int)strips.size() * stripW + 8);
-    int stripH = area.getHeight();
+    const int contentW = juce::jmax(viewportBounds.getWidth(), (int)strips.size() * stripW + 8);
+    int stripH = viewportBounds.getHeight();
     if (contentW > channelViewport.getWidth()) {
         stripH = juce::jmax(0, stripH - channelViewport.getScrollBarThickness());
     }
@@ -611,20 +671,20 @@ void MixerComponent::resized() {
     for (int i = 0; i < (int)strips.size(); ++i) {
         strips[i]->setBounds(i * stripW + 4, 0, 148, stripH);
     }
+}
 
-    // master content
-    auto ma = masterPanel.getLocalBounds();
-    masterHeader.setVisible(false);
-    masterViewport.setBounds(masterPanel.getLocalBounds());
+void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
+    masterHeader.setBounds(panelBounds.removeFromTop(theme::ui::kSectionH));
+    masterViewport.setBounds(panelBounds);
     const int outW = 120;
     const int outGap = 4;
-    const int contentW2 = (int)outputStrips.size() * (outW + outGap) + 8;
+    const int contentW = (int)outputStrips.size() * (outW + outGap) + 8;
     int masterH = masterViewport.getHeight();
-    if (contentW2 > masterViewport.getWidth()) {
+    if (contentW > masterViewport.getWidth()) {
         masterH = juce::jmax(0, masterH - masterViewport.getScrollBarThickness());
     }
-    masterContent.setSize(juce::jmax(0, juce::jmax(masterViewport.getWidth(), contentW2)),
-                         juce::jmax(0, masterH));
+    masterContent.setSize(juce::jmax(0, juce::jmax(masterViewport.getWidth(), contentW)),
+                          juce::jmax(0, masterH));
     for (int i = 0; i < (int)outputStrips.size(); ++i) {
         outputStrips[i]->setBounds(i * (outW + outGap) + 4, 0, outW, masterH);
     }
@@ -639,8 +699,32 @@ void MixerComponent::closeAllEqWindows() {
     }
 }
 
+void MixerComponent::setSections(Sections sections) {
+    if (sections_ == sections) return;
+    sections_ = sections;
+    rebuild();
+}
+
 void MixerComponent::rebuild() {
     strips.clear();
+    if (sections_ != Sections::OutputsOnly) rebuildChannelStrips();
+
+    outputStrips.clear();
+    if (sections_ != Sections::InputsOnly) rebuildOutputStrips();
+
+    resized();
+}
+
+void MixerComponent::refreshStrips() {
+    for (auto* s : strips) {
+        if (s != nullptr) s->refreshInput();
+    }
+    for (auto* s : outputStrips) {
+        if (s != nullptr) s->refresh();
+    }
+}
+
+void MixerComponent::rebuildChannelStrips() {
     for (const auto& ch : audioEngine.getChannels()) {
         auto* s = strips.add(new ChannelStrip(*ch, audioEngine));
         const std::uint32_t id = ch->id;
@@ -666,8 +750,9 @@ void MixerComponent::rebuild() {
         };
         stripContent.addAndMakeVisible(*s);
     }
+}
 
-    outputStrips.clear();
+void MixerComponent::rebuildOutputStrips() {
     int outputIndex = 0;
     for (const auto& out : audioEngine.getOutputs()) {
         auto* s = outputStrips.add(new OutputStrip(*out, outputIndex++, audioEngine));
@@ -697,5 +782,4 @@ void MixerComponent::rebuild() {
         };
         masterContent.addAndMakeVisible(*s);
     }
-    resized();
 }

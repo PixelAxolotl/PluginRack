@@ -76,6 +76,14 @@ private:
     bool hasGate = false;
     pluginrack::DynamicsEffect gateEffect;
     juce::Label gateCaption{"", "GATE"};
+    // The gate is bypassed by default and the strip's chain row is its only
+    // other switch, so the panel needs its own enable control: without one the
+    // gate knobs change a processor that never runs.
+    juce::TextButton gateEnableButton{"Enable"};
+    // The merged rack card has one switch per effect, so the panel is where
+    // each effect is enabled: this one drives the page's own effect (the
+    // compressor on the graph page), the gate row keeps its own below.
+    juce::TextButton enableButton{"Enable"};
     juce::Label gateThresholdLabel{"", "Threshold"};
     juce::Label gateRangeLabel{"", "Range"};
     juce::Label gateAttackLabel{"", "Attack"};

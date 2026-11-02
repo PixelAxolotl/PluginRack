@@ -4,6 +4,7 @@
 
 #include <juce_dsp/juce_dsp.h>
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -93,7 +94,11 @@ public:
              const std::vector<pluginrack::EqBand>& initialBands,
              std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands,
              double sampleRateHz,
-             bool embedded = false);
+             bool embedded = false,
+             // Saved RTA display offset in dB; 0 means the default view.
+             float initialRtaOffsetDb = 0.0f,
+             // Saved analyzer weighting: 0 = Z, 1 = A, 2 = C.
+             int initialWeighting = 0);
     ~EQWindow() override;
 
     // Owner wiring (assign after construction, same pattern as onCloseRequest):
@@ -107,6 +112,14 @@ public:
     // and persists edits through applyDelayMs (0..EqEngine::kMaxDelayMs).
     std::function<void(float delayMs)> applyDelayMs;
     void setDelayMs(float delayMs);
+
+    // RTA display offset wiring: each +/- step calls this with the new offset,
+    // in the same units the label shows (0 == the default view). The owner
+    // stores it, so the analyzer looks the same in every EQ surface.
+    std::function<void(float offsetDb)> applySpectrumOffset;
+    // Analyzer weighting picker (Z/A/C), same persistence contract: the index
+    // is the saved scene value.
+    std::function<void(int weighting)> applyWeighting;
 
     // Switches between kAnalyzerOff/Pre/Post; button clicks route through it.
     void setAnalyzerMode(int mode);
@@ -145,10 +158,21 @@ private:
     MiniButton rtaPlusButton{"+"};
     juce::Label analyzerLabel{"", "Analyzer"};
     juce::Label rtaOffsetLabel{"", "+12"};
+    // Three toggle buttons acting as a radio group: one weighting at a time,
+    // Z (flat) by default.
+    MiniButton weightingZ{"Z"};
+    MiniButton weightingA{"A"};
+    MiniButton weightingC{"C"};
+    std::array<MiniButton*, 3> weightingButtons{&weightingZ, &weightingA, &weightingC};
+    // -1 until the constructor seeds it, so the first call always applies.
+    int weightingIndex = -1;
+    void setWeightingIndex(int index);
     static constexpr float kRtaOffsetMinDb = -60.0f;
     static constexpr float kRtaOffsetMaxDb = 60.0f;
     static constexpr float kRtaOffsetStepDb = 3.0f;
-    static constexpr float kDefaultRtaOffsetDb = 24.0f;
+    // Saved offset (0 == default view); the curve is drawn with this plus
+    // EQCurveComponent::kDefaultSpectrumOffsetDb.
+    float rtaOffsetDb = 0.0f;
     void setRtaOffsetDb(float offsetDb);
     int analyzerMode = kAnalyzerOff;
     bool reducedToFps30 = false;

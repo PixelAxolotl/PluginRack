@@ -21,6 +21,11 @@ target_sources(pluginrack_app PRIVATE
     src/DeviceControl.h
     src/DeviceMenu.cpp
     src/InsertHost.h
+    src/InsertMiniView.cpp
+    src/InsertMiniView.h
+    src/IoView.cpp
+    src/IoView.h
+    src/PageHeader.h
     src/DeviceMenu.h
     src/DynamicsWindow.cpp
     src/DynamicsWindow.h
@@ -39,6 +44,8 @@ target_sources(pluginrack_app PRIVATE
     src/MainComponent.h
     src/MixerComponent.cpp
     src/MixerComponent.h
+    src/NativeThumbnail.cpp
+    src/NativeThumbnail.h
     src/PluginHost.cpp
     src/PluginHost.h
     src/RackView.cpp

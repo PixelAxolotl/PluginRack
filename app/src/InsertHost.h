@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "AudioEngine.h"
+#include "InsertMiniView.h"
 #include "MiniButton.h"
 #include "Theme.h"
 
@@ -66,7 +67,7 @@ public:
         indexLabel.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(indexLabel);
 
-        nameLabel.setJustificationType(juce::Justification::centredLeft);
+        nameLabel.setJustificationType(juce::Justification::centred);
         nameLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
         nameLabel.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(nameLabel);
@@ -112,6 +113,26 @@ public:
         });
         removeButton.setTooltip("Remove this plugin");
         addAndMakeVisible(removeButton);
+
+        // The dynamics pair is drawn as one card, so it carries one switch per
+        // effect instead of the single bypass button.
+        compButton.setFontSize(9.0f);
+        compButton.setTooltip("Bypass the compressor");
+        compButton.setClickAction([this] {
+            const bool next = !compButton.getToggleState();
+            compButton.setToggleState(next);
+            host.setBuiltInBypass(compChainItem, next);
+        });
+        addChildComponent(compButton);
+
+        gateButton.setFontSize(9.0f);
+        gateButton.setTooltip("Bypass the gate");
+        gateButton.setClickAction([this] {
+            const bool next = !gateButton.getToggleState();
+            gateButton.setToggleState(next);
+            host.setBuiltInBypass(gateChainItem, next);
+        });
+        addChildComponent(gateButton);
     }
 
     void setInsert(AudioEngine::InsertSlot* newInsert) {
@@ -181,11 +202,91 @@ public:
         repaint();
     }
 
+    // Rack cards carry a read-only mini view under the row; strips that do not
+    // ask for one keep the plain 36 px row.
+    void setMiniView(std::unique_ptr<InsertMiniView> view) {
+        mini = std::move(view);
+        if (mini != nullptr) {
+            addAndMakeVisible(*mini);
+            mini->setBounds(getLocalBounds().withTrimmedTop(kHeaderHeight));
+        }
+        resized();
+        repaint();
+    }
+
+    InsertMiniView* miniView() const { return mini.get(); }
+
+    // One card for the dynamics pair: both chain rows are shown as a single
+    // unit with a bypass switch each, because the two effects share one graph
+    // and one editor.
+    void setBuiltInPair(const juce::String& title,
+                        pluginrack::ChainItem compressorItem, bool compressorBypassed,
+                        pluginrack::ChainItem gateItem, bool gateBypassed) {
+        insert = nullptr;
+        chainItem = compressorItem;
+        builtIn = true;
+        addSlot = false;
+        paired = true;
+        compChainItem = compressorItem;
+        gateChainItem = gateItem;
+        nameLabel.setText(title, juce::dontSendNotification);
+        nameLabel.setColour(juce::Label::textColourId, theme::text());
+        nameLabel.setTooltip(title);
+        bypassButton.setVisible(false);
+        removeButton.setVisible(false);
+        compButton.setVisible(true);
+        gateButton.setVisible(true);
+        setPairBypassed(compressorBypassed, gateBypassed);
+        setTooltip("Click to open the compressor and gate settings");
+        resized();
+        repaint();
+    }
+
+    void setPairBypassed(bool compressorBypassed, bool gateBypassed) {
+        compButton.setToggleState(compressorBypassed);
+        gateButton.setToggleState(gateBypassed);
+    }
+
+    // Live bypass state for a built-in row: the EQ and dynamics panels switch
+    // the effect on without the list being rebuilt.
+    void setBuiltInBypassed(bool bypassed) {
+        if (bypassButton.getToggleState() == bypassed) return;
+        bypassButton.setToggleState(bypassed);
+    }
+
+    // The insert the main bay is currently showing, so the card can say so.
+    void setSelected(bool isSelected) {
+        if (selected == isSelected) return;
+        selected = isSelected;
+        repaint();
+    }
+
+    int preferredHeight() const {
+        return kHeaderHeight + (mini != nullptr ? InsertMiniView::kHeight : 0);
+    }
+
+    static constexpr int kHeaderHeight = 36;
+
     void resized() override {
         auto area = getLocalBounds().reduced(3, 1);
         indexLabel.setVisible(false);
         area.removeFromLeft(20);
+        if (mini != nullptr)
+            mini->setBounds(getLocalBounds().withTrimmedTop(kHeaderHeight).reduced(2, 0));
+        // Mixer strips use compact rows (14-20 px), while rack cards reserve
+        // a 36 px header above their preview. Keep the label inside the actual
+        // row so compact text is vertically centered instead of clipped.
+        const int headerHeight = mini != nullptr ? kHeaderHeight : getHeight();
+        area = area.withHeight(juce::jmax(0, headerHeight - 2));
         if (addSlot) {
+            nameLabel.setBounds(area);
+            return;
+        }
+        if (paired) {
+            gateButton.setBounds(area.removeFromRight(20));
+            area.removeFromRight(3);
+            compButton.setBounds(area.removeFromRight(20));
+            area.removeFromRight(3);
             nameLabel.setBounds(area);
             return;
         }
@@ -234,10 +335,19 @@ public:
             g.setColour(theme::border());
             g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 1.0f);
         }
+
+        // The card whose insert is in the center bay reads as selected, so the
+        // list never leaves you guessing which editor is showing.
+        if (selected) {
+            g.setColour(theme::cyan());
+            g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 2.0f);
+        }
     }
 
     void mouseDown(const juce::MouseEvent& e) override {
-        dragging = e.x < 28 && (insert != nullptr || builtIn);
+        // The handle lives in the header row only: the mini view below it is
+        // for looking at, and clicking it must open the editor, not reorder.
+        dragging = inHandle(e);
         dragOffset = e.y;
         repaint();
         if (insert == nullptr && !builtIn) {
@@ -268,7 +378,7 @@ public:
     }
 
     void mouseMove(const juce::MouseEvent& e) override {
-        const bool onHandle = e.x < 28 && (insert != nullptr || builtIn);
+        const bool onHandle = inHandle(e);
         setMouseCursor(onHandle ? juce::MouseCursor::DraggingHandCursor
                                 : juce::MouseCursor::PointingHandCursor);
     }
@@ -289,6 +399,10 @@ public:
     }
 
 private:
+    bool inHandle(const juce::MouseEvent& e) const {
+        return e.x < 28 && e.y < kHeaderHeight && (insert != nullptr || builtIn);
+    }
+
     IInsertHost& host;
     juce::Component* hostComponent = nullptr;
     int slotIndex = 0;
@@ -299,10 +413,17 @@ private:
     bool addSlotPrimary = false;
     bool hovered = false;
     bool dragging = false;
+    bool selected = false;
+    std::unique_ptr<InsertMiniView> mini;
     int dragOffset = 0;
     int pendingTarget = -1;
     juce::Label indexLabel;
     juce::Label nameLabel;
     MiniButton bypassButton{"B"};
     MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
+    MiniButton compButton{"C"};
+    MiniButton gateButton{"G"};
+    pluginrack::ChainItem compChainItem;
+    pluginrack::ChainItem gateChainItem;
+    bool paired = false;
 };

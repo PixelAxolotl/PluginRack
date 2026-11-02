@@ -391,7 +391,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             }
         }
         if (c < channelIds_.size()) {
-            meters_.observeChannel(channelIds_[c], channelPeak);
+            meters_.observeChannelRealtime(channelIds_[c], channelPeak);
         }
     }
 
@@ -474,7 +474,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             }
         }
         if (o < outputIds_.size()) {
-            meters_.observeOutput(outputIds_[o], outputPeak);
+            meters_.observeOutputRealtime(outputIds_[o], outputPeak);
         }
         if (output.channels == nullptr) {
             continue;

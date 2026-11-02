@@ -19,14 +19,26 @@ std::vector<juce::File> lastSceneCandidates() {
 
 bool isReservedSaveName(const juce::String& name) {
     const juce::String lower = name.toLowerCase();
+    // "default" is the scene file SceneBridge::save() writes; a named save of
+    // the same name would overwrite or delete it.
     return lower == "last" || lower == "autosave" || lower == "session"
-        || lower == "previous" || lower == "lastscene" || lower == "default_save";
+        || lower == "previous" || lower == "lastscene" || lower == "default"
+        || lower == "default_save";
 }
 
 juce::String sanitizeSaveName(const juce::String& name) {
     juce::String result = name.trim();
     // Strip any path components / extension supplied by the user.
     result = result.replaceCharacter('\\', '_').replaceCharacter('/', '_');
+    // Windows rejects these in a file name; replacing them keeps the save
+    // from failing with an unexplained create error.
+    for (const auto character : juce::String(":*?\"<>|")) {
+        result = result.replaceCharacter(character, '_');
+    }
+    // Trailing dots and spaces are dropped by Windows, so drop them here too.
+    while (result.endsWithChar('.') || result.endsWithChar(' ')) {
+        result = result.dropLastCharacters(1);
+    }
     if (result.endsWithIgnoreCase(".json")) result = result.dropLastCharacters(5);
     return result;
 }
@@ -53,12 +65,18 @@ juce::StringArray SceneBridge::getSaveNames() {
     juce::StringArray names;
     const auto dir = getScenesDirectory();
     if (!dir.exists()) return names;
+    // The auto-saved session files and the default scene are not user saves.
+    std::vector<juce::File> reserved = lastSceneCandidates();
+    reserved.push_back(getSceneFile());
     for (const auto& file : dir.findChildFiles(juce::File::findFiles, false, "*.json")) {
-        bool reserved = false;
-        for (const auto& candidate : lastSceneCandidates()) {
-            if (file.getFullPathName() == candidate.getFullPathName()) { reserved = true; break; }
+        bool isReserved = false;
+        for (const auto& candidate : reserved) {
+            if (file.getFullPathName() == candidate.getFullPathName()) {
+                isReserved = true;
+                break;
+            }
         }
-        if (reserved) continue;
+        if (isReserved) continue;
         names.add(file.getFileNameWithoutExtension());
     }
     names.sort(true);
@@ -246,9 +264,11 @@ std::optional<pluginrack::Scene> SceneBridge::loadDefaultOrLast(juce::String& er
     const auto defaultName = getDefaultSaveName();
     if (defaultName.isNotEmpty()) {
         auto scene = loadNamed(defaultName, errorMessage);
-        if (scene.has_value()) return scene;
-        // Fall through to last scene if the selected default is unavailable.
-        errorMessage.clear();
+        if (!scene.has_value() && errorMessage.isEmpty()) {
+            errorMessage = "The selected default save '" + defaultName +
+                            "' could not be loaded.";
+        }
+        return scene;
     }
     return loadLast(errorMessage);
 }

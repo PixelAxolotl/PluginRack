@@ -179,3 +179,13 @@ TEST_CASE("wav conversion maps non-finite samples to zero") {
     file.close();
     std::filesystem::remove(path, ec);
 }
+
+TEST_CASE("wav writer rejects incomplete frames") {
+    const std::vector<float> samples = {0.0f, 0.0f, 0.0f};
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "pluginrack-wav-invalid-test.wav").string();
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    REQUIRE_FALSE(pluginrack::writeWav(path, samples, 2, 48000));
+    REQUIRE_FALSE(std::filesystem::exists(path));
+}

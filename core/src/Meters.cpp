@@ -26,6 +26,14 @@ void MeterBank::observeOutput(std::uint32_t id, float peak) noexcept {
     observe(outputPeaks_, id, peak);
 }
 
+void MeterBank::observeChannelRealtime(std::uint32_t id, float peak) noexcept {
+    observeRealtime(channelPeaks_, id, peak);
+}
+
+void MeterBank::observeOutputRealtime(std::uint32_t id, float peak) noexcept {
+    observeRealtime(outputPeaks_, id, peak);
+}
+
 void MeterBank::advance(int numFrames, double sampleRate) noexcept {
     if (numFrames <= 0 || sampleRate <= 0.0) {
         return;
@@ -56,6 +64,18 @@ void MeterBank::observe(PeakMap& peaks, std::uint32_t id, float peak) noexcept {
         peaks.emplace(id, std::make_unique<std::atomic<float>>(clamped));
         return;
     }
+    const float current = it->second->load(std::memory_order_relaxed);
+    if (clamped > current) {
+        it->second->store(clamped, std::memory_order_relaxed);
+    }
+}
+
+void MeterBank::observeRealtime(PeakMap& peaks, std::uint32_t id, float peak) noexcept {
+    const auto it = peaks.find(id);
+    if (it == peaks.end()) {
+        return;
+    }
+    const float clamped = clampPeak(peak);
     const float current = it->second->load(std::memory_order_relaxed);
     if (clamped > current) {
         it->second->store(clamped, std::memory_order_relaxed);

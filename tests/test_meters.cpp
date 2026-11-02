@@ -126,3 +126,13 @@ TEST_CASE("unknown id reports zero") {
     REQUIRE(meters.channelPeak(999) == 0.0f);
     REQUIRE(meters.outputPeak(999) == 0.0f);
 }
+
+TEST_CASE("realtime meter updates do not register unknown ids") {
+    pluginrack::MeterBank meters;
+    meters.observeChannelRealtime(999, 1.0f);
+    REQUIRE(meters.channelPeak(999) == 0.0f);
+
+    meters.observeChannel(1, 0.0f);
+    meters.observeChannelRealtime(1, 0.5f);
+    REQUIRE(meters.channelPeak(1) == 0.5f);
+}
