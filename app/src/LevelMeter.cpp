@@ -4,34 +4,99 @@
 
 #include "Theme.h"
 
-LevelMeter::LevelMeter(juce::Atomic<float>& peakSource)
-    : source(peakSource) {
+namespace {
+
+constexpr float kDbSpan = LevelMeter::kMaxDb - LevelMeter::kMinDb;
+
+// dB marks on the meter: the fader's own endpoints plus the steps a stereo
+// meter is read at.
+constexpr int kMarks[] = {12, 6, 0, -6, -12, -24, -36, -48, -60};
+
+float proportionOf(float peak) {
+    const float db = 20.0f * std::log10(juce::jmax(peak, 1.0e-6f));
+    return juce::jlimit(0.0f, 1.0f, (db - LevelMeter::kMinDb) / kDbSpan);
+}
+
+} // namespace
+
+juce::Rectangle<int> LevelMeter::faderTrackBounds(juce::Slider& fader) {
+    const auto slider = fader.getLookAndFeel().getSliderLayout(fader).sliderBounds;
+    const int inset = juce::jmin(theme::metrics::kFaderTrackInset, slider.getHeight() / 2);
+    return slider.reduced(0, inset).translated(fader.getX(), fader.getY());
+}
+
+LevelMeter::LevelMeter(juce::Atomic<float>& leftPeakSource, juce::Atomic<float>& rightPeakSource)
+    : leftSource(leftPeakSource), rightSource(rightPeakSource) {
     startTimerHz(30);
 }
 
 void LevelMeter::paint(juce::Graphics& g) {
     g.fillAll(theme::bg().darker(0.2f));
-    auto bounds = getLocalBounds().reduced(3, 2);
-    const int totalH = bounds.getHeight();
-    // Same -60..+12 dB window the fader is drawn on, so the meter next to a
-    // fader lines up with it (and with the dynamics panel's dB scales).
-    const float db = 20.0f * std::log10(juce::jmax(displayedPeak, 1.0e-6f));
-    const float proportion = juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 72.0f);
-    const int meterHeight = juce::roundToInt(static_cast<float>(totalH) * proportion);
 
-    // Track and scale copied from the dynamics panel's level meters: the same
-    // green-at-the-bottom to amber-at-the-top ramp over the same panel well, so
-    // a level reads the same in the mixer as it does on the compressor page.
+    const auto well = getLocalBounds().reduced(1);
+    if (well.isEmpty()) return;
     g.setColour(theme::panel());
-    g.fillRoundedRectangle(bounds.toFloat(), 2.0f);
-    g.setColour(theme::line().withAlpha(0.45f));
-    g.drawRoundedRectangle(bounds.toFloat(), 2.0f, 1.0f);
-    if (meterHeight > 0) {
-        juce::ColourGradient grad(theme::green(), (float)bounds.getX(), (float)bounds.getBottom(),
-                                 theme::amber(), (float)bounds.getX(), (float)bounds.getY(), false);
+    g.fillRoundedRectangle(well.toFloat(), 2.0f);
+
+    const auto bars = well.reduced(1);
+    if (bars.isEmpty()) return;
+    constexpr int gap = 2;
+    const int barWidth = juce::jmax(1, (bars.getWidth() - gap) / 2);
+    const juce::Rectangle<int> leftBar{bars.getX(), bars.getY(), barWidth, bars.getHeight()};
+    const juce::Rectangle<int> rightBar{bars.getRight() - barWidth, bars.getY(), barWidth,
+                                        bars.getHeight()};
+
+    // Each side gets its own dark track, so the pair reads as two columns even
+    // when both are idle.
+    g.setColour(theme::bg());
+    g.fillRoundedRectangle(leftBar.toFloat(), 1.5f);
+    g.fillRoundedRectangle(rightBar.toFloat(), 1.5f);
+
+    const auto markY = [&bars](int db) {
+        const float proportion = (static_cast<float>(db) - kMinDb) / kDbSpan;
+        const int top = bars.getY();
+        const int bottom = bars.getBottom() - 1;
+        return juce::jlimit(top, bottom,
+                            juce::roundToInt(static_cast<float>(bottom)
+                                             - static_cast<float>(bottom - top) * proportion));
+    };
+
+    // Ticks first on the empty track, then again over the bars: one pass would
+    // either vanish against the panel or vanish against a lit bar.
+    for (const int db : kMarks) {
+        g.setColour(theme::line().withAlpha(db == 0 ? 0.55f : 0.3f));
+        g.drawHorizontalLine(markY(db), (float)bars.getX(), (float)bars.getRight());
+    }
+
+    const auto drawBar = [&g](juce::Rectangle<int> bar, float proportion) {
+        const int filled = juce::roundToInt(static_cast<float>(bar.getHeight()) * proportion);
+        if (filled <= 0) return;
+        juce::ColourGradient grad(theme::green(), (float)bar.getX(), (float)bar.getBottom(),
+                                 theme::amber(), (float)bar.getX(), (float)bar.getY(), false);
         g.setGradientFill(grad);
-        g.fillRoundedRectangle((float)bounds.getX(), (float)(bounds.getBottom() - meterHeight),
-                               (float)bounds.getWidth(), (float)meterHeight, 2.0f);
+        g.fillRect(bar.getX(), bar.getBottom() - filled, bar.getWidth(), filled);
+    };
+    drawBar(leftBar, proportionOf(displayedLeft));
+    drawBar(rightBar, proportionOf(displayedRight));
+
+    for (const int db : kMarks) {
+        g.setColour(theme::bg().withAlpha(db == 0 ? 0.6f : 0.38f));
+        g.drawHorizontalLine(markY(db), (float)bars.getX(), (float)bars.getRight());
+    }
+
+    // Each bar is named at its foot. The chip keeps the letter readable
+    // whether or not the bar underneath it is lit.
+    const int labelHeight = juce::jmin(10, bars.getHeight());
+    if (labelHeight >= 8) {
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        for (int side = 0; side < 2; ++side) {
+            const auto bar = side == 0 ? leftBar : rightBar;
+            const auto chip = bar.withY(bar.getBottom() - labelHeight).withHeight(labelHeight);
+            g.setColour(theme::bg().withAlpha(0.85f));
+            g.fillRect(chip);
+            g.setColour(theme::text());
+            g.drawText(side == 0 ? "L" : "R", chip, juce::Justification::centred, false);
+        }
     }
 
     g.setColour(theme::line().withAlpha(0.65f));
@@ -39,7 +104,9 @@ void LevelMeter::paint(juce::Graphics& g) {
 }
 
 void LevelMeter::timerCallback() {
-    const auto newPeak = juce::jlimit(0.0f, 1.0f, source.exchange(0.0f));
-    displayedPeak = juce::jmax(newPeak, displayedPeak * 0.85f);
+    const auto newLeft = juce::jlimit(0.0f, 1.0f, leftSource.exchange(0.0f));
+    const auto newRight = juce::jlimit(0.0f, 1.0f, rightSource.exchange(0.0f));
+    displayedLeft = juce::jmax(newLeft, displayedLeft * 0.85f);
+    displayedRight = juce::jmax(newRight, displayedRight * 0.85f);
     repaint();
 }

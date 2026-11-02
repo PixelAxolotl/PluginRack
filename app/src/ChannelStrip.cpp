@@ -10,7 +10,7 @@ constexpr int kStripWidth = 148;
 ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engine)
     : channel(channelState),
       audioEngine(engine),
-      levelMeter(channelState.peak) {
+      levelMeter(channelState.peakL, channelState.peakR) {
     deviceControl.setTitle(channel.name);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
@@ -62,9 +62,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }
                 });
-            });
-            deviceControl.setOnDoubleClick([this] {
-                if (onDoubleClicked) onDoubleClicked();
             });
         });
     });
@@ -320,7 +317,15 @@ void ChannelStrip::openEqWindow() {
             safe->audioEngine.setChannelEq(safe->channel.id, bands);
             safe->refreshEqButton();
         },
-        liveRateHz);
+        liveRateHz, false, channel.eqRtaOffsetDb, channel.eqRtaWeighting);
+    window->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe == nullptr) return;
+        safe->audioEngine.setChannelEqRtaOffset(safe->channel.id, offsetDb);
+    };
+    window->applyWeighting = [safe](int weighting) {
+        if (safe == nullptr) return;
+        safe->audioEngine.setChannelEqRtaWeighting(safe->channel.id, weighting);
+    };
     // Analyzer wiring (Task 6): the window pulls this channel's tap ring copy
     // on its UI timer and gates which side render() memcpy-copies; the
     // kAnalyzer* mode codes mirror AudioEngine::AnalyzerTap::kOff/kPre/kPost.
@@ -496,14 +501,19 @@ void ChannelStrip::resized() {
     }
     area.removeFromTop(4);
 
-    // fader + meter (bottom, dominant)
+    // fader + meter (bottom, dominant). The meter spans the fader's track, not
+    // the fader component: its value box sits above the track, and laying the
+    // bars out on the component would make them taller than the fader.
     auto footer = area.removeFromBottom(theme::metrics::kRowH); // M / S
     const int half = (footer.getWidth() - 4) / 2;
     auto fm = area;
-    const int meterW = 12;
-    levelMeter.setBounds(fm.removeFromRight(meterW));
+    constexpr int meterW = 24;
+    auto meterColumn = fm.removeFromRight(meterW);
     fm.removeFromRight(4);
     faderSlider.setBounds(fm);
+    levelMeter.setBounds(LevelMeter::faderTrackBounds(faderSlider)
+                             .withX(meterColumn.getX())
+                             .withWidth(meterColumn.getWidth()));
 
     muteButton.setBounds(footer.removeFromLeft(half));
     footer.removeFromLeft(4);
@@ -742,6 +752,9 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     for (auto& effect : effects)
         if (effect.id == item.id) effect.bypassed = bypassed;
     audioEngine.setChannelEffects(channel.id, effects);
+    // An open dynamics panel mirrors the gate row; a chain-row toggle has to
+    // reach it or the panel keeps showing the old switch state.
+    refreshDynamicsButtons();
 }
 
 void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {

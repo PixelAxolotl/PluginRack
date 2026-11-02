@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -11,18 +12,20 @@
 #include "DynamicsWindow.h"
 #include "EQWindow.h"
 #include "InsertHost.h"
+#include "InsertMiniView.h"
 #include "LevelMeter.h"
 #include "Theme.h"
 
 // Channel-centric rack view: 4 columns - channel strip | insert chain (EQ + VSTs)
 // | docked plugin editor | output routing. Reuses Mixer fader/meter/EqButton/slots.
-class RackView final : public juce::Component, public IInsertHost {
+class RackView final : public juce::Component, public IInsertHost, private juce::Timer {
 public:
     explicit RackView(AudioEngine& engine);
     ~RackView() override;
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    void visibilityChanged() override;
     void rebuild();
     void mouseDown(const juce::MouseEvent& e) override;
 
@@ -61,6 +64,17 @@ private:
     AudioEngine::Output* currentOutput();
     const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* currentInserts() const;
     AudioEngine::InsertSlot* findInsert(std::uint32_t insertId);
+    // Maps a row index in the visible list to the chain index a drop lands on.
+    // The dynamics pair is one row but two chain entries, so a drop after the
+    // card has to skip past the second one.
+    int chainIndexForRow(int row);
+    void moveChainItemRaw(pluginrack::ChainItem item, int chainIndex);
+    // Moves both rows of the pair so the merged card keeps them adjacent.
+    void moveDynamicsPair(pluginrack::ChainItem item, int targetRowIndex);
+    // Resolves a dynamics row to its effect. Scenes store the effect ids they
+    // were saved with (the gate's has moved), so a mismatched id falls back to
+    // the effect type the row names.
+    const pluginrack::DynamicsEffect* dynamicsEffectFor(std::uint32_t itemId);
     void ensureSelection();
     void refreshHeader();
     void refreshSlots();
@@ -84,6 +98,13 @@ private:
     void renameSelectedChain();
     void refreshEqButton();
     void refreshOutputButtons();
+    // Card thumbnails: the timer refreshes the focused VST's snapshot and the
+    // built-in graphs; the tap is re-armed every tick because another view can
+    // switch it off.
+    void timerCallback() override;
+    void startMiniTimer();
+    AudioEngine::AnalyzerTap* currentTap();
+    void releaseMiniTap();
 
     AudioEngine& audioEngine;
     int selectedId = -1;
@@ -122,6 +143,25 @@ private:
     juce::Viewport slotViewport;
     juce::Component slotContent;
     juce::OwnedArray<InsertSlotComponent> slots;
+    // Cards that carry a mini view, so the timer can feed them without walking
+    // the list. Cleared at the top of refreshSlots(), which rebuilds every row.
+    InsertSlotComponent* eqCard = nullptr;
+    // Compressor and gate share one card, so one pointer covers both.
+    InsertSlotComponent* dynamicsCard = nullptr;
+    std::map<std::uint32_t, InsertSlotComponent*> vstCards;
+    // Last snapshot per insert. Kept after its card is rebuilt so a thumbnail
+    // does not blink away every time the layout changes.
+    std::map<std::uint32_t, juce::Image> vstThumbs;
+    MiniSpectrum miniSpectrum;
+    DynamicsMeterSim compressorMeter;
+    DynamicsMeterSim gateMeter;
+    std::vector<float> tapLeft;
+    std::vector<float> tapRight;
+    int miniTimerHz = 0;
+    // Armed strip, held by id: a scene restore destroys the strip a raw pointer
+    // would point at.
+    std::uint32_t tapArmedId = 0;
+    bool tapArmedIsOutput = false;
     int chainDropTarget = -1;
     int chainRowCount = 0;
     juce::Label chainMarker;

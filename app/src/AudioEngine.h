@@ -3,7 +3,9 @@
 #include <JuceHeader.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -73,6 +75,11 @@ public:
         juce::Atomic<bool> muted{false};
         juce::Atomic<bool> soloed{false};
         juce::Atomic<float> peak{0.0f};
+        // Per-side peaks for the stereo meter, written by render()
+        // immediately after the fader and read by the UI without a lock, like
+        // peak above.
+        juce::Atomic<float> peakL{0.0f};
+        juce::Atomic<float> peakR{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
@@ -87,6 +94,11 @@ public:
         // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
         // like eqBands, mirrored into eq via setDelayMs under stateLock.
         float eqDelayMs = 0.0f;
+        // RTA display offset in dB (0 == the default view). Display only;
+        // message-thread state saved with the scene like eqBands.
+        float eqRtaOffsetDb = 0.0f;
+        // Analyzer weighting: 0 = Z, 1 = A, 2 = C. Display only.
+        int eqRtaWeighting = 0;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
@@ -106,6 +118,10 @@ public:
         std::uint32_t id = 0;
         juce::String name;
         juce::Atomic<float> peak{0.0f};
+        // Per-side peaks for the stereo meter; same writer/reader rule as the
+        // channel strip's pair.
+        juce::Atomic<float> peakL{0.0f};
+        juce::Atomic<float> peakR{0.0f};
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
@@ -118,6 +134,8 @@ public:
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
         float eqDelayMs = 0.0f; // post-EQ delay, same rules as Channel
+        float eqRtaOffsetDb = 0.0f; // RTA display offset, same rules as Channel
+        int eqRtaWeighting = 0;     // analyzer weighting, same rules as Channel
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         juce::Atomic<bool> eqBypassed{true};
@@ -170,9 +188,93 @@ public:
     };
 
     AudioEngine();
+    ~AudioEngine();
 
     void prepareToPlay(int maxBlockFrames);
     void openDefaultDevices();
+    // Assigns the default output/input and opens them on the startup worker
+    // instead of blocking the message thread (see openStripsDevicesAsync).
+    void openDefaultDevicesAsync();
+    // Opens every device named by the current strips on a background thread.
+    // Startup uses this after restoreScene(..., false) so the window stays
+    // responsive while slow WASAPI drivers are probed (a USB endpoint can take
+    // over ten seconds to enumerate its formats). All output streams open
+    // concurrently against one snapshot of the engine rate (the first output
+    // by id owns the clock role); the input captures follow once the clock's
+    // final rate is known. Calls while a run is active are ignored. The
+    // message thread consumes the result through takeDeviceOpenErrors() /
+    // consumeDeviceOpenFinished().
+    void openStripsDevicesAsync();
+    bool isOpeningDevices() const { return openingDevices_.load(std::memory_order_relaxed); }
+    int getDeviceOpenProgress() const { return deviceOpenProgress_.load(std::memory_order_relaxed); }
+    int getDeviceOpenTotal() const { return deviceOpenTotal_.load(std::memory_order_relaxed); }
+    // True exactly once after a background open finishes.
+    bool consumeDeviceOpenFinished() {
+        return deviceOpenFinished_.exchange(false, std::memory_order_acq_rel);
+    }
+    // Returns and clears the errors reported by the last background open.
+    juce::String takeDeviceOpenErrors();
+
+    // Latency/robustness trade-offs exposed in Settings. Changing one
+    // reopens the affected streams; output changes run on the same background
+    // opener as startup so the window stays responsive.
+    enum class LatencyOption {
+        LowLatencyInput,    // 1-block capture read delay (default 2)
+        PreferExclusive,    // try exclusive WASAPI before the shared modes
+        LowLatencyOutputs,  // 2-block FIFO target for non-clock outputs
+        MinimalClockFifo,   // clock FIFO: no priming, silence top-up only
+        FullDuplexInput     // input on the clock device: share its clock
+    };
+    void setLatencyOption(LatencyOption option, bool enabled);
+    bool getLatencyOption(LatencyOption option) const;
+
+    // Everything the Settings page can change. Applied as one unit so a
+    // device that refuses the new configuration can fall back cleanly.
+    struct DeviceSettings {
+        int inputBuffer = 0;
+        int outputBuffer = 0;
+        bool lowLatencyInput = false;
+        bool preferExclusive = false;
+        bool lowLatencyOutputs = false;
+        bool minimalClockFifo = false;
+        bool fullDuplexInput = false;
+        // Not a stream option: kept here so it saves and loads with the rest.
+        bool autoReloadDevices = false;
+        // Rack insert thumbnail refresh rate (fps); also not a stream option.
+        int rackThumbnailFps = 15;
+    };
+    DeviceSettings getDeviceSettings() const;
+    // Reopens every device with these settings on the background opener. If a
+    // device refuses to open, the previous settings are restored and the
+    // previous streams are kept (they are only replaced on success).
+    void applyDeviceSettings(const DeviceSettings& settings);
+    // Reopens every device with the current settings (no setting change).
+    void reloadAllDevicesAsync();
+
+    // Auto-reload: the watcher lives in Settings, but the flag and the watched
+    // strips are session state, so they belong to the engine that saves them.
+    void setAutoReloadDevices(bool enabled);
+    bool getAutoReloadDevices() const { return autoReloadDevices_.load(); }
+    // Rack insert thumbnails: takes effect on the next UI tick, never reopens
+    // a stream, so it is set straight from Settings instead of being staged.
+    void setRackThumbnailFps(int fps);
+    int getRackThumbnailFps() const { return rackThumbnailFps_.load(); }
+    void setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices);
+    std::vector<pluginrack::WatchedDevice> getWatchedDevices() const;
+
+    struct ReloadableDevice {
+        juce::String label;
+        juce::String deviceName;
+        std::uint32_t stripId = 0;
+        bool isInput = false;
+    };
+    std::vector<ReloadableDevice> getReloadableDevices() const;
+    // Reopens one device on the background opener. If it refuses, the current
+    // stream is kept (the old playback/capture is only replaced on success).
+    void reloadDeviceAsync(const ReloadableDevice& device);
+    // Reopens several devices and automatically retries any that fail, so a
+    // device that was busy during a reload gets another chance.
+    void reloadDevicesAsync(const std::vector<ReloadableDevice>& devices);
     void render(int frames);
     std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
     void releaseResources();
@@ -192,8 +294,17 @@ public:
     bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
     bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
+    // The device name behind the clock output; empty when no output owns the
+    // clock. I/O uses it to name the stream the measurement travels through.
+    juce::String getClockOutputDeviceName() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
+    // Message-thread watchdog: flags a strip whose assigned device is no longer
+    // enumerated (unplugged or disabled while the stream was open), so the UI
+    // shows it as missing instead of leaving the status dot green. Only adds
+    // the marker; a successful open clears it. Returns true when any strip
+    // changed. Cheap enough for a UI timer: enumeration is cached.
+    bool refreshDeviceAvailability();
     juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
@@ -236,9 +347,13 @@ public:
     void setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands);
     void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
     void setChannelEqDelay(std::uint32_t channelId, float delayMs);
+    void setChannelEqRtaOffset(std::uint32_t channelId, float offsetDb);
+    void setChannelEqRtaWeighting(std::uint32_t channelId, int weighting);
     void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(int outIdx, bool bypassed);
     void setOutputEqDelay(int outIdx, float delayMs);
+    void setOutputEqRtaOffset(int outIdx, float offsetDb);
+    void setOutputEqRtaWeighting(int outIdx, int weighting);
     void setChannelEffects(std::uint32_t channelId,
                            const std::vector<pluginrack::DynamicsEffect>& effects);
     void setOutputEffects(std::uint32_t outputId,
@@ -266,8 +381,18 @@ public:
 
     FifoDiagnostics getFifoDiagnostics() const;
 
-    void startLatencyMeasurement();
+    // listenDevice selects the capture that listens for the returning click
+    // (an open input device name). Empty means any open input.
+    void startLatencyMeasurement(const juce::String& listenDevice = {});
     void cancelLatencyMeasurement();
+    // Message-thread watchdog for a measurement that can never finish: no
+    // clock output renders, no input capture is open, or the audio clock is
+    // stopped. The render path times out a hunt it started; this covers the
+    // case where nothing renders at all. Safe to call at UI refresh rate.
+    void pollLatencyMeasurement();
+    // Drops a stale result; called whenever the device graph or its buffer
+    // configuration changes, because the old figure no longer describes it.
+    void resetLatencyMeasurement();
     bool isLatencyMeasuring() const { return latencyMeasureActive_.load(std::memory_order_relaxed); }
     bool hasMeasuredLatency() const { return latencyMeasuredValid_.load(std::memory_order_relaxed); }
     bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
@@ -276,18 +401,38 @@ public:
     pluginrack::Scene makeScene() const;
     // Rebuilds strips, plugins, and devices from a saved scene. MUST run on
     // the JUCE message thread: plugin instantiation, editor-window
-    // destruction with the old strips, and device open/close are message-
-    // thread operations. The audio clock is parked around the strip swap
-    // so the call stays brief. Returns plugin/device load errors, empty on
-    // full success.
-    juce::String restoreScene(const pluginrack::Scene& scene);
+    // destruction with the old strips, and strip swapping are message-thread
+    // operations. openDevicesNow=false records the scene's device assignments
+    // and leaves the streams closed; the caller then runs
+    // openStripsDevicesAsync() so a slow driver probe never blocks the UI.
+    // Returns plugin/device load errors, empty on full success.
+    juce::String restoreScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
 
 private:
+    class DeviceOpenThread;
+
     Channel* findChannel(std::uint32_t channelId);
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
     static float decibelsToGain(float gainDb);
+    // Implementation of the public device setters without the "starting up"
+    // check: the background opener calls these directly from its worker.
+    juce::String setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
+                                           bool forceReopen = false);
+    // engineRate lets the startup opener open every output against one
+    // snapshot of the clock rate instead of racing the clock's own open.
+    juce::String setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
+                                     double engineRate);
+    void prepareToPlayImpl(int maxBlockFrames, bool openInputs);
+    // One full open pass over every output and input; returns the errors
+    // without publishing them, so the caller can retry with previous settings.
+    juce::String openAllDevicesPass(const std::function<bool()>& shouldExit, bool forceInputs);
+    void openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs,
+                              const DeviceSettings* fallback);
+    void startDeviceJob(std::function<void(const std::function<bool()>&)> job);
+    void applySettingsValues(const DeviceSettings& settings);
+    void stopDeviceOpenThread();
     // Audio-thread silence feed: pushes a fade-to-silence block to every
     // published output. Never allocates and never takes stateLock, so it also
     // works on the render-miss path when the message thread holds the lock.
@@ -347,16 +492,44 @@ private:
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
 
+    // Background device opener (startup path). Kept last so its lifetime ends
+    // before the strips it reports on.
+    std::unique_ptr<DeviceOpenThread> deviceOpenThread_;
+    // Cleared in the destructor so a prepare callback posted from the device
+    // worker cannot run against a destroyed engine.
+    std::shared_ptr<std::atomic<bool>> prepareAliveToken_ =
+        std::make_shared<std::atomic<bool>>(true);
+    std::atomic<bool> openingDevices_{false};
+    std::atomic<int> deviceOpenProgress_{0};
+    std::atomic<int> deviceOpenTotal_{0};
+    std::atomic<bool> deviceOpenFinished_{false};
+    juce::CriticalSection deviceOpenErrorsLock_;
+    juce::String deviceOpenErrors_;
+
+    std::atomic<bool> lowLatencyInput_{false};
+    std::atomic<bool> preferExclusive_{false};
+    std::atomic<bool> lowLatencyOutputs_{false};
+    std::atomic<bool> minimalClockFifo_{false};
+    std::atomic<bool> fullDuplexInput_{false};
+    std::atomic<bool> autoReloadDevices_{false};
+    std::atomic<int> rackThumbnailFps_{15};
+    juce::CriticalSection watchedDevicesLock_;
+    std::vector<pluginrack::WatchedDevice> watchedDevices_;
+
     // Round-trip latency measurement state.
     std::atomic<bool> latencyMeasureActive_{false};
     std::atomic<bool> latencyMeasureEmitted_{false};
-    std::atomic<std::uint64_t> latencyMeasureOutputSample_{0};
-    std::atomic<int> latencyMeasureBlocks_{0};
     std::atomic<bool> latencyMeasuredValid_{false};
     std::atomic<int> latencyMeasuredSamples_{0};
+    std::atomic<double> latencyMeasuredRate_{0.0};
     std::atomic<std::uint32_t> latencyMeasureStartMs_{0};
     std::atomic<bool> latencyMeasureFailed_{false};
+    // Which capture listens for the return. Written by startLatencyMeasurement
+    // under stateLock and read by render(), which also holds it.
+    juce::String latencyListenDevice_;
     std::uint64_t outputSampleCounter_ = 0;
+
+    void resetLatencyMeasurementLocked();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

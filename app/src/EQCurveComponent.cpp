@@ -22,6 +22,27 @@ constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
 // valleys into the +/-15 dB view instead of crushing them on the floor.
 constexpr double kRtaKneeDb = -6.0;
 constexpr double kRtaCompSlope = 0.5;
+// The analyzer floors silence here (EQWindow's FFT writes jmax(-100, ...)).
+// It means "nothing on this band", not "quiet audio".
+constexpr double kSilenceFloorDb = -99.5;
+
+// IEC 61672 A and C weighting in dB, evaluated at the bin's own frequency.
+// Z is flat, so it returns 0 and the spectrum is drawn as measured.
+double weightingDb(EQCurveComponent::Weighting weighting, double hz) {
+    if (weighting == EQCurveComponent::Weighting::Z || hz <= 0.0) return 0.0;
+    const double f2 = hz * hz;
+    constexpr double kF1 = 20.598997 * 20.598997;   // 20.6 Hz corner
+    constexpr double kF2 = 107.65265 * 107.65265;   // 107.7 Hz
+    constexpr double kF3 = 737.86223 * 737.86223;   // 737.9 Hz
+    constexpr double kF4 = 12194.217 * 12194.217;   // 12.2 kHz corner
+    if (weighting == EQCurveComponent::Weighting::A) {
+        const double response = (kF4 * f2 * f2)
+                                / ((f2 + kF1) * std::sqrt((f2 + kF2) * (f2 + kF3)) * (f2 + kF4));
+        return 20.0 * std::log10(response) + 2.00;
+    }
+    const double response = (kF4 * f2) / ((f2 + kF1) * (f2 + kF4));
+    return 20.0 * std::log10(response) + 0.06;
+}
 
 // Grid vertical lines: 1-2-5(ish) per decade over the 20 Hz - 20 kHz span.
 constexpr double kGridFreqs[] = {
@@ -207,6 +228,12 @@ void EQCurveComponent::setSpectrumOffsetDb(float offsetDb) {
     repaint();
 }
 
+void EQCurveComponent::setWeighting(Weighting newWeighting) {
+    if (weighting == newWeighting) return;
+    weighting = newWeighting;
+    repaint();
+}
+
 double EQCurveComponent::xToFreq(float x) const {
     const double t = juce::jlimit(0.0, 1.0, static_cast<double>(x) / static_cast<double>(juce::jmax(1, getWidth())));
     return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, t);
@@ -236,9 +263,14 @@ float EQCurveComponent::spectrumY(double hz) const {
     const std::size_t low = static_cast<std::size_t>(pos);
     const std::size_t high = juce::jmin(low + 1, spectrumDb.size() - 1);
     const double frac = pos - static_cast<double>(low);
-    double db = (static_cast<double>(spectrumDb[low]) * (1.0 - frac)
-                    + static_cast<double>(spectrumDb[high]) * frac)
-                    + static_cast<double>(spectrumOffsetDb);
+    const double measured = static_cast<double>(spectrumDb[low]) * (1.0 - frac)
+                            + static_cast<double>(spectrumDb[high]) * frac;
+    // The silence floor stays on the floor whatever the display offset is: the
+    // offset exists to lift quiet audio, and lifting "nothing" instead paints
+    // a solid slab across the whole graph at large offsets.
+    if (measured <= kSilenceFloorDb) return gainToY(-kMaxGainDb);
+    double db = measured + static_cast<double>(spectrumOffsetDb)
+                + weightingDb(weighting, hz);
     // Display-range compression: truthful above the knee, 2:1 below it so
     // quiet valleys lift into view instead of hugging the floor. The EQ
     // curves themselves never pass through here.

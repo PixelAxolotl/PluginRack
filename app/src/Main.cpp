@@ -6,20 +6,84 @@
 
 #include <iostream>
 
+class TrayIcon final : public juce::SystemTrayIconComponent {
+public:
+    TrayIcon(std::function<void()> onShowWindow, std::function<void()> onQuit)
+        : onShowWindow_(std::move(onShowWindow)), onQuit_(std::move(onQuit)) {
+        juce::Image image(juce::Image::ARGB, 32, 32, true);
+        juce::Graphics g(image);
+        g.fillAll(juce::Colours::transparentBlack);
+        g.setColour(juce::Colours::limegreen);
+        g.fillEllipse(4.0f, 4.0f, 24.0f, 24.0f);
+        setIconImage(image, image);
+        setIconTooltip("PluginRack");
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override {
+        // Right click (or ctrl-click) opens the menu. While the window is
+        // hidden in the tray that menu is the only way to quit, so it must not
+        // share the left-click path that only restores the window.
+        if (e.mods.isPopupMenu()) {
+            showMenu();
+            return;
+        }
+        if (onShowWindow_) onShowWindow_();
+    }
+
+private:
+    void showMenu() {
+        juce::PopupMenu menu;
+        menu.addItem(1, "Open PluginRack");
+        menu.addSeparator();
+        menu.addItem(2, "Quit PluginRack");
+        juce::Component::SafePointer<TrayIcon> safe(this);
+        menu.showMenuAsync(juce::PopupMenu::Options().withMousePosition(),
+                           [safe](int result) {
+                               if (safe == nullptr) return;
+                               if (result == 1 && safe->onShowWindow_) safe->onShowWindow_();
+                               else if (result == 2 && safe->onQuit_) safe->onQuit_();
+                           });
+    }
+
+    std::function<void()> onShowWindow_;
+    std::function<void()> onQuit_;
+};
+
 class MainWindow final : public juce::DocumentWindow {
 public:
-    MainWindow()
-        : juce::DocumentWindow("PluginRack", juce::Colours::darkgrey, allButtons) {
+    MainWindow(bool closeToTray, std::function<void(bool)> onCloseToTrayChanged)
+        : juce::DocumentWindow("PluginRack", juce::Colours::darkgrey, allButtons)
+        , closeToTray_(closeToTray) {
         setUsingNativeTitleBar(true);
-        setContentOwned(new MainComponent(), true);
+        auto* content = new MainComponent();
+        content->settings().onCloseToTrayChanged = [this, onCloseToTrayChanged](bool enabled) {
+            closeToTray_ = enabled;
+            if (onCloseToTrayChanged) onCloseToTrayChanged(enabled);
+        };
+        content->settings().setCloseToTrayEnabled(closeToTray_);
+        setContentOwned(content, true);
+        trayIcon_ = std::make_unique<TrayIcon>(
+            [this] {
+                setVisible(true);
+                toFront(true);
+            },
+            [] { juce::JUCEApplication::getInstance()->systemRequestedQuit(); });
         setResizeLimits(1180, 700, 10000, 10000);
         centreWithSize(1600, 900);
         setVisible(true);
     }
 
     void closeButtonPressed() override {
+        if (closeToTray_) {
+            setVisible(false);
+            return;
+        }
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
     }
+
+private:
+    bool closeToTray_ = true;
+    std::unique_ptr<TrayIcon> trayIcon_;
 };
 
 class PluginRackApplication final : public juce::JUCEApplication {
@@ -64,6 +128,8 @@ public:
                 if (tok == "mixer") shotView = AppView::Mixer;
                 else if (tok == "rack" || tok == "racks") shotView = AppView::Rack;
                 else if (tok == "routing") shotView = AppView::Routing;
+                else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
+                else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
                 else if (tok.containsOnly("0123456789")) {
                     if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
@@ -90,7 +156,17 @@ public:
         lookAndFeel = std::make_unique<ConsoleLookAndFeel>();
         juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel.get());
         tooltipWindow = std::make_unique<juce::TooltipWindow>(nullptr, 100);
-        mainWindow = std::make_unique<MainWindow>();
+        juce::PropertiesFile::Options storageOptions;
+        storageOptions.applicationName = "PluginRack";
+        storageOptions.filenameSuffix = ".settings";
+        storageOptions.folderName = "PluginRack";
+        storageOptions.osxLibrarySubFolder = "Application Support";
+        properties.setStorageParameters(storageOptions);
+        const bool closeToTray = properties.getUserSettings()->getBoolValue("closeToTray", true);
+        mainWindow = std::make_unique<MainWindow>(closeToTray, [this](bool enabled) {
+            properties.getUserSettings()->setValue("closeToTray", enabled);
+            properties.getUserSettings()->saveIfNeeded();
+        });
     }
 
     void shutdown() override {
@@ -105,6 +181,7 @@ public:
     }
 
 private:
+    juce::ApplicationProperties properties;
     std::unique_ptr<ConsoleLookAndFeel> lookAndFeel;
     std::unique_ptr<juce::TooltipWindow> tooltipWindow;
     std::unique_ptr<MainWindow> mainWindow;
