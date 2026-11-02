@@ -17,6 +17,7 @@ public:
     static juce::Rectangle<int> faderTrackBounds(juce::Slider& fader);
 
     void paint(juce::Graphics& g) override;
+    void setStereo(bool stereo);
 
     static constexpr float kMinDb = -60.0f;
     static constexpr float kMaxDb = 12.0f;
@@ -28,6 +29,7 @@ private:
     juce::Atomic<float>& rightSource;
     float displayedLeft = 0.0f;
     float displayedRight = 0.0f;
+    bool stereo = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LevelMeter)
 };
