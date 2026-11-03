@@ -118,11 +118,51 @@ TEST_CASE("InputCapture ring buffer gets the same depth clamp", "[underrun]") {
                                    "InputCapture::open");
     // The ring is sized from the larger of the input device buffer and the
     // output render block, so mismatched buffer settings cannot starve it.
-    CHECK(contains(body, "blockFrames * 4"));
+    CHECK(contains(body, "capacityUnit * 4"));
     CHECK(contains(body, "65536"));
     // Read delay is configurable (1 or 2 blocks); the ring must still clamp.
     CHECK(contains(body, "blockFrames * juce::jmax(1, readDelayBlocks)"));
     CHECK(contains(body, "readCursor.prepare"));
+}
+
+TEST_CASE("input read delay ignores the probe capacity reserve", "[underrun][latency]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto body = functionBody(source, "juce::String InputCapture::open");
+    // The reserve for an unfinished clock probe may only grow the ring. It must
+    // not reach the delay unit, or it is added to every input as real latency.
+    CHECK(contains(body, "capacityUnit = juce::jmax(blockFrames, capacityReserveFrames)"));
+    CHECK(contains(body,
+                   "const int delay = juce::jlimit(0, maxDelay, "
+                   "blockFrames * juce::jmax(1, readDelayBlocks))"));
+
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "renderBlockFrames = currentBufferSize"));
+    CHECK(contains(engine,
+                   "capacityReserveFrames = juce::jmax(currentBufferSize, "
+                   "kProbeRenderBlockFrames)"));
+}
+
+TEST_CASE("low-latency input backs off only after a real starvation", "[underrun][latency]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto body = functionBody(source, "bool InputCapture::pull");
+    // The first one-block pull is allowed to prime without becoming a false
+    // glitch; later starvation adds one block and keeps the cursor continuous.
+    CHECK(contains(body, "written >= targetDelay + static_cast<std::uint64_t>(frames)"));
+    CHECK(contains(body, "const int nextDelay"));
+    CHECK(contains(body, "readCursor.setTargetDelay(nextDelay)"));
+}
+
+TEST_CASE("output FIFO follows the clock block and corrects independent clocks", "[underrun][latency]") {
+    const auto header = readSource("app/src/DeviceStream.h");
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto open = functionBody(device, "OutputPlayback::open");
+    const auto callback = functionBody(
+        device, "void OutputPlayback::audioDeviceIOCallbackWithContext");
+    CHECK(contains(header, "int renderBlockFrames = 0"));
+    CHECK(contains(open, "renderBlockFrames_ * 2"));
+    CHECK(contains(callback, "kMaxDriftCorrection"));
+    CHECK(contains(callback, "fifo->read(sourceFrames)"));
+    CHECK(contains(callback, "exactRead"));
 }
 
 TEST_CASE("InputCapture publishes lock-free and counts real underruns",
@@ -223,10 +263,25 @@ TEST_CASE("latency tuning options reach the device opens",
     const auto device = readSource("app/src/DeviceStream.cpp");
     CHECK(contains(device, "blockFrames * juce::jmax(1, readDelayBlocks)"));
     CHECK(contains(device, "preferExclusive"));
+    CHECK(contains(device, "kTypeShared, kTypeLowLatency, kTypeExclusive"));
+    CHECK(contains(device, "typeSetup.setAttribute(\"deviceType\", typeName)"));
+    CHECK_FALSE(contains(device, "manager.setCurrentAudioDeviceType(typeName, false)"));
     const auto settings = readSource("app/src/SettingsView.cpp");
     CHECK(contains(settings, "LowLatencyInput"));
     CHECK(contains(settings, "MinimalClockFifo"));
     CHECK(contains(settings, "showDeviceBuffer"));
+}
+
+TEST_CASE("device startup overlaps probes and retries only rate mismatches", "[underrun][latency]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto openPass = functionBody(
+        engine, "juce::String AudioEngine::openAllDevicesPass");
+    CHECK(contains(openPass, "launchOutputs(0, outputsWanted.size(), openRate"));
+    CHECK(contains(openPass, "launchInputs(openRate, forceInputs"));
+    CHECK(contains(openPass, "setChannelInputDeviceImpl(request.id, request.name, force, rate)"));
+    CHECK(contains(openPass, "retryInputs = std::abs(finalRate - openRate) > 0.5"));
+    CHECK(contains(engine, "currentBufferSize = newBuf"));
+    CHECK(contains(engine, "kProbeRenderBlockFrames"));
 }
 
 TEST_CASE("settings apply fails safe and reloads single devices",
@@ -342,9 +397,11 @@ TEST_CASE("scene save and restore carry the audio tuning", "[plugin][restore]") 
     const auto restore = functionBody(cpp, "juce::String AudioEngine::restoreScene");
 
     CHECK(contains(save, "pluginrack::AudioSettings audio"));
+    CHECK(contains(save, "audio.latencyTuningOptIn"));
     CHECK(contains(save, "audio.autoReloadDevices"));
     CHECK(contains(save, "getWatchedDevices"));
     CHECK(contains(restore, "scene.audio.has_value()"));
+    CHECK(contains(restore, "settings.latencyTuningOptIn"));
     CHECK(contains(restore, "applySettingsValues(settings)"));
     CHECK(contains(restore, "setWatchedDevices(scene.audio->watchedDevices)"));
 }

@@ -34,7 +34,12 @@ public:
                       // jitter, 1 is the low-latency choice.
                       int readDelayBlocks = 2,
                       // Try exclusive mode before the shared modes.
-                      bool preferExclusive = false);
+                      bool preferExclusive = false,
+                      // Extra ring history for a render block the clock may
+                      // still be negotiating. Sizes the ring only: it must not
+                      // reach the read delay, which stays tied to the real
+                      // render block or it turns straight into input latency.
+                      int capacityReserveFrames = 0);
     juce::String open(const juce::String& preferredDeviceName,
                       double engineSampleRate,
                       juce::String& errorOut,
@@ -178,7 +183,12 @@ public:
                       // -1 = same as targetFillBlocks.
                       int primeBlocks = -1,
                       // Try exclusive mode before the shared modes.
-                      bool preferExclusive = false);
+                      bool preferExclusive = false,
+                      // Maximum render block that will be pushed into this
+                      // FIFO. Independent output buffers can be smaller than
+                      // the clock block, so the FIFO must still fit a whole
+                      // render block.
+                      int renderBlockFrames = 0);
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -227,6 +237,7 @@ private:
     juce::AudioBuffer<float> storage;
     int capacity = 0;
     int bufferSize = 256;
+    int renderBlockFrames_ = 0;
     int targetFillFrames = 0;
     double sampleRate = 0.0;
     juce::String error;

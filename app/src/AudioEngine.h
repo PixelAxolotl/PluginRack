@@ -229,7 +229,7 @@ public:
         PreferExclusive,    // try exclusive WASAPI before the shared modes
         LowLatencyOutputs,  // 2-block FIFO target for non-clock outputs
         MinimalClockFifo,   // clock FIFO: no priming, silence top-up only
-        FullDuplexInput     // input on the clock device: share its clock
+        FullDuplexInput     // same-device input: start with one-block delay
     };
     void setLatencyOption(LatencyOption option, bool enabled);
     bool getLatencyOption(LatencyOption option) const;
@@ -239,6 +239,10 @@ public:
     struct DeviceSettings {
         int inputBuffer = 0;
         int outputBuffer = 0;
+        // Beta latency modes are ignored unless the user explicitly opts in
+        // through Settings and applies the choice. Persisted with scenes so
+        // an old session cannot silently turn them back on.
+        bool latencyTuningOptIn = false;
         bool lowLatencyInput = false;
         bool preferExclusive = false;
         bool lowLatencyOutputs = false;
@@ -425,7 +429,8 @@ private:
     // Implementation of the public device setters without the "starting up"
     // check: the background opener calls these directly from its worker.
     juce::String setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
-                                           bool forceReopen = false);
+                                           bool forceReopen = false,
+                                           double engineRate = 0.0);
     // engineRate lets the startup opener open every output against one
     // snapshot of the clock rate instead of racing the clock's own open.
     juce::String setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
@@ -512,6 +517,7 @@ private:
     juce::CriticalSection deviceOpenErrorsLock_;
     juce::String deviceOpenErrors_;
 
+    std::atomic<bool> latencyTuningOptIn_{false};
     std::atomic<bool> lowLatencyInput_{false};
     std::atomic<bool> preferExclusive_{false};
     std::atomic<bool> lowLatencyOutputs_{false};
