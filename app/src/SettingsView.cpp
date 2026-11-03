@@ -274,12 +274,8 @@ void SettingsView::refresh() {
     }
 
     juce::String errors;
-    for (const auto& c : audioEngine.getChannels()) {
-        if (c->inputError.isNotEmpty()) errors += c->name + ": " + c->inputError + "\n";
-    }
-    for (const auto& o : audioEngine.getOutputs()) {
-        if (o->outputError.isNotEmpty()) errors += o->name + ": " + o->outputError + "\n";
-    }
+    for (const auto& [stripName, stripError] : audioEngine.getDeviceErrors())
+        errors += stripName + ": " + stripError + "\n";
     if (report.underruns + report.overruns > 0) errors += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
     const auto fifo = audioEngine.getFifoDiagnostics();
     if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0) {
@@ -356,10 +352,8 @@ void SettingsView::revertPending() {
 
 void SettingsView::refreshListenChoices() {
     juce::StringArray names;
-    for (const auto& channel : audioEngine.getChannels()) {
-        if (channel->input != nullptr && channel->inputDeviceName.isNotEmpty())
-            names.addIfNotAlreadyThere(channel->inputDeviceName);
-    }
+    for (const auto& name : audioEngine.getAssignedInputDeviceNames())
+        names.addIfNotAlreadyThere(name);
     if (listenChoicesBuilt_ && names == listenNames_) return;
     listenChoicesBuilt_ = true;
     listenNames_ = names;
@@ -530,13 +524,10 @@ void SettingsView::pollAutoReload() {
                                            });
         if (!isWatched) continue;
 
-        bool failing = false;
-        if (device.isInput) {
-            if (auto* channel = audioEngine.getChannelById(device.stripId))
-                failing = channel->inputError.isNotEmpty();
-        } else if (auto* output = audioEngine.getOutputById(device.stripId)) {
-            failing = output->outputError.isNotEmpty();
-        }
+        const bool failing =
+            device.isInput
+                ? audioEngine.getChannelDeviceState(device.stripId).error.isNotEmpty()
+                : audioEngine.getOutputDeviceState(device.stripId).error.isNotEmpty();
 
         auto& state = autoReloadState_[key];
         if (!failing) {

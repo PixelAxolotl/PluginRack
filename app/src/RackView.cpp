@@ -383,7 +383,9 @@ void RackView::refreshHeader() {
     meter.reset();
     if (ch != nullptr) {
         nameLabel.setText(ch->name, juce::dontSendNotification);
-        juce::String sub = ch->inputDeviceName.isNotEmpty() ? ch->inputDeviceName : juce::String("No input");
+        const auto deviceState = audioEngine.getChannelDeviceState(ch->id);
+        juce::String sub = deviceState.deviceName.isNotEmpty() ? deviceState.deviceName
+                                                               : juce::String("No input");
         sub += ch->layout == pluginrack::ChannelLayout::Mono ? " - Mono" : " - Stereo";
         subLabel.setText(sub, juce::dontSendNotification);
         modeCombo.setSelectedId(ch->layout == pluginrack::ChannelLayout::Mono ? 1 : 2,
@@ -404,8 +406,8 @@ void RackView::refreshHeader() {
         meter->setStereo(ch->layout != pluginrack::ChannelLayout::Mono);
     } else if (out != nullptr) {
         nameLabel.setText(out->name, juce::dontSendNotification);
-        subLabel.setText(out->outputDeviceName.isNotEmpty() ? out->outputDeviceName
-                                                            : juce::String("No device"),
+        const auto deviceName = audioEngine.getOutputDeviceState(out->id).deviceName;
+        subLabel.setText(deviceName.isNotEmpty() ? deviceName : juce::String("No device"),
                          juce::dontSendNotification);
         inputEditing = false;
         inputChip.setVisible(false);
@@ -438,7 +440,7 @@ void RackView::refreshInputControls() {
     }
 
     const bool mono = ch->layout == pluginrack::ChannelLayout::Mono;
-    const bool hasInputDevice = ch->inputDeviceName.isNotEmpty();
+    const bool hasInputDevice = audioEngine.getChannelDeviceState(ch->id).deviceName.isNotEmpty();
     const int a = ch->inputChannels.empty() ? 1 : ch->inputChannels[0] + 1;
     const int b = ch->inputChannels.size() > 1 ? ch->inputChannels[1] + 1 : a;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
@@ -1661,15 +1663,32 @@ void RackView::renameSelectedChain() {
 }
 
 juce::String RackView::insertPlugin(const juce::File& file) {
+    // Loading runs on a worker; the strip is rebuilt from the completion, so
+    // the message thread never waits on the plugin's initialisation.
+    juce::Component::SafePointer<RackView> safe(this);
     if (auto* ch = currentChannel()) {
-        const auto error = audioEngine.addPlugin(ch->id, file);
-        refreshAfterInsertChange();
-        return error;
+        const auto channelId = ch->id;
+        audioEngine.addPluginAsync(channelId, file, [safe](juce::String error) {
+            if (safe == nullptr) return;
+            safe->refreshAfterInsertChange();
+            if (error.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
+            }
+        });
+        return {};
     }
     if (auto* out = currentOutput()) {
-        const auto error = audioEngine.addOutputPlugin(out->id, file);
-        refreshAfterInsertChange();
-        return error;
+        const auto outputId = out->id;
+        audioEngine.addOutputPluginAsync(outputId, file, [safe](juce::String error) {
+            if (safe == nullptr) return;
+            safe->refreshAfterInsertChange();
+            if (error.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
+            }
+        });
+        return {};
     }
     return "No chain is selected.";
 }

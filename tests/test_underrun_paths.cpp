@@ -264,7 +264,7 @@ TEST_CASE("latency tuning options reach the device opens",
     CHECK(contains(device, "blockFrames * juce::jmax(1, readDelayBlocks)"));
     CHECK(contains(device, "preferExclusive"));
     CHECK(contains(device, "kTypeShared, kTypeLowLatency, kTypeExclusive"));
-    CHECK(contains(device, "typeSetup.setAttribute(\"deviceType\", typeName)"));
+    CHECK(contains(device, "typeSetup.setAttribute(\"deviceType\", chosenTypeName)"));
     CHECK_FALSE(contains(device, "manager.setCurrentAudioDeviceType(typeName, false)"));
     const auto settings = readSource("app/src/SettingsView.cpp");
     CHECK(contains(settings, "LowLatencyInput"));
@@ -272,23 +272,60 @@ TEST_CASE("latency tuning options reach the device opens",
     CHECK(contains(settings, "showDeviceBuffer"));
 }
 
-TEST_CASE("device startup overlaps probes and retries only rate mismatches", "[underrun][latency]") {
+TEST_CASE("device startup overlaps probes and opens every stream once", "[underrun][latency]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto openPass = functionBody(
         engine, "juce::String AudioEngine::openAllDevicesPass");
-    CHECK(contains(openPass, "launchOutputs(0, outputsWanted.size(), openRate"));
-    CHECK(contains(openPass, "launchInputs(openRate, forceInputs"));
+    CHECK(contains(openPass, "launchOutputs(openRate, outputResults, outputHelpers)"));
+    CHECK(contains(openPass, "launchInputs(openRate, forceInputs, inputResults, inputHelpers)"));
     CHECK(contains(openPass, "setChannelInputDeviceImpl(request.id, request.name, force, rate)"));
-    CHECK(contains(openPass, "retryInputs = std::abs(finalRate - openRate) > 0.5"));
+    // No rollback wave, no second rate pass: exactly one attempt per stream.
+    CHECK_FALSE(contains(openPass, "retryInputs"));
+    CHECK_FALSE(contains(openPass, "clockOpened"));
+    const auto strips = functionBody(engine, "void AudioEngine::openStripsDevicesNow");
+    CHECK(countOccurrences(strips, "openAllDevicesPass(") == 1);
     CHECK(contains(engine, "currentBufferSize = newBuf"));
     CHECK(contains(engine, "kProbeRenderBlockFrames"));
+}
+
+TEST_CASE("failing devices are silenced and named in the progress text",
+          "[underrun][latency]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto pass = functionBody(engine, "juce::String AudioEngine::openAllDevicesPass");
+    // Every endpoint starts at once, so the progress text lists the whole
+    // in-flight set instead of the last worker to start.
+    CHECK(countOccurrences(pass, "beginDeviceOpen(status)") == 2);
+    CHECK(countOccurrences(pass, "endDeviceOpen(status)") == 2);
+    const auto engine2 = readSource("app/src/AudioEngine.cpp");
+    const auto status = functionBody(engine2, "juce::String AudioEngine::getDeviceOpenStatus");
+    CHECK(contains(status, "endpoints in parallel"));
+    CHECK(contains(status, " more)"));
+    // A refusal is reported against the strip and endpoint it belongs to, and
+    // a refused clock explains why nothing plays.
+    CHECK(contains(pass, "outputsWanted[i].label"));
+    CHECK(contains(pass, "inputsWanted[i].label"));
+    CHECK(contains(pass, "could not be opened as the clock"));
+}
+
+TEST_CASE("each device is opened with one device type and no retry",
+          "[underrun][latency]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto preferred = functionBody(source, "juce::String openWithPreferredType");
+    // One initialise() call: picking the type is a name lookup, never a probe.
+    CHECK(countOccurrences(preferred, "manager.initialise(") == 1);
+    CHECK_FALSE(contains(source, "openWithWildcardSearch"));
+    // A missing endpoint fails immediately instead of falling back to the
+    // system default and reporting success.
+    CHECK(contains(preferred, "No such device: "));
+    CHECK(contains(preferred, "manager.closeAudioDevice()"));
 }
 
 TEST_CASE("settings apply fails safe and reloads single devices",
           "[underrun][latency]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     CHECK(contains(engine, "AudioEngine::applyDeviceSettings"));
-    CHECK(contains(engine, "restored the previous ones"));
+    // No "restore the previous settings and try again" second pass.
+    CHECK_FALSE(contains(engine, "restored the previous ones"));
     CHECK(contains(engine, "AudioEngine::reloadAllDevicesAsync"));
     CHECK(contains(engine, "AudioEngine::reloadDeviceAsync"));
     CHECK(contains(engine, "forceReopen"));
@@ -301,8 +338,12 @@ TEST_CASE("settings apply fails safe and reloads single devices",
     CHECK(contains(header, "reloadDeviceToggles"));
     CHECK(contains(header, "autoReloadToggle"));
     CHECK(contains(engine, "AudioEngine::reloadDevicesAsync"));
-    CHECK(contains(engine, "attempt < 3"));
-    CHECK(contains(engine, "juce::Thread::sleep(400)"));
+    // One attempt per device: a busy or failing endpoint is reported and left
+    // silent instead of being retried after a pause.
+    const auto reload = functionBody(engine, "void AudioEngine::reloadDevicesAsync");
+    CHECK_FALSE(contains(reload, "attempt <"));
+    CHECK_FALSE(contains(reload, "juce::Thread::sleep(400)"));
+    CHECK(contains(reload, "beginDeviceOpen(status)"));
 }
 
 TEST_CASE("clock reopen keeps feeding other outputs until the new clock runs",
@@ -326,9 +367,7 @@ TEST_CASE("buffer-size requests must match the device buffer",
           "[underrun][buffer]") {
     const auto source = readSource("app/src/DeviceStream.cpp");
     const auto preferred = functionBody(source, "juce::String openWithPreferredType");
-    const auto wildcard = functionBody(source, "juce::String openWithWildcardSearch");
     CHECK(contains(preferred, "getCurrentBufferSizeSamples() != requestedBufferSize"));
-    CHECK(contains(wildcard, "getCurrentBufferSizeSamples() != requestedBufferSize"));
     CHECK(contains(preferred, "manager.closeAudioDevice()"));
 }
 
@@ -359,7 +398,7 @@ TEST_CASE("scene restore loads plugins before the device handoff",
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
                                    "juce::String AudioEngine::restoreScene");
     const auto load = body.find("loadPlugin(juce::File(insert->pluginPath)");
-    const auto device = body.find("setOutputDevice(id, name)");
+    const auto device = body.find("openStripsDevicesAsync()");
     REQUIRE(load != std::string::npos);
     REQUIRE(device != std::string::npos);
     CHECK(load < device);
@@ -404,4 +443,87 @@ TEST_CASE("scene save and restore carry the audio tuning", "[plugin][restore]") 
     CHECK(contains(restore, "settings.latencyTuningOptIn"));
     CHECK(contains(restore, "applySettingsValues(settings)"));
     CHECK(contains(restore, "setWatchedDevices(scene.audio->watchedDevices)"));
+}
+
+TEST_CASE("views read device strings through the locked snapshot", "[underrun][thread]") {
+    // The device opener assigns the strip device name/error Strings on its
+    // worker thread. Copying them from the message thread without stateLock
+    // reads a torn StringHolder pointer and faults inside String::operator=.
+    const auto channelStrip = readSource("app/src/ChannelStrip.cpp");
+    const auto refresh = functionBody(channelStrip, "void ChannelStrip::refreshInput");
+    CHECK(contains(refresh, "audioEngine.getChannelDeviceState(channel.id)"));
+    CHECK_FALSE(contains(refresh, "setDeviceName(channel.inputDeviceName)"));
+    CHECK_FALSE(contains(refresh, "setError(channel.inputError)"));
+
+    const auto mixer = readSource("app/src/MixerComponent.cpp");
+    const auto outputRefresh =
+        functionBody(mixer, "void MixerComponent::OutputStrip::refresh()");
+    CHECK(contains(outputRefresh, "audioEngine.getOutputDeviceState(output.id)"));
+    CHECK_FALSE(contains(outputRefresh, "setDeviceName(output.outputDeviceName)"));
+
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto clock = functionBody(engine, "juce::String AudioEngine::getClockDescription");
+    CHECK(contains(clock, "const juce::ScopedLock lock(stateLock)"));
+    CHECK_FALSE(contains(clock, "getActiveDeviceType"));
+
+    const auto main = readSource("app/src/MainComponent.cpp");
+    CHECK(contains(main, "audioEngine.getDeviceErrors()"));
+    CHECK_FALSE(contains(main, "c->inputError"));
+}
+
+TEST_CASE("an already-open input is reused or released before reopening",
+          "[underrun][thread]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto body =
+        functionBody(engine, "juce::String AudioEngine::setChannelInputDeviceImpl");
+    // Reuse compares the ring the capture was sized for, not the clock block
+    // that was still unknown when it opened: an exact block match reopens a
+    // device this process already holds, the driver refuses the second client,
+    // and the user sees an error next to working audio.
+    CHECK(contains(body, "it->second.renderBlockFrames >= capacityReserveFrames"));
+    CHECK_FALSE(contains(body, "it->second.renderBlockFrames >= currentBufferSize"));
+    // Any real reopen releases the endpoint first.
+    const auto close = body.find("previous->close()");
+    const auto open = body.find("capture->open(");
+    REQUIRE(close != std::string::npos);
+    REQUIRE(open != std::string::npos);
+    CHECK(close < open);
+}
+
+TEST_CASE("adding a VST never instantiates on the message thread", "[plugin][ui]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto add = functionBody(engine, "void AudioEngine::addPluginAsync");
+    CHECK(contains(add, "PluginHost::loadFromFile"));
+    CHECK(contains(add, "juce::Thread::launch"));
+    CHECK(contains(add, "MessageManager::callAsync"));
+    // Install happens back on the message thread, after the instance exists.
+    const auto adopt = add.find("insert->pluginHost.adopt(loaded)");
+    const auto post = add.find("MessageManager::callAsync");
+    REQUIRE(adopt != std::string::npos);
+    REQUIRE(post != std::string::npos);
+    CHECK(post < adopt);
+
+    // One format manager, serialised: the instantiation worker and the scene
+    // loader must not use it concurrently.
+    const auto host = readSource("app/src/PluginHost.cpp");
+    CHECK(contains(host, "sharedFormatLock()"));
+    CHECK(contains(host, "PluginHost::loadFromFile"));
+    CHECK(contains(host, "plugin->prepareToPlay(currentSampleRate, currentBufferSize)"));
+
+    const auto rack = readSource("app/src/RackView.cpp");
+    const auto insert = functionBody(rack, "juce::String RackView::insertPlugin");
+    CHECK(contains(insert, "addPluginAsync"));
+    CHECK(contains(insert, "addOutputPluginAsync"));
+    CHECK_FALSE(contains(insert, "audioEngine.addPlugin("));
+}
+
+TEST_CASE("crashes are logged with a backtrace", "[crash]") {
+    const auto main = readSource("app/src/Main.cpp");
+    CHECK(contains(main, "setApplicationCrashHandler"));
+    CHECK(contains(main, "getStackBacktrace"));
+    CHECK(contains(main, "crash-"));
+    CHECK(contains(main, "setCurrentLogger"));
+    const auto cmake = readSource("app/CMakeLists.txt");
+    CHECK(contains(cmake, "/Zi"));
+    CHECK(contains(cmake, "target_link_options(pluginrack_app PRIVATE /DEBUG)"));
 }

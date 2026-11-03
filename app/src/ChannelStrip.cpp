@@ -13,8 +13,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
       levelMeter(faderSlider, channelState.peakL, channelState.peakR, channelState.rmsL,
                  channelState.rmsR) {
     deviceControl.setTitle(channel.name);
-    deviceControl.setDeviceName(channel.inputDeviceName);
-    deviceControl.setError(channel.inputError);
     refreshInput();
 
     // The strip header carries the name and the device; the input chip below
@@ -51,7 +49,8 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     addAndMakeVisible(splitButton);
 
     deviceControl.setOnClick([this] {
-        DeviceMenu::showInputMenu(deviceControl, channel.inputDeviceName,
+        const auto current = audioEngine.getChannelDeviceState(channel.id);
+        DeviceMenu::showInputMenu(deviceControl, current.deviceName,
                                   audioEngine.getAvailableInputDevices(),
                                   [this](juce::String chosen) {
             const std::uint32_t channelId = channel.id;
@@ -575,8 +574,11 @@ void ChannelStrip::refreshRouting() {
 }
 
 void ChannelStrip::refreshInput() {
+    // Device name/error are written by the device-opener worker: take a locked
+    // snapshot instead of reading the strip fields directly.
+    const auto deviceState = audioEngine.getChannelDeviceState(channel.id);
     const bool mono = channel.layout == pluginrack::ChannelLayout::Mono;
-    const bool hasInputDevice = channel.inputDeviceName.isNotEmpty();
+    const bool hasInputDevice = deviceState.deviceName.isNotEmpty();
     levelMeter.setStereo(!mono);
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
@@ -592,10 +594,10 @@ void ChannelStrip::refreshInput() {
     modeCombo.setVisible(hasInputDevice && inputEditing);
     inputComboA.setVisible(hasInputDevice && inputEditing);
     inputComboB.setVisible(hasInputDevice && inputEditing && !mono);
-    deviceControl.setDeviceName(channel.inputDeviceName);
-    deviceControl.setError(channel.inputError);
-    inputErrorLabel.setText(channel.inputError, juce::dontSendNotification);
-    inputErrorLabel.setVisible(channel.inputError.isNotEmpty());
+    deviceControl.setDeviceName(deviceState.deviceName);
+    deviceControl.setError(deviceState.error);
+    inputErrorLabel.setText(deviceState.error, juce::dontSendNotification);
+    inputErrorLabel.setVisible(deviceState.error.isNotEmpty());
     resized();
 }
 
@@ -617,7 +619,7 @@ void ChannelStrip::applyInputMapping() {
 }
 
 void ChannelStrip::splitIntoMonoChannels() {
-    const auto device = channel.inputDeviceName;
+    const auto device = audioEngine.getChannelDeviceState(channel.id).deviceName;
     // The capture only stores what was requested; the device may expose more
     // physical inputs than this channel's mapping uses.
     const int inputs = channel.input != nullptr ? channel.input->availableInputCount() : 0;
@@ -681,9 +683,18 @@ void ChannelStrip::openPicker() {
 }
 
 juce::String ChannelStrip::insertPlugin(const juce::File& file) {
-    const auto error = audioEngine.addPlugin(channel.id, file);
-    refreshAfterInsertChange();
-    return error;
+    // The load is asynchronous; the strip refreshes when it finishes.
+    const auto channelId = channel.id;
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    audioEngine.addPluginAsync(channelId, file, [safe](juce::String error) {
+        if (safe == nullptr) return;
+        safe->refreshAfterInsertChange();
+        if (error.isNotEmpty()) {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
+        }
+    });
+    return {};
 }
 
 void ChannelStrip::erasePlugin(std::uint32_t insertId) {

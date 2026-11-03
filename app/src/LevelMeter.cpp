@@ -17,7 +17,8 @@ float proportionOf(float level) {
 juce::String dbText(float level) {
     if (level <= 0.0f) return "-Inf";
     const float db = 20.0f * std::log10(level);
-    return db <= LevelMeter::kMinDb ? juce::String("-Inf") : juce::String(db, 1);
+    if (db <= LevelMeter::kMinDb) return juce::String("-Inf");
+    return juce::String(juce::jmin(db, LevelMeter::kMaxDb), 1);
 }
 
 juce::String intervalText(int ms) {
@@ -241,13 +242,15 @@ void LevelMeter::timerCallback() {
     const auto now = juce::Time::getMillisecondCounter();
     const int holdMs = peakHoldMs();
 
-    const float peakL = juce::jlimit(0.0f, 1.0f, leftPeakSource.get());
-    const float peakR = juce::jlimit(0.0f, 1.0f, rightPeakSource.get());
+    // Keep the full amplitude range (up to kMaxDb) so hot signals are not
+    // clamped to 0 dB; proportionOf()/dbText() handle the display range.
+    const float peakL = juce::jmax(0.0f, leftPeakSource.get());
+    const float peakR = juce::jmax(0.0f, rightPeakSource.get());
     displayedPeakL = juce::jmax(peakL, displayedPeakL * 0.85f);
     displayedPeakR = juce::jmax(peakR, displayedPeakR * 0.85f);
 
-    displayedRmsL = smoothedRms(displayedRmsL, juce::jlimit(0.0f, 1.0f, leftRmsSource.get()));
-    displayedRmsR = smoothedRms(displayedRmsR, juce::jlimit(0.0f, 1.0f, rightRmsSource.get()));
+    displayedRmsL = smoothedRms(displayedRmsL, juce::jmax(0.0f, leftRmsSource.get()));
+    displayedRmsR = smoothedRms(displayedRmsR, juce::jmax(0.0f, rightRmsSource.get()));
 
     // The held peak tracks the loudest value and, once its interval is up,
     // drops back to whatever the live peak is now and holds that for the next
