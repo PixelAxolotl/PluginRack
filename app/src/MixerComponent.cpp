@@ -8,8 +8,11 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
       meter(gainSlider, outputState.peakL, outputState.peakR, outputState.rmsL,
             outputState.rmsR) {
     deviceControl.setTitle(output.name);
-    deviceControl.setDeviceName(output.outputDeviceName);
-    deviceControl.setError(output.outputError);
+    {
+        const auto deviceState = audioEngine.getOutputDeviceState(output.id);
+        deviceControl.setDeviceName(deviceState.deviceName);
+        deviceControl.setError(deviceState.error);
+    }
     meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
 
     removeOutputButton.setFontSize(13.0f);
@@ -25,15 +28,17 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     addAndMakeVisible(removeOutputButton);
 
     deviceControl.setOnClick([this] {
-        DeviceMenu::showOutputMenu(deviceControl, output.outputDeviceName,
+        DeviceMenu::showOutputMenu(deviceControl,
+                                   audioEngine.getOutputDeviceState(output.id).deviceName,
                                    audioEngine.getAvailableOutputDevices(),
                                    [this](juce::String chosen) {
             const std::uint32_t outputId = output.id;
             juce::Thread::launch([this, outputId, chosen] {
                 const auto err = audioEngine.setOutputDevice(outputId, chosen);
                 juce::MessageManager::callAsync([this, err] {
-                    deviceControl.setDeviceName(output.outputDeviceName);
-                    deviceControl.setError(output.outputError);
+                    const auto deviceState = audioEngine.getOutputDeviceState(output.id);
+                    deviceControl.setDeviceName(deviceState.deviceName);
+                    deviceControl.setError(deviceState.error);
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }
@@ -421,8 +426,10 @@ void MixerComponent::OutputStrip::paint(juce::Graphics& g) {
 void MixerComponent::OutputStrip::refresh() {
     gainSlider.setValue(output.gainDb.get(), juce::dontSendNotification);
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
-    deviceControl.setDeviceName(output.outputDeviceName);
-    deviceControl.setError(output.outputError);
+    // Locked snapshot: the device opener writes these strings off-thread.
+    const auto deviceState = audioEngine.getOutputDeviceState(output.id);
+    deviceControl.setDeviceName(deviceState.deviceName);
+    deviceControl.setError(deviceState.error);
     const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     meter.setStereo(!mono);
@@ -470,9 +477,18 @@ void MixerComponent::OutputStrip::mouseDoubleClick(const juce::MouseEvent&) {
 }
 
 juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
-    const auto error = audioEngine.addOutputPlugin(output.id, file);
-    refreshAfterInsertChange();
-    return error;
+    // The load is asynchronous; the strip refreshes when it finishes.
+    const auto outputId = output.id;
+    juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
+    audioEngine.addOutputPluginAsync(outputId, file, [safe](juce::String error) {
+        if (safe == nullptr) return;
+        safe->refreshAfterInsertChange();
+        if (error.isNotEmpty()) {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
+        }
+    });
+    return {};
 }
 
 void MixerComponent::OutputStrip::erasePlugin(std::uint32_t insertId) {

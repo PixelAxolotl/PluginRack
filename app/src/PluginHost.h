@@ -6,8 +6,27 @@
 
 class PluginHost {
 public:
+    // Result of instantiating a VST3 file. The instance is shared so it can be
+    // built on a worker thread (instantiation blocks for as long as the plugin
+    // takes to initialise) and then adopted on the message thread, where
+    // prepareToPlay must run: some plugins synchronise with it.
+    struct LoadedPlugin {
+        std::shared_ptr<juce::AudioPluginInstance> instance;
+        juce::String path;
+        juce::String name;
+        juce::String error;
+    };
+
     PluginHost();
     ~PluginHost();
+
+    // Blocking instantiation. Only for callers that are already off the
+    // message thread or can afford the stall; the Add-VST path uses
+    // loadFromFile on a worker plus adopt on the message thread.
+    static LoadedPlugin loadFromFile(const juce::File& file, double sampleRate,
+                                     int bufferSize, const juce::String& stateBase64 = {});
+    // Message thread: takes over the instance and prepares it to play.
+    void adopt(const LoadedPlugin& loaded);
 
     // stateBase64 is an opaque blob previously returned by getStateAsBase64;
     // when non-empty it is applied before the plugin is prepared to play, so
@@ -42,8 +61,7 @@ public:
     void closeEditorWindow(juce::DocumentWindow* window);
 
 private:
-    juce::AudioPluginFormatManager formatManager;
-    std::unique_ptr<juce::AudioPluginInstance> plugin;
+    std::shared_ptr<juce::AudioPluginInstance> plugin;
     mutable juce::CriticalSection pluginLock;
     juce::MidiBuffer midiBuffer;
     juce::String pluginPath;

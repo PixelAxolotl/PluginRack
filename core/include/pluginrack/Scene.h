@@ -118,6 +118,10 @@ struct WatchedDevice {
 struct AudioSettings {
     int inputBuffer = 0;
     int outputBuffer = 0;
+    // Beta latency tuning is an explicit opt-in. This marker lets older
+    // scenes that happened to contain tuning keys migrate back to the stable
+    // defaults instead of silently enabling the aggressive modes on startup.
+    bool latencyTuningOptIn = false;
     bool lowLatencyInput = false;
     bool preferExclusive = false;
     bool lowLatencyOutputs = false;

@@ -365,6 +365,7 @@ void to_json(nlohmann::json& j, const AudioSettings& settings) {
     j = nlohmann::json{
         {"inputBuffer", settings.inputBuffer},
         {"outputBuffer", settings.outputBuffer},
+        {"latencyTuningOptIn", settings.latencyTuningOptIn},
         {"lowLatencyInput", settings.lowLatencyInput},
         {"preferExclusive", settings.preferExclusive},
         {"lowLatencyOutputs", settings.lowLatencyOutputs},
@@ -380,12 +381,23 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     settings = AudioSettings{};
     settings.inputBuffer = j.value("inputBuffer", 0);
     settings.outputBuffer = j.value("outputBuffer", 0);
+    settings.latencyTuningOptIn = j.value("latencyTuningOptIn", false);
     settings.lowLatencyInput = j.value("lowLatencyInput", false);
     settings.preferExclusive = j.value("preferExclusive", false);
     settings.lowLatencyOutputs = j.value("lowLatencyOutputs", false);
     settings.minimalClockFifo = j.value("minimalClockFifo", false);
     settings.fullDuplexInput = j.value("fullDuplexInput", false);
     settings.autoReloadDevices = j.value("autoReloadDevices", false);
+    if (!settings.latencyTuningOptIn) {
+        // Scenes written before the explicit opt-in marker (or hand-edited
+        // scenes that omit it) must never turn on the beta latency modes just
+        // because their individual legacy keys are present.
+        settings.lowLatencyInput = false;
+        settings.preferExclusive = false;
+        settings.lowLatencyOutputs = false;
+        settings.minimalClockFifo = false;
+        settings.fullDuplexInput = false;
+    }
     // Absent in scenes written before rack thumbnails existed: the default
     // rate is what those sessions were already running at.
     settings.rackThumbnailFps = j.value("rackThumbnailFps", 15);

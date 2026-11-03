@@ -69,7 +69,7 @@ private:
     juce::ToggleButton exclusiveToggle { "Prefer exclusive mode" };
     juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
     juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
-    juce::ToggleButton fullDuplexToggle { "Same-device input (full duplex)" };
+    juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
 
     // Rack view cost control: the thumbnail timer's rate. Applied straight to
     // the engine (no Apply step) because it is not a stream option.
