@@ -108,6 +108,8 @@ public:
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
+        // Guarded by stateLock: the device opener assigns these on its worker
+        // thread, so views must read them through getChannelDeviceState().
         juce::String inputDeviceName;
         juce::String inputError;
         pluginrack::SourceKind sourceKind = pluginrack::SourceKind::Hardware;
@@ -147,8 +149,12 @@ public:
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
+        // Guarded by stateLock; read them through getOutputDeviceState().
         juce::String outputDeviceName;
         juce::String outputError;
+        // Device type the open selected ("Windows Audio", "ASIO", ...),
+        // copied here so diagnostics never touch the playback object.
+        juce::String outputDeviceType;
         std::unique_ptr<OutputPlayback> output;
     };
 
@@ -214,6 +220,11 @@ public:
     bool isOpeningDevices() const { return openingDevices_.load(std::memory_order_relaxed); }
     int getDeviceOpenProgress() const { return deviceOpenProgress_.load(std::memory_order_relaxed); }
     int getDeviceOpenTotal() const { return deviceOpenTotal_.load(std::memory_order_relaxed); }
+    // The endpoints being opened right now, e.g. `... input "Ch 1" - USB Audio`.
+    // Every endpoint starts at once, so this renders the in-flight set rather
+    // than one name: a single "current" string only ever showed the last
+    // worker to start, which read as if devices were opened one at a time.
+    juce::String getDeviceOpenStatus() const;
     // True exactly once after a background open finishes.
     bool consumeDeviceOpenFinished() {
         return deviceOpenFinished_.exchange(false, std::memory_order_acq_rel);
@@ -229,7 +240,7 @@ public:
         PreferExclusive,    // try exclusive WASAPI before the shared modes
         LowLatencyOutputs,  // 2-block FIFO target for non-clock outputs
         MinimalClockFifo,   // clock FIFO: no priming, silence top-up only
-        FullDuplexInput     // input on the clock device: share its clock
+        FullDuplexInput     // same-device input: start with one-block delay
     };
     void setLatencyOption(LatencyOption option, bool enabled);
     bool getLatencyOption(LatencyOption option) const;
@@ -239,6 +250,10 @@ public:
     struct DeviceSettings {
         int inputBuffer = 0;
         int outputBuffer = 0;
+        // Beta latency modes are ignored unless the user explicitly opts in
+        // through Settings and applies the choice. Persisted with scenes so
+        // an old session cannot silently turn them back on.
+        bool latencyTuningOptIn = false;
         bool lowLatencyInput = false;
         bool preferExclusive = false;
         bool lowLatencyOutputs = false;
@@ -267,6 +282,20 @@ public:
     int getRackThumbnailFps() const { return rackThumbnailFps_.load(); }
     void setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices);
     std::vector<pluginrack::WatchedDevice> getWatchedDevices() const;
+
+    // Snapshot of a strip's device strings, copied under stateLock. The device
+    // opener writes those fields on its own worker thread; copying a juce::String
+    // that another thread is reassigning reads a torn StringHolder pointer and
+    // crashes, so views must never read the strip fields directly.
+    struct DeviceState {
+        juce::String deviceName;
+        juce::String error;
+    };
+    DeviceState getChannelDeviceState(std::uint32_t channelId) const;
+    DeviceState getOutputDeviceState(std::uint32_t outputId) const;
+    // Locked copies for the views that list failures or watch devices.
+    std::vector<std::pair<juce::String, juce::String>> getDeviceErrors() const;
+    std::vector<juce::String> getAssignedInputDeviceNames() const;
 
     struct ReloadableDevice {
         juce::String label;
@@ -311,11 +340,17 @@ public:
     // the marker; a successful open clears it. Returns true when any strip
     // changed. Cheap enough for a UI timer: enumeration is cached.
     bool refreshDeviceAvailability();
-    juce::String addPlugin(std::uint32_t channelId, const juce::File& file);
+    // Loads the VST3 on a worker and installs it on the message thread:
+    // instantiation blocks for as long as the plugin needs to initialise, and
+    // doing that here froze the window. done() runs on the message thread with
+    // an error message, or an empty string on success.
+    void addPluginAsync(std::uint32_t channelId, const juce::File& file,
+                        std::function<void(juce::String)> done);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
-    juce::String addOutputPlugin(std::uint32_t outputId, const juce::File& file);
+    void addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
+                              std::function<void(juce::String)> done);
     struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
@@ -425,7 +460,8 @@ private:
     // Implementation of the public device setters without the "starting up"
     // check: the background opener calls these directly from its worker.
     juce::String setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
-                                           bool forceReopen = false);
+                                           bool forceReopen = false,
+                                           double engineRate = 0.0);
     // engineRate lets the startup opener open every output against one
     // snapshot of the clock rate instead of racing the clock's own open.
     juce::String setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
@@ -434,9 +470,12 @@ private:
     // One full open pass over every output and input; returns the errors
     // without publishing them, so the caller can retry with previous settings.
     juce::String openAllDevicesPass(const std::function<bool()>& shouldExit, bool forceInputs);
-    void openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs,
-                              const DeviceSettings* fallback);
+    void openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs);
     void startDeviceJob(std::function<void(const std::function<bool()>&)> job);
+    // Tracks which endpoints are mid-open so the UI can show them all.
+    void beginDeviceOpen(const juce::String& label);
+    void endDeviceOpen(const juce::String& label);
+    void clearDeviceOpens();
     void applySettingsValues(const DeviceSettings& settings);
     void stopDeviceOpenThread();
     // Audio-thread silence feed: pushes a fade-to-silence block to every
@@ -511,7 +550,13 @@ private:
     std::atomic<bool> deviceOpenFinished_{false};
     juce::CriticalSection deviceOpenErrorsLock_;
     juce::String deviceOpenErrors_;
+    // Endpoints mid-open. Each open runs on its own thread with its own COM
+    // apartment, so several are in flight at once; this lock guards the small
+    // label list the UI renders.
+    mutable juce::CriticalSection deviceOpenActiveLock_;
+    std::vector<juce::String> deviceOpenActive_;
 
+    std::atomic<bool> latencyTuningOptIn_{false};
     std::atomic<bool> lowLatencyInput_{false};
     std::atomic<bool> preferExclusive_{false};
     std::atomic<bool> lowLatencyOutputs_{false};

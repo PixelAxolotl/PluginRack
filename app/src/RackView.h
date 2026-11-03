@@ -90,6 +90,8 @@ private:
     void jumpToMixer();
 
     void rebuildChannelCombo();
+    void refreshInputControls();
+    void applyInputMapping();
     void focusEq();
     void closeEqWindow();
     void focusDynamics(pluginrack::DynamicsEffectType type);
@@ -115,6 +117,11 @@ private:
 
     // Channel selector
     juce::ComboBox channelCombo;
+    juce::TextButton inputChip;
+    bool inputEditing = false;
+    juce::ComboBox modeCombo;
+    juce::ComboBox inputComboA;
+    juce::ComboBox inputComboB;
     std::vector<int> comboIds;
     std::vector<char> comboIsOutput;
 

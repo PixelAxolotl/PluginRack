@@ -26,9 +26,9 @@ built-in effects.
 - **Scenes** — names, gains, pan, mute/solo, EQ, dynamics, insert plugin state,
   routing sends, device choices and the audio tuning are saved as JSON and
   restored exactly.
-- **Latency controls** *(BETA)* — device buffer selection, optional low-latency
-  input, low-latency output FIFOs, a minimal clock FIFO, exclusive WASAPI, and a
-  round-trip latency measurement.
+- **Latency controls** *(BETA)* — device buffer selection, adaptive low-latency
+  input/output FIFOs, a minimal clock FIFO, optional exclusive WASAPI, and a
+  round-trip latency measurement. Shared WASAPI remains the stable default.
 
 ## Using PluginRack
 
@@ -71,9 +71,10 @@ scene.
 
 Each channel and output strip has a device menu: **System Default**, **None -
 silent**, the available WASAPI/ASIO devices, and the app's own device types.
-The first output with a real device becomes the clock; its sample rate and block
-size are used by every stream. Inputs are shared per device, so several channels
-can capture the same endpoint.
+The first output with a real device becomes the clock; its sample rate and render
+block drive the engine. Individual devices may use different driver buffer sizes;
+the bounded FIFOs bridge those callbacks. Inputs are shared per device, so several
+channels can capture the same endpoint.
 
 The **I/O** view shows the same strips as the Mixer with an **Inputs** / **Outputs**
 tab switch, so either side can fill the window on its own. Device assignment is
@@ -83,29 +84,34 @@ identical in both places.
 
 Buffer and latency changes are **staged**: nothing is applied until you press
 **Apply**. **Revert** discards the staged values. The tuning travels with the
-scene: **Save** stores the buffer sizes, the five latency switches and the
-auto-reload state, and loading a save restores them before the devices reopen.
-Scenes written before schema 4 carry no tuning block, so loading one leaves the
-live settings alone.
+scene: **Save** stores the buffer sizes, the five latency switches, their
+explicit opt-in marker, and the auto-reload state; loading a save restores them
+before the devices reopen. All five beta latency switches are off by default.
+Scenes written before the opt-in marker are treated as stable defaults, so an
+old save cannot silently select exclusive or low-latency operation.
 
 - **Input / Output buffer** — `Auto (driver default)` or an explicit size. If a
   device refuses the new size, the previous setting is restored automatically.
-- **Low-latency input** *(BETA)* — the capture keeps one render block of read
-  delay instead of two (about 10 ms).
-- **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI before the shared
-  modes. It can help or hurt depending on the driver; switching reopens every
-  device.
+- **Low-latency input** *(BETA)* — the capture starts with one render block of
+  read delay instead of two (about 10 ms), then adds a block automatically after
+  a real starvation.
+- **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI for the standalone
+  clock output. Shared mode remains first for other streams and same-device
+  input because exclusive clients cannot share an endpoint reliably.
 - **Low-latency outputs** *(BETA)* — non-clock outputs keep two device buffers
-  instead of four (about 20 ms on those outputs).
+  instead of four (about 20 ms on those outputs); bounded drift correction keeps
+  separate device clocks from slowly draining that margin.
 - **Minimal clock FIFO** *(BETA)* — the clock starts with no primed FIFO; a
   missed render is covered by one block of silence (about 10 ms).
-- **Same-device input (full duplex)** *(BETA)* — when the input and the clock
-  output are the same endpoint, use its hardware clock and a one-block read delay.
+- **Same-device input (one-block start)** *(BETA)* — when the input and the clock
+  output are the same endpoint, start with one block of read delay. The capture
+  adds a block automatically if that aggressive setting starves.
 
-On the development machine (48 kHz, 480-sample blocks, USB clock output) the
-defaults measured about **70 ms** end-to-end estimate, **60 ms** with low-latency
-input, and **50 ms** with the minimal clock FIFO as well. Exclusive mode measured
-higher here (~80–90 ms) and glitched once while switching; that is driver-dependent.
+Latency depends on the driver-reported buffers and plugin chain. Start with the
+stable shared-WASAPI defaults, then lower the input/output buffers one step at a
+time while watching the underrun diagnostics. Exclusive mode can be slower or
+glitch during a switch, so it is only used for the standalone clock when
+explicitly requested.
 
 ### Reloading devices
 
@@ -149,11 +155,12 @@ is written on exit.
 
 | Symptom | What to do |
 |---|---|
-| Toolbar says `Starting audio...` for a long time | Wait for the endpoint probe; the window is usable. A USB device can take ~16 s. |
-| A device is silent or disappeared | Open Settings, tick that device, and press **Reload All Audio Devices**. With **Auto-reload checked devices on error** on, checked devices reopen themselves. |
-| New buffer size is rejected | The app restores the previous size and shows the driver's reason in an alert. |
-| Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared low-latency is the default. |
+| Toolbar says `Starting audio...` for a long time | Wait for the endpoint probe; the window is usable and the text names the endpoint. A USB device can take ~16 s. Each endpoint is tried once, so it ends as soon as that probe returns. |
+| A device is silent or disappeared | Open Settings, tick that device, and press **Reload All Audio Devices**. With **Auto-reload checked devices on error** on, checked devices are reopened (one attempt each). |
+| New buffer size is rejected | That device keeps its previous stream and the alert shows the driver's reason. |
+| Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared WASAPI is the default. |
 | Round-trip measurement fails | Connect a physical cable from the clock output to the input chosen in **Listen on**; the app reports "No return" otherwise. |
+| The app crashed | The reason is written to `%APPDATA%\PluginRack\logs`: `PluginRack.log` has the run milestones and `crash-<time>.txt` has the fault address and a backtrace. Keep `PluginRack.pdb` next to the exe and run `llvm-symbolizer --obj=PluginRack.exe 0x<address>` to get the function and line. |
 
 ## Development
 
@@ -240,15 +247,24 @@ docs/    Design spec and session handoff notes
 ### Why the first device open can take a while
 
 Opening a WASAPI endpoint is not instant. JUCE's WASAPI backend probes every
-channel count from 32 down to 2 across every supported sample rate and format
+channel count (up to 64 down to 2 in the current JUCE source) across every supported sample rate and format
 (`queryMaxNumChannels`) before it can report the device's capabilities, and some
 USB drivers answer each format check slowly.
 
 On the development machine two USB endpoints take about **16 seconds each** in
-that probe; other devices take well under a second. Outputs are therefore opened
-concurrently, so the wall-clock startup is roughly the slowest single endpoint
-rather than the sum. The UI stays responsive and shows progress. Reloading a
-single device avoids paying that cost for every stream.
+that probe; other devices take well under a second. Independent outputs and
+captures are opened concurrently, so startup is bounded by roughly the slowest
+single endpoint rather than the sum of all probes. The toolbar names the
+endpoint being probed (`Starting audio... 2/3  input "Ch 1" - USB Audio`), so a
+slow driver is visible instead of looking like a hang.
+
+Each endpoint is attempted **exactly once**. There is no device-type fallback
+chain, no default-rate retry, and no second pass: if an endpoint refuses, its
+stream stays closed and silent, the strip goes red, and the message names the
+strip, the endpoint and the driver error. The first output is the clock, so if
+it cannot be opened nothing can play and the message says so. Exclusive mode
+adds its more expensive format probe and is only used when explicitly enabled.
+Reloading a single device avoids paying that cost for every stream.
 
 This is a JUCE backend characteristic, not a hang. If it becomes a problem, the
 options are a local JUCE patch that caps the channel-count probe, caching the
@@ -261,10 +277,17 @@ working device mode per endpoint, or using ASIO where a driver exists.
 - The UI must never wait on the audio thread. Device opens run on the background
   opener (`openStripsDevicesAsync` / `applyDeviceSettings`) and are guarded by
   `openingDevices_`; structural mutators must respect that guard.
+- **Never read `inputDeviceName` / `outputDeviceName` / `inputError` /
+  `outputError` from a view.** The opener assigns those `juce::String`s on its
+  worker thread; copying one while it is being reassigned reads a torn
+  `StringHolder` pointer and crashes inside `String::operator=`. Views use the
+  locked snapshots `getChannelDeviceState()`, `getOutputDeviceState()`,
+  `getDeviceErrors()` and `getAssignedInputDeviceNames()`.
 - Device streams are replaced only after a successful open. A failed open keeps
   the previous playback/capture, which is what makes Apply and device reloads
   safe to try.
-- MSVC builds use `/W4 /WX`; keep new code warning-clean.
+- MSVC builds use `/W4 /WX`; keep new code warning-clean. Every build also emits
+  `PluginRack.pdb` next to the exe so a crash offset can be symbolized.
 - Add core behavior tests next to the existing Catch2 cases. The source-invariant
   tests in `tests/test_underrun_paths.cpp` protect the audio-path wiring.
 - Scenes are schema-versioned. Bump `kSchemaVersion` and read new fields with

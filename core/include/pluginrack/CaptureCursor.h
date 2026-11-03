@@ -157,6 +157,14 @@ public:
     int targetDelay() const { return targetDelay_; }
     bool isPrimed() const { return primed_; }
 
+    // The audio owner may increase the delay after a real starvation without
+    // resetting the fractional cursor. Keeping the cursor alive avoids the
+    // block repeat/skip that a full reset would introduce at the exact moment
+    // the stream is recovering.
+    void setTargetDelay(int targetDelaySamples) noexcept {
+        targetDelay_ = std::clamp(targetDelaySamples, 0, std::max(0, capacity_ - 1));
+    }
+
 private:
     int capacity_ = 0;
     int targetDelay_ = 0;
