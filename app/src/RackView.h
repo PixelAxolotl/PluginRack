@@ -14,6 +14,7 @@
 #include "InsertHost.h"
 #include "InsertMiniView.h"
 #include "LevelMeter.h"
+#include "NativeThumbnail.h"
 #include "Theme.h"
 
 // Channel-centric rack view: 4 columns - channel strip | insert chain (EQ + VSTs)
@@ -105,6 +106,7 @@ private:
     void startMiniTimer();
     AudioEngine::AnalyzerTap* currentTap();
     void releaseMiniTap();
+    void applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail);
 
     AudioEngine& audioEngine;
     int selectedId = -1;
@@ -184,6 +186,14 @@ private:
     // Size the plugin asked for when it was docked; layout reuses it so the
     // bay can never stretch the editor to fill.
     juce::Rectangle<int> dockedEditorSize;
+    // Native plugin editors are captured on this worker: PrintWindow makes the
+    // plugin repaint its whole UI, which stalled the message thread when it ran
+    // inside the thumbnail timer.
+    nativedisplay::WindowCaptureWorker thumbnailWorker;
+    // A software editor can only be rendered on the message thread; pace that
+    // by what the previous snapshot actually cost.
+    juce::uint32 lastSnapshotMs = 0;
+    int lastSnapshotCostMs = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

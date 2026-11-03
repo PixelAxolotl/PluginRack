@@ -80,6 +80,10 @@ public:
         // peak above.
         juce::Atomic<float> peakL{0.0f};
         juce::Atomic<float> peakR{0.0f};
+        // Per-side RMS for the meter's solid bar, written by render() at the
+        // same point as the peaks and read by the UI without a lock.
+        juce::Atomic<float> rmsL{0.0f};
+        juce::Atomic<float> rmsR{0.0f};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
@@ -122,6 +126,8 @@ public:
         // channel strip's pair.
         juce::Atomic<float> peakL{0.0f};
         juce::Atomic<float> peakR{0.0f};
+        juce::Atomic<float> rmsL{0.0f};
+        juce::Atomic<float> rmsR{0.0f};
         juce::Atomic<float> gainDb{0.0f};
         juce::Atomic<bool> muted{false};
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;

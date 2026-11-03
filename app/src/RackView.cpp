@@ -235,6 +235,8 @@ RackView::~RackView() {
     releaseMiniTap();
     closeEqWindow();
     closeDynamicsWindow();
+    // Stop the capture worker before the editor it captures goes away.
+    thumbnailWorker.stop();
     closeDockedEditor();
 }
 
@@ -355,7 +357,8 @@ void RackView::refreshHeader() {
         panSlider.setVisible(true);
         trimCaption.setVisible(true);
         trimKnob.setVisible(true);
-        meter = std::make_unique<LevelMeter>(ch->peakL, ch->peakR);
+        meter = std::make_unique<LevelMeter>(gainSlider, ch->peakL, ch->peakR, ch->rmsL,
+                                             ch->rmsR);
     } else if (out != nullptr) {
         nameLabel.setText(out->name, juce::dontSendNotification);
         subLabel.setText(out->outputDeviceName.isNotEmpty() ? out->outputDeviceName
@@ -368,7 +371,8 @@ void RackView::refreshHeader() {
         panSlider.setVisible(false);
         trimCaption.setVisible(false);
         trimKnob.setVisible(false);
-        meter = std::make_unique<LevelMeter>(out->peakL, out->peakR);
+        meter = std::make_unique<LevelMeter>(gainSlider, out->peakL, out->peakR, out->rmsL,
+                                             out->rmsR);
     }
     if (meter != nullptr) addAndMakeVisible(*meter);
     refreshEqButton();
@@ -680,28 +684,58 @@ void RackView::timerCallback() {
     // one editor per processor, so a live thumbnail and the bay cannot
     // coexist; and a hosted VST3 editor paints itself into its own window, so
     // it is captured from that window when it has one.
-    if (dockedEditor != nullptr && focusedInsertId != 0 && !eqFocused && !dynamicsFocused) {
-        const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
-        juce::Image thumb;
-        if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
-            // A hosted VST3 editor is its own native window whose JUCE paint is
-            // a black fill, so only a window capture sees the plugin's pixels.
-            thumb = nativedisplay::captureWindow(pluginWindow, targetWidth);
-        } else {
-            const auto editorBounds = dockedEditor->getLocalBounds();
-            if (!editorBounds.isEmpty()) {
-                const float scale = juce::jlimit(0.02f, 1.0f,
-                                                 static_cast<float>(targetWidth)
-                                                     / static_cast<float>(editorBounds.getWidth()));
-                thumb = dockedEditor->createComponentSnapshot(editorBounds, true, scale);
-            }
-        }
-        if (!thumb.isNull()) {
-            vstThumbs[focusedInsertId] = thumb;
-            if (const auto card = vstCards.find(focusedInsertId); card != vstCards.end())
-                if (auto* mini = card->second->miniView()) mini->setVstSnapshot(thumb);
-        }
+    //
+    // That capture must not run here: PrintWindow makes the plugin repaint its
+    // whole UI, and doing that from a message-thread timer at display rates
+    // starved every other message (the window froze while audio kept running).
+    const bool wantsThumbnail = dockedEditor != nullptr && focusedInsertId != 0
+                                && !eqFocused && !dynamicsFocused
+                                && dockedEditor->isShowing();
+    if (!wantsThumbnail) {
+        thumbnailWorker.clearRequest();
+        return;
     }
+
+    const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
+    if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
+        // The worker keeps only the newest request, so a slow plugin lowers
+        // the thumbnail rate instead of backing the UI thread up.
+        const auto insertId = focusedInsertId;
+        juce::Component::SafePointer<RackView> safe(this);
+        thumbnailWorker.request(pluginWindow, targetWidth,
+                                [safe, insertId](juce::Image thumbnail) {
+            if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+        });
+        return;
+    }
+
+    // A software-drawn editor can only be rendered on the message thread, so
+    // pace it with what the previous snapshot cost.
+    const auto now = juce::Time::getMillisecondCounter();
+    const auto interval = static_cast<juce::uint32>(
+        juce::jmax(1000 / juce::jmax(1, fps), 4 * lastSnapshotCostMs));
+    if (now - lastSnapshotMs < interval) return;
+    lastSnapshotMs = now;
+
+    const auto started = juce::Time::getMillisecondCounterHiRes();
+    const auto editorBounds = dockedEditor->getLocalBounds();
+    juce::Image thumb;
+    if (!editorBounds.isEmpty()) {
+        const float scale = juce::jlimit(0.02f, 1.0f,
+                                         static_cast<float>(targetWidth)
+                                             / static_cast<float>(editorBounds.getWidth()));
+        thumb = dockedEditor->createComponentSnapshot(editorBounds, true, scale);
+    }
+    lastSnapshotCostMs =
+        juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
+    applyVstThumbnail(focusedInsertId, thumb);
+}
+
+void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail) {
+    if (thumbnail.isNull()) return;
+    vstThumbs[insertId] = thumbnail;
+    if (const auto card = vstCards.find(insertId); card != vstCards.end())
+        if (auto* mini = card->second->miniView()) mini->setVstSnapshot(thumbnail);
 }
 
 void RackView::refreshEditor() {
@@ -790,10 +824,14 @@ void RackView::refreshEditor() {
 }
 
 void RackView::closeDockedEditor() {
+    thumbnailWorker.clearRequest();
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
         return;
     }
+    // A capture may be reading the editor's native window right now; hold the
+    // worker's lock so it has finished before that window is destroyed.
+    const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
     // A floating window may have taken ownership of the editor (reparented
     // away from the dock): the window owns it now, so release our pointers
     // without deleting.
@@ -822,6 +860,8 @@ void RackView::closeDockedEditor() {
 }
 
 void RackView::hideDockedEditor() {
+    // Nothing to thumbnail while the bay shows a panel instead.
+    thumbnailWorker.clearRequest();
     if (dockedEditor != nullptr) dockedEditor->setVisible(false);
 }
 
@@ -1327,16 +1367,13 @@ void RackView::resized() {
     la.removeFromBottom(10);
 
     auto faderRow = la;
-    auto meterColumn = faderRow.removeFromRight(24);
+    auto meterColumn = faderRow.removeFromRight(LevelMeter::kPreferredWidth);
     faderRow.removeFromRight(4);
     gainCaption.setBounds(faderRow.removeFromTop(14));
     gainSlider.setBounds(faderRow.reduced(0, 4));
-    // The meter spans the fader's track, not the fader component, so its bars
-    // start and end where the fader's travel does.
-    if (meter != nullptr)
-        meter->setBounds(LevelMeter::faderTrackBounds(gainSlider)
-                             .withX(meterColumn.getX())
-                             .withWidth(meterColumn.getWidth()));
+    // The meter lines its bars up with the fader's travel itself, and takes
+    // the strip above that travel for the Peak/RMS readouts.
+    if (meter != nullptr) meter->setBounds(meterColumn);
 
     if (soloButton.isVisible()) {
         const int third = btnRow.getWidth() / 3 - 3;

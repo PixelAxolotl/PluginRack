@@ -31,8 +31,12 @@ inline constexpr int kDeviceH = 30;  // name + device block
 inline constexpr int kActionW = 44;  // split / flip
 inline constexpr int kCloseW = 20;   // the cross
 // End inset a vertical fader's track leaves inside its slider area. The meter
-// beside it uses the same value to line its scale up with the track.
+// beside it maps to the fader's value region, which is why the two read out at
+// the same height.
 inline constexpr int kFaderTrackInset = 7;
+// dB marks shared by the fader's ticks and the meter's scale, so a mark on
+// either side of a fader reads at the same height.
+inline constexpr int kDbMarks[] = {12, 6, 0, -3, -6, -10, -15, -20, -30, -40, -50, -60};
 } // namespace metrics
 
 // One type scale, one spacing scale and one control vocabulary for every

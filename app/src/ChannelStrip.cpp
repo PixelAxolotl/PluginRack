@@ -10,7 +10,8 @@ constexpr int kStripWidth = 148;
 ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engine)
     : channel(channelState),
       audioEngine(engine),
-      levelMeter(channelState.peakL, channelState.peakR) {
+      levelMeter(faderSlider, channelState.peakL, channelState.peakR, channelState.rmsL,
+                 channelState.rmsR) {
     deviceControl.setTitle(channel.name);
     deviceControl.setDeviceName(channel.inputDeviceName);
     deviceControl.setError(channel.inputError);
@@ -501,19 +502,16 @@ void ChannelStrip::resized() {
     }
     area.removeFromTop(4);
 
-    // fader + meter (bottom, dominant). The meter spans the fader's track, not
-    // the fader component: its value box sits above the track, and laying the
-    // bars out on the component would make them taller than the fader.
+    // fader + meter (bottom, dominant). The meter lines its bars up with the
+    // fader's travel itself and keeps the readouts in the strip above the
+    // travel, so it takes the fader's full height.
     auto footer = area.removeFromBottom(theme::metrics::kRowH); // M / S
     const int half = (footer.getWidth() - 4) / 2;
     auto fm = area;
-    constexpr int meterW = 24;
-    auto meterColumn = fm.removeFromRight(meterW);
+    auto meterColumn = fm.removeFromRight(LevelMeter::kPreferredWidth);
     fm.removeFromRight(4);
     faderSlider.setBounds(fm);
-    levelMeter.setBounds(LevelMeter::faderTrackBounds(faderSlider)
-                             .withX(meterColumn.getX())
-                             .withWidth(meterColumn.getWidth()));
+    levelMeter.setBounds(meterColumn);
 
     muteButton.setBounds(footer.removeFromLeft(half));
     footer.removeFromLeft(4);
