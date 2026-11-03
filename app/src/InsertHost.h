@@ -33,6 +33,9 @@ inline constexpr int kChainSlotCount = kChainBuiltInSlots + kChainVstSlots;
 class IInsertHost {
 public:
     virtual ~IInsertHost() = default;
+    // Starts an asynchronous load: returns an immediate validation error, or an
+    // empty string when the plugin is being instantiated on the load worker.
+    // The view refreshes itself from the completion.
     virtual juce::String insertPlugin(const juce::File&) = 0;
     virtual void erasePlugin(std::uint32_t insertId) = 0;
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;

@@ -415,6 +415,7 @@ TEST_CASE("scene audio settings round-trip") {
     pluginrack::AudioSettings audio;
     audio.inputBuffer = 128;
     audio.outputBuffer = 512;
+    audio.latencyTuningOptIn = true;
     audio.lowLatencyInput = true;
     audio.minimalClockFifo = true;
     audio.autoReloadDevices = true;
@@ -432,6 +433,29 @@ TEST_CASE("scene audio settings round-trip") {
     REQUIRE(loaded.scene->audio.has_value());
     REQUIRE(*loaded.scene->audio == audio);
     REQUIRE(*loaded.scene == original);
+}
+
+TEST_CASE("legacy audio tuning keys do not opt into beta latency modes") {
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({
+        "schemaVersion": 4,
+        "audio": {
+            "lowLatencyInput": true,
+            "preferExclusive": true,
+            "lowLatencyOutputs": true,
+            "minimalClockFifo": true,
+            "fullDuplexInput": true
+        }
+    })");
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->audio.has_value());
+    const auto& audio = *loaded.scene->audio;
+    CHECK_FALSE(audio.latencyTuningOptIn);
+    CHECK_FALSE(audio.lowLatencyInput);
+    CHECK_FALSE(audio.preferExclusive);
+    CHECK_FALSE(audio.lowLatencyOutputs);
+    CHECK_FALSE(audio.minimalClockFifo);
+    CHECK_FALSE(audio.fullDuplexInput);
 }
 
 TEST_CASE("a scene without an audio block leaves the tuning unset") {

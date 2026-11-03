@@ -6,6 +6,60 @@
 
 #include <iostream>
 
+#if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
+#endif
+
+namespace {
+
+// Run log and crash reports. A Windows crash record only gives the module and
+// a code offset, so the report also carries the fault address and a backtrace;
+// with the PDB this build ships next to the exe, llvm-symbolizer turns those
+// into function names and source lines.
+juce::File pluginRackLogDirectory() {
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("PluginRack")
+        .getChildFile("logs");
+}
+
+void writeCrashReport(void* exceptionInfo) {
+    juce::String text;
+    text << "PluginRack crash\n"
+         << "when: " << juce::Time::getCurrentTime().toString(true, true, true, true) << "\n"
+         << "build: " << __DATE__ << " " << __TIME__ << "\n";
+
+   #if JUCE_WINDOWS
+    if (auto* info = static_cast<EXCEPTION_POINTERS*>(exceptionInfo)) {
+        if (auto* record = info->ExceptionRecord) {
+            text << "exception: 0x"
+                 << juce::String::toHexString((juce::int64) record->ExceptionCode)
+                 << " at 0x"
+                 << juce::String::toHexString(
+                        (juce::int64) reinterpret_cast<juce::pointer_sized_int>(
+                            record->ExceptionAddress))
+                 << "\n";
+        }
+    }
+   #endif
+
+    const auto backtrace = juce::SystemStats::getStackBacktrace();
+    text << "stack:\n" << backtrace << "\n";
+    std::cerr << text.toStdString() << std::endl;
+
+    const auto dir = pluginRackLogDirectory();
+    dir.createDirectory();
+    const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S");
+    dir.getChildFile("crash-" + stamp + ".txt").replaceWithText(text);
+}
+
+} // namespace
+
 class TrayIcon final : public juce::SystemTrayIconComponent {
 public:
     TrayIcon(std::function<void()> onShowWindow, std::function<void()> onQuit)
@@ -93,6 +147,13 @@ public:
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise(const juce::String& commandLine) override {
+        juce::SystemStats::setApplicationCrashHandler(&writeCrashReport);
+        pluginRackLogDirectory().createDirectory();
+        fileLogger = std::make_unique<juce::FileLogger>(
+            pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
+        juce::Logger::setCurrentLogger(fileLogger.get());
+        juce::Logger::writeToLog("initialise: " + commandLine);
+
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
@@ -170,6 +231,7 @@ public:
     }
 
     void shutdown() override {
+        juce::Logger::writeToLog("shutdown");
         if (mainWindow != nullptr) {
             if (auto* mainComponent = dynamic_cast<MainComponent*>(mainWindow->getContentComponent()))
                 mainComponent->saveSceneOnExit();
@@ -178,9 +240,12 @@ public:
         tooltipWindow.reset();
         juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
         lookAndFeel.reset();
+        juce::Logger::setCurrentLogger(nullptr);
+        fileLogger.reset();
     }
 
 private:
+    std::unique_ptr<juce::FileLogger> fileLogger;
     juce::ApplicationProperties properties;
     std::unique_ptr<ConsoleLookAndFeel> lookAndFeel;
     std::unique_ptr<juce::TooltipWindow> tooltipWindow;

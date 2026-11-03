@@ -26,6 +26,10 @@ namespace {
 constexpr std::uint32_t kLatencyMeasureTimeoutMs = 3000;
 // A detected impulse further away than this cannot be the loopback.
 constexpr double kLatencyMeasureMaxSeconds = 5.0;
+// Device probes can finish in either order. Reserve enough FIFO/ring history
+// for a larger negotiated clock block so outputs and inputs can be opened in
+// parallel without making startup wait for a second, serialized probe.
+constexpr int kProbeRenderBlockFrames = 4096;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
 
@@ -713,36 +717,68 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
     return {};
 }
 
-juce::String AudioEngine::addPlugin(std::uint32_t channelId, const juce::File& file) {
-    auto* channel = findChannel(channelId);
-    if (channel == nullptr) {
-        return "The channel no longer exists.";
-    }
-    if (channel->inserts.size() >= 5) {
-        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file,
+                                 std::function<void(juce::String)> done) {
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) {
+            done("The channel no longer exists.");
+            return;
+        }
+        if (channel->inserts.size() >= 5) {
+            done("Each strip holds 3 built-in effects and at most 5 VST inserts.");
+            return;
+        }
     }
 
-    auto insert = std::make_unique<InsertSlot>();
-    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-    const auto error = insert->pluginHost.loadPlugin(file);
-    if (error.isNotEmpty()) {
-        return error;
-    }
-    insert->pluginPath = file.getFullPathName();
-    insert->pluginName = insert->pluginHost.getPluginName();
-    insert->latencySamples = insert->pluginHost.getLatencySamples();
+    // Instantiation is a blocking driver call that can take seconds: build the
+    // instance on a worker and only touch the strip back here on the message
+    // thread. The window stays responsive meanwhile.
+    const double rate = currentSampleRate;
+    const int block = currentBufferSize;
+    auto alive = prepareAliveToken_;
+    juce::Logger::writeToLog("plugin: loading " + file.getFileName());
+    juce::Thread::launch([this, alive, channelId, file, rate, block,
+                          done = std::move(done)]() mutable {
+        const auto loaded = PluginHost::loadFromFile(file, rate, block);
+        juce::MessageManager::callAsync([this, alive, channelId, file, loaded,
+                                         done = std::move(done)]() mutable {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (loaded.error.isNotEmpty()) {
+                juce::Logger::writeToLog("plugin: failed - " + loaded.error);
+                done(loaded.error);
+                return;
+            }
 
-    const juce::ScopedLock lock(stateLock);
-    if (channel->inserts.size() >= 5) {
-        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
-    }
-    // The id comes from the same counter restoreScene re-bases under
-    // stateLock at swap time, so take it under this lock too.
-    insert->id = nextInsertId++;
-    const auto insertId = insert->id;
-    channel->inserts.push_back(std::move(insert));
-    channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
-    return {};
+            auto insert = std::make_unique<InsertSlot>();
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+            insert->pluginHost.adopt(loaded);
+            insert->pluginPath = loaded.path;
+            insert->pluginName = loaded.name;
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
+
+            juce::String error;
+            {
+                const juce::ScopedLock lock(stateLock);
+                auto* channel = findChannel(channelId);
+                if (channel == nullptr) {
+                    error = "The channel no longer exists.";
+                } else if (channel->inserts.size() >= 5) {
+                    error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                } else {
+                    insert->id = nextInsertId++;
+                    const auto insertId = insert->id;
+                    channel->inserts.push_back(std::move(insert));
+                    channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                }
+            }
+            juce::Logger::writeToLog(error.isEmpty()
+                                         ? "plugin: loaded " + loaded.name
+                                         : "plugin: install failed - " + error);
+            done(error);
+        });
+    });
 }
 
 void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) {
@@ -790,35 +826,65 @@ void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t inser
     }
 }
 
-juce::String AudioEngine::addOutputPlugin(std::uint32_t outputId, const juce::File& file) {
-    auto* output = findOutput(outputId);
-    if (output == nullptr) {
-        return "The output no longer exists.";
-    }
-    if (output->inserts.size() >= 5) {
-        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
+                                       std::function<void(juce::String)> done) {
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* output = findOutput(outputId);
+        if (output == nullptr) {
+            done("The output no longer exists.");
+            return;
+        }
+        if (output->inserts.size() >= 5) {
+            done("Each strip holds 3 built-in effects and at most 5 VST inserts.");
+            return;
+        }
     }
 
-    auto insert = std::make_unique<InsertSlot>();
-    insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-    const auto error = insert->pluginHost.loadPlugin(file);
-    if (error.isNotEmpty()) {
-        return error;
-    }
-    insert->pluginPath = file.getFullPathName();
-    insert->pluginName = insert->pluginHost.getPluginName();
-    insert->latencySamples = insert->pluginHost.getLatencySamples();
+    const double rate = currentSampleRate;
+    const int block = currentBufferSize;
+    auto alive = prepareAliveToken_;
+    juce::Logger::writeToLog("plugin: loading " + file.getFileName());
+    juce::Thread::launch([this, alive, outputId, file, rate, block,
+                          done = std::move(done)]() mutable {
+        const auto loaded = PluginHost::loadFromFile(file, rate, block);
+        juce::MessageManager::callAsync([this, alive, outputId, file, loaded,
+                                         done = std::move(done)]() mutable {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (loaded.error.isNotEmpty()) {
+                juce::Logger::writeToLog("plugin: failed - " + loaded.error);
+                done(loaded.error);
+                return;
+            }
 
-    const juce::ScopedLock lock(stateLock);
-    if (output->inserts.size() >= 5) {
-        return "Each strip holds 3 built-in effects and at most 5 VST inserts.";
-    }
-    // Same counter discipline as addPlugin: id assignment under stateLock.
-    insert->id = nextInsertId++;
-    const auto insertId = insert->id;
-    output->inserts.push_back(std::move(insert));
-    output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
-    return {};
+            auto insert = std::make_unique<InsertSlot>();
+            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+            insert->pluginHost.adopt(loaded);
+            insert->pluginPath = loaded.path;
+            insert->pluginName = loaded.name;
+            insert->latencySamples = insert->pluginHost.getLatencySamples();
+
+            juce::String error;
+            {
+                const juce::ScopedLock lock(stateLock);
+                auto* output = findOutput(outputId);
+                if (output == nullptr) {
+                    error = "The output no longer exists.";
+                } else if (output->inserts.size() >= 5) {
+                    error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                } else {
+                    insert->id = nextInsertId++;
+                    const auto insertId = insert->id;
+                    output->inserts.push_back(std::move(insert));
+                    output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                }
+            }
+            juce::Logger::writeToLog(error.isEmpty()
+                                         ? "plugin: loaded " + loaded.name
+                                         : "plugin: install failed - " + error);
+            done(error);
+        });
+    });
 }
 
 void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId) {
@@ -1280,6 +1346,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
     pluginrack::AudioSettings audio;
     audio.inputBuffer = settings.inputBuffer;
     audio.outputBuffer = settings.outputBuffer;
+    audio.latencyTuningOptIn = settings.latencyTuningOptIn;
     audio.lowLatencyInput = settings.lowLatencyInput;
     audio.preferExclusive = settings.preferExclusive;
     audio.lowLatencyOutputs = settings.lowLatencyOutputs;
@@ -1303,6 +1370,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         DeviceSettings settings = getDeviceSettings();
         settings.inputBuffer = scene.audio->inputBuffer;
         settings.outputBuffer = scene.audio->outputBuffer;
+        settings.latencyTuningOptIn = scene.audio->latencyTuningOptIn;
         settings.lowLatencyInput = scene.audio->lowLatencyInput;
         settings.preferExclusive = scene.audio->preferExclusive;
         settings.lowLatencyOutputs = scene.audio->lowLatencyOutputs;
@@ -1387,6 +1455,10 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
+            // Scene restore still instantiates here, on the message thread:
+            // log it so a slow plugin is visible in the run log.
+            juce::Logger::writeToLog("scene: instantiating "
+                                     + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
                                                              juce::String(savedInsert.pluginState));
             if (error.isNotEmpty()) {
@@ -1444,6 +1516,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
+            juce::Logger::writeToLog("scene: instantiating "
+                                     + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
                                                              juce::String(savedInsert.pluginState));
             if (error.isNotEmpty()) {
@@ -1560,12 +1634,6 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             desiredInputDevices[savedChannel.id] = live->second;
         }
     }
-    for (const auto& [id, name] : desiredInputDevices) {
-        const auto e = openDevicesNow ? setChannelInputDevice(id, name)
-                                      : juce::String{};
-        if (e.isNotEmpty()) loadErrors += e + "\n";
-    }
-
     std::map<std::uint32_t, juce::String> desiredOutputDevices;
     for (const auto& savedOutput : scene.outputs) {
         const juce::String sceneDevice(savedOutput.deviceId);
@@ -1578,29 +1646,11 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             desiredOutputDevices[savedOutput.id] = live->second;
         }
     }
-    for (const auto& [id, name] : desiredOutputDevices) {
-        if (name.isNotEmpty()) {
-            const auto e = openDevicesNow ? setOutputDevice(id, name)
-                                          : juce::String{};
-            if (e.isNotEmpty()) loadErrors += e + "\n";
-        }
-    }
-
-    if (openDevicesNow) {
-        // Resume the clock after the device re-apply above: the normal path
-        // re-arms it inside setOutputDevice's hand-off, this covers the case
-        // where the clock's device did not change hands at all. Idempotent.
-        const juce::ScopedLock lock(stateLock);
-        for (auto& o : outputs) {
-            if (o->id == clockOutputId && o->output != nullptr) {
-                o->output->setRenderActive(true);
-                break;
-            }
-        }
-    } else {
-        // Startup: record the scene's device assignments so the UI and the
-        // saved scene keep them, and leave the streams closed. The opener
-        // below starts them without blocking the message thread.
+    // Record the assignments only. Opening them inline would run one blocking
+    // driver probe per endpoint on the message thread, which is what made
+    // loading a scene look like a freeze; the background opener below (or the
+    // caller at startup) opens them in parallel and reports any refusal.
+    {
         const juce::ScopedLock lock(stateLock);
         clockOutputId = 0;
         for (const auto& [id, name] : desiredInputDevices) {
@@ -1620,6 +1670,9 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         }
     }
 
+    if (openDevicesNow)
+        openStripsDevicesAsync();
+
     return loadErrors;
 }
 
@@ -1634,7 +1687,7 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
 }
 
 juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
-                                                    bool forceReopen) {
+                                                     bool forceReopen, double engineRate) {
     auto* channel = findChannel(channelId);
     if (channel == nullptr) {
         return "The channel no longer exists.";
@@ -1664,13 +1717,27 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         }
     }
 
+    int renderBlockFrames = 0;
+    int capacityReserveFrames = 0;
+    {
+        const juce::ScopedLock sl(stateLock);
+        // The read delay must follow the real render block; only the ring
+        // reserves room for a block the clock may still be negotiating.
+        renderBlockFrames = currentBufferSize;
+        capacityReserveFrames = juce::jmax(currentBufferSize, kProbeRenderBlockFrames);
+    }
+
     std::shared_ptr<InputCapture> reuse;
     if (!forceReopen) {
         const juce::ScopedLock sl(stateLock);
         const auto it = inputCaptures_.find(deviceName);
+        // Compare against the ring the capture was actually sized for, not the
+        // render block: the clock has not negotiated when inputs start, so an
+        // exact block comparison rejects every capture on the next pass and
+        // reopens a device this process already holds open.
         if (it != inputCaptures_.end() && it->second.requestedChannels >= needed
             && it->second.requestedBufferSize == requestedInputBufferSize_
-            && it->second.renderBlockFrames >= currentBufferSize) {
+            && it->second.renderBlockFrames >= capacityReserveFrames) {
             reuse = it->second.capture;
         }
     }
@@ -1689,20 +1756,52 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     // No usable capture yet (or it is too narrow): open one sized for all
     // channels on this device. On failure every channel keeps its previous
     // capture untouched.
+    //
+    // The capture being replaced has to be closed first: a driver hands an
+    // endpoint out once, so opening the replacement while the old stream still
+    // runs fails and leaves the user with an error next to working audio. The
+    // cost is one device-open of silence on an explicit reload.
+    {
+        std::shared_ptr<InputCapture> previous;
+        {
+            const juce::ScopedLock sl(stateLock);
+            const auto it = inputCaptures_.find(deviceName);
+            if (it != inputCaptures_.end()) previous = it->second.capture;
+        }
+        if (previous != nullptr) {
+            {
+                const juce::ScopedLock sl(stateLock);
+                inputCaptures_.erase(deviceName);
+                for (auto& c : channels) {
+                    if (c->input == previous) c->input.reset();
+                }
+            }
+            previous->close();
+        }
+    }
+
     auto capture = std::make_shared<InputCapture>();
     juce::String err;
-    // Same-device input shares the clock's hardware clock, so it can use the
-    // same 1-block read delay as the low-latency input option.
+    // Same-device input usually follows the same hardware clock, so the
+    // optional one-block delay is a reasonable starting point. The capture
+    // promotes itself to a safer delay after a real starvation.
     const auto clockDevice = getClockOutputDeviceName();
     const bool inputOnClockDevice = fullDuplexInput_.load(std::memory_order_relaxed)
                                     && clockDevice.isNotEmpty() && clockDevice == deviceName;
     const bool useLowLatencyInput = lowLatencyInput_.load(std::memory_order_relaxed)
                                     || inputOnClockDevice;
+    // Do not create an exclusive input client for an endpoint already used by
+    // the clock output. Two independent exclusive clients cannot share the
+    // endpoint; shared WASAPI is the stable fallback for same-device capture.
+    const bool inputPreferExclusive = preferExclusive_.load(std::memory_order_relaxed)
+                                   && !(clockDevice.isNotEmpty() && clockDevice == deviceName);
+    const double requestedRate = engineRate > 0.0 ? engineRate : currentSampleRate;
     const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       currentSampleRate, needed, err, requestedInputBufferSize_,
-                                       currentBufferSize,
+                                       requestedRate, needed, err, requestedInputBufferSize_,
+                                       renderBlockFrames,
                                        useLowLatencyInput ? 1 : 2,
-                                       preferExclusive_.load(std::memory_order_relaxed));
+                                       inputPreferExclusive,
+                                       capacityReserveFrames);
     if (openErr.isNotEmpty()) {
         if (!forceReopen) {
             const juce::ScopedLock sl(stateLock);
@@ -1726,7 +1825,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         }
         inputCaptures_[deviceName] = SharedInputCapture{capture, needed,
                                                         requestedInputBufferSize_,
-                                                        currentBufferSize};
+                                                        capacityReserveFrames};
         pruneUnusedCaptures();
     }
     // The old capture closes here, outside stateLock, only after every channel
@@ -1780,13 +1879,31 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         return "The output no longer exists.";
     }
 
-    const bool isClock = (clockOutputId == outputId) || (clockOutputId == 0);
+    bool isClock = false;
+    bool sharesClockInput = false;
+    int renderBlockFrames = 0;
+    {
+        const juce::ScopedLock sl(stateLock);
+        // The startup opener can open several outputs at once. Read the clock
+        // role under the same lock that the clock hand-off updates it with;
+        // otherwise the first output's negotiation can race another worker's
+        // role check.
+        isClock = (clockOutputId == outputId) || (clockOutputId == 0);
+        renderBlockFrames = juce::jmax(currentBufferSize, kProbeRenderBlockFrames);
+        if (isClock) {
+            sharesClockInput = std::any_of(
+                channels.begin(), channels.end(), [&deviceName](const auto& channel) {
+                    return channel->inputDeviceName == deviceName;
+                });
+        }
+    }
 
     if (deviceName == "None - silent" || deviceName.isEmpty()) {
-        const bool wasClock = (clockOutputId == outputId);
+        bool wasClock = false;
         OutputPlayback* retiredPlayback = nullptr;
         {
             const juce::ScopedLock sl(stateLock);
+            wasClock = (clockOutputId == outputId);
             if (out->output != nullptr) {
                 // Keep the object alive: the lock-free render-miss path may
                 // still hold its raw pointer until the snapshot is rebuilt.
@@ -1794,6 +1911,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
                 retiredPlayback = retiredOutputs_.back().get();
             }
             out->outputDeviceName.clear();
+            out->outputDeviceType.clear();
             out->outputError.clear();
             if (wasClock) {
                 clockOutputId = 0;
@@ -1851,15 +1969,14 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         targetBlocks = lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4;
         primeBlocks = targetBlocks;
     }
-    const bool preferExclusive = preferExclusive_.load(std::memory_order_relaxed);
+    // Exclusive mode is limited to a standalone clock output. It is not safe
+    // for non-clock outputs (which may share an endpoint) or for a clock whose
+    // endpoint is also used by an input capture.
+    const bool preferExclusive = preferExclusive_.load(std::memory_order_relaxed)
+                              && isClock && !sharesClockInput;
     auto openErr = newPlayback->open(openName, engineRate, err, requestedOutputBufferSize_,
-                                     targetBlocks, primeBlocks, preferExclusive);
-    if (isClock && openErr.isNotEmpty() && engineRate > 0.0) {
-        // Clock device cannot do the engine rate: fall back to its own default
-        // once (old behaviour) before giving up.
-        openErr = newPlayback->open(openName, 0.0, err, requestedOutputBufferSize_,
-                                    targetBlocks, primeBlocks, preferExclusive);
-    }
+                                     targetBlocks, primeBlocks, preferExclusive,
+                                     renderBlockFrames);
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
@@ -1868,8 +1985,14 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         // the saved scene still say which device is missing, instead of
         // dropping back to "Choose device" with only an error line.
         if (out->output == nullptr) out->outputDeviceName = deviceName;
-        out->outputError = openErr;
-        return openErr;
+        // Some drivers refuse a second client for an endpoint, so reopening an
+        // already-open output fails while the old stream keeps playing. Say
+        // that instead of reporting the strip as dead.
+        auto message = openErr;
+        if (out->output != nullptr)
+            message += " (the previous stream is still running)";
+        out->outputError = message;
+        return message;
     }
 
     if (isClock) {
@@ -1879,6 +2002,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         {
             const juce::ScopedLock sl(stateLock);
             currentSampleRate = newRate;
+            currentBufferSize = newBuf;
             clockOutputId = outputId;
         }
         // Plugins are prepared on the message thread only: some synchronise
@@ -1919,6 +2043,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
             out->output->setRenderActive(true);
         }
         out->outputDeviceName = deviceName;
+        out->outputDeviceType = out->output->getActiveDeviceType();
         out->outputError.clear();
         publishRenderOutputsLocked();
     }
@@ -1995,6 +2120,9 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
 }
 
 juce::String AudioEngine::getClockDescription() const {
+    // Called from the UI timer while the device opener may be rewriting these
+    // strings, so every read here happens under the lock.
+    const juce::ScopedLock lock(stateLock);
     if (clockOutputId == 0) {
         return "No output device - click a master strip";
     }
@@ -2008,11 +2136,8 @@ juce::String AudioEngine::getClockDescription() const {
                                  : juce::String(khzValue, 1);
             auto desc = o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
                       + juce::String(currentBufferSize) + " smp";
-            if (o->output != nullptr) {
-                const auto type = o->output->getActiveDeviceType();
-                if (type.isNotEmpty())
-                    desc += " [" + shortDeviceTypeTag(type) + "]";
-            }
+            if (o->outputDeviceType.isNotEmpty())
+                desc += " [" + shortDeviceTypeTag(o->outputDeviceType) + "]";
             return desc;
         }
     }
@@ -2327,10 +2452,12 @@ bool AudioEngine::openFullDuplexIfPossible(const juce::String& inputDevice, cons
     fullDuplex_ = false;
     if (inputDevice.isEmpty() || outputDevice.isEmpty()) return false;
     if (inputDevice != outputDevice) return false;
-    // Same device: use existing separate streams (device provides both directions).
-    // Single render is guaranteed by clockOutputId (only the clock output renders).
-    fullDuplex_ = true;
-    return true;
+    // The current stream model still owns input and output callbacks
+    // separately. Treating that as a shared full-duplex device was misleading:
+    // it made the beta option promise one hardware clock without actually
+    // sharing an AudioDeviceManager. Same-device input gets the safer
+    // one-block starting delay through FullDuplexInput instead.
+    return false;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {
@@ -2372,6 +2499,7 @@ void AudioEngine::startDeviceJob(std::function<void(const std::function<bool()>&
     deviceOpenProgress_.store(0);
     deviceOpenTotal_.store(0);
     deviceOpenFinished_.store(false);
+    clearDeviceOpens();
 
     if (deviceOpenThread_ != nullptr) {
         // The previous run has finished (openingDevices_ was false); join it
@@ -2385,27 +2513,18 @@ void AudioEngine::startDeviceJob(std::function<void(const std::function<bool()>&
 
 void AudioEngine::openStripsDevicesAsync() {
     startDeviceJob([this](const std::function<bool()>& shouldExit) {
-        openStripsDevicesNow(shouldExit, /*forceInputs=*/false, nullptr);
+        openStripsDevicesNow(shouldExit, /*forceInputs=*/false);
     });
 }
 
-void AudioEngine::openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs,
-                                       const DeviceSettings* fallback) {
-    auto errors = openAllDevicesPass(shouldExit, forceInputs);
-
-    if (errors.isNotEmpty() && fallback != nullptr && !shouldExit()) {
-        // At least one stream refused the new configuration. Every device
-        // keeps its previous playback/capture on failure, so restoring the
-        // settings and retrying once puts the engine back on the working
-        // configuration instead of leaving a strip silent.
-        const auto firstErrors = errors;
-        applySettingsValues(*fallback);
-        deviceOpenProgress_.store(0);
-        const auto restoreErrors = openAllDevicesPass(shouldExit, /*forceInputs=*/true);
-        errors = "Could not open the new audio settings - restored the previous ones.\n"
-               + firstErrors;
-        if (restoreErrors.isNotEmpty()) errors += restoreErrors;
-    }
+void AudioEngine::openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs) {
+    // Exactly one pass. A device that refuses is reported and left silent
+    // instead of being retried with another type, rate, or buffer size.
+    juce::Logger::writeToLog("audio: opening devices");
+    const auto errors = openAllDevicesPass(shouldExit, forceInputs);
+    clearDeviceOpens();
+    juce::Logger::writeToLog(errors.isNotEmpty() ? "audio: devices open with errors\n" + errors
+                                                 : juce::String("audio: devices open"));
 
     {
         const juce::ScopedLock lock(deviceOpenErrorsLock_);
@@ -2434,6 +2553,35 @@ juce::String AudioEngine::takeDeviceOpenErrors() {
     return errors;
 }
 
+void AudioEngine::beginDeviceOpen(const juce::String& label) {
+    const juce::ScopedLock lock(deviceOpenActiveLock_);
+    deviceOpenActive_.push_back(label);
+}
+
+void AudioEngine::endDeviceOpen(const juce::String& label) {
+    const juce::ScopedLock lock(deviceOpenActiveLock_);
+    const auto it = std::find(deviceOpenActive_.begin(), deviceOpenActive_.end(), label);
+    if (it != deviceOpenActive_.end()) deviceOpenActive_.erase(it);
+}
+
+void AudioEngine::clearDeviceOpens() {
+    const juce::ScopedLock lock(deviceOpenActiveLock_);
+    deviceOpenActive_.clear();
+}
+
+juce::String AudioEngine::getDeviceOpenStatus() const {
+    const juce::ScopedLock lock(deviceOpenActiveLock_);
+    if (deviceOpenActive_.empty()) return {};
+    if (deviceOpenActive_.size() == 1) return "opening " + deviceOpenActive_.front();
+
+    // The clock and every strip start together; say so instead of showing one.
+    const auto count = (int) deviceOpenActive_.size();
+    juce::String text = "opening " + juce::String(count) + " endpoints in parallel: "
+                      + deviceOpenActive_[0] + ", " + deviceOpenActive_[1];
+    if (count > 2) text << " (+" + juce::String(count - 2) + " more)";
+    return text;
+}
+
 juce::String AudioEngine::getClockOutputDeviceName() const {
     const juce::ScopedLock lock(stateLock);
     for (const auto& output : outputs) {
@@ -2446,6 +2594,7 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     DeviceSettings settings;
     settings.inputBuffer = requestedInputBufferSize_;
     settings.outputBuffer = requestedOutputBufferSize_;
+    settings.latencyTuningOptIn = latencyTuningOptIn_.load();
     settings.lowLatencyInput = lowLatencyInput_.load();
     settings.preferExclusive = preferExclusive_.load();
     settings.lowLatencyOutputs = lowLatencyOutputs_.load();
@@ -2474,14 +2623,59 @@ std::vector<pluginrack::WatchedDevice> AudioEngine::getWatchedDevices() const {
     return watchedDevices_;
 }
 
+AudioEngine::DeviceState AudioEngine::getChannelDeviceState(std::uint32_t channelId) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& channel : channels) {
+        if (channel->id == channelId)
+            return {channel->inputDeviceName, channel->inputError};
+    }
+    return {};
+}
+
+AudioEngine::DeviceState AudioEngine::getOutputDeviceState(std::uint32_t outputId) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& output : outputs) {
+        if (output->id == outputId)
+            return {output->outputDeviceName, output->outputError};
+    }
+    return {};
+}
+
+std::vector<std::pair<juce::String, juce::String>> AudioEngine::getDeviceErrors() const {
+    std::vector<std::pair<juce::String, juce::String>> errors;
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& channel : channels) {
+        if (channel->inputError.isNotEmpty())
+            errors.emplace_back(channel->name, channel->inputError);
+    }
+    for (const auto& output : outputs) {
+        if (output->outputError.isNotEmpty())
+            errors.emplace_back(output->name, output->outputError);
+    }
+    return errors;
+}
+
+std::vector<juce::String> AudioEngine::getAssignedInputDeviceNames() const {
+    std::vector<juce::String> names;
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& channel : channels) {
+        if (channel->input == nullptr || channel->inputDeviceName.isEmpty())
+            continue;
+        if (std::find(names.begin(), names.end(), channel->inputDeviceName) == names.end())
+            names.push_back(channel->inputDeviceName);
+    }
+    return names;
+}
+
 void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
     requestedInputBufferSize_ = settings.inputBuffer;
     requestedOutputBufferSize_ = settings.outputBuffer;
-    lowLatencyInput_.store(settings.lowLatencyInput);
-    preferExclusive_.store(settings.preferExclusive);
-    lowLatencyOutputs_.store(settings.lowLatencyOutputs);
-    minimalClockFifo_.store(settings.minimalClockFifo);
-    fullDuplexInput_.store(settings.fullDuplexInput);
+    latencyTuningOptIn_.store(settings.latencyTuningOptIn);
+    lowLatencyInput_.store(settings.latencyTuningOptIn && settings.lowLatencyInput);
+    preferExclusive_.store(settings.latencyTuningOptIn && settings.preferExclusive);
+    lowLatencyOutputs_.store(settings.latencyTuningOptIn && settings.lowLatencyOutputs);
+    minimalClockFifo_.store(settings.latencyTuningOptIn && settings.minimalClockFifo);
+    fullDuplexInput_.store(settings.latencyTuningOptIn && settings.fullDuplexInput);
     autoReloadDevices_.store(settings.autoReloadDevices);
     if (settings.rackThumbnailFps > 0) rackThumbnailFps_.store(settings.rackThumbnailFps);
     // Buffer and stream-mode changes replace every device, so a measurement
@@ -2491,10 +2685,9 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
 
 void AudioEngine::applyDeviceSettings(const DeviceSettings& settings) {
     if (isOpeningDevices()) return;
-    const auto previous = getDeviceSettings();
     applySettingsValues(settings);
-    startDeviceJob([this, previous](const std::function<bool()>& shouldExit) {
-        openStripsDevicesNow(shouldExit, /*forceInputs=*/true, &previous);
+    startDeviceJob([this](const std::function<bool()>& shouldExit) {
+        openStripsDevicesNow(shouldExit, /*forceInputs=*/true);
     });
 }
 
@@ -2507,6 +2700,11 @@ void AudioEngine::setLatencyOption(LatencyOption option, bool enabled) {
         case LatencyOption::MinimalClockFifo:  settings.minimalClockFifo = enabled; break;
         case LatencyOption::FullDuplexInput:   settings.fullDuplexInput = enabled; break;
     }
+    settings.latencyTuningOptIn = settings.lowLatencyInput
+                               || settings.preferExclusive
+                               || settings.lowLatencyOutputs
+                               || settings.minimalClockFifo
+                               || settings.fullDuplexInput;
     applyDeviceSettings(settings);
 }
 
@@ -2562,23 +2760,26 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
 
         for (const auto& device : devices) {
             if (shouldExit()) break;
-            juce::String error;
-            for (int attempt = 0; attempt < 3; ++attempt) {
-                if (shouldExit()) break;
-                error = device.isInput
-                            ? setChannelInputDeviceImpl(device.stripId, device.deviceName,
-                                                        /*forceReopen=*/true)
-                            : setOutputDeviceImpl(device.stripId, device.deviceName,
-                                                  currentSampleRate);
-                if (error.isEmpty()) break;
-                // Give the driver a moment to release a busy endpoint before
-                // the automatic retry.
-                juce::Thread::sleep(400);
-            }
+            const auto status = "reloading " + device.label;
+            beginDeviceOpen(status);
+            // Single attempt: a device that refuses stays silent and is
+            // reported, instead of being retried with a 400 ms pause.
+            const auto error = device.isInput
+                                   ? setChannelInputDeviceImpl(device.stripId, device.deviceName,
+                                                               /*forceReopen=*/true)
+                                   : setOutputDeviceImpl(device.stripId, device.deviceName,
+                                                         currentSampleRate);
+            endDeviceOpen(status);
             if (error.isNotEmpty()) failures.add(device.label + ": " + error);
             deviceOpenProgress_.fetch_add(1);
         }
 
+        clearDeviceOpens();
+        if (failures.isEmpty())
+            juce::Logger::writeToLog("audio: reloaded " + juce::String((int) devices.size())
+                                     + " device(s)");
+        else
+            juce::Logger::writeToLog("audio: reload failed\n" + failures.joinIntoString("\n"));
         {
             const juce::ScopedLock lock(deviceOpenErrorsLock_);
             deviceOpenErrors_ = failures.joinIntoString("\n");
@@ -2592,6 +2793,9 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     struct Request {
         std::uint32_t id = 0;
         juce::String name;
+        // Strip name, used for the progress line and the error text so the
+        // user can see which strip a device belongs to.
+        juce::String label;
     };
 
     // Snapshot the assignments under stateLock. Structural mutators bail out
@@ -2603,7 +2807,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         for (const auto& output : outputs) {
             if (output->outputDeviceName.isNotEmpty()
                 && output->outputDeviceName != "None - silent") {
-                outputsWanted.push_back({output->id, output->outputDeviceName});
+                outputsWanted.push_back({output->id, output->outputDeviceName, output->name});
             }
         }
         std::sort(outputsWanted.begin(), outputsWanted.end(),
@@ -2616,7 +2820,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
             }
             // Channels sharing one device share one capture: open it once.
             if (seenInputs.insert(channel->inputDeviceName).second) {
-                inputsWanted.push_back({channel->id, channel->inputDeviceName});
+                inputsWanted.push_back({channel->id, channel->inputDeviceName, channel->name});
             }
         }
         openRate = currentSampleRate;
@@ -2628,105 +2832,86 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     deviceOpenTotal_.store((int) (outputsWanted.size() + inputsWanted.size()));
     juce::String errors;
 
-    // Opens outputs [first, end) concurrently. Each helper needs its own COM
-    // apartment. Returns one error string per request, in request order.
-    auto openOutputs = [this, &shouldExit, &outputsWanted](std::size_t first, double rate) {
-        std::vector<juce::String> results(outputsWanted.size() - first);
-        std::vector<std::thread> helpers;
-        helpers.reserve(results.size());
-        for (std::size_t i = first; i < outputsWanted.size(); ++i) {
-            helpers.emplace_back([this, &shouldExit, &outputsWanted, &results, rate, i, first] {
+    // Device probes are the expensive part of startup. Keep each probe on its
+    // own COM thread and let output and input probes overlap. Every stream is
+    // attempted exactly once: a refusal is reported against its strip and the
+    // device stays closed and silent, never retried.
+    auto launchOutputs = [this, &shouldExit, &outputsWanted](double rate,
+                                                             std::vector<juce::String>& results,
+                                                             std::vector<std::thread>& helpers) {
+        for (std::size_t i = 0; i < outputsWanted.size(); ++i) {
+            const auto request = outputsWanted[i];
+            helpers.emplace_back([this, &shouldExit, &results, request, rate, i] {
                 if (shouldExit()) return;
                #if JUCE_WINDOWS
                 const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
                #endif
-                results[i - first] = setOutputDeviceImpl(outputsWanted[i].id,
-                                                         outputsWanted[i].name, rate);
+                const auto status = "output \"" + request.label + "\" - " + request.name;
+                beginDeviceOpen(status);
+                results[i] = setOutputDeviceImpl(request.id, request.name, rate);
+                endDeviceOpen(status);
                 deviceOpenProgress_.fetch_add(1);
                #if JUCE_WINDOWS
                 if (SUCCEEDED(comResult)) CoUninitialize();
                #endif
             });
         }
-        for (auto& helper : helpers) helper.join();
-        return results;
     };
 
-    auto record = [&errors](const juce::String& error) {
-        if (error.isNotEmpty()) errors += error + "\n";
-    };
-
-    // The clock fixes the sample rate and block size every other stream is
-    // opened against. Opening it in parallel with the others (rather than
-    // first) is safe because every stream is offered the snapshotted engine
-    // rate; a clock that falls back to its own rate is handled below.
-    bool clockOpened = false;
-    if (!outputsWanted.empty() && !shouldExit()) {
-        auto results = openOutputs(0, openRate);
-        record(results.front());
-
-        double finalRate = openRate;
-        {
-            const juce::ScopedLock lock(stateLock);
-            finalRate = currentSampleRate;
-            const auto* clock = findOutput(outputsWanted.front().id);
-            clockOpened = clock != nullptr && clock->output != nullptr;
-        }
-
-        if (!clockOpened) {
-            // The designated clock refused. Roll the parallel attempt back and
-            // retry in the original order so exactly one working output takes
-            // the clock role.
-            {
-                const juce::ScopedLock lock(stateLock);
-                clockOutputId = 0;
-            }
-            for (const auto& request : outputsWanted) {
-                if (shouldExit()) break;
-                setOutputDeviceImpl(request.id, "None - silent", openRate);
-            }
-            deviceOpenProgress_.store(0);
-            for (const auto& request : outputsWanted) {
-                if (shouldExit()) break;
-                record(setOutputDeviceImpl(request.id, request.name, openRate));
+    auto launchInputs = [this, &shouldExit, &inputsWanted](double rate,
+                                                           bool force,
+                                                           std::vector<juce::String>& results,
+                                                           std::vector<std::thread>& helpers) {
+        for (std::size_t i = 0; i < inputsWanted.size(); ++i) {
+            const auto request = inputsWanted[i];
+            helpers.emplace_back([this, &shouldExit, &results, request, rate, force, i] {
+                if (shouldExit()) return;
+               #if JUCE_WINDOWS
+                const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+               #endif
+                const auto status = "input \"" + request.label + "\" - " + request.name;
+                beginDeviceOpen(status);
+                results[i] = setChannelInputDeviceImpl(request.id, request.name, force, rate);
+                endDeviceOpen(status);
                 deviceOpenProgress_.fetch_add(1);
-            }
-        } else if (std::abs(finalRate - openRate) > 0.5) {
-            // The clock fell back to its own rate: every other stream was
-            // opened at the wrong rate, so reopen them at the final one.
-            for (std::size_t i = 1; i < outputsWanted.size(); ++i)
-                setOutputDeviceImpl(outputsWanted[i].id, "None - silent", finalRate);
-            deviceOpenProgress_.store(1);
-            const auto retried = openOutputs(1, finalRate);
-            for (const auto& error : retried) record(error);
-        } else {
-            for (std::size_t i = 1; i < results.size(); ++i) record(results[i]);
+               #if JUCE_WINDOWS
+                if (SUCCEEDED(comResult)) CoUninitialize();
+               #endif
+            });
         }
-    }
+    };
 
-    // Inputs are opened last: they need the clock's final rate. Channels
-    // sharing one device were already reduced to a single request.
-    std::mutex errorLock;
-    std::vector<std::thread> helpers;
-    helpers.reserve(inputsWanted.size());
-    for (const auto& request : inputsWanted) {
-        helpers.emplace_back([this, &shouldExit, &request, &record, &errorLock, forceInputs] {
-            if (shouldExit()) return;
-           #if JUCE_WINDOWS
-            const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-           #endif
-            const auto error = setChannelInputDeviceImpl(request.id, request.name, forceInputs);
-            {
-                const std::lock_guard<std::mutex> lock(errorLock);
-                record(error);
-            }
-            deviceOpenProgress_.fetch_add(1);
-           #if JUCE_WINDOWS
-            if (SUCCEEDED(comResult)) CoUninitialize();
-           #endif
-        });
+    std::vector<juce::String> outputResults(outputsWanted.size());
+    std::vector<juce::String> inputResults(inputsWanted.size());
+    std::vector<std::thread> outputHelpers;
+    std::vector<std::thread> inputHelpers;
+    outputHelpers.reserve(outputsWanted.size());
+    inputHelpers.reserve(inputsWanted.size());
+
+    if (!shouldExit()) {
+        launchOutputs(openRate, outputResults, outputHelpers);
+        launchInputs(openRate, forceInputs, inputResults, inputHelpers);
     }
-    for (auto& helper : helpers) helper.join();
+    for (auto& helper : outputHelpers) helper.join();
+    for (auto& helper : inputHelpers) helper.join();
+
+    // Every stream was attempted exactly once. Report each refusal against the
+    // strip it belongs to; the failing device is already closed and silent.
+    for (std::size_t i = 0; i < outputResults.size(); ++i) {
+        if (outputResults[i].isEmpty()) continue;
+        const auto label = "Output \"" + outputsWanted[i].label + "\" ("
+                         + outputsWanted[i].name + ")";
+        if (i == 0)
+            errors += label + " could not be opened as the clock, so nothing can play: "
+                    + outputResults[i] + "\n";
+        else
+            errors += label + ": " + outputResults[i] + "\n";
+    }
+    for (std::size_t i = 0; i < inputResults.size(); ++i) {
+        if (inputResults[i].isEmpty()) continue;
+        errors += "Input \"" + inputsWanted[i].label + "\" (" + inputsWanted[i].name
+               + "): " + inputResults[i] + "\n";
+    }
 
     return errors;
 }

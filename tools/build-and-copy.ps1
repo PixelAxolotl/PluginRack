@@ -45,3 +45,17 @@ catch {
 }
 
 Write-Output "Copied $builtExe to $rootExe"
+
+# Crash reports give a module offset; the matching PDB is what turns it into a
+# function and line. Keep it beside the exe.
+$builtPdb = [System.IO.Path]::ChangeExtension($builtExe, ".pdb")
+$rootPdb = [System.IO.Path]::ChangeExtension($rootExe, ".pdb")
+if (Test-Path $builtPdb) {
+    try {
+        Copy-Item -LiteralPath $builtPdb -Destination $rootPdb -Force
+        Write-Output "Copied $builtPdb to $rootPdb"
+    }
+    catch {
+        Write-Output "Warning: could not copy $builtPdb ($($_.Exception.Message))"
+    }
+}
