@@ -58,62 +58,15 @@ juce::AudioIODeviceType* ensureTypeRegistered(juce::AudioDeviceManager& manager,
     return raw;
 }
 
-// Legacy open path: wildcard device-name search over all registered types,
-// then rate/buffer applied through setAudioDeviceSetup (rolled back on error).
-// Returns the active type name, or empty with errorOut set on failure.
-juce::String openWithWildcardSearch(juce::AudioDeviceManager& manager,
-                                    const juce::String& preferredDeviceName,
-                                    int numInputChannels,
-                                    int numOutputChannels,
-                                    double engineSampleRate,
-                                    int requestedBufferSize,
-                                    juce::String& errorOut) {
-    auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
-                                  preferredDeviceName, nullptr);
-    if (err.isEmpty() && requestedBufferSize >= 0) {
-        const juce::AudioDeviceManager::AudioDeviceSetup prev = manager.getAudioDeviceSetup();
-        juce::AudioDeviceManager::AudioDeviceSetup setup = prev;
-        if (requestedBufferSize > 0) setup.bufferSize = requestedBufferSize;
-        if (engineSampleRate > 0.0) setup.sampleRate = engineSampleRate;
-        err = manager.setAudioDeviceSetup(setup, true);
-        if (err.isEmpty() && requestedBufferSize > 0) {
-            auto* device = manager.getCurrentAudioDevice();
-            if (device == nullptr || device->getCurrentBufferSizeSamples() != requestedBufferSize) {
-                err = "The device does not support a " + juce::String(requestedBufferSize)
-                    + "-sample buffer.";
-            }
-        }
-        if (err.isNotEmpty())
-            manager.setAudioDeviceSetup(prev, true);
-    }
-    // initialise() silently falls back to the default device when the wildcard
-    // search finds no match, so an unplugged device would otherwise report
-    // success and leave the strip's status dot green. Treat that as the
-    // missing-device error it is.
-    if (err.isEmpty() && preferredDeviceName.isNotEmpty()) {
-        const auto setup = manager.getAudioDeviceSetup();
-        const bool requested = setup.outputDeviceName.equalsIgnoreCase(preferredDeviceName)
-                            || setup.inputDeviceName.equalsIgnoreCase(preferredDeviceName);
-        if (!requested) {
-            err = "No such device: " + preferredDeviceName;
-            manager.closeAudioDevice();
-        }
-    }
-    if (err.isNotEmpty()) {
-        errorOut = err;
-        return {};
-    }
-    return manager.getCurrentAudioDeviceType();
-}
-
-// Opens preferredDeviceName (empty = system default) in the first device type
-// from the low-latency chain that actually carries it, passing the full
-// AudioDeviceSetup with the name explicit instead of relying on a wildcard
-// match. The type is selected through AudioDeviceManager's setup XML so JUCE
-// opens the requested endpoint directly; setCurrentAudioDeviceType would
-// first open the system default, sleep 1.5 seconds, close it, and only then
-// open the requested endpoint. On success returns the selected type name; on
-// failure returns empty and sets errorOut.
+// Opens preferredDeviceName (empty = system default) once, in the first device
+// type that actually carries it, passing the full AudioDeviceSetup with the
+// name explicit instead of relying on a wildcard match. The type is selected
+// through AudioDeviceManager's setup XML so JUCE opens the requested endpoint
+// directly; setCurrentAudioDeviceType would first open the system default,
+// sleep 1.5 seconds, close it, and only then open the requested endpoint.
+// There is deliberately no fallback chain and no retry: one attempt, then the
+// caller reports the error and leaves the strip silent. On success returns the
+// selected type name; on failure returns empty and sets errorOut.
 juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    const juce::String& preferredDeviceName,
                                    bool wantInput,
@@ -123,77 +76,85 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    int requestedBufferSize,
                                    juce::String& errorOut,
                                    bool preferExclusive = false) {
+    // Only name lookups happen here (no driver probe). The first type that
+    // carries the endpoint is the single attempt we make: every extra type is
+    // another full WASAPI probe, and a startup that keeps failing for a minute
+    // is worse than a strip that goes silent with a clear error.
     juce::StringArray typeOrder { kTypeShared, kTypeLowLatency, kTypeExclusive, kTypeAsio };
     if (preferExclusive) {
         typeOrder.removeString(kTypeExclusive);
         typeOrder.insert(0, kTypeExclusive);
     }
 
-    juce::String lastError;
+    juce::AudioIODeviceType* chosenType = nullptr;
+    juce::String chosenTypeName;
+    juce::StringArray chosenDeviceNames;
     for (const auto& typeName : typeOrder) {
         auto* type = ensureTypeRegistered(manager, typeName);
         if (type == nullptr)
             continue; // platform without this type (or ASIO built without JUCE_ASIO)
-        const auto deviceNames = type->getDeviceNames(wantInput);
+        auto deviceNames = type->getDeviceNames(wantInput);
         const bool hasDevice = preferredDeviceName.isEmpty()
                                    ? !deviceNames.isEmpty()
                                    : deviceNames.contains(preferredDeviceName);
-        if (!hasDevice)
-            continue; // no matching device name in this type: fall through
-
-        // Resolve the default to its actual endpoint name before building the
-        // XML. An empty name in AudioDeviceSetup means "let the manager pick a
-        // default", but the XML path treats two empty names as "no device".
-        juce::String selectedDeviceName = preferredDeviceName;
-        if (selectedDeviceName.isEmpty()) {
-            const int defaultIndex = type->getDefaultDeviceIndex(wantInput);
-            if (defaultIndex < 0 || defaultIndex >= deviceNames.size()) continue;
-            selectedDeviceName = deviceNames[defaultIndex];
-        }
-
-        const std::vector<int> bufferCandidates{requestedBufferSize};
-        for (const int candidate : bufferCandidates) {
-            juce::AudioDeviceManager::AudioDeviceSetup setup;
-            if (wantInput)
-                setup.inputDeviceName = selectedDeviceName;
-            else
-                setup.outputDeviceName = selectedDeviceName;
-            if (requestedBufferSize >= 0) {
-                setup.sampleRate = engineSampleRate; // 0 = driver default
-                setup.bufferSize = candidate;
-            }
-            juce::XmlElement typeSetup("DEVICESETUP");
-            typeSetup.setAttribute("deviceType", typeName);
-            if (wantInput)
-                typeSetup.setAttribute("audioInputDeviceName", selectedDeviceName);
-            else
-                typeSetup.setAttribute("audioOutputDeviceName", selectedDeviceName);
-            auto err = manager.initialise(numInputChannels, numOutputChannels, &typeSetup, false,
-                                          selectedDeviceName, &setup);
-            if (err.isEmpty()) {
-                auto* device = manager.getCurrentAudioDevice();
-                if (requestedBufferSize > 0
-                    && (device == nullptr
-                        || device->getCurrentBufferSizeSamples() != requestedBufferSize)) {
-                    err = "The device does not support a " + juce::String(requestedBufferSize)
-                        + "-sample buffer.";
-                } else {
-                    return typeName;
-                }
-            }
-            lastError = err;
-            manager.closeAudioDevice();
-        }
+        if (!hasDevice) continue;
+        chosenType = type;
+        chosenTypeName = typeName;
+        chosenDeviceNames = std::move(deviceNames);
+        break;
     }
 
-    // Nothing in the chain opened this device (non-WASAPI backends, DirectSound
-    // only names, or every mode refused): keep the legacy behaviour.
-    auto fallback = openWithWildcardSearch(manager, preferredDeviceName, numInputChannels,
-                                           numOutputChannels, engineSampleRate,
-                                           requestedBufferSize, errorOut);
-    if (fallback.isEmpty() && lastError.isNotEmpty())
-        errorOut = lastError;
-    return fallback;
+    if (chosenType == nullptr) {
+        errorOut = preferredDeviceName.isEmpty()
+                       ? juce::String("No audio device is available.")
+                       : "No such device: " + preferredDeviceName;
+        return {};
+    }
+
+    // Resolve the default to its actual endpoint name before building the XML.
+    // An empty name in AudioDeviceSetup means "let the manager pick a default",
+    // but the XML path treats two empty names as "no device".
+    juce::String selectedDeviceName = preferredDeviceName;
+    if (selectedDeviceName.isEmpty()) {
+        const int defaultIndex = chosenType->getDefaultDeviceIndex(wantInput);
+        if (defaultIndex < 0 || defaultIndex >= chosenDeviceNames.size()) {
+            errorOut = "No audio device is available.";
+            return {};
+        }
+        selectedDeviceName = chosenDeviceNames[defaultIndex];
+    }
+
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    if (wantInput)
+        setup.inputDeviceName = selectedDeviceName;
+    else
+        setup.outputDeviceName = selectedDeviceName;
+    if (requestedBufferSize >= 0) {
+        setup.sampleRate = engineSampleRate; // 0 = driver default
+        setup.bufferSize = requestedBufferSize;
+    }
+    juce::XmlElement typeSetup("DEVICESETUP");
+    typeSetup.setAttribute("deviceType", chosenTypeName);
+    if (wantInput)
+        typeSetup.setAttribute("audioInputDeviceName", selectedDeviceName);
+    else
+        typeSetup.setAttribute("audioOutputDeviceName", selectedDeviceName);
+    auto err = manager.initialise(numInputChannels, numOutputChannels, &typeSetup, false,
+                                  selectedDeviceName, &setup);
+    auto* device = err.isEmpty() ? manager.getCurrentAudioDevice() : nullptr;
+    if (err.isEmpty() && device == nullptr)
+        err = "Could not open " + selectedDeviceName + ".";
+    if (err.isEmpty() && requestedBufferSize > 0
+        && device->getCurrentBufferSizeSamples() != requestedBufferSize) {
+        err = "The device does not support a " + juce::String(requestedBufferSize)
+            + "-sample buffer.";
+    }
+    if (err.isNotEmpty()) {
+        manager.closeAudioDevice();
+        errorOut = err;
+        return {};
+    }
+    return chosenTypeName;
 }
 }
 
@@ -273,8 +234,8 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     inputError.clear();
 
     const int numInputChannels = juce::jmax(2, numChannelsNeeded);
-    // Prefer the stable shared mode; low-latency/exclusive modes remain
-    // available as fallbacks when a driver refuses the shared open.
+    // One attempt in the preferred device type (shared, or exclusive when it
+    // was explicitly enabled). A refusal is reported, never retried.
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ true,
                                               numInputChannels, 0,
                                               engineSampleRate, requestedBufferSize, errorOut,
@@ -625,8 +586,8 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     closing_.store(false, std::memory_order_relaxed);
     error.clear();
 
-    // Prefer the stable shared mode; low-latency/exclusive modes remain
-    // available as fallbacks when a driver refuses the shared open.
+    // One attempt in the preferred device type (shared, or exclusive when it
+    // was explicitly enabled). A refusal is reported, never retried.
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
                                               0, 2,
                                               engineSampleRate, requestedBufferSize, errorOut,

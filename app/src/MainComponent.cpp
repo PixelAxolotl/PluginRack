@@ -299,9 +299,11 @@ void MainComponent::timerCallback() {
     if (audioEngine.isOpeningDevices()) {
         const auto total = audioEngine.getDeviceOpenTotal();
         const auto done = audioEngine.getDeviceOpenProgress();
-        toolbar.setClockText("Starting audio... " + juce::String(done) + "/"
-                                 + juce::String(total),
-                             true);
+        const auto status = audioEngine.getDeviceOpenStatus();
+        juce::String text = "Starting audio... " + juce::String(done) + "/"
+                          + juce::String(total);
+        if (status.isNotEmpty()) text += "  " + status;
+        toolbar.setClockText(text, true);
     } else {
         if (audioEngine.consumeDeviceOpenFinished()) {
             const auto deviceErrors = audioEngine.takeDeviceOpenErrors();
@@ -363,16 +365,7 @@ void MainComponent::timerCallback() {
 
     bool hasError = !report.valid;
     if (!hasError && (report.underruns + report.overruns) > 0) hasError = true;
-    if (!hasError) {
-        for (const auto& c : audioEngine.getChannels()) {
-            if (c->inputError.isNotEmpty()) { hasError = true; break; }
-        }
-    }
-    if (!hasError) {
-        for (const auto& o : audioEngine.getOutputs()) {
-            if (o->outputError.isNotEmpty()) { hasError = true; break; }
-        }
-    }
+    if (!hasError) hasError = !audioEngine.getDeviceErrors().empty();
     toolbar.setHasError(hasError);
 }
 
@@ -540,12 +533,8 @@ void MainComponent::showAudioErrors() {
         lines.add("Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / "
                   + juce::String((juce::int64)report.underruns) + " underruns.");
     }
-    for (const auto& c : audioEngine.getChannels()) {
-        if (c->inputError.isNotEmpty()) lines.add(c->name + ": " + c->inputError);
-    }
-    for (const auto& o : audioEngine.getOutputs()) {
-        if (o->outputError.isNotEmpty()) lines.add(o->name + ": " + o->outputError);
-    }
+    for (const auto& [stripName, stripError] : audioEngine.getDeviceErrors())
+        lines.add(stripName + ": " + stripError);
     if (lines.isEmpty()) lines.add("No audio errors.");
     showError(lines.joinIntoString("\n"));
 }

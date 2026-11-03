@@ -47,11 +47,29 @@ private:
     PluginHost& owner;
     juce::AudioProcessorEditor* editor = nullptr;
 };
+
+// One VST3 format manager for the whole app: the scene loader instantiates on
+// the message thread while the Add-VST path instantiates on a worker, and the
+// manager caches the opened bundle per format instance. Serialise the calls
+// because it is not thread-safe.
+juce::AudioPluginFormatManager& sharedFormatManager() {
+    // Deliberately process-lifetime: the format manager caches opened VST3
+    // bundles, so it must outlive every host and worker that uses it.
+    static auto* manager = [] {
+        auto* registered = new juce::AudioPluginFormatManager();
+        registered->addFormat(std::make_unique<juce::VST3PluginFormat>());
+        return registered;
+    }();
+    return *manager;
+}
+
+juce::CriticalSection& sharedFormatLock() {
+    static juce::CriticalSection lock;
+    return lock;
+}
 } // namespace
 
-PluginHost::PluginHost() {
-    formatManager.addFormat(std::make_unique<juce::VST3PluginFormat>());
-}
+PluginHost::PluginHost() = default;
 
 PluginHost::~PluginHost() {
     delete editorWindow;
@@ -164,10 +182,6 @@ void PluginHost::closeFloatingEditor() {
 }
 
 juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& stateBase64) {
-    if (!file.exists()) {
-        return "The selected VST3 does not exist.";
-    }
-
     double sampleRate = 0.0;
     int bufferSize = 0;
     {
@@ -176,35 +190,65 @@ juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& 
         bufferSize = currentBufferSize;
     }
 
+    const auto loaded = loadFromFile(file, sampleRate, bufferSize, stateBase64);
+    if (loaded.error.isNotEmpty()) {
+        return loaded.error;
+    }
+    adopt(loaded);
+    return {};
+}
+
+PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double sampleRate,
+                                                  int bufferSize, const juce::String& stateBase64) {
+    LoadedPlugin loaded;
+    loaded.path = file.getFullPathName();
+    if (!file.exists()) {
+        loaded.error = "The selected VST3 does not exist.";
+        return loaded;
+    }
+
+    const juce::ScopedLock lock(sharedFormatLock());
+    auto& manager = sharedFormatManager();
+    if (manager.getNumFormats() == 0) {
+        loaded.error = "No VST3 plugin format is available.";
+        return loaded;
+    }
+
     juce::OwnedArray<juce::PluginDescription> descriptions;
-    formatManager.getFormat(0)->findAllTypesForFile(descriptions, file.getFullPathName());
+    manager.getFormat(0)->findAllTypesForFile(descriptions, loaded.path);
     if (descriptions.isEmpty()) {
-        return "No VST3 plugin was found in the selected file.";
+        loaded.error = "No VST3 plugin was found in the selected file.";
+        return loaded;
     }
 
     juce::String errorMessage;
-    auto candidate = formatManager.createPluginInstance(*descriptions[0], sampleRate, bufferSize,
-                                                        errorMessage);
+    auto candidate = manager.createPluginInstance(*descriptions[0], sampleRate, bufferSize,
+                                                  errorMessage);
     if (candidate == nullptr) {
-        return errorMessage.isNotEmpty() ? errorMessage : "The VST3 could not be instantiated.";
+        loaded.error = errorMessage.isNotEmpty() ? errorMessage
+                                                 : "The VST3 could not be instantiated.";
+        return loaded;
     }
 
     // The host supplies one stereo audio block. Auxiliary and sidechain
     // buses must be disabled explicitly; leaving them active makes some VST3
     // processors interpret the two-channel block with the wrong bus offsets.
     if (!candidate->disableNonMainBuses()) {
-        return "The selected VST3 could not disable its auxiliary buses.";
+        loaded.error = "The selected VST3 could not disable its auxiliary buses.";
+        return loaded;
     }
 
     auto layout = candidate->getBusesLayout();
     if (layout.inputBuses.isEmpty() || layout.outputBuses.isEmpty()) {
-        return "The selected plugin is not an audio effect with input and output buses.";
+        loaded.error = "The selected plugin is not an audio effect with input and output buses.";
+        return loaded;
     }
 
     layout.inputBuses.getReference(0) = juce::AudioChannelSet::stereo();
     layout.outputBuses.getReference(0) = juce::AudioChannelSet::stereo();
     if (!candidate->setBusesLayout(layout)) {
-        return "The selected plugin does not support stereo input and output.";
+        loaded.error = "The selected plugin does not support stereo input and output.";
+        return loaded;
     }
 
     candidate->setRateAndBufferSizeDetails(sampleRate, bufferSize);
@@ -217,18 +261,26 @@ juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& 
             candidate->setStateInformation(state.getData(), (int) state.getSize());
         }
     }
-    candidate->prepareToPlay(sampleRate, bufferSize);
 
+    loaded.name = candidate->getName();
+    loaded.instance = std::move(candidate);
+    return loaded;
+}
+
+void PluginHost::adopt(const LoadedPlugin& loaded) {
+    if (loaded.instance == nullptr) return;
     const juce::ScopedLock lock(pluginLock);
     if (plugin != nullptr) {
         plugin->releaseResources();
     }
-    pluginPath = file.getFullPathName();
-    pluginName = candidate->getName();
-    plugin = std::move(candidate);
+    pluginPath = loaded.path;
+    pluginName = loaded.name;
+    plugin = loaded.instance;
+    // prepareToPlay runs here, on the message thread: some plugins synchronise
+    // with it (see AudioEngine's device-open comment).
+    plugin->prepareToPlay(currentSampleRate, currentBufferSize);
     prepared = true;
     cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
-    return {};
 }
 
 void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {

@@ -97,4 +97,9 @@ target_link_libraries(pluginrack_app PRIVATE
 if(MSVC)
     target_compile_options(pluginrack_app PRIVATE /W4 /WX)
     target_compile_options(pluginrack_app PRIVATE /utf-8)
+    # Keep symbols in every configuration: a crash report only names the module
+    # and a code offset, and resolving it needs the matching PDB. The build
+    # script copies PluginRack.pdb next to the exe.
+    target_compile_options(pluginrack_app PRIVATE /Zi)
+    target_link_options(pluginrack_app PRIVATE /DEBUG)
 endif()

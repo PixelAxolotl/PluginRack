@@ -155,11 +155,12 @@ is written on exit.
 
 | Symptom | What to do |
 |---|---|
-| Toolbar says `Starting audio...` for a long time | Wait for the endpoint probe; the window is usable. A USB device can take ~16 s. |
-| A device is silent or disappeared | Open Settings, tick that device, and press **Reload All Audio Devices**. With **Auto-reload checked devices on error** on, checked devices reopen themselves. |
-| New buffer size is rejected | The app restores the previous size and shows the driver's reason in an alert. |
-| Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared low-latency is the default. |
+| Toolbar says `Starting audio...` for a long time | Wait for the endpoint probe; the window is usable and the text names the endpoint. A USB device can take ~16 s. Each endpoint is tried once, so it ends as soon as that probe returns. |
+| A device is silent or disappeared | Open Settings, tick that device, and press **Reload All Audio Devices**. With **Auto-reload checked devices on error** on, checked devices are reopened (one attempt each). |
+| New buffer size is rejected | That device keeps its previous stream and the alert shows the driver's reason. |
+| Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared WASAPI is the default. |
 | Round-trip measurement fails | Connect a physical cable from the clock output to the input chosen in **Listen on**; the app reports "No return" otherwise. |
+| The app crashed | The reason is written to `%APPDATA%\PluginRack\logs`: `PluginRack.log` has the run milestones and `crash-<time>.txt` has the fault address and a backtrace. Keep `PluginRack.pdb` next to the exe and run `llvm-symbolizer --obj=PluginRack.exe 0x<address>` to get the function and line. |
 
 ## Development
 
@@ -252,13 +253,17 @@ USB drivers answer each format check slowly.
 
 On the development machine two USB endpoints take about **16 seconds each** in
 that probe; other devices take well under a second. Independent outputs and
-captures are opened concurrently, so the first pass is bounded by roughly the
-slowest endpoint rather than the sum of all probes. The UI stays responsive and
-shows progress; only an unusual clock sample-rate fallback causes a second pass.
-The first output is the clock, so the main output can appear to be the slowest;
-when exclusive mode was explicitly enabled, it also runs the more expensive
-exclusive format probe. New/default sessions open it in stable shared mode
-instead; exclusive mode requires an explicit opt-in.
+captures are opened concurrently, so startup is bounded by roughly the slowest
+single endpoint rather than the sum of all probes. The toolbar names the
+endpoint being probed (`Starting audio... 2/3  input "Ch 1" - USB Audio`), so a
+slow driver is visible instead of looking like a hang.
+
+Each endpoint is attempted **exactly once**. There is no device-type fallback
+chain, no default-rate retry, and no second pass: if an endpoint refuses, its
+stream stays closed and silent, the strip goes red, and the message names the
+strip, the endpoint and the driver error. The first output is the clock, so if
+it cannot be opened nothing can play and the message says so. Exclusive mode
+adds its more expensive format probe and is only used when explicitly enabled.
 Reloading a single device avoids paying that cost for every stream.
 
 This is a JUCE backend characteristic, not a hang. If it becomes a problem, the
@@ -272,10 +277,17 @@ working device mode per endpoint, or using ASIO where a driver exists.
 - The UI must never wait on the audio thread. Device opens run on the background
   opener (`openStripsDevicesAsync` / `applyDeviceSettings`) and are guarded by
   `openingDevices_`; structural mutators must respect that guard.
+- **Never read `inputDeviceName` / `outputDeviceName` / `inputError` /
+  `outputError` from a view.** The opener assigns those `juce::String`s on its
+  worker thread; copying one while it is being reassigned reads a torn
+  `StringHolder` pointer and crashes inside `String::operator=`. Views use the
+  locked snapshots `getChannelDeviceState()`, `getOutputDeviceState()`,
+  `getDeviceErrors()` and `getAssignedInputDeviceNames()`.
 - Device streams are replaced only after a successful open. A failed open keeps
   the previous playback/capture, which is what makes Apply and device reloads
   safe to try.
-- MSVC builds use `/W4 /WX`; keep new code warning-clean.
+- MSVC builds use `/W4 /WX`; keep new code warning-clean. Every build also emits
+  `PluginRack.pdb` next to the exe so a crash offset can be symbolized.
 - Add core behavior tests next to the existing Catch2 cases. The source-invariant
   tests in `tests/test_underrun_paths.cpp` protect the audio-path wiring.
 - Scenes are schema-versioned. Bump `kSchemaVersion` and read new fields with
