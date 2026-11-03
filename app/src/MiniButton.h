@@ -20,6 +20,11 @@ public:
         repaint();
     }
     bool getToggleState() const { return on; }
+    void setLabel(juce::String newLabel) {
+        if (label == newLabel) return;
+        label = std::move(newLabel);
+        repaint();
+    }
     void setClickAction(std::function<void()> action) { clickAction = std::move(action); }
     void setEnabledState(bool state) { active = state; repaint(); }
     void setFontSize(float size) { fontSize = size; repaint(); }

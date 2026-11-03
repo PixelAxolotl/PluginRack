@@ -135,6 +135,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     levelKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     levelKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(levelKnob);
+    levelKnob.setName("Trim");
 
     panLabel.setText("PAN", juce::dontSendNotification);
     panLabel.setJustificationType(juce::Justification::centred);
@@ -156,6 +157,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     panKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     panKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(panKnob);
+    panKnob.setName("Pan");
 
     rebuildRoutingButtons();
 
@@ -175,6 +177,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     faderSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     faderSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(faderSlider);
+    faderSlider.setName("Gain");
 
     addAndMakeVisible(levelMeter);
 
@@ -432,6 +435,9 @@ void ChannelStrip::resized() {
     removeChannelButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
     actionsRow.removeFromRight(2);
     splitButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    dragHandleBounds = dragHandleVisible
+                           ? actionsRow.removeFromLeft(theme::metrics::kActionH)
+                           : juce::Rectangle<int>();
     area.removeFromTop(2);
     deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
@@ -822,6 +828,7 @@ void ChannelStrip::paint(juce::Graphics& g) {
     // border
     g.setColour(theme::border());
     g.drawRect(getLocalBounds(), 1);
+    paintDragHandle(g);
     if (chainDropTarget >= 0) {
         g.setColour(theme::cyan());
         g.fillRoundedRectangle(4.0f, static_cast<float>(chainBoundaryY(chainDropTarget)),
@@ -829,8 +836,53 @@ void ChannelStrip::paint(juce::Graphics& g) {
     }
 }
 
-void ChannelStrip::mouseDown(const juce::MouseEvent&) {
+void ChannelStrip::setDragHandleVisible(bool visible) {
+    if (dragHandleVisible == visible) return;
+    dragHandleVisible = visible;
+    draggingHandle = false;
+    resized();
+    repaint();
+}
+
+void ChannelStrip::paintDragHandle(juce::Graphics& g) const {
+    if (!dragHandleVisible || dragHandleBounds.isEmpty()) return;
+    g.setColour(draggingHandle ? theme::cyan() : theme::dim().withAlpha(0.65f));
+    const auto centre = dragHandleBounds.toFloat().getCentre();
+    // Two columns of three dots: the usual "grab me to reorder" grip.
+    for (int row = -1; row <= 1; ++row) {
+        for (int column = 0; column <= 1; ++column) {
+            g.fillEllipse(centre.x - 2.5f + static_cast<float>(column) * 4.0f,
+                          centre.y - 3.0f + static_cast<float>(row) * 3.0f, 2.0f, 2.0f);
+        }
+    }
+}
+
+void ChannelStrip::mouseDown(const juce::MouseEvent& e) {
     if (onSelected) onSelected();
+    if (dragHandleVisible && e.mods.isLeftButtonDown()
+        && dragHandleBounds.contains(e.getPosition())) {
+        draggingHandle = true;
+        repaint();
+        if (onDragHandleStarted) onDragHandleStarted();
+    }
+}
+
+void ChannelStrip::mouseDrag(const juce::MouseEvent& e) {
+    if (!draggingHandle) return;
+    if (onDragHandleMoved) onDragHandleMoved(e.getScreenPosition());
+}
+
+void ChannelStrip::mouseUp(const juce::MouseEvent&) {
+    if (!draggingHandle) return;
+    draggingHandle = false;
+    repaint();
+    if (onDragHandleFinished) onDragHandleFinished();
+}
+
+void ChannelStrip::mouseMove(const juce::MouseEvent& e) {
+    setMouseCursor(dragHandleVisible && dragHandleBounds.contains(e.getPosition())
+                       ? juce::MouseCursor::DraggingHandCursor
+                       : juce::MouseCursor::NormalCursor);
 }
 
 void ChannelStrip::mouseDoubleClick(const juce::MouseEvent&) {

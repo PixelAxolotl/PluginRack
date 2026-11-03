@@ -48,6 +48,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
         else if (auto* out = currentOutput()) audioEngine.setOutputGain(out->id, v);
     };
     addAndMakeVisible(gainSlider);
+    gainSlider.setName("Gain");
 
     trimCaption.setText("Trim", juce::dontSendNotification);
     trimCaption.setJustificationType(juce::Justification::centred);
@@ -69,6 +70,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
             audioEngine.setChannelTrim(ch->id, static_cast<float>(trimKnob.getValue()));
     };
     addAndMakeVisible(trimKnob);
+    trimKnob.setName("Trim");
 
     panCaption.setText("Pan", juce::dontSendNotification);
     panCaption.setJustificationType(juce::Justification::centred);
@@ -89,6 +91,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
             audioEngine.setChannelPan(ch->id, static_cast<float>(panSlider.getValue()));
     };
     addAndMakeVisible(panSlider);
+    panSlider.setName("Pan");
 
     for (auto* b : {&muteButton, &soloButton}) {
         b->setClickingTogglesState(true);
@@ -261,6 +264,8 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     emptyLabel.setColour(juce::Label::textColourId, theme::dim());
     emptyLabel.setVisible(false);
     addAndMakeVisible(emptyLabel);
+
+    addAndMakeVisible(touchBar);
 
     tapLeft.assign(static_cast<std::size_t>(MiniSpectrum::kFftSize), 0.0f);
     tapRight.assign(static_cast<std::size_t>(MiniSpectrum::kFftSize), 0.0f);
@@ -891,6 +896,11 @@ void RackView::refreshEditor() {
         return;
     }
 
+    // Knobs turned inside the plugin's own window become the touch strip's
+    // target (the plugin reports the parameter change; the click itself never
+    // reaches JUCE). Re-armed below after any closeDockedEditor() call.
+    auto* pluginInstance = focus->pluginHost.getInstance();
+
     // Already docked for this insert: reuse the live editor (it may only be
     // hidden behind an EQ/dynamics panel) instead of rebuilding the VST UI.
     if (dockedEditor != nullptr && dockedHost == &focus->pluginHost) {
@@ -899,6 +909,7 @@ void RackView::refreshEditor() {
         if (dockedEditor->getParentComponent() != &editorHolder)
             editorHolder.addAndMakeVisible(dockedEditor);
         dockedEditor->setVisible(true);
+        knobWatcher.setPlugin(pluginInstance);
         resized();
         return;
     }
@@ -909,10 +920,13 @@ void RackView::refreshEditor() {
     dockedEditor = dockedHost->createEditorForDock();
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
-        noEditorLabel.setText("No GUI - generic sliders", juce::dontSendNotification);
+        // No GUI: there is nothing to dock or touch (the card still shows the
+        // plugin's name and its bypass switch).
+        noEditorLabel.setText("This plugin has no editor", juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(true);
         noEditorBypass.setToggleState(focus->bypassed.get(), juce::dontSendNotification);
+        knobWatcher.setPlugin(pluginInstance);
         resized();
         return;
     }
@@ -924,10 +938,14 @@ void RackView::refreshEditor() {
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
     editorHolder.addAndMakeVisible(dockedEditor);
+    knobWatcher.setPlugin(pluginInstance);
     resized();
 }
 
 void RackView::closeDockedEditor() {
+    // The knob watcher reads the processor directly: drop it before the insert
+    // (and with it the processor) can be destroyed.
+    knobWatcher.clear();
     thumbnailWorker.clearRequest();
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
@@ -1389,6 +1407,7 @@ void RackView::rebuild() {
     ensureSelection();
     const bool hasChain = selectedId >= 0;
     emptyLabel.setVisible(!hasChain);
+    touchBar.setVisible(hasChain);
 
     nameLabel.setVisible(hasChain);
     subLabel.setVisible(hasChain);
@@ -1441,15 +1460,20 @@ void RackView::resized() {
     const int leftW = 160;
     const int pluginW = 220;
     const int rightW = 110;
+    const int touchW = 64;
     const int gap = 8;
 
     auto leftArea = area.removeFromLeft(leftW);
     area.removeFromLeft(gap);
     auto rightArea = area.removeFromRight(rightW);
     area.removeFromRight(gap);
+    auto touchArea = area.removeFromRight(touchW);
+    area.removeFromRight(gap);
     auto pluginArea = area.removeFromLeft(pluginW);
     area.removeFromLeft(gap);
     auto centerArea = area;
+
+    touchBar.setBounds(touchArea);
 
     // left column
     auto la = leftArea.reduced(4);
@@ -1598,10 +1622,13 @@ void RackView::paint(juce::Graphics& g) {
     const int leftW = 160;
     const int pluginW = 220;
     const int rightW = 110;
+    const int touchW = 64;
     const int gap = 8;
     auto leftArea = area.removeFromLeft(leftW);
     area.removeFromLeft(gap);
     auto rightArea = area.removeFromRight(rightW);
+    area.removeFromRight(gap);
+    auto touchArea = area.removeFromRight(touchW);
     area.removeFromRight(gap);
     auto pluginArea = area.removeFromLeft(pluginW);
     area.removeFromLeft(gap);
@@ -1616,6 +1643,9 @@ void RackView::paint(juce::Graphics& g) {
     drawPanel(pluginArea, theme::panel(), theme::border());
     drawPanel(centerArea, theme::bg().darker(0.16f), theme::line().withAlpha(0.8f));
     drawPanel(rightArea, theme::panel().darker(0.08f), theme::border());
+    // The touch strip paints its own panel; this keeps the column framed if it
+    // is ever hidden (no chain selected).
+    drawPanel(touchArea, theme::panel().darker(0.08f), theme::border());
 
     theme::ui::drawSectionCaption(g, { leftArea.getX() + 8, leftArea.getY() + 4, 70, 12 }, "INPUT");
     theme::ui::drawSectionCaption(g, { pluginArea.getX() + 8, pluginArea.getY() + 4, 80, 12 }, "INSERTS");

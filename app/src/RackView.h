@@ -15,7 +15,10 @@
 #include "InsertMiniView.h"
 #include "LevelMeter.h"
 #include "NativeThumbnail.h"
+#include "PluginKnobWatcher.h"
 #include "Theme.h"
+#include "TouchSlideBar.h"
+#include "ValueEditSlider.h"
 
 // Channel-centric rack view: 4 columns - channel strip | insert chain (EQ + VSTs)
 // | docked plugin editor | output routing. Reuses Mixer fader/meter/EqButton/slots.
@@ -129,12 +132,12 @@ private:
     juce::Label nameLabel;
     juce::Label subLabel;
     juce::Label gainCaption;
-    juce::Slider gainSlider;   // vertical
+    ValueEditSlider gainSlider;   // vertical
     juce::Label trimCaption;
-    juce::Slider trimKnob;     // gain/trim rotary
+    ValueEditSlider trimKnob;     // gain/trim rotary
     std::unique_ptr<LevelMeter> meter;
     juce::Label panCaption;
-    juce::Slider panSlider;    // rotary
+    ValueEditSlider panSlider;    // rotary
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
     juce::TextButton mixerButton{"Mixer"};
@@ -186,6 +189,12 @@ private:
     // Right output routing
     juce::Label outputHeader;
     juce::OwnedArray<juce::TextButton> outputButtons;
+
+    // Far-right touch surface: drives whichever dial was touched last.
+    TouchSlideBar touchBar;
+
+    // Makes a knob turned inside the VST's own window the strip's target.
+    PluginKnobWatcher knobWatcher;
 
     // Docked editor
     juce::AudioProcessorEditor* dockedEditor = nullptr;

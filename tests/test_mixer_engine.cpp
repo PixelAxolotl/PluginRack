@@ -473,7 +473,7 @@ TEST_CASE("mixer +6dB peak at 1k boosts 1k sine approx 2x") {
     REQUIRE(referencePeak > 0.1f);
 
     scene.channels[0].eqEnabled = true;
-    scene.channels[0].eqBands = pluginrack::defaultSixBands();
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f; // the 1 kHz peak band
     pluginrack::MixerEngine boosted = prepareEngine(scene);
     const float boostedPeak = sineOutputPeak(boosted);
@@ -486,7 +486,7 @@ TEST_CASE("mixer setChannelEq applies bands live and ignores bad indexes") {
     scene.channels[0].eqEnabled = true;
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
-    auto bands = pluginrack::defaultSixBands();
+    auto bands = pluginrack::defaultEqBands();
     bands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
     engine.setChannelEq(99, bands);
@@ -502,7 +502,7 @@ TEST_CASE("mixer setOutputEq boosts the summed bus") {
     scene.outputs[0].eqEnabled = true;
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
-    auto bands = pluginrack::defaultSixBands();
+    auto bands = pluginrack::defaultEqBands();
     bands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
     engine.setOutputEq(99, bands);
@@ -516,7 +516,7 @@ TEST_CASE("mixer setOutputEq boosts the summed bus") {
 TEST_CASE("mixer render with active eq allocates nothing") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
-    scene.channels[0].eqBands = pluginrack::defaultSixBands();
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f;
     scene.outputs[0].eqEnabled = true;
 
@@ -613,7 +613,7 @@ TEST_CASE("mixer setChannelEqBypassed gates the eq live without re-prepare") {
 
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
-    scene.channels[0].eqBands = pluginrack::defaultSixBands();
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
 
@@ -634,7 +634,7 @@ TEST_CASE("mixer setOutputEqBypassed gates the output eq") {
 
     pluginrack::Scene scene = eqTestScene();
     scene.outputs[0].eqEnabled = true;
-    scene.outputs[0].eqBands = pluginrack::defaultSixBands();
+    scene.outputs[0].eqBands = pluginrack::defaultEqBands();
     scene.outputs[0].eqBands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
 

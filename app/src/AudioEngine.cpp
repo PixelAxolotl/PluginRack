@@ -593,6 +593,36 @@ void AudioEngine::removeChannel(std::uint32_t channelId) {
     pruneUnusedCaptures();
 }
 
+void AudioEngine::moveChannel(std::uint32_t channelId, int targetIndex) {
+    const juce::ScopedLock lock(stateLock);
+    const auto it = std::find_if(channels.begin(), channels.end(),
+                                 [channelId](const auto& channel) {
+                                     return channel->id == channelId;
+                                 });
+    if (it == channels.end()) return;
+    const int currentIndex = static_cast<int>(std::distance(channels.begin(), it));
+    const int index = juce::jlimit(0, static_cast<int>(channels.size()) - 1, targetIndex);
+    if (index == currentIndex) return;
+    auto moved = std::move(*it);
+    channels.erase(it);
+    channels.insert(channels.begin() + index, std::move(moved));
+}
+
+void AudioEngine::moveOutput(std::uint32_t outputId, int targetIndex) {
+    const juce::ScopedLock lock(stateLock);
+    const auto it = std::find_if(outputs.begin(), outputs.end(),
+                                 [outputId](const auto& output) {
+                                     return output->id == outputId;
+                                 });
+    if (it == outputs.end()) return;
+    const int currentIndex = static_cast<int>(std::distance(outputs.begin(), it));
+    const int index = juce::jlimit(0, static_cast<int>(outputs.size()) - 1, targetIndex);
+    if (index == currentIndex) return;
+    auto moved = std::move(*it);
+    outputs.erase(it);
+    outputs.insert(outputs.begin() + index, std::move(moved));
+}
+
 void AudioEngine::addChannel() {
     if (isOpeningDevices()) return;
     const juce::ScopedLock lock(stateLock);
