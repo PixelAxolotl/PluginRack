@@ -307,6 +307,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     const int maxDelay = juce::jmax(0, capacity - blockFrames - 2);
     const int delay = juce::jlimit(0, maxDelay, blockFrames * juce::jmax(1, readDelayBlocks));
     readDelaySamples.store(delay, std::memory_order_relaxed);
+    initialReadDelay_.store(delay, std::memory_order_relaxed);
     readCursor.prepare(capacity, delay, 0.005);
     lastPlayed_[0] = 0.0f;
     lastPlayed_[1] = 0.0f;
@@ -341,6 +342,7 @@ void InputCapture::close() {
     lastUnderrunEpoch_ = 0;
     fadeInEpoch_ = 0;
     readDelaySamples.store(0, std::memory_order_relaxed);
+    initialReadDelay_.store(0, std::memory_order_relaxed);
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
@@ -382,10 +384,15 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
         // input clock can drift or arrive late. Add one render block only
         // after a real starvation, preserving the low setting while stable
         // and recovering to the normal safety margin when it is not.
+        // Back off at most once: a single real starvation adds one render
+        // block of safety margin. Repeated underruns (e.g. during a device
+        // reload) must not keep growing the delay into an unreasonable
+        // amount, so once we have backed off beyond the initial delay we stop.
         const int currentDelay = readDelaySamples.load(std::memory_order_relaxed);
+        const int baseDelay = initialReadDelay_.load(std::memory_order_relaxed);
         const int maxDelay = juce::jmax(0, capacity - frames - 2);
         const int nextDelay = juce::jmin(maxDelay, currentDelay + frames);
-        if (nextDelay > currentDelay) {
+        if (nextDelay > currentDelay && currentDelay <= baseDelay) {
             readDelaySamples.store(nextDelay, std::memory_order_relaxed);
             readCursor.setTargetDelay(nextDelay);
         }
@@ -748,7 +755,7 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
 void OutputPlayback::pushSilence(int frames) {
     if (frames <= 0) return;
     const juce::SpinLock::ScopedTryLockType lock(fifoLock);
-    if (!lock.isLocked() || fifo == nullptr) return;
+    if (!lock.isLocked() || fifo == nullptr || capacity <= 0) return;
     // Only top the FIFO back up to its target. A single missed render is
     // already covered by the buffered audio; inserting silence on top of a
     // full FIFO would both delay the dropout and spam the dropped-frame

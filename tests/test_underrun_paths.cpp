@@ -142,6 +142,15 @@ TEST_CASE("input read delay ignores the probe capacity reserve", "[underrun][lat
                    "kProbeRenderBlockFrames)"));
 }
 
+TEST_CASE("input read delay does not accumulate across repeated underruns", "[underrun][latency]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto body = functionBody(source, "bool InputCapture::pull");
+    // Backoff must be gated on the initial delay so repeated underruns during
+    // a device reload cannot grow the delay without bound.
+    CHECK(contains(body, "const int baseDelay = initialReadDelay_.load"));
+    CHECK(contains(body, "if (nextDelay > currentDelay && currentDelay <= baseDelay)"));
+}
+
 TEST_CASE("low-latency input backs off only after a real starvation", "[underrun][latency]") {
     const auto source = readSource("app/src/DeviceStream.cpp");
     const auto body = functionBody(source, "bool InputCapture::pull");
