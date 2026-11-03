@@ -25,7 +25,7 @@ constexpr float kMinEqQ = 0.1f;
 constexpr float kMaxEqQ = 20.0f;
 constexpr float kMinEqDelayMs = 0.0f;
 constexpr float kMaxEqDelayMs = 1000.0f;
-constexpr std::size_t kMaxEqBands = 6;
+constexpr std::size_t kMaxEqBands = 7;
 constexpr std::size_t kMaxEffects = 4;
 constexpr float kMinDynamicsMakeupDb = -24.0f;
 constexpr float kMaxDynamicsMakeupDb = 24.0f;
@@ -73,7 +73,7 @@ void validateEqBands(const char* kind, std::uint32_t id, const std::vector<EqBan
     if (bands.size() > kMaxEqBands) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                           std::string(kind) + " " + std::to_string(id) + " eqBands has " +
-                              std::to_string(bands.size()) + " bands, expected at most 6"});
+                              std::to_string(bands.size()) + " bands, expected at most 7"});
     }
     for (std::size_t i = 0; i < bands.size(); ++i) {
         const EqBand& band = bands[i];

@@ -14,6 +14,7 @@
 #include "LevelMeter.h"
 #include "MiniButton.h"
 #include "Theme.h"
+#include "ValueEditSlider.h"
 
 class MixerComponent final : public juce::Component {
 public:
@@ -85,10 +86,26 @@ private:
 
         void mouseDown(const juce::MouseEvent&) override;
         void mouseDoubleClick(const juce::MouseEvent&) override;
+        void mouseDrag(const juce::MouseEvent&) override;
+        void mouseUp(const juce::MouseEvent&) override;
+        void mouseMove(const juce::MouseEvent&) override;
+
+        // Output reordering: the top-left grip reports the drag in screen space
+        // and the board maps it to an insertion index, exactly like the input
+        // strips' handle.
+        void setDragHandleVisible(bool visible);
+        std::function<void()> onDragHandleStarted;
+        std::function<void(juce::Point<int> screenPosition)> onDragHandleMoved;
+        std::function<void()> onDragHandleFinished;
 
     private:
         void refreshInserts();
         int chainBoundaryY(int targetIndex) const;
+        void paintDragHandle(juce::Graphics& g) const;
+
+        juce::Rectangle<int> dragHandleBounds;
+        bool dragHandleVisible = false;
+        bool draggingHandle = false;
 
         AudioEngine::Output& output;
         int outputIndex = 0;
@@ -102,7 +119,7 @@ private:
         int chainRowCount = 0;
         juce::Label vstHeader{"", "VST RACK"};
         std::unique_ptr<juce::FileChooser> fileChooser;
-        juce::Slider gainSlider;
+        ValueEditSlider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
         EqButton gateButton{"GATE"};
@@ -116,6 +133,25 @@ private:
     void rebuildOutputStrips();
     void layoutChannelStrips(juce::Rectangle<int> viewportBounds);
     void layoutOutputStrips(juce::Rectangle<int> panelBounds);
+    void updateChannelDrag(juce::Point<int> screenPosition);
+    void finishChannelDrag(std::uint32_t channelId, int sourceIndex);
+    void updateOutputDrag(juce::Point<int> screenPosition);
+    void finishOutputDrag(std::uint32_t outputId, int sourceIndex);
+    // Boundary index (0..count) in the pre-move list -> the index the engine
+    // inserts at after removal. Dropping to the right of the dragged strip's
+    // own slot shifts by one.
+    static int moveTargetIndex(int insertionIndex, int sourceIndex, int count);
+    // X of the light-blue insertion bar for a boundary, always inside the
+    // gutter so the neighbouring strips cannot paint over it.
+    static float insertionBarX(int insertionIndex, int inset, int step, int gap);
+
+    // Hosts the strips and paints the light-blue insertion bar while one is
+    // dragged by its handle (same marker vocabulary as the VST chain drag).
+    class StripLane final : public juce::Component {
+    public:
+        void paint(juce::Graphics& g) override;
+        float dropMarkerX = -1.0f;
+    };
 
     AudioEngine& audioEngine;
     Sections sections_ = Sections::Both;
@@ -123,13 +159,15 @@ private:
     juce::TextButton addOutputButton{"+ Out"};
     juce::Label inputHeader{"", "INPUTS"};
     juce::Viewport channelViewport;
-    juce::Component stripContent;
+    StripLane stripContent;
+    int channelInsertIndex = -1;
     juce::OwnedArray<ChannelStrip> strips;
 
     juce::Component masterPanel;
     juce::Label masterHeader{"", "OUTPUTS"};
     juce::Viewport masterViewport;
-    juce::Component masterContent;
+    StripLane masterContent;
+    int outputInsertIndex = -1;
     juce::OwnedArray<OutputStrip> outputStrips;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixerComponent)

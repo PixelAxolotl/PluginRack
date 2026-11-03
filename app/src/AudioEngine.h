@@ -94,7 +94,7 @@ public:
         // mirroring core's EqState mutex; eqBypassed/eqDirty are atomics so the
         // UI can read them without the lock.
         pluginrack::EqEngine eq;
-        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultEqBands()};
         // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
         // like eqBands, mirrored into eq via setDelayMs under stateLock.
         float eqDelayMs = 0.0f;
@@ -140,7 +140,7 @@ public:
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
-        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultSixBands()};
+        std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultEqBands()};
         float eqDelayMs = 0.0f; // post-EQ delay, same rules as Channel
         float eqRtaOffsetDb = 0.0f; // RTA display offset, same rules as Channel
         int eqRtaWeighting = 0;     // analyzer weighting, same rules as Channel
@@ -320,6 +320,15 @@ public:
 
     void addChannel();
     void removeChannel(std::uint32_t channelId);
+    // Moves a channel to scene-order position targetIndex (clamped). The mixer's
+    // drag handle calls this; the engine order is what scenes save, so the new
+    // arrangement survives a save/load. Channel objects never move in memory
+    // (only the owning unique_ptrs do), so strips' Channel& stays valid.
+    void moveChannel(std::uint32_t channelId, int targetIndex);
+    // Output-side twin of moveChannel: the mixer's output strips reorder with
+    // the same handle. Routes and EQ windows address outputs by id/scene-order,
+    // so a move only reshuffles the scene order.
+    void moveOutput(std::uint32_t outputId, int targetIndex);
     void addOutput();
     juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);

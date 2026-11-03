@@ -50,7 +50,7 @@ struct Channel {
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     std::vector<ChainItem> chain;
     bool eqEnabled = false;
-    std::vector<EqBand> eqBands = defaultSixBands();
+    std::vector<EqBand> eqBands = defaultEqBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
     // chain undelayed. Like the bands it only runs while eqEnabled.
     float eqDelayMs = 0.0f;
@@ -77,7 +77,7 @@ struct Output {
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     std::vector<ChainItem> chain;
     bool eqEnabled = false;
-    std::vector<EqBand> eqBands = defaultSixBands();
+    std::vector<EqBand> eqBands = defaultEqBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
     // chain undelayed. Like the bands it only runs while eqEnabled.
     float eqDelayMs = 0.0f;

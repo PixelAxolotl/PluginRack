@@ -14,13 +14,26 @@ EQWindow::EQWindow(const juce::String& title,
       embedded(embeddedMode) {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
+    // A draggable window turns every press on the panel's background into a
+    // window move: clicking near the curve's edge threw the editor across the
+    // screen instead of editing. The title bar still moves it.
+    setDraggable(false);
     // Width floor leaves room for the four knob slots (Freq/Gain/Q/Delay)
     // with their 72 px value boxes intact.
     setResizeLimits(480, 320, 10000, 10000);
     setColour(juce::DocumentWindow::backgroundColourId, theme::bg());
 
     curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
-    curve.setBands(initialBands);
+    // Scenes written before the EQ gained its low-pass point carry six bands;
+    // pad with the factory points so the HPF/LPF switches always have a point
+    // to drive (and so the curve always shows the full set).
+    {
+        auto bands = initialBands;
+        const auto defaults = pluginrack::defaultEqBands();
+        for (std::size_t i = bands.size(); i < defaults.size(); ++i)
+            bands.push_back(defaults[i]);
+        curve.setBands(bands);
+    }
     curve.onBandsChanged = [this] {
         if (applyBands) applyBands(curve.getBands());
         syncControls(); // node drag moved freq/gain: keep knobs in step
@@ -44,9 +57,7 @@ EQWindow::EQWindow(const juce::String& title,
         const int sel = curve.getSelectedBand();
         if (sel < 0 || sel >= static_cast<int>(bands.size())) return;
         bands[static_cast<std::size_t>(sel)].enabled = !bands[static_cast<std::size_t>(sel)].enabled;
-        curve.setBands(bands);
-        bypassButton.setToggleState(!bands[static_cast<std::size_t>(sel)].enabled);
-        if (applyBands) applyBands(curve.getBands());
+        commitBands(std::move(bands));
     });
     Component::addAndMakeVisible(bypassButton);
 
@@ -56,11 +67,25 @@ EQWindow::EQWindow(const juce::String& title,
         const int sel = curve.getSelectedBand();
         if (sel < 0 || sel >= static_cast<int>(bands.size())) return;
         bands[static_cast<std::size_t>(sel)].solo = !bands[static_cast<std::size_t>(sel)].solo;
-        curve.setBands(bands);
-        soloButton.setToggleState(bands[static_cast<std::size_t>(sel)].solo);
-        if (applyBands) applyBands(curve.getBands());
+        commitBands(std::move(bands));
     });
     Component::addAndMakeVisible(soloButton);
+
+    // Bottom-left switches: the selected point's mode (bell vs shelf) and the
+    // two filter points. The HPF/LPF switches force their point's type, so a
+    // stray toggle can never leave the outer points without a filter.
+    bandTypeButton.setFontSize(9.0f);
+    bandTypeButton.setTooltip("Switch the selected point between bell (band) and shelf");
+    bandTypeButton.setClickAction([this] { toggleBandType(); });
+    Component::addAndMakeVisible(bandTypeButton);
+    hpfButton.setFontSize(9.0f);
+    hpfButton.setTooltip("Enable or bypass the low-cut (high-pass) point");
+    hpfButton.setClickAction([this] { toggleFilterBand(0); });
+    Component::addAndMakeVisible(hpfButton);
+    lpfButton.setFontSize(9.0f);
+    lpfButton.setTooltip("Enable or bypass the high-cut (low-pass) point");
+    lpfButton.setClickAction([this] { toggleFilterBand(kLowPassBandIndex); });
+    Component::addAndMakeVisible(lpfButton);
 
     for (auto* label : { &freqLabel, &gainLabel, &qLabel, &delayLabel }) {
         label->setJustificationType(juce::Justification::centred);
@@ -74,13 +99,18 @@ EQWindow::EQWindow(const juce::String& title,
     freqKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     freqKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
     freqKnob.setRange(EQCurveComponent::kMinFreqHz, EQCurveComponent::kMaxFreqHz);
+    // Double-click (and the rack strip's reset) return the point to 1 kHz.
+    freqKnob.setDoubleClickReturnValue(true, 1000.0);
     freqKnob.setSkewFactorFromMidPoint(1000.0);
     freqKnob.textFromValueFunction = [](double hz) {
         return hz >= 1000.0 ? juce::String(hz / 1000.0, 2) + " kHz"
                             : juce::String(hz, 0) + " Hz";
     };
     freqKnob.valueFromTextFunction = [](const juce::String& text) {
-        const double hz = text.getDoubleValue();
+        // The box shows "1.20 kHz", so accept both spellings of the unit.
+        const auto trimmed = text.trim().toLowerCase();
+        double hz = trimmed.getDoubleValue();
+        if (trimmed.contains("khz") || trimmed.endsWithChar('k')) hz *= 1000.0;
         return juce::jlimit(static_cast<double>(EQCurveComponent::kMinFreqHz),
                             static_cast<double>(EQCurveComponent::kMaxFreqHz), hz);
     };
@@ -91,6 +121,7 @@ EQWindow::EQWindow(const juce::String& title,
     freqKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     freqKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(freqKnob);
+    freqKnob.setName("Freq");
 
     gainKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     gainKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
@@ -104,6 +135,7 @@ EQWindow::EQWindow(const juce::String& title,
     gainKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     gainKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(gainKnob);
+    gainKnob.setName("Gain");
 
     qKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
     qKnob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
@@ -123,6 +155,7 @@ EQWindow::EQWindow(const juce::String& title,
     qKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     qKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(qKnob);
+    qKnob.setName("Q");
 
     // Per-EQ delay (not per band): 0-1000 ms with a skew that gives the
     // short, alignment-relevant range most of the rotation. Editing engages
@@ -147,6 +180,7 @@ EQWindow::EQWindow(const juce::String& title,
     delayKnob.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     delayKnob.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     Component::addAndMakeVisible(delayKnob);
+    delayKnob.setName("Delay");
 
     syncControls();
 
@@ -337,6 +371,40 @@ void EQWindow::applyDelayFromControl() {
     if (applyDelayMs) applyDelayMs(static_cast<float>(delayKnob.getValue()));
 }
 
+void EQWindow::commitBands(std::vector<pluginrack::EqBand> bands) {
+    curve.setBands(bands);
+    syncControls();
+    if (applyBands) applyBands(curve.getBands());
+}
+
+void EQWindow::toggleBandType() {
+    auto bands = curve.getBands();
+    const int sel = curve.getSelectedBand();
+    if (sel < 0 || sel >= static_cast<int>(bands.size())) return;
+    pluginrack::EqBand& band = bands[static_cast<std::size_t>(sel)];
+    if (band.type == pluginrack::EqType::HighPass || band.type == pluginrack::EqType::LowPass)
+        return; // filter points: the HPF/LPF switches own their mode
+    if (band.type == pluginrack::EqType::Peak) {
+        // The shelf shapes whichever end the point sits on: below the middle of
+        // the spectrum a low shelf, above it a high shelf.
+        band.type = band.freqHz < 1000.0f ? pluginrack::EqType::LowShelf
+                                          : pluginrack::EqType::HighShelf;
+    } else {
+        band.type = pluginrack::EqType::Peak;
+    }
+    commitBands(std::move(bands));
+}
+
+void EQWindow::toggleFilterBand(int index) {
+    auto bands = curve.getBands();
+    if (index < 0 || index >= static_cast<int>(bands.size())) return;
+    pluginrack::EqBand& band = bands[static_cast<std::size_t>(index)];
+    band.type = index == 0 ? pluginrack::EqType::HighPass : pluginrack::EqType::LowPass;
+    band.enabled = !band.enabled;
+    band.gainDb = 0.0f; // filter points ignore gain: keep the node on 0 dB
+    commitBands(std::move(bands));
+}
+
 void EQWindow::setDelayMs(float delayMs) {
     delayKnob.setValue(juce::jlimit(0.0, static_cast<double>(pluginrack::EqEngine::kMaxDelayMs),
                                     static_cast<double>(delayMs)),
@@ -355,11 +423,31 @@ void EQWindow::syncControls() {
     bypassButton.setToggleState(!band.enabled);
     soloButton.setToggleState(band.solo);
 
-    // High-pass ignores gain and Q in the engine; disable knobs that would
-    // do nothing so the UI never lies about its effect.
+    // High-pass and low-pass ignore gain and Q in the engine; disable knobs
+    // that would do nothing so the UI never lies about its effect.
     const bool isHighPass = (band.type == pluginrack::EqType::HighPass);
-    gainKnob.setEnabled(!isHighPass);
-    qKnob.setEnabled(!isHighPass);
+    const bool isLowPass = (band.type == pluginrack::EqType::LowPass);
+    const bool isFilterPoint = isHighPass || isLowPass;
+    gainKnob.setEnabled(!isFilterPoint);
+    qKnob.setEnabled(!isFilterPoint);
+
+    // Point mode: a bell reads "BAND", a shelf reads "SHELF". The filter
+    // points are not switchable here (their type would stop being a filter).
+    const bool isShelf = band.type == pluginrack::EqType::LowShelf
+                      || band.type == pluginrack::EqType::HighShelf;
+    bandTypeButton.setLabel(isShelf ? "SHELF" : "BAND");
+    bandTypeButton.setToggleState(isShelf);
+    bandTypeButton.setEnabledState(!isFilterPoint);
+
+    // Filter switches always reflect the whole set, not the selection.
+    const auto& all = curve.getBands();
+    if (!all.empty())
+        hpfButton.setToggleState(all.front().type == pluginrack::EqType::HighPass
+                                 && all.front().enabled);
+    if (static_cast<int>(all.size()) > kLowPassBandIndex)
+        lpfButton.setToggleState(all[static_cast<std::size_t>(kLowPassBandIndex)].type
+                                     == pluginrack::EqType::LowPass
+                                 && all[static_cast<std::size_t>(kLowPassBandIndex)].enabled);
 }
 
 void EQWindow::closeButtonPressed() {
@@ -408,9 +496,15 @@ void EQWindow::resized() {
     curve.setBounds(area);
 
     auto left = controlsRow.removeFromLeft(84);
-    left.removeFromTop(8);
+    left.removeFromTop(6);
     left.removeFromLeft(6);
-    stereoTag.setBounds(left.removeFromTop(16));
+    bandTypeButton.setBounds(left.removeFromTop(24));
+    left.removeFromTop(4);
+    hpfButton.setBounds(left.removeFromTop(22));
+    left.removeFromTop(4);
+    lpfButton.setBounds(left.removeFromTop(22));
+    left.removeFromTop(4);
+    stereoTag.setBounds(left.removeFromTop(14));
     controlsRow.removeFromLeft(4);
 
     auto right = controlsRow.removeFromRight(80);

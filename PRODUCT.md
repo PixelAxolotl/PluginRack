@@ -56,7 +56,9 @@ Confirmed by the implementation and its design spec:
 
 - Per-strip insert chain of up to six slots, hosted in-process, ordered with built-in effects.
 - Channel processing: six-band EQ with delay, a compressor and a gate. The
-  two are presented as one `Compressor / Gate` surface. There is no limiter.
+  compressor and the gate share one `Dynamics` editor and are drawn as one
+  `Dynamics` card with a bypass switch each; the EQ keeps its own card. There
+  is no limiter.
 - Mixer controls: input trim, gain, pan, mute, solo, peak metering.
 - Many-to-many routing matrix; each channel→output cell is a send with its own
   level. Outputs can be added and removed at runtime.

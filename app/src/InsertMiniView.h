@@ -28,7 +28,8 @@ public:
 
     void showEq(const std::vector<pluginrack::EqBand>& bands, double sampleRateHz);
     void showDynamics(const pluginrack::DynamicsEffect& effect);
-    // The dynamics pair shares one card: compressor and gate on one graph.
+    // The Dynamics card carries both effects of the pair on one graph: the
+    // compressor's transfer curve and the gate's.
     void showDynamicsPair(const pluginrack::DynamicsEffect& compressor,
                           const pluginrack::DynamicsEffect& gate);
     void showVst();

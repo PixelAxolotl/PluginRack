@@ -25,7 +25,7 @@ bool paramsFinite(const EqBand& band) noexcept {
 
 } // namespace
 
-std::vector<EqBand> defaultSixBands() {
+std::vector<EqBand> defaultEqBands() {
     return {
         EqBand{EqType::HighPass, 80.0f, 0.0f, 0.707f, true, false},
         EqBand{EqType::LowShelf, 200.0f, 0.0f, 0.707f, true, false},
@@ -33,6 +33,7 @@ std::vector<EqBand> defaultSixBands() {
         EqBand{EqType::Peak, 1000.0f, 0.0f, 0.707f, true, false},
         EqBand{EqType::Peak, 3000.0f, 0.0f, 0.707f, true, false},
         EqBand{EqType::HighShelf, 8000.0f, 0.0f, 0.707f, true, false},
+        EqBand{EqType::LowPass, 12000.0f, 0.0f, 0.707f, false, false},
     };
 }
 
@@ -127,7 +128,7 @@ void EqEngine::applyDelay(float* L, float* R, int n) noexcept {
 void EqEngine::setBands(const std::vector<EqBand>& bands) {
     bands_ = bands;
     if (bands_.size() > kNumBands) {
-        bands_.resize(kNumBands); // fixed six bands; extras ignored
+        bands_.resize(kNumBands); // fixed seven bands; extras ignored
     }
     rebuild();
 }
@@ -178,6 +179,16 @@ void EqEngine::computeCoeffs(const EqBand& band, double sampleRate, Biquad& out)
         b0 = (1.0 + cosW0) * 0.5;
         b1 = -(1.0 + cosW0);
         b2 = (1.0 + cosW0) * 0.5;
+        a0 = 1.0 + alpha;
+        a1 = -2.0 * cosW0;
+        a2 = 1.0 - alpha;
+        break;
+    }
+    case EqType::LowPass: {
+        const double alpha = sinW0 / (2.0 * kButterworthQ);
+        b0 = (1.0 - cosW0) * 0.5;
+        b1 = 1.0 - cosW0;
+        b2 = (1.0 - cosW0) * 0.5;
         a0 = 1.0 + alpha;
         a1 = -2.0 * cosW0;
         a2 = 1.0 - alpha;

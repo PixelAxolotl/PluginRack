@@ -75,6 +75,9 @@ private:
     // the engine (no Apply step) because it is not a stream option.
     juce::Label rackThumbnailsLabel { "", "Rack thumbnails" };
     juce::ComboBox rackThumbnailFpsCombo;
+    // How long a meter holds its peak line. Session-wide, applied at once.
+    juce::Label peakHoldLabel { "", "Peak hold" };
+    juce::ComboBox peakHoldCombo;
     juce::ToggleButton closeToTrayToggle { "Minimize to system tray when closed" };
 
     juce::Label devicesLabel;

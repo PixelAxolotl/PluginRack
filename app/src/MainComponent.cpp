@@ -445,7 +445,7 @@ void MainComponent::showMenu() {
                                                         insertIds.push_back(insert->id);
                                                     for (const auto insertId : insertIds)
                                                         audioEngine.removePlugin(c->id, insertId);
-                                                    audioEngine.setChannelEq(c->id, pluginrack::defaultSixBands());
+                                                    audioEngine.setChannelEq(c->id, pluginrack::defaultEqBands());
                                                     audioEngine.setChannelEqBypassed(c->id, true);
                                                     audioEngine.setChannelEqDelay(c->id, 0.0f);
                                                     audioEngine.setChannelGain(c->id, 0.0f);
@@ -462,7 +462,7 @@ void MainComponent::showMenu() {
                                                         insertIds.push_back(insert->id);
                                                     for (const auto insertId : insertIds)
                                                         audioEngine.removeOutputPlugin(outputId, insertId);
-                                                    audioEngine.setOutputEq((int)i, pluginrack::defaultSixBands());
+                                                    audioEngine.setOutputEq((int)i, pluginrack::defaultEqBands());
                                                     audioEngine.setOutputEqBypassed((int)i, true);
                                                     audioEngine.setOutputEqDelay((int)i, 0.0f);
                                                     audioEngine.setOutputGain(outputId, 0.0f);

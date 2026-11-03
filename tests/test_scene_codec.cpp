@@ -164,11 +164,11 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
     // the same flat default bands as v2 (mirrors "v2 scene loads flat EQ").
     const pluginrack::Channel& channel = loaded.scene->channels.front();
     REQUIRE(channel.eqEnabled == false);
-    REQUIRE(channel.eqBands == pluginrack::defaultSixBands());
+    REQUIRE(channel.eqBands == pluginrack::defaultEqBands());
     REQUIRE(channel.eqDelayMs == 0.0f);
     REQUIRE(channel.trimDb == 0.0f);
     REQUIRE(loaded.scene->outputs.front().eqEnabled == false);
-    REQUIRE(loaded.scene->outputs.front().eqBands == pluginrack::defaultSixBands());
+    REQUIRE(loaded.scene->outputs.front().eqBands == pluginrack::defaultEqBands());
     REQUIRE(loaded.scene->outputs.front().eqDelayMs == 0.0f);
     REQUIRE(loaded.scene->outputs.front().gainDb == 0.0f);
     REQUIRE(loaded.scene->outputs.front().muted == false);
@@ -329,7 +329,8 @@ TEST_CASE("v2 scene loads flat EQ and saves as v3") {
 
     const pluginrack::Channel& channel = loaded.scene->channels.front();
     REQUIRE(channel.eqEnabled == false);
-    REQUIRE(channel.eqBands.size() == 6);
+    // The factory EQ has seven points (high-pass through low-pass).
+    REQUIRE(channel.eqBands.size() == 7);
     for (const pluginrack::EqBand& band : channel.eqBands) {
         REQUIRE(band.gainDb == 0.0f);
     }
@@ -337,7 +338,7 @@ TEST_CASE("v2 scene loads flat EQ and saves as v3") {
 
     const pluginrack::Output& output = loaded.scene->outputs.front();
     REQUIRE(output.eqEnabled == false);
-    REQUIRE(output.eqBands.size() == 6);
+    REQUIRE(output.eqBands.size() == 7);
     for (const pluginrack::EqBand& band : output.eqBands) {
         REQUIRE(band.gainDb == 0.0f);
     }
@@ -358,7 +359,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     channel.id = 1;
     channel.name = "mic";
     channel.eqEnabled = true;
-    channel.eqBands = pluginrack::defaultSixBands();
+    channel.eqBands = pluginrack::defaultEqBands();
     channel.eqBands[0].enabled = false;
     channel.eqBands[3].freqHz = 1250.5f;
     channel.eqBands[3].gainDb = 6.0f;
@@ -373,7 +374,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     output.id = 1;
     output.name = "mains";
     output.eqEnabled = true;
-    output.eqBands = pluginrack::defaultSixBands();
+    output.eqBands = pluginrack::defaultEqBands();
     output.eqBands[1].freqHz = 150.25f;
     output.eqBands[5].gainDb = -3.0f;
     output.eqDelayMs = 480.0f;

@@ -144,6 +144,7 @@ private:
     std::uint64_t lastUnderrunEpoch_ = 0;
     std::uint64_t fadeInEpoch_ = 0;
     std::atomic<int> readDelaySamples{0};
+    std::atomic<int> initialReadDelay_{0};
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;

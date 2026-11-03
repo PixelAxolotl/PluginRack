@@ -13,6 +13,7 @@
 #include "LevelMeter.h"
 #include "MiniButton.h"
 #include "Theme.h"
+#include "ValueEditSlider.h"
 
 class ChannelStrip final : public juce::Component, public IInsertHost {
 public:
@@ -52,7 +53,18 @@ public:
     std::function<void()> onSelected;
     std::function<void()> onDoubleClicked;
 
+    // Channel reordering (mixer only): the grip at the strip's top-left reports
+    // the drag in screen space; the owner maps it to a target index and owns the
+    // resulting rebuild. Hidden unless the hosting board asks for it.
+    std::function<void()> onDragHandleStarted;
+    std::function<void(juce::Point<int> screenPosition)> onDragHandleMoved;
+    std::function<void()> onDragHandleFinished;
+    void setDragHandleVisible(bool visible);
+
     void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void mouseMove(const juce::MouseEvent&) override;
     void mouseDoubleClick(const juce::MouseEvent&) override;
 
 private:
@@ -60,6 +72,7 @@ private:
     int chainBoundaryY(int targetIndex) const;
     void applyInputMapping();
     void splitIntoMonoChannels();
+    void paintDragHandle(juce::Graphics& g) const;
 
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
@@ -70,6 +83,9 @@ private:
 
     juce::TextButton inputChip;
     bool inputEditing = false;
+    juce::Rectangle<int> dragHandleBounds;
+    bool dragHandleVisible = false;
+    bool draggingHandle = false;
     juce::ComboBox modeCombo;
     juce::ComboBox inputComboA;
     juce::ComboBox inputComboB;
@@ -80,15 +96,15 @@ private:
     int chainRowCount = 0;
 
     juce::Label levelLabel{"", "Level"};
-    juce::Slider levelKnob;
+    ValueEditSlider levelKnob;
     juce::Label panLabel{"", "Pan"};
-    juce::Slider panKnob;
+    ValueEditSlider panKnob;
 
     juce::OwnedArray<juce::TextButton> routingButtons;
     std::vector<std::uint32_t> routingOutputIds;
 
     juce::Label faderLabel{"", "dB"};
-    juce::Slider faderSlider;
+    ValueEditSlider faderSlider;
     LevelMeter levelMeter;
 
     juce::TextButton muteButton{"Mute"};

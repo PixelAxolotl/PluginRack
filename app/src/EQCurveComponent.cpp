@@ -92,21 +92,31 @@ void EQCurveComponent::setSelectedBand(int index) {
     repaint();
 }
 
-juce::Colour EQCurveComponent::bandColour(int index) {
-    switch (index) {
-        case 0: return theme::red();    // high-pass
-        case 1: return theme::green();  // low shelf
-        case 5: return theme::violet(); // high shelf
-        default: return theme::cyan();  // peak bands
+juce::Colour EQCurveComponent::bandColour(const pluginrack::EqBand& band) {
+    switch (band.type) {
+        case pluginrack::EqType::HighPass: return theme::red();    // low cut
+        case pluginrack::EqType::LowPass: return theme::orange();  // high cut
+        case pluginrack::EqType::LowShelf:
+        case pluginrack::EqType::HighShelf: return theme::blue();  // shelves
+        case pluginrack::EqType::Peak: break;
     }
+    return theme::green(); // bells (band)
 }
+
+namespace {
+// Filter points (high-pass / low-pass) carry no gain, so their node rides the
+// 0 dB line like their response does.
+bool isGainlessBand(const pluginrack::EqBand& band) noexcept {
+    return band.type == pluginrack::EqType::HighPass
+        || band.type == pluginrack::EqType::LowPass;
+}
+} // namespace
 
 juce::Point<float> EQCurveComponent::nodePosition(const pluginrack::EqBand& band,
                                                   int width, int height) {
     const double t = std::log(band.freqHz / kMinFreqHz) / std::log(kMaxFreqHz / kMinFreqHz);
     const float x = static_cast<float>(juce::jlimit(0.0, 1.0, t) * width);
-    // HP ignores gainDb, so its node rides the 0 dB line like the response does.
-    const double gain = (band.type == pluginrack::EqType::HighPass)
+    const double gain = isGainlessBand(band)
                             ? 0.0
                             : juce::jlimit(-kMaxGainDb, kMaxGainDb, static_cast<double>(band.gainDb));
     const float y = static_cast<float>(height * 0.5 - gain / kMaxGainDb * height * 0.5);
@@ -138,6 +148,16 @@ double EQCurveComponent::bandShapeDb(const pluginrack::EqBand& band,
             b0 = (1.0 + cosW0) * 0.5;
             b1 = -(1.0 + cosW0);
             b2 = (1.0 + cosW0) * 0.5;
+            a0 = 1.0 + alpha;
+            a1 = -2.0 * cosW0;
+            a2 = 1.0 - alpha;
+            break;
+        }
+        case pluginrack::EqType::LowPass: {
+            const double alpha = sinW0 / (2.0 * kButterworthQ);
+            b0 = (1.0 - cosW0) * 0.5;
+            b1 = 1.0 - cosW0;
+            b2 = (1.0 - cosW0) * 0.5;
             a0 = 1.0 + alpha;
             a1 = -2.0 * cosW0;
             a2 = 1.0 - alpha;
@@ -361,13 +381,14 @@ void EQCurveComponent::paint(juce::Graphics& g) {
 
     // Selected band alone, dashed in its band colour (drawn under the nodes).
     if (selectedBand >= 0 && selectedBand < static_cast<int>(bands.size()))
-        paintCurve(selectedBand, bandColour(selectedBand).withAlpha(0.55f), 1.0f, false);
+        paintCurve(selectedBand, bandColour(bands[static_cast<std::size_t>(selectedBand)]).withAlpha(0.55f),
+                   1.0f, false);
 
     // --- nodes (band colours; dimmed when bypassed, ringed when selected).
     for (int i = 0; i < static_cast<int>(bands.size()); ++i) {
         const pluginrack::EqBand& band = bands[static_cast<std::size_t>(i)];
         const juce::Point<float> p = nodePosition(band, w, h);
-        g.setColour(bandColour(i).withAlpha(band.enabled ? 1.0f : 0.35f));
+        g.setColour(bandColour(band).withAlpha(band.enabled ? 1.0f : 0.35f));
         g.fillEllipse(p.x - static_cast<float>(kNodeRadius), p.y - static_cast<float>(kNodeRadius),
                       static_cast<float>(kNodeRadius * 2), static_cast<float>(kNodeRadius * 2));
         if (i == selectedBand) {
@@ -383,21 +404,26 @@ void EQCurveComponent::paint(juce::Graphics& g) {
     }
 }
 
-void EQCurveComponent::mouseDown(const juce::MouseEvent& e) {
+int EQCurveComponent::bandIndexAt(juce::Point<float> position) const {
     const int w = getWidth();
     const int h = getHeight();
-    if (w < 40 || h < 40) return;
+    if (w < 40 || h < 40) return -1;
 
-    // Pick the nearest node within tolerance.
+    // Nearest node within the pick tolerance (closest wins on overlap).
     int best = -1;
     float bestDist = static_cast<float>(kNodeHitRadius * kNodeHitRadius);
     for (int i = 0; i < static_cast<int>(bands.size()); ++i) {
         const juce::Point<float> p = nodePosition(bands[static_cast<std::size_t>(i)], w, h);
-        const float dx = e.position.getX() - p.x;
-        const float dy = e.position.getY() - p.y;
+        const float dx = position.getX() - p.x;
+        const float dy = position.getY() - p.y;
         const float dist = dx * dx + dy * dy;
         if (dist <= bestDist) { bestDist = dist; best = i; }
     }
+    return best;
+}
+
+void EQCurveComponent::mouseDown(const juce::MouseEvent& e) {
+    const int best = bandIndexAt(e.position);
     if (best < 0) return;
 
     setSelectedBand(best);
@@ -407,12 +433,29 @@ void EQCurveComponent::mouseDown(const juce::MouseEvent& e) {
     if (onBandSelected) onBandSelected();
 }
 
+void EQCurveComponent::mouseDoubleClick(const juce::MouseEvent& e) {
+    const int index = bandIndexAt(e.position);
+    if (index < 0) return;
+    const auto defaults = pluginrack::defaultEqBands();
+    if (index >= static_cast<int>(defaults.size())) return;
+
+    const auto& factory = defaults[static_cast<std::size_t>(index)];
+    pluginrack::EqBand& band = bands[static_cast<std::size_t>(index)];
+    if (band == factory) return;
+
+    band = factory; // original type, frequency, gain, Q, enabled and solo
+    dragBand = -1;
+    setSelectedBand(index);
+    repaint();
+    if (onBandsChanged) onBandsChanged();
+}
+
 void EQCurveComponent::mouseDrag(const juce::MouseEvent& e) {
     if (dragBand < 0 || dragBand >= static_cast<int>(bands.size())) return;
     pluginrack::EqBand& band = bands[static_cast<std::size_t>(dragBand)];
 
     band.freqHz = static_cast<float>(xToFreq(e.position.getX()));
-    if (band.type != pluginrack::EqType::HighPass) {
+    if (!isGainlessBand(band)) {
         band.gainDb = static_cast<float>(std::round(yToGain(e.position.getY()) * 10.0) / 10.0);
     }
 

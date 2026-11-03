@@ -69,6 +69,7 @@ void to_json(nlohmann::json& j, EqType type) {
         case EqType::LowShelf: j = "LowShelf"; break;
         case EqType::Peak: j = "Peak"; break;
         case EqType::HighShelf: j = "HighShelf"; break;
+        case EqType::LowPass: j = "LowPass"; break;
     }
 }
 
@@ -82,6 +83,8 @@ void from_json(const nlohmann::json& j, EqType& type) {
         type = EqType::Peak;
     } else if (name == "HighShelf") {
         type = EqType::HighShelf;
+    } else if (name == "LowPass") {
+        type = EqType::LowPass;
     } else {
         throw nlohmann::json::other_error::create(502, "unknown EqType '" + name + "'", &j);
     }
@@ -255,7 +258,7 @@ void from_json(const nlohmann::json& j, Channel& channel) {
         if (j.contains("chain")) j.at("chain").get_to(channel.chain);
     }
     // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
-    // the flat defaultSixBands() from Channel{} above, and v3 files written
+    // the flat defaultEqBands() from Channel{} above, and v3 files written
     // before the delay knob have no eqDelayMs (0 ms).
     channel.eqEnabled = j.value("eqEnabled", false);
     channel.eqDelayMs = j.value("eqDelayMs", 0.0f);
@@ -314,7 +317,7 @@ void from_json(const nlohmann::json& j, Output& output) {
         if (j.contains("chain")) j.at("chain").get_to(output.chain);
     }
     // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
-    // the flat defaultSixBands() from Output{} above, and v3 files written
+    // the flat defaultEqBands() from Output{} above, and v3 files written
     // before the delay knob have no eqDelayMs (0 ms).
     output.eqEnabled = j.value("eqEnabled", false);
     output.eqDelayMs = j.value("eqDelayMs", 0.0f);

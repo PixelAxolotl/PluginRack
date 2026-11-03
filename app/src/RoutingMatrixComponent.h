@@ -5,6 +5,7 @@
 #include "AudioEngine.h"
 #include "PageHeader.h"
 #include "Theme.h"
+#include "ValueEditSlider.h"
 
 class RoutingMatrixComponent final : public juce::Component {
 public:
@@ -22,7 +23,7 @@ private:
     juce::OwnedArray<juce::Label> outputHeaders;
     juce::OwnedArray<juce::Label> channelLabels;
     juce::OwnedArray<juce::Label> sendSideLabels;
-    juce::OwnedArray<juce::Slider> sendSliders;
+    juce::OwnedArray<ValueEditSlider> sendSliders;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RoutingMatrixComponent)
 };

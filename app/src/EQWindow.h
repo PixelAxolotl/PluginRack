@@ -14,6 +14,7 @@
 #include "EQCurveComponent.h"
 #include "MiniButton.h"
 #include "Theme.h"
+#include "ValueEditSlider.h"
 
 // Task-4 shell button: stock TextButton face with a flag-driven DESIGN.md 1px
 // accent-cyan ring (MiniButton/DeviceControl convention). The ring paints on
@@ -142,15 +143,27 @@ private:
 
     MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
     MiniButton soloButton{"Solo"};        // selected band solo toggle
+    // Selected point's mode: bell ("BAND") or shelf ("SHELF"). The two filter
+    // points are driven by the HPF/LPF switches instead, so this one disables
+    // itself while either of them is selected.
+    MiniButton bandTypeButton{"BAND"};
+    MiniButton hpfButton{"HPF"};
+    MiniButton lpfButton{"LPF"};
+    // Highest band index: the fixed point the LPF switch drives (index 0 is
+    // the HPF point).
+    static constexpr int kLowPassBandIndex = 6;
+    void toggleBandType();
+    void toggleFilterBand(int index);
+    void commitBands(std::vector<pluginrack::EqBand> bands);
     juce::Label stereoTag{"", "Stereo"};  // visual only in v1 (plan, Task 5)
     juce::Label freqLabel{"", "Freq"};
     juce::Label gainLabel{"", "Gain"};
     juce::Label qLabel{"", "Q"};
     juce::Label delayLabel{"", "Delay"};
-    juce::Slider freqKnob;
-    juce::Slider gainKnob;
-    juce::Slider qKnob;
-    juce::Slider delayKnob;
+    ValueEditSlider freqKnob;
+    ValueEditSlider gainKnob;
+    ValueEditSlider qKnob;
+    ValueEditSlider delayKnob;
 
     // Analyzer state, all sized once at construction (message thread): one
     // FFT instance per open window (spec), reused every tick.

@@ -4,8 +4,10 @@
 
 namespace pluginrack {
 
-// Filter types for the fixed six-band channel EQ (RBJ cookbook biquads).
-enum class EqType { HighPass, LowShelf, Peak, HighShelf };
+// Filter types for the fixed seven-band channel EQ (RBJ cookbook biquads).
+// Any point can sit in any of these modes: the two filter modes (high-pass and
+// low-pass) own the outer points, the shelf/bell modes the inner ones.
+enum class EqType { HighPass, LowShelf, Peak, HighShelf, LowPass };
 
 struct EqBand {
     EqType type;
@@ -17,11 +19,13 @@ struct EqBand {
     bool operator==(const EqBand&) const = default;
 };
 
-// HP 80 Hz, low shelf 200 Hz, peaks 500 Hz / 1 kHz / 3 kHz, high shelf 8 kHz.
-// All 0 dB, Q 0.707, all enabled, none solo. (Q is unused for the high-pass.)
-std::vector<EqBand> defaultSixBands();
+// HP 80 Hz, low shelf 200 Hz, peaks 500 Hz / 1 kHz / 3 kHz, high shelf 8 kHz,
+// low-pass 12 kHz. All 0 dB, Q 0.707, none solo and all enabled except the
+// low-pass, which starts bypassed so the default EQ stays flat. (Q is unused
+// for the high-pass and the low-pass.)
+std::vector<EqBand> defaultEqBands();
 
-// Fixed six-band stereo parametric EQ, DF-II transposed biquads, one state
+// Fixed seven-band stereo parametric EQ, DF-II transposed biquads, one state
 // per band per channel, followed by an optional delay line (0..kMaxDelayMs)
 // for time-aligning a channel or output. Coefficients are recomputed in
 // prepare()/setBands() only (message thread); process() is a multiply-add
@@ -45,7 +49,7 @@ public:
     void reset() noexcept;
 
 private:
-    static constexpr int kNumBands = 6;
+    static constexpr int kNumBands = 7;
 
     struct Biquad {
         float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
