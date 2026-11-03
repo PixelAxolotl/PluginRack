@@ -128,4 +128,91 @@ juce::Image captureWindow(void* windowHandle, int targetWidth) {
    #endif
 }
 
+namespace {
+
+// The plugin paints on its own thread while PrintWindow waits, so the gap
+// after a capture is measured in what that capture actually cost: three times
+// the cost keeps the repaint work to a quarter of the time.
+constexpr int kCaptureCostFactor = 3;
+
+} // namespace
+
+WindowCaptureWorker::WindowCaptureWorker()
+    : juce::Thread("PluginRack window capture") {
+    startThread();
+}
+
+WindowCaptureWorker::~WindowCaptureWorker() {
+    stop();
+}
+
+void WindowCaptureWorker::request(void* windowHandle, int targetWidth,
+                                  std::function<void(juce::Image)> onCaptured) {
+    if (windowHandle == nullptr) {
+        clearRequest();
+        return;
+    }
+    {
+        const juce::ScopedLock lock(requestLock);
+        pendingHandle = windowHandle;
+        pendingWidth = targetWidth;
+        pendingCallback = std::move(onCaptured);
+    }
+    wake.signal();
+}
+
+void WindowCaptureWorker::clearRequest() {
+    const juce::ScopedLock lock(requestLock);
+    pendingHandle = nullptr;
+    pendingCallback = nullptr;
+}
+
+void WindowCaptureWorker::stop() {
+    clearRequest();
+    if (!isThreadRunning()) return;
+    signalThreadShouldExit();
+    wake.signal();
+    stopThread(2000);
+}
+
+void WindowCaptureWorker::run() {
+    while (!threadShouldExit()) {
+        void* handle = nullptr;
+        int width = 0;
+        std::function<void(juce::Image)> callback;
+        {
+            const juce::ScopedLock lock(requestLock);
+            handle = pendingHandle;
+            width = pendingWidth;
+            callback = std::move(pendingCallback);
+            pendingHandle = nullptr;
+            pendingCallback = nullptr;
+        }
+
+        if (handle == nullptr) {
+            wake.wait(100);
+            continue;
+        }
+
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        juce::Image image;
+        {
+            const juce::ScopedLock lock(captureMutex);
+            image = captureWindow(handle, width);
+        }
+        const auto costMs =
+            juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
+
+        if (callback != nullptr) {
+            juce::MessageManager::callAsync(
+                [done = std::move(callback), captured = image]() mutable {
+                    done(captured);
+                });
+        }
+
+        if (threadShouldExit()) break;
+        juce::Thread::sleep(juce::jmax(1, costMs * kCaptureCostFactor));
+    }
+}
+
 } // namespace nativedisplay

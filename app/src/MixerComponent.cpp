@@ -5,7 +5,8 @@
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
                                                  AudioEngine& engine)
     : output(outputState), outputIndex(outputIdx), audioEngine(engine),
-      meter(outputState.peakL, outputState.peakR) {
+      meter(gainSlider, outputState.peakL, outputState.peakR, outputState.rmsL,
+            outputState.rmsR) {
     deviceControl.setTitle(output.name);
     deviceControl.setDeviceName(output.outputDeviceName);
     deviceControl.setError(output.outputError);
@@ -396,15 +397,14 @@ void MixerComponent::OutputStrip::resized() {
     auto muteRow = area.removeFromBottom(theme::metrics::kRowH);
     muteButton.setBounds(muteRow);
 
-    // fader + meter (shorter, ~half of input height) above mute. The meter is
-    // laid out on the fader's track so its bars read against the fader scale.
+    // fader + meter (shorter, ~half of input height) above mute. The meter
+    // lines its bars up with the fader's travel itself and keeps the readouts
+    // in the strip above the travel, so it takes the fader's full height.
     area.removeFromBottom(4);
-    auto meterColumn = area.removeFromRight(22);
+    auto meterColumn = area.removeFromRight(LevelMeter::kPreferredWidth);
     area.removeFromRight(4);
     gainSlider.setBounds(area);
-    meter.setBounds(LevelMeter::faderTrackBounds(gainSlider)
-                        .withX(meterColumn.getX())
-                        .withWidth(meterColumn.getWidth()));
+    meter.setBounds(meterColumn);
 }
 
 void MixerComponent::OutputStrip::paint(juce::Graphics& g) {

@@ -369,6 +369,8 @@ void AudioEngine::render(int frames) {
         channel->peak = meters.channelPeak(channel->id);
         channel->peakL = peakL;
         channel->peakR = peakR;
+        channel->rmsL = channel->buffer.getRMSLevel(0, 0, frames);
+        channel->rmsR = channel->buffer.getRMSLevel(1, 0, frames);
     }
 
     for (const auto& route : routes) {
@@ -457,6 +459,8 @@ void AudioEngine::render(int frames) {
         output->peak = meters.outputPeak(output->id);
         output->peakL = peakL;
         output->peakR = peakR;
+        output->rmsL = output->buffer.getRMSLevel(0, 0, frames);
+        output->rmsR = output->buffer.getRMSLevel(1, 0, frames);
     }
 
     // Round-trip latency measurement: inject a one-sample impulse on the

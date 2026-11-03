@@ -121,18 +121,15 @@ void ConsoleLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w
     g.fillRoundedRectangle(centreX - 2.0f, sliderPos, 4.0f, trackBottom - sliderPos, 2.0f);
 
     g.setColour(theme::line().withAlpha(0.55f));
-    constexpr int dbMarks[] = {12, 0, -12, -30, -60};
-    // Ticks sit on the same dB marks as the labels: an even split implied a
-    // linear scale the fader does not use.
-    for (const int db : dbMarks) {
+    // Ticks sit on the same dB marks the meter labels beside the fader, so the
+    // two scales cannot drift apart.
+    for (const int db : theme::metrics::kDbMarks) {
         const float proportion = 1.0f - (float)(db + 60) / 72.0f;
         const float tickY = trackTop + (trackBottom - trackTop) * proportion;
         const float tickWidth = db == 0 ? 10.0f : 6.0f;
         g.drawHorizontalLine(juce::roundToInt(tickY), centreX - tickWidth,
                              centreX - trackWidth * 0.5f - 3.0f);
     }
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
-    g.setColour(theme::dim().withAlpha(0.9f));
 
     const float thumbWidth = juce::jmin(34.0f, (float)width - 4.0f);
     const float thumbHeight = 12.0f;
@@ -144,16 +141,4 @@ void ConsoleLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w
                            thumbWidth, thumbHeight, 3.0f, 1.5f);
     g.drawHorizontalLine(juce::roundToInt(sliderPos), centreX - thumbWidth * 0.34f,
                          centreX + thumbWidth * 0.34f);
-
-    // Scale after the handle and clear of its edge: the handle used to sit on
-    // top of the "0" mark, and the end marks were clipped by the bounds.
-    g.setColour(theme::dim().withAlpha(0.9f));
-    for (const int db : dbMarks) {
-        const float proportion = 1.0f - (float)(db + 60) / 72.0f;
-        const float markY = trackTop + (trackBottom - trackTop) * proportion;
-        const int labelTop = juce::jlimit(y, y + juce::jmax(0, height - 10),
-                                          juce::roundToInt(markY - 5.0f));
-        g.drawText(juce::String(db), (int)(centreX + thumbWidth * 0.5f + 4.0f), labelTop, 24, 10,
-                   juce::Justification::centredLeft, false);
-    }
 }
