@@ -45,6 +45,10 @@ public:
     int getBufferSize() const;
 
     bool hasPlugin() const;
+    // The hosted instance (message thread only, may be null). The caller must
+    // not keep it across insert removal - the rack's generic parameter panel
+    // re-reads it on every refresh for exactly that reason.
+    juce::AudioPluginInstance* getInstance() const;
     // Lock-free cached latency: refreshed on load/prepare/bypass so the
     // latency report never blocks on pluginLock.
     int getLatencySamples() const;

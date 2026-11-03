@@ -11,6 +11,7 @@
 #include "DynamicsCurveComponent.h"
 #include "MiniButton.h"
 #include "Theme.h"
+#include "ValueEditSlider.h"
 
 class DynamicsWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
@@ -88,10 +89,10 @@ private:
     juce::Label gateRangeLabel{"", "Range"};
     juce::Label gateAttackLabel{"", "Attack"};
     juce::Label gateReleaseLabel{"", "Release"};
-    juce::Slider gateThreshold;
-    juce::Slider gateRange;
-    juce::Slider gateAttack;
-    juce::Slider gateRelease;
+    ValueEditSlider gateThreshold;
+    ValueEditSlider gateRange;
+    ValueEditSlider gateAttack;
+    ValueEditSlider gateRelease;
 
     // Simulated detector gain (<= 0 dB, makeup excluded) so the dot lags the
     // curve through attack and overshoots it on release.
@@ -110,13 +111,13 @@ private:
     juce::Label kneeLabel{"", "Knee"};
     juce::ComboBox presetCombo;
     juce::ComboBox gatePresetCombo;
-    juce::Slider threshold;
-    juce::Slider ratio;
-    juce::Slider attack;
-    juce::Slider release;
-    juce::Slider makeup;
-    juce::Slider inputGain;
-    juce::Slider knee;
+    ValueEditSlider threshold;
+    ValueEditSlider ratio;
+    ValueEditSlider attack;
+    ValueEditSlider release;
+    ValueEditSlider makeup;
+    ValueEditSlider inputGain;
+    ValueEditSlider knee;
     std::array<float, 512> tapL{};
     std::array<float, 512> tapR{};
 

@@ -3,6 +3,7 @@
 #include "ConsoleLookAndFeel.h"
 #include "DeviceStream.h"
 #include "MainComponent.h"
+#include "SliderTouch.h"
 
 #include <iostream>
 
@@ -217,6 +218,9 @@ public:
         lookAndFeel = std::make_unique<ConsoleLookAndFeel>();
         juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel.get());
         tooltipWindow = std::make_unique<juce::TooltipWindow>(nullptr, 100);
+        // Right-click value entry for dials that have no value box of their own,
+        // and last-touched tracking for the rack's touch-and-slide strip.
+        slider_touch::installRightClickEditor();
         juce::PropertiesFile::Options storageOptions;
         storageOptions.applicationName = "PluginRack";
         storageOptions.filenameSuffix = ".settings";

@@ -28,7 +28,7 @@ void fillSignal(float* L, float* R, int n) {
 TEST_CASE("eq flat passes audio") {
     EqEngine e;
     e.prepare(44100, 512);
-    e.setBands(defaultSixBands());
+    e.setBands(defaultEqBands());
     float L[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     float R[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     e.process(L, R, 8);
@@ -40,7 +40,7 @@ TEST_CASE("eq flat passes audio") {
 }
 
 TEST_CASE("eq bypassed band is bit-identical") {
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
     }
@@ -63,7 +63,7 @@ TEST_CASE("eq bypassed band is bit-identical") {
 }
 
 TEST_CASE("eq HP removes DC") {
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     bands[0].solo = true; // solo rule: only the high-pass runs
     EqEngine e;
     e.prepare(44100, 512);
@@ -80,12 +80,37 @@ TEST_CASE("eq HP removes DC") {
     REQUIRE(std::fabs(R[static_cast<std::size_t>(kFrames) - 1]) < 1e-3f);
 }
 
+TEST_CASE("eq LP removes highs") {
+    auto bands = defaultEqBands();
+    bands[6].enabled = true;
+    bands[6].solo = true; // solo rule: only the low-pass runs
+    EqEngine e;
+    e.prepare(44100, 512);
+    e.setBands(bands);
+
+    // Alternating samples are the Nyquist tone (22.05 kHz here), far above the
+    // 12 kHz corner, so the filter settles to near silence.
+    constexpr int kFrames = 4096;
+    std::vector<float> L(static_cast<std::size_t>(kFrames));
+    std::vector<float> R(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        const float value = (i % 2 == 0) ? 0.5f : -0.5f;
+        L[static_cast<std::size_t>(i)] = value;
+        R[static_cast<std::size_t>(i)] = value;
+    }
+    for (int off = 0; off < kFrames; off += 512) {
+        e.process(L.data() + off, R.data() + off, 512);
+    }
+    REQUIRE(std::fabs(L[static_cast<std::size_t>(kFrames) - 1]) < 1e-3f);
+    REQUIRE(std::fabs(R[static_cast<std::size_t>(kFrames) - 1]) < 1e-3f);
+}
+
 TEST_CASE("eq NaN params never NaN out") {
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     bands[2].freqHz = kNan;
     bands[3].gainDb = kNan;
     bands[4].q = kNan;
-    auto ref = defaultSixBands();
+    auto ref = defaultEqBands();
     ref[2].enabled = false; // same effect as the NaN guard: band skipped
     ref[3].enabled = false;
     ref[4].enabled = false;
@@ -115,19 +140,19 @@ TEST_CASE("eq NaN params never NaN out") {
 }
 
 TEST_CASE("eq solo isolates band") {
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     bands[1].type = EqType::LowShelf;
     bands[1].gainDb = 6.0f;
     bands[1].solo = true;
     bands[2].gainDb = -4.0f; // must NOT run while another band is soloed
 
-    auto only = defaultSixBands();
+    auto only = defaultEqBands();
     for (int i = 0; i < 6; ++i) {
         only[static_cast<std::size_t>(i)].enabled = (i == 1); // no solo flags
     }
     only[1].gainDb = 6.0f;
 
-    auto bypassed = defaultSixBands();
+    auto bypassed = defaultEqBands();
     for (auto& band : bypassed) {
         band.enabled = false;
     }
@@ -167,7 +192,7 @@ TEST_CASE("eq solo isolates band") {
 TEST_CASE("eq delay shifts the signal by the requested samples") {
     EqEngine e;
     e.prepare(48000.0, 512);
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false; // delay only: no band may touch the block
     }
@@ -192,7 +217,7 @@ TEST_CASE("eq delay shifts the signal by the requested samples") {
 TEST_CASE("eq delay holds across render blocks") {
     EqEngine e;
     e.prepare(48000.0, 512);
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
     }
@@ -221,7 +246,7 @@ TEST_CASE("eq zero delay is bit-identical") {
     EqEngine e;
     e.prepare(48000.0, 512);
     e.setDelayMs(0.0f);
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
     }
@@ -256,7 +281,7 @@ TEST_CASE("eq delay clamps to the 0-1 s range") {
 TEST_CASE("eq delay change mid-stream glides without blowing up") {
     EqEngine e;
     e.prepare(48000.0, 512);
-    auto bands = defaultSixBands();
+    auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
     }

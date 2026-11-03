@@ -7,7 +7,7 @@
 
 #include <pluginrack/EqEngine.h>
 
-// Pro-Q-style curve editor (Task 5) for the fixed six-band EQ. Paints a
+// Pro-Q-style curve editor (Task 5) for the fixed seven-band EQ. Paints a
 // log-frequency grid (20 Hz - 20 kHz, +/-15 dB), one draggable node per band
 // in its band colour, and the combined magnitude response in yellow computed
 // from the same RBJ biquad transfer functions core/EqEngine.cpp applies
@@ -80,11 +80,18 @@ public:
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
+    // Double-clicking a node restores that point to its factory setting (type,
+    // frequency, gain, Q and enabled/solo state) and pushes it to the engine.
+    void mouseDoubleClick(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent&) override { dragBand = -1; }
 
 private:
-    static juce::Colour bandColour(int index);
+    // Node colour by filter kind: shelves blue, bells green. The two filter
+    // points keep their own hues so a low/high cut still reads as a cut.
+    static juce::Colour bandColour(const pluginrack::EqBand& band);
+    // Index of the node under position, or -1 when the click misses them all.
+    int bandIndexAt(juce::Point<float> position) const;
     static juce::Point<float> nodePosition(const pluginrack::EqBand& band,
                                            int width, int height);
     // Normalised biquad magnitude in dB at hz, mirroring core's coefficient
@@ -100,7 +107,7 @@ private:
     // magnitudes, clamped to the +/-15 dB view (0 when no spectrum is set).
     float spectrumY(double hz) const;
 
-    std::vector<pluginrack::EqBand> bands{pluginrack::defaultSixBands()};
+    std::vector<pluginrack::EqBand> bands{pluginrack::defaultEqBands()};
     int selectedBand = 2; // first peak band: a meaningful default selection
     int dragBand = -1;    // band being dragged this gesture, -1 when idle
     // Analyzer magnitudes in dBFS per FFT bin (empty = off). UI thread only,

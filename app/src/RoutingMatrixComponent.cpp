@@ -105,7 +105,8 @@ void RoutingMatrixComponent::rebuild() {
         for (const auto& output : audioEngine.getOutputs()) {
             const auto addSend = [&](bool rightSide) {
                 addSideLabel(rightSide ? "R" : "L");
-                auto* slider = sendSliders.add(new juce::Slider());
+                auto* slider = sendSliders.add(new ValueEditSlider());
+                slider->setName("Send " + channel->name + " > " + output->name);
                 slider->setSliderStyle(juce::Slider::LinearBar);
                 slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
                 slider->setRange(-60.0, 12.0, 0.1);

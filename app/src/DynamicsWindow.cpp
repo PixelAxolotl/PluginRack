@@ -73,9 +73,10 @@ DynamicsWindow::DynamicsWindow(
     setUsingNativeTitleBar(true);
     setResizable(false, false);
     setContentOwned(&content, false);
-    // Used as-is when this opens as a floating window (the mixer strips);
-    // the rack docks it into the editor bay and overrides the bounds.
-    setSize(kMinWidth, kMinHeight);
+    // Used as-is when this opens as a floating window (the mixer strips): open
+    // in the middle of the screen instead of JUCE's default top-left corner.
+    // The rack docks it into the editor bay and overrides the bounds.
+    centreWithSize(kMinWidth, kMinHeight);
     // The gate row edits the strip's gate effect, which lives alongside the
     // compressor; only the compressor panel shows it.
     hasGate = type == pluginrack::DynamicsEffectType::Compressor && gate != nullptr;
@@ -216,6 +217,14 @@ DynamicsWindow::DynamicsWindow(
         label->setColour(juce::Label::textColourId, theme::dim());
         content.addAndMakeVisible(*label);
     }
+    // Names for the rack's touch-and-slide strip ("linked to ...").
+    threshold.setName("Threshold");
+    ratio.setName(type == pluginrack::DynamicsEffectType::Gate ? "Range" : "Ratio");
+    attack.setName("Attack");
+    release.setName("Release");
+    makeup.setName("Output");
+    inputGain.setName("Input");
+    knee.setName("Knee");
 
     // Second row: the same strip's gate, so both panels drive one effect.
     if (hasGate) {
@@ -261,6 +270,10 @@ DynamicsWindow::DynamicsWindow(
                   [this, gateChanged](float value) { gateEffect.releaseMs = value; gateChanged(); });
         curve.setGate(gateEffect, !gateEffect.bypassed);
     }
+    gateThreshold.setName("Gate Thresh");
+    gateRange.setName("Gate Range");
+    gateAttack.setName("Gate Attack");
+    gateRelease.setName("Gate Rel");
     if (type == pluginrack::DynamicsEffectType::Gate) {
         ratioLabel.setText("Range", juce::dontSendNotification);
         makeup.setVisible(false);

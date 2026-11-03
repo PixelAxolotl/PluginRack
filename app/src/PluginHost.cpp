@@ -85,6 +85,11 @@ bool PluginHost::hasPlugin() const {
     return plugin != nullptr;
 }
 
+juce::AudioPluginInstance* PluginHost::getInstance() const {
+    const juce::ScopedLock lock(pluginLock);
+    return plugin.get();
+}
+
 juce::String PluginHost::getStateAsBase64() const {
     const juce::ScopedLock lock(pluginLock);
     if (plugin == nullptr) return {};

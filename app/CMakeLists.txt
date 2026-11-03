@@ -48,6 +48,8 @@ target_sources(pluginrack_app PRIVATE
     src/NativeThumbnail.h
     src/PluginHost.cpp
     src/PluginHost.h
+    src/PluginKnobWatcher.cpp
+    src/PluginKnobWatcher.h
     src/RackView.cpp
     src/RackView.h
     src/RoutingMatrixComponent.cpp
@@ -57,7 +59,13 @@ target_sources(pluginrack_app PRIVATE
     src/SceneBridge.cpp
     src/SceneBridge.h
     src/SettingsView.cpp
-    src/SettingsView.h)
+    src/SettingsView.h
+    src/SliderTouch.cpp
+    src/SliderTouch.h
+    src/TouchSlideBar.cpp
+    src/TouchSlideBar.h
+    src/ValueEditSlider.cpp
+    src/ValueEditSlider.h)
 
 target_compile_features(pluginrack_app PRIVATE cxx_std_20)
 target_compile_definitions(pluginrack_app PRIVATE
