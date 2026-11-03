@@ -126,6 +126,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
         selectedId = newId;
         selectedIsOutput = newOut;
         focusedInsertId = 0;
+        inputEditing = false;
         rebuild();
     };
     addAndMakeVisible(channelCombo);
@@ -133,6 +134,43 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     channelCombo.setColour(juce::ComboBox::textColourId, theme::text());
     channelCombo.setColour(juce::ComboBox::arrowColourId, theme::dim());
     channelCombo.setColour(juce::ComboBox::outlineColourId, theme::border());
+
+    inputChip.setColour(juce::TextButton::buttonColourId, theme::control());
+    inputChip.setColour(juce::TextButton::buttonOnColourId, theme::line());
+    inputChip.setColour(juce::TextButton::textColourOffId, theme::text());
+    inputChip.setColour(juce::TextButton::textColourOnId, theme::text());
+    inputChip.setClickingTogglesState(true);
+    inputChip.setTooltip("Input channels - click to change");
+    inputChip.onClick = [this] {
+        inputEditing = inputChip.getToggleState();
+        refreshInputControls();
+        resized();
+    };
+    addAndMakeVisible(inputChip);
+
+    modeCombo.addItem("MONO", 1);
+    modeCombo.addItem("ST", 2);
+    for (int i = 1; i <= 16; ++i) {
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
+    }
+    inputComboA.setTooltip("Physical input for this channel (1-based)");
+    inputComboB.setTooltip("Physical input for the right side (1-based)");
+    const auto styleInputCombo = [this](juce::ComboBox& combo) {
+        combo.setColour(juce::ComboBox::backgroundColourId, theme::control());
+        combo.setColour(juce::ComboBox::textColourId, theme::text());
+        combo.setColour(juce::ComboBox::arrowColourId, theme::dim());
+        combo.setColour(juce::ComboBox::outlineColourId, theme::border());
+        combo.onChange = [this] { applyInputMapping(); };
+        addAndMakeVisible(combo);
+    };
+    styleInputCombo(modeCombo);
+    styleInputCombo(inputComboA);
+    styleInputCombo(inputComboB);
+    inputChip.setVisible(false);
+    modeCombo.setVisible(false);
+    inputComboA.setVisible(false);
+    inputComboB.setVisible(false);
 
     const auto styleSectionHeader = [this](juce::Label& label, const juce::String& text) {
         label.setText(text, juce::dontSendNotification);
@@ -253,6 +291,7 @@ void RackView::setSelectedChannel(int channelId, bool isOutput) {
     selectedId = channelId;
     selectedIsOutput = isOutput;
     focusedInsertId = 0;
+    inputEditing = false;
     rebuild();
 }
 
@@ -347,6 +386,9 @@ void RackView::refreshHeader() {
         juce::String sub = ch->inputDeviceName.isNotEmpty() ? ch->inputDeviceName : juce::String("No input");
         sub += ch->layout == pluginrack::ChannelLayout::Mono ? " - Mono" : " - Stereo";
         subLabel.setText(sub, juce::dontSendNotification);
+        modeCombo.setSelectedId(ch->layout == pluginrack::ChannelLayout::Mono ? 1 : 2,
+                                juce::dontSendNotification);
+        refreshInputControls();
         gainSlider.setValue(ch->gainDb.get(), juce::dontSendNotification);
         trimKnob.setValue(ch->trimDb.get(), juce::dontSendNotification);
         panSlider.setValue(ch->pan.get(), juce::dontSendNotification);
@@ -359,11 +401,17 @@ void RackView::refreshHeader() {
         trimKnob.setVisible(true);
         meter = std::make_unique<LevelMeter>(gainSlider, ch->peakL, ch->peakR, ch->rmsL,
                                              ch->rmsR);
+        meter->setStereo(ch->layout != pluginrack::ChannelLayout::Mono);
     } else if (out != nullptr) {
         nameLabel.setText(out->name, juce::dontSendNotification);
         subLabel.setText(out->outputDeviceName.isNotEmpty() ? out->outputDeviceName
                                                             : juce::String("No device"),
                          juce::dontSendNotification);
+        inputEditing = false;
+        inputChip.setVisible(false);
+        modeCombo.setVisible(false);
+        inputComboA.setVisible(false);
+        inputComboB.setVisible(false);
         gainSlider.setValue(out->gainDb.get(), juce::dontSendNotification);
         muteButton.setToggleState(out->muted.get(), juce::dontSendNotification);
         soloButton.setVisible(false);
@@ -373,9 +421,63 @@ void RackView::refreshHeader() {
         trimKnob.setVisible(false);
         meter = std::make_unique<LevelMeter>(gainSlider, out->peakL, out->peakR, out->rmsL,
                                              out->rmsR);
+        meter->setStereo(out->layout != pluginrack::ChannelLayout::Mono);
     }
     if (meter != nullptr) addAndMakeVisible(*meter);
     refreshEqButton();
+}
+
+void RackView::refreshInputControls() {
+    auto* ch = currentChannel();
+    if (ch == nullptr) {
+        inputChip.setVisible(false);
+        modeCombo.setVisible(false);
+        inputComboA.setVisible(false);
+        inputComboB.setVisible(false);
+        return;
+    }
+
+    const bool mono = ch->layout == pluginrack::ChannelLayout::Mono;
+    const bool hasInputDevice = ch->inputDeviceName.isNotEmpty();
+    const int a = ch->inputChannels.empty() ? 1 : ch->inputChannels[0] + 1;
+    const int b = ch->inputChannels.size() > 1 ? ch->inputChannels[1] + 1 : a;
+    modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
+    inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
+    inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
+
+    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    if (!hasInputDevice) inputChip.setButtonText("No input");
+    else if (inputEditing) inputChip.setButtonText("Done");
+    else if (mono) inputChip.setButtonText(aText);
+    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+
+    inputChip.setToggleState(inputEditing, juce::dontSendNotification);
+    inputChip.setVisible(true);
+    modeCombo.setVisible(hasInputDevice && inputEditing);
+    inputComboA.setVisible(hasInputDevice && inputEditing);
+    inputComboB.setVisible(hasInputDevice && inputEditing && !mono);
+}
+
+void RackView::applyInputMapping() {
+    auto* ch = currentChannel();
+    if (ch == nullptr) return;
+
+    const bool mono = modeCombo.getSelectedId() == 1;
+    const int a = juce::jmax(0, juce::jmax(1, inputComboA.getSelectedId()) - 1);
+    std::vector<int> mapping;
+    if (mono) {
+        mapping = {a};
+    } else {
+        int b = juce::jmax(0, juce::jmax(1, inputComboB.getSelectedId()) - 1);
+        if (b == a) b = a == 0 ? 1 : 0;
+        mapping = {a, b};
+    }
+    audioEngine.setChannelMapping(ch->id,
+                                  mono ? pluginrack::ChannelLayout::Mono
+                                  : pluginrack::ChannelLayout::Stereo,
+                                  mapping);
+    refreshHeader();
+    resized();
 }
 
 const pluginrack::DynamicsEffect* RackView::dynamicsEffectFor(std::uint32_t itemId) {
@@ -1290,6 +1392,10 @@ void RackView::rebuild() {
     subLabel.setVisible(hasChain);
     gainCaption.setVisible(hasChain);
     gainSlider.setVisible(hasChain);
+    inputChip.setVisible(hasChain && currentChannel() != nullptr);
+    modeCombo.setVisible(false);
+    inputComboA.setVisible(false);
+    inputComboB.setVisible(false);
     muteButton.setVisible(hasChain);
     soloButton.setVisible(hasChain && currentChannel() != nullptr);
     mixerButton.setVisible(hasChain);
@@ -1346,25 +1452,48 @@ void RackView::resized() {
     // left column
     auto la = leftArea.reduced(4);
     la.removeFromTop(14);
-    channelCombo.setBounds(la.removeFromTop(24));
+    auto selectorRow = la.removeFromTop(24);
+    channelCombo.setBounds(selectorRow);
     la.removeFromTop(4);
     nameLabel.setBounds(la.removeFromTop(20));
     subLabel.setBounds(la.removeFromTop(16));
     la.removeFromTop(10);
 
-    trimCaption.setBounds(la.removeFromTop(14));
-    auto trimArea = la.removeFromTop(56);
-    trimKnob.setBounds(trimArea.withSizeKeepingCentre(52, 52));
-    la.removeFromTop(6);
+    if (currentChannel() != nullptr) {
+        auto inputRow = la.removeFromTop(theme::metrics::kFieldH);
+        if (inputEditing) {
+            modeCombo.setBounds(inputRow.removeFromLeft(44));
+            inputRow.removeFromLeft(2);
+            inputComboA.setBounds(inputRow.removeFromLeft(36));
+            inputRow.removeFromLeft(2);
+            if (inputComboB.isVisible()) {
+                inputComboB.setBounds(inputRow.removeFromLeft(36));
+                inputRow.removeFromLeft(2);
+            }
+            inputChip.setBounds(inputRow);
+        } else {
+            inputChip.setBounds(inputRow);
+        }
+        la.removeFromTop(2);
+    }
+
+    // Trim and Pan share one row, matching the Mixer channel strip.
+    if (currentChannel() != nullptr) {
+        auto controlsRow = la.removeFromTop(74);
+        const int knobCellW = (controlsRow.getWidth() - 4) / 2;
+        auto trimCell = controlsRow.removeFromLeft(knobCellW);
+        controlsRow.removeFromLeft(4);
+        auto panCell = controlsRow.removeFromLeft(knobCellW);
+        trimCaption.setBounds(trimCell.removeFromTop(14));
+        trimKnob.setBounds(trimCell.reduced(2));
+        panCaption.setBounds(panCell.removeFromTop(14));
+        panSlider.setBounds(panCell.reduced(2));
+        la.removeFromTop(4);
+    }
 
     la.removeFromBottom(6); // breathing room above the panel edge
     auto btnRow = la.removeFromBottom(24);
     la.removeFromBottom(14);
-
-    auto panArea = la.removeFromBottom(92);
-    panCaption.setBounds(panArea.removeFromTop(14));
-    panSlider.setBounds(panArea.withSizeKeepingCentre(64, 64));
-    la.removeFromBottom(10);
 
     auto faderRow = la;
     auto meterColumn = faderRow.removeFromRight(LevelMeter::kPreferredWidth);

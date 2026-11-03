@@ -26,9 +26,9 @@ built-in effects.
 - **Scenes** — names, gains, pan, mute/solo, EQ, dynamics, insert plugin state,
   routing sends, device choices and the audio tuning are saved as JSON and
   restored exactly.
-- **Latency controls** *(BETA)* — device buffer selection, optional low-latency
-  input, low-latency output FIFOs, a minimal clock FIFO, exclusive WASAPI, and a
-  round-trip latency measurement.
+- **Latency controls** *(BETA)* — device buffer selection, adaptive low-latency
+  input/output FIFOs, a minimal clock FIFO, optional exclusive WASAPI, and a
+  round-trip latency measurement. Shared WASAPI remains the stable default.
 
 ## Using PluginRack
 
@@ -71,9 +71,10 @@ scene.
 
 Each channel and output strip has a device menu: **System Default**, **None -
 silent**, the available WASAPI/ASIO devices, and the app's own device types.
-The first output with a real device becomes the clock; its sample rate and block
-size are used by every stream. Inputs are shared per device, so several channels
-can capture the same endpoint.
+The first output with a real device becomes the clock; its sample rate and render
+block drive the engine. Individual devices may use different driver buffer sizes;
+the bounded FIFOs bridge those callbacks. Inputs are shared per device, so several
+channels can capture the same endpoint.
 
 The **I/O** view shows the same strips as the Mixer with an **Inputs** / **Outputs**
 tab switch, so either side can fill the window on its own. Device assignment is
@@ -83,29 +84,34 @@ identical in both places.
 
 Buffer and latency changes are **staged**: nothing is applied until you press
 **Apply**. **Revert** discards the staged values. The tuning travels with the
-scene: **Save** stores the buffer sizes, the five latency switches and the
-auto-reload state, and loading a save restores them before the devices reopen.
-Scenes written before schema 4 carry no tuning block, so loading one leaves the
-live settings alone.
+scene: **Save** stores the buffer sizes, the five latency switches, their
+explicit opt-in marker, and the auto-reload state; loading a save restores them
+before the devices reopen. All five beta latency switches are off by default.
+Scenes written before the opt-in marker are treated as stable defaults, so an
+old save cannot silently select exclusive or low-latency operation.
 
 - **Input / Output buffer** — `Auto (driver default)` or an explicit size. If a
   device refuses the new size, the previous setting is restored automatically.
-- **Low-latency input** *(BETA)* — the capture keeps one render block of read
-  delay instead of two (about 10 ms).
-- **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI before the shared
-  modes. It can help or hurt depending on the driver; switching reopens every
-  device.
+- **Low-latency input** *(BETA)* — the capture starts with one render block of
+  read delay instead of two (about 10 ms), then adds a block automatically after
+  a real starvation.
+- **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI for the standalone
+  clock output. Shared mode remains first for other streams and same-device
+  input because exclusive clients cannot share an endpoint reliably.
 - **Low-latency outputs** *(BETA)* — non-clock outputs keep two device buffers
-  instead of four (about 20 ms on those outputs).
+  instead of four (about 20 ms on those outputs); bounded drift correction keeps
+  separate device clocks from slowly draining that margin.
 - **Minimal clock FIFO** *(BETA)* — the clock starts with no primed FIFO; a
   missed render is covered by one block of silence (about 10 ms).
-- **Same-device input (full duplex)** *(BETA)* — when the input and the clock
-  output are the same endpoint, use its hardware clock and a one-block read delay.
+- **Same-device input (one-block start)** *(BETA)* — when the input and the clock
+  output are the same endpoint, start with one block of read delay. The capture
+  adds a block automatically if that aggressive setting starves.
 
-On the development machine (48 kHz, 480-sample blocks, USB clock output) the
-defaults measured about **70 ms** end-to-end estimate, **60 ms** with low-latency
-input, and **50 ms** with the minimal clock FIFO as well. Exclusive mode measured
-higher here (~80–90 ms) and glitched once while switching; that is driver-dependent.
+Latency depends on the driver-reported buffers and plugin chain. Start with the
+stable shared-WASAPI defaults, then lower the input/output buffers one step at a
+time while watching the underrun diagnostics. Exclusive mode can be slower or
+glitch during a switch, so it is only used for the standalone clock when
+explicitly requested.
 
 ### Reloading devices
 
@@ -240,15 +246,20 @@ docs/    Design spec and session handoff notes
 ### Why the first device open can take a while
 
 Opening a WASAPI endpoint is not instant. JUCE's WASAPI backend probes every
-channel count from 32 down to 2 across every supported sample rate and format
+channel count (up to 64 down to 2 in the current JUCE source) across every supported sample rate and format
 (`queryMaxNumChannels`) before it can report the device's capabilities, and some
 USB drivers answer each format check slowly.
 
 On the development machine two USB endpoints take about **16 seconds each** in
-that probe; other devices take well under a second. Outputs are therefore opened
-concurrently, so the wall-clock startup is roughly the slowest single endpoint
-rather than the sum. The UI stays responsive and shows progress. Reloading a
-single device avoids paying that cost for every stream.
+that probe; other devices take well under a second. Independent outputs and
+captures are opened concurrently, so the first pass is bounded by roughly the
+slowest endpoint rather than the sum of all probes. The UI stays responsive and
+shows progress; only an unusual clock sample-rate fallback causes a second pass.
+The first output is the clock, so the main output can appear to be the slowest;
+when exclusive mode was explicitly enabled, it also runs the more expensive
+exclusive format probe. New/default sessions open it in stable shared mode
+instead; exclusive mode requires an explicit opt-in.
+Reloading a single device avoids paying that cost for every stream.
 
 This is a JUCE backend characteristic, not a hang. If it becomes a problem, the
 options are a local JUCE patch that caps the channel-count probe, caching the

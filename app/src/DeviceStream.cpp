@@ -14,10 +14,12 @@ juce::String formatKhz(double rate) {
     return juce::String(k, 1) + " kHz";
 }
 
-// Device type names registered by JUCE for the WASAPI modes, in the order we
-// prefer them: event-driven shared first, then exclusive, then plain shared.
-// ASIO (only when this build has JUCE_ASIO) is tried last, after the WASAPI
-// modes. "Windows Audio (Exclusive Mode)" is JUCE's exact registered name.
+// Device type names registered by JUCE for the WASAPI modes. Normal shared
+// WASAPI is deliberately tried first: the low-latency and exclusive modes are
+// useful fallbacks, but forcing either one on every endpoint made the beta
+// tuning path driver-dependent and prone to dropouts.
+// ASIO (only when this build has JUCE_ASIO) is tried last. "Windows Audio
+// (Exclusive Mode)" is JUCE's exact registered name.
 const juce::String kTypeLowLatency = "Windows Audio (Low Latency Mode)";
 const juce::String kTypeExclusive = "Windows Audio (Exclusive Mode)";
 const juce::String kTypeShared = "Windows Audio";
@@ -107,8 +109,10 @@ juce::String openWithWildcardSearch(juce::AudioDeviceManager& manager,
 // Opens preferredDeviceName (empty = system default) in the first device type
 // from the low-latency chain that actually carries it, passing the full
 // AudioDeviceSetup with the name explicit instead of relying on a wildcard
-// match. A type switch that opens another device is closed again before the
-// chosen setup is applied. On success returns the selected type name; on
+// match. The type is selected through AudioDeviceManager's setup XML so JUCE
+// opens the requested endpoint directly; setCurrentAudioDeviceType would
+// first open the system default, sleep 1.5 seconds, close it, and only then
+// open the requested endpoint. On success returns the selected type name; on
 // failure returns empty and sets errorOut.
 juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    const juce::String& preferredDeviceName,
@@ -119,7 +123,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    int requestedBufferSize,
                                    juce::String& errorOut,
                                    bool preferExclusive = false) {
-    juce::StringArray typeOrder { kTypeLowLatency, kTypeExclusive, kTypeShared, kTypeAsio };
+    juce::StringArray typeOrder { kTypeShared, kTypeLowLatency, kTypeExclusive, kTypeAsio };
     if (preferExclusive) {
         typeOrder.removeString(kTypeExclusive);
         typeOrder.insert(0, kTypeExclusive);
@@ -137,26 +141,35 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
         if (!hasDevice)
             continue; // no matching device name in this type: fall through
 
-        manager.setCurrentAudioDeviceType(typeName, false);
-        if (manager.getCurrentAudioDeviceType() != typeName)
-            continue;
-        // The type switch probes the type's default device; release it so the
-        // selected endpoint below is the only one that stays open.
-        manager.closeAudioDevice();
+        // Resolve the default to its actual endpoint name before building the
+        // XML. An empty name in AudioDeviceSetup means "let the manager pick a
+        // default", but the XML path treats two empty names as "no device".
+        juce::String selectedDeviceName = preferredDeviceName;
+        if (selectedDeviceName.isEmpty()) {
+            const int defaultIndex = type->getDefaultDeviceIndex(wantInput);
+            if (defaultIndex < 0 || defaultIndex >= deviceNames.size()) continue;
+            selectedDeviceName = deviceNames[defaultIndex];
+        }
 
         const std::vector<int> bufferCandidates{requestedBufferSize};
         for (const int candidate : bufferCandidates) {
             juce::AudioDeviceManager::AudioDeviceSetup setup;
             if (wantInput)
-                setup.inputDeviceName = preferredDeviceName;
+                setup.inputDeviceName = selectedDeviceName;
             else
-                setup.outputDeviceName = preferredDeviceName;
+                setup.outputDeviceName = selectedDeviceName;
             if (requestedBufferSize >= 0) {
                 setup.sampleRate = engineSampleRate; // 0 = driver default
                 setup.bufferSize = candidate;
             }
-            auto err = manager.initialise(numInputChannels, numOutputChannels, nullptr, true,
-                                          preferredDeviceName, &setup);
+            juce::XmlElement typeSetup("DEVICESETUP");
+            typeSetup.setAttribute("deviceType", typeName);
+            if (wantInput)
+                typeSetup.setAttribute("audioInputDeviceName", selectedDeviceName);
+            else
+                typeSetup.setAttribute("audioOutputDeviceName", selectedDeviceName);
+            auto err = manager.initialise(numInputChannels, numOutputChannels, &typeSetup, false,
+                                          selectedDeviceName, &setup);
             if (err.isEmpty()) {
                 auto* device = manager.getCurrentAudioDevice();
                 if (requestedBufferSize > 0
@@ -253,14 +266,15 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                int requestedBufferSize,
                                int renderBlockFrames,
                                int readDelayBlocks,
-                               bool preferExclusive) {
+                               bool preferExclusive,
+                               int capacityReserveFrames) {
     close();
     error.clear();
     inputError.clear();
 
     const int numInputChannels = juce::jmax(2, numChannelsNeeded);
-    // Pick the lowest-latency device type that carries this device before
-    // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
+    // Prefer the stable shared mode; low-latency/exclusive modes remain
+    // available as fallbacks when a driver refuses the shared open.
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ true,
                                               numInputChannels, 0,
                                               engineSampleRate, requestedBufferSize, errorOut,
@@ -315,8 +329,12 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // window to read.
     const int blockFrames = juce::jmax(
         deviceBufferSize, renderBlockFrames > 0 ? renderBlockFrames : deviceBufferSize);
-    capacity = juce::jmax(blockFrames * 4,
-                          juce::jmin(blockFrames * 8, 65536));
+    // The reserve only sizes the ring. Keeping it out of blockFrames matters:
+    // the read delay below is derived from blockFrames, so a reserve sized for
+    // a probe that has not finished yet would become ~85 ms of real latency.
+    const int capacityUnit = juce::jmax(blockFrames, capacityReserveFrames);
+    capacity = juce::jmax(capacityUnit * 4,
+                          juce::jmin(capacityUnit * 8, 65536));
     storage.setSize(inputChannelCount_, capacity);
     storage.clear();
     writePos = 0;
@@ -393,9 +411,24 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
     // reached counts as a real underrun.
     const auto targetDelay =
         static_cast<std::uint64_t>(readDelaySamples.load(std::memory_order_relaxed));
-    const bool primedEnough = written >= targetDelay;
-    if (window.underrun && window.fresh && primedEnough)
+    // A one-block delay necessarily has less than a look-ahead sample on the
+    // first pull. Do not report that expected startup condition as a glitch.
+    const bool primedEnough = written >= targetDelay + static_cast<std::uint64_t>(frames);
+    if (window.underrun && window.fresh && primedEnough) {
         inputUnderruns.fetch_add(1, std::memory_order_relaxed);
+
+        // Low-latency input starts with one block of delay, but a separate
+        // input clock can drift or arrive late. Add one render block only
+        // after a real starvation, preserving the low setting while stable
+        // and recovering to the normal safety margin when it is not.
+        const int currentDelay = readDelaySamples.load(std::memory_order_relaxed);
+        const int maxDelay = juce::jmax(0, capacity - frames - 2);
+        const int nextDelay = juce::jmin(maxDelay, currentDelay + frames);
+        if (nextDelay > currentDelay) {
+            readDelaySamples.store(nextDelay, std::memory_order_relaxed);
+            readCursor.setTargetDelay(nextDelay);
+        }
+    }
     if (window.overrun && window.fresh) inputOverruns.fetch_add(1, std::memory_order_relaxed);
 
     // Declick bookkeeping: mark the epoch that ended in a fade-out, then
@@ -581,18 +614,19 @@ OutputPlayback::~OutputPlayback() {
 }
 
 juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
-                                 double engineSampleRate,
-                                 juce::String& errorOut,
-                                 int requestedBufferSize,
-                                 int targetFillBlocks,
-                                 int primeBlocks,
-                                 bool preferExclusive) {
+                                  double engineSampleRate,
+                                  juce::String& errorOut,
+                                  int requestedBufferSize,
+                                  int targetFillBlocks,
+                                  int primeBlocks,
+                                  bool preferExclusive,
+                                  int renderBlockFrames) {
     close();
     closing_.store(false, std::memory_order_relaxed);
     error.clear();
 
-    // Pick the lowest-latency device type that carries this device before
-    // initialise (sharedLowLatency -> exclusive -> shared -> ASIO).
+    // Prefer the stable shared mode; low-latency/exclusive modes remain
+    // available as fallbacks when a driver refuses the shared open.
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
                                               0, 2,
                                               engineSampleRate, requestedBufferSize, errorOut,
@@ -622,14 +656,22 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     sampleRate = actual;
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
+    renderBlockFrames_ = renderBlockFrames > 0 ? renderBlockFrames : bufferSize;
     deviceOutputLatency = dev->getOutputLatencyInSamples();
     // Target the requested number of device buffers of headroom with two
     // spare blocks for bursts. The old fixed 16384 cap could make the ring
     // smaller than the priming target at large device buffer sizes, so the
     // first push was always dropped.
     targetFillFrames = bufferSize * juce::jmax(0, targetFillBlocks);
-    capacity = juce::jmax(targetFillFrames + bufferSize * 2,
-                          juce::jmin(bufferSize * 8, 65536));
+    // The render block belongs to the clock output and can differ from this
+    // device's callback size. Reserve enough room for a complete render block
+    // as well as the normal device-buffer headroom; otherwise a small
+    // non-clock buffer rejects every push from a larger clock block.
+    const int renderHeadroom = juce::jmax(bufferSize, renderBlockFrames_ * 2);
+    capacity = juce::jmax(targetFillFrames + renderHeadroom,
+                          juce::jmin(juce::jmax(bufferSize * 8,
+                                               renderBlockFrames_ * 2),
+                                     65536));
     fifo = std::make_unique<juce::AbstractFifo>(capacity);
     storage.setSize(2, capacity);
     storage.clear();
@@ -672,6 +714,7 @@ void OutputPlayback::close() {
     sampleRate = 0.0;
     activeDeviceType_.clear();
     deviceOutputLatency = 0;
+    renderBlockFrames_ = 0;
     latencySamples.store(0, std::memory_order_relaxed);
     fillFrames.store(0, std::memory_order_relaxed);
     deviceFadeInRemaining = 0;
@@ -812,15 +855,35 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
         currentOutputChannels = nullptr;
         return;
     }
-    auto readHandle = fifo->read(numSamples);
-    fillFrames.store(fifo->getNumReady(), std::memory_order_relaxed);
+
+    // Independent output devices do not share a sample clock with the clock
+    // output. Nudge the read rate by at most 0.5% according to FIFO fill so a
+    // two-buffer low-latency target does not slowly drain or grow over time.
+    // When the fill is on target this remains the old memcpy fast path.
+    const int readyBefore = fifo->getNumReady();
+    constexpr double kMaxDriftCorrection = 0.005;
+    const int fillScale = juce::jmax(1, juce::jmax(targetFillFrames, bufferSize));
+    const double fillCorrection = targetFillFrames > 0
+        ? std::clamp((double)(readyBefore - targetFillFrames)
+                         / (double)fillScale * kMaxDriftCorrection,
+                     -kMaxDriftCorrection, kMaxDriftCorrection)
+        : 0.0;
+    const double readRatio = 1.0 + fillCorrection;
+    const int requestedSourceFrames = static_cast<int>(std::ceil(
+        (double)juce::jmax(0, numSamples - 1) * readRatio)) + 1;
+    const int sourceFrames = juce::jlimit(1, juce::jmax(1, capacity),
+                                          requestedSourceFrames);
+    auto readHandle = fifo->read(sourceFrames);
     const int b1 = readHandle.blockSize1;
     const int b2 = readHandle.blockSize2;
     const int total = b1 + b2;
-    const bool shortRead = total < numSamples;
+    const bool shortRead = total < sourceFrames;
+    const int produced = total > 0
+        ? juce::jmin(numSamples, static_cast<int>(std::ceil((double)total / readRatio)))
+        : 0;
     if (shortRead) {
         outputUnderruns.fetch_add(1, std::memory_order_relaxed);
-        outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - total),
+        outputDroppedFrames.fetch_add((std::uint64_t)(numSamples - produced),
                                       std::memory_order_relaxed);
         // Fade the short tail to silence; the next complete block fades back
         // in instead of starting at an arbitrary amplitude.
@@ -828,37 +891,58 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     }
 
     const int chans = juce::jmin(2, numOutputChannels);
+    const bool exactRead = !shortRead && std::abs(readRatio - 1.0) < 1.0e-12
+                        && sourceFrames == numSamples;
+    const int fadeIn = shortRead ? 0 : juce::jmin(deviceFadeInRemaining, numSamples);
+    const int fadeDone = 64 - deviceFadeInRemaining;
+    const auto sampleAt = [this, &readHandle, b1](int channel, int index) noexcept {
+        return index < b1
+            ? this->storage.getReadPointer(channel)[readHandle.startIndex1 + index]
+            : this->storage.getReadPointer(channel)[readHandle.startIndex2 + index - b1];
+    };
     for (int ch = 0; ch < chans; ++ch) {
         float* out = outputChannelData[ch];
         if (out == nullptr) continue;
-        const float* src = storage.getReadPointer(ch);
-        if (b1 > 0) {
-            std::memcpy(out, src + readHandle.startIndex1,
-                        sizeof(float) * (std::size_t)b1);
+        if (exactRead) {
+            const float* src = storage.getReadPointer(ch);
+            if (b1 > 0) {
+                std::memcpy(out, src + readHandle.startIndex1,
+                            sizeof(float) * (std::size_t)b1);
+            }
+            if (b2 > 0) {
+                std::memcpy(out + b1, src + readHandle.startIndex2,
+                            sizeof(float) * (std::size_t)b2);
+            }
+        } else {
+            for (int i = 0; i < produced; ++i) {
+                const double position = (double)i * readRatio;
+                const int base = static_cast<int>(std::floor(position));
+                const float fraction = static_cast<float>(position - (double)base);
+                const float first = sampleAt(ch, base);
+                out[i] = base + 1 < total
+                    ? first + (sampleAt(ch, base + 1) - first) * fraction
+                    : first;
+            }
         }
-        if (b2 > 0) {
-            std::memcpy(out + b1, src + readHandle.startIndex2,
-                        sizeof(float) * (std::size_t)b2);
-        }
-        if (shortRead) {
-            const float last = total > 0 ? out[total - 1] : 0.0f;
-            const int gap = numSamples - total;
+        if (produced < numSamples) {
+            const float last = produced > 0 ? out[produced - 1] : 0.0f;
+            const int gap = numSamples - produced;
             for (int i = 0; i < gap; ++i) {
-                out[total + i] =
+                out[produced + i] =
                     last * (1.0f - (float)(i + 1) / (float)(gap + 1));
             }
-        } else if (deviceFadeInRemaining > 0) {
+        } else if (fadeIn > 0) {
             // Continue the same 64-sample ramp across small device blocks so
             // the gain does not restart at every block boundary.
             constexpr int kFadeLength = 64;
-            const int done = kFadeLength - deviceFadeInRemaining;
-            const int fade = juce::jmin(deviceFadeInRemaining, numSamples);
-            for (int i = 0; i < fade; ++i) {
-                out[i] *= (float)(done + i + 1) / (float)(kFadeLength + 1);
+            for (int i = 0; i < fadeIn; ++i) {
+                out[i] *= (float)(fadeDone + i + 1) / (float)(kFadeLength + 1);
             }
-            deviceFadeInRemaining -= fade;
         }
     }
+
+    if (!shortRead && deviceFadeInRemaining > 0)
+        deviceFadeInRemaining -= fadeIn;
 
     const int ready = fifo->getNumReady();
     fillFrames.store(ready, std::memory_order_relaxed);

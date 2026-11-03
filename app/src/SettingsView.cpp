@@ -121,7 +121,7 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     addAndMakeVisible(measureButton);
 
-    tuningLabel.setText("LATENCY TUNING", juce::dontSendNotification);
+    tuningLabel.setText("LATENCY TUNING (OPT-IN)", juce::dontSendNotification);
     tuningLabel.setFont(theme::ui::sectionFont());
     tuningLabel.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
     addAndMakeVisible(tuningLabel);
@@ -150,17 +150,23 @@ SettingsView::SettingsView(AudioEngine& engine)
                 case AudioEngine::LatencyOption::FullDuplexInput:
                     staged_.fullDuplexInput = toggle->getToggleState(); break;
             }
+            staged_.latencyTuningOptIn = staged_.lowLatencyInput
+                                      || staged_.preferExclusive
+                                      || staged_.lowLatencyOutputs
+                                      || staged_.minimalClockFifo
+                                      || staged_.fullDuplexInput;
             updatePendingState();
         };
         addAndMakeVisible(*toggle);
     }
     lowLatencyInputToggle.setTooltip(
         "Input capture keeps one render block of read delay instead of two. "
-        "Saves ~10 ms; may add input underruns on jittery drivers.");
+        "Saves ~10 ms while stable; it adds a block automatically after a real "
+        "starvation on a jittery driver.");
     exclusiveToggle.setTooltip(
-        "Try exclusive WASAPI before shared low-latency. Latency depends on the "
-        "driver (sometimes higher), and switching reopens every device, so the "
-        "audio may glitch briefly.");
+        "Try exclusive WASAPI for the standalone clock output. Shared WASAPI "
+        "remains first for other streams and for same-device input, because "
+        "exclusive clients cannot share an endpoint reliably.");
     lowLatencyOutputsToggle.setTooltip(
         "Non-clock outputs keep two device buffers instead of four. Saves "
         "~20 ms on those outputs; more sensitive to clock drift. Switching "
@@ -170,8 +176,9 @@ SettingsView::SettingsView(AudioEngine& engine)
         "render is covered by one block of silence. Switching reopens the "
         "devices.");
     fullDuplexToggle.setTooltip(
-        "When the input and the clock output are the same device, use its "
-        "hardware clock and one block of input read delay. Saves ~10 ms.");
+        "When the input and clock output use the same endpoint, start capture "
+        "with one block of read delay. It is not a shared callback; the delay "
+        "grows automatically if the device starves.");
 
     pendingLabel.setFont(theme::ui::captionFont());
     pendingLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -323,6 +330,7 @@ void SettingsView::updatePendingState() {
     const auto applied = audioEngine.getDeviceSettings();
     dirty_ = staged_.inputBuffer != applied.inputBuffer
           || staged_.outputBuffer != applied.outputBuffer
+          || staged_.latencyTuningOptIn != applied.latencyTuningOptIn
           || staged_.lowLatencyInput != applied.lowLatencyInput
           || staged_.preferExclusive != applied.preferExclusive
           || staged_.lowLatencyOutputs != applied.lowLatencyOutputs
