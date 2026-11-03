@@ -21,7 +21,6 @@ public:
                juce::Atomic<float>& rightRmsSource);
 
     void paint(juce::Graphics& g) override;
-    void mouseDown(const juce::MouseEvent& event) override;
     void setStereo(bool stereo);
 
     static constexpr float kMinDb = -60.0f;
@@ -31,12 +30,14 @@ public:
     // the Peak/RMS readouts all fit in it.
     static constexpr int kPreferredWidth = 44;
 
-    // Peak-hold intervals offered in the meter's right-click menu.
+    // Peak-hold intervals offered by the Settings page picker.
     inline static constexpr std::array<int, 5> kPeakHoldChoices{100, 250, 500, 750, 1000};
 
-    // Shared by every meter; the menu sets it for the session.
+    // Shared by every meter; the Settings picker sets it for the session.
     static int peakHoldMs();
     static void setPeakHoldMs(int ms);
+    // Text for one interval in the Settings picker ("250 ms", "1 s").
+    static juce::String peakHoldLabel(int ms);
 
 private:
     void timerCallback() override;

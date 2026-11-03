@@ -132,6 +132,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
         inputEditing = false;
         rebuild();
     };
+    channelCombo.setLookAndFeel(&selectorLookAndFeel);
     addAndMakeVisible(channelCombo);
     channelCombo.setColour(juce::ComboBox::backgroundColourId, theme::control());
     channelCombo.setColour(juce::ComboBox::textColourId, theme::text());
@@ -256,6 +257,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     outputHeader.setFont(theme::ui::itemFont());
     outputHeader.setColour(juce::Label::textColourId, theme::amber());
     addAndMakeVisible(outputHeader);
+    addAndMakeVisible(sourceList);
 
     emptyLabel.setText("No chains yet - add a channel or output in the Mixer view.",
                        juce::dontSendNotification);
@@ -505,10 +507,45 @@ const pluginrack::DynamicsEffect* RackView::dynamicsEffectFor(std::uint32_t item
     return byType != effects->end() ? &*byType : nullptr;
 }
 
+const std::vector<pluginrack::ChainItem>* RackView::currentChain() const {
+    if (selectedId < 0) return nullptr;
+    const auto id = static_cast<std::uint32_t>(selectedId);
+    if (!selectedIsOutput) {
+        for (const auto& channel : audioEngine.getChannels())
+            if (channel->id == id) return &channel->chain;
+    } else {
+        for (const auto& output : audioEngine.getOutputs())
+            if (output->id == id) return &output->chain;
+    }
+    return nullptr;
+}
+
+const std::vector<pluginrack::DynamicsEffect>* RackView::currentEffects() const {
+    if (selectedId < 0) return nullptr;
+    const auto id = static_cast<std::uint32_t>(selectedId);
+    if (!selectedIsOutput) {
+        for (const auto& channel : audioEngine.getChannels())
+            if (channel->id == id) return &channel->effects;
+    } else {
+        for (const auto& output : audioEngine.getOutputs())
+            if (output->id == id) return &output->effects;
+    }
+    return nullptr;
+}
+
+const pluginrack::DynamicsEffect* RackView::effectOfType(pluginrack::DynamicsEffectType type) const {
+    const auto* effects = currentEffects();
+    if (effects == nullptr) return nullptr;
+    const auto found = std::find_if(effects->begin(), effects->end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    return found != effects->end() ? &*found : nullptr;
+}
+
 void RackView::refreshSlots() {
     slots.clear();
     eqCard = nullptr;
     dynamicsCard = nullptr;
+    dynamicsCardPaired = false;
     vstCards.clear();
     gateButton.setVisible(false);
     eqButton.setVisible(false);
@@ -537,96 +574,114 @@ void RackView::refreshSlots() {
         ++row;
     };
 
-    bool dynamicsPlaced = false;
-    for (const auto& item : items) {
-        if (item.type == pluginrack::ChainItemType::Eq) {
+    const auto* effectList = currentEffects();
+    static const std::vector<pluginrack::DynamicsEffect> fallbackEffects =
+        pluginrack::defaultDynamicsEffects();
+    const auto& effects = effectList != nullptr ? *effectList : fallbackEffects;
+    const auto rows = buildChainRows(items, effects);
+
+    // Exactly one of these is live: currentChannel() refuses an output
+    // selection and currentOutput() refuses a channel one.
+    auto* selectedChannel = currentChannel();
+    auto* selectedOutput = selectedChannel == nullptr ? currentOutput() : nullptr;
+    static const std::vector<pluginrack::EqBand> noEqBands;
+    const auto& eqBands = selectedChannel != nullptr ? selectedChannel->eqBands
+                          : selectedOutput != nullptr ? selectedOutput->eqBands
+                                                      : noEqBands;
+    const bool eqBypassed = selectedChannel != nullptr ? selectedChannel->eqBypassed.get()
+                            : selectedOutput != nullptr ? selectedOutput->eqBypassed.get()
+                                                        : false;
+    const auto* compressor = effectOfType(pluginrack::DynamicsEffectType::Compressor);
+
+    for (const auto& rowIndices : rows) {
+        std::vector<pluginrack::ChainItem> rowItems;
+        rowItems.reserve(rowIndices.size());
+        for (const int index : rowIndices) rowItems.push_back(items[static_cast<std::size_t>(index)]);
+        const auto item = rowItems.front();
+
+        if (item.type == pluginrack::ChainItemType::Insert) {
+            AudioEngine::InsertSlot* found = nullptr;
+            if (inserts != nullptr)
+                for (const auto& candidate : *inserts)
+                    if (candidate->id == item.id) {
+                        found = candidate.get();
+                        break;
+                    }
+            if (found == nullptr) continue;
             auto* slot = slots.add(new InsertSlotComponent(*this, row));
-            slot->setBuiltIn(item, "EQ",
-                             selectedIsOutput ? currentOutput()->eqBypassed.get()
-                                              : currentChannel()->eqBypassed.get());
+            slot->setInsert(found);
             auto mini = std::make_unique<InsertMiniView>();
-            mini->showEq(selectedIsOutput ? currentOutput()->eqBands : currentChannel()->eqBands,
-                         liveRateHz);
+            mini->showVst();
+            if (const auto thumb = vstThumbs.find(found->id); thumb != vstThumbs.end())
+                mini->setVstSnapshot(thumb->second);
+            slot->setMiniView(std::move(mini));
+            slot->setSelected(dockedHost != nullptr && focusedInsertId == found->id);
+            vstCards[found->id] = slot;
+            place(slot);
+            continue;
+        }
+
+        auto* slot = slots.add(new InsertSlotComponent(*this, row));
+        if (rowItems.size() > 1) {
+            // Compressor and gate share the Dynamics card: one switch each, and
+            // the panel a click opens is the one that carries both.
+            const int compIndex = compressorIndexInRow(items, effects, rowIndices);
+            const int gateIndex =
+                rowIndices.front() == compIndex ? rowIndices.back() : rowIndices.front();
+            const auto compressorItem = items[static_cast<std::size_t>(compIndex)];
+            const auto gateItem = items[static_cast<std::size_t>(gateIndex)];
+            const auto* gate = effectOfType(pluginrack::DynamicsEffectType::Gate);
+            CardSwitch compSwitch{compressorItem, compressor != nullptr && compressor->bypassed, "C",
+                                  "Compressor: click to bypass, right-click to open the panel"};
+            CardSwitch gateSwitch{gateItem, gate != nullptr && gate->bypassed, "G",
+                                  "Gate: click to bypass, right-click to open the panel"};
+            slot->setBuiltInPair("Dynamics", compressorItem, compSwitch, gateSwitch);
+            auto mini = std::make_unique<InsertMiniView>();
+            if (compressor != nullptr && gate != nullptr)
+                mini->showDynamicsPair(*compressor, *gate);
+            else if (const auto* single = compressor != nullptr ? compressor : gate)
+                mini->showDynamics(*single);
+            slot->setMiniView(std::move(mini));
+            slot->setSelected(dynamicsFocused);
+            dynamicsCard = slot;
+            dynamicsCardPaired = true;
+            place(slot);
+            continue;
+        }
+
+        if (item.type == pluginrack::ChainItemType::Eq) {
+            slot->setBuiltIn(item, "EQ", eqBypassed);
+            auto mini = std::make_unique<InsertMiniView>();
+            mini->showEq(eqBands, liveRateHz);
             slot->setMiniView(std::move(mini));
             slot->setSelected(eqFocused);
             eqCard = slot;
-            place(slot);
-        } else if (item.type == pluginrack::ChainItemType::Dynamics) {
-            // Compressor and gate are two chain rows drawn as one card: the
-            // first row seen places it, the other is its partner.
-            if (dynamicsPlaced) continue;
-            dynamicsPlaced = true;
-            pluginrack::ChainItem partner{pluginrack::ChainItemType::Dynamics, 0};
-            for (const auto& other : items)
-                if (other.type == pluginrack::ChainItemType::Dynamics && other.id != item.id)
-                    partner = other;
-
-            const auto* firstEffect = dynamicsEffectFor(item.id);
-            const auto* partnerEffect = partner.id != 0 ? dynamicsEffectFor(partner.id) : nullptr;
-            const auto* compressor =
-                firstEffect != nullptr
-                        && firstEffect->type == pluginrack::DynamicsEffectType::Compressor
-                    ? firstEffect
-                    : (partnerEffect != nullptr
-                               && partnerEffect->type == pluginrack::DynamicsEffectType::Compressor
-                           ? partnerEffect
-                           : nullptr);
-            const auto* gate = firstEffect != nullptr
-                                       && firstEffect->type == pluginrack::DynamicsEffectType::Gate
-                                   ? firstEffect
-                                   : (partnerEffect != nullptr
-                                              && partnerEffect->type
-                                                     == pluginrack::DynamicsEffectType::Gate
-                                          ? partnerEffect
-                                          : nullptr);
-
-            auto* slot = slots.add(new InsertSlotComponent(*this, row));
-            if (compressor != nullptr && gate != nullptr) {
-                // Each switch has to address the chain row that carries it.
-                const auto compressorItem = compressor == firstEffect ? item : partner;
-                const auto gateItem = gate == firstEffect ? item : partner;
-                slot->setBuiltInPair("Gate/Comp", compressorItem, compressor->bypassed,
-                                     gateItem, gate->bypassed);
+        } else {
+            // A chain missing its partner leaves one dynamics effect on a row
+            // of its own.
+            const auto* effect = dynamicsEffectFor(item.id);
+            const bool isCompressor =
+                effect != nullptr ? effect->type == pluginrack::DynamicsEffectType::Compressor
+                                  : item.id == 1;
+            slot->setBuiltIn(item, isCompressor ? "Compressor" : "Gate",
+                             effect != nullptr && effect->bypassed);
+            if (effect != nullptr) {
                 auto mini = std::make_unique<InsertMiniView>();
-                mini->showDynamicsPair(*compressor, *gate);
+                mini->showDynamics(*effect);
                 slot->setMiniView(std::move(mini));
                 dynamicsCard = slot;
-            } else {
-                const auto* single = compressor != nullptr ? compressor : gate;
-                slot->setBuiltIn(item, compressor != nullptr ? "Compressor" : "Gate",
-                                 single != nullptr && single->bypassed);
-                if (single != nullptr) {
-                    auto mini = std::make_unique<InsertMiniView>();
-                    mini->showDynamics(*single);
-                    slot->setMiniView(std::move(mini));
-                    dynamicsCard = slot;
-                }
-            }
-            slot->setSelected(dynamicsFocused);
-            place(slot);
-        } else if (inserts != nullptr) {
-            auto it = std::find_if(inserts->begin(), inserts->end(),
-                                   [id = item.id](const auto& insert) { return insert->id == id; });
-            if (it != inserts->end()) {
-                auto* slot = slots.add(new InsertSlotComponent(*this, row));
-                slot->setInsert(it->get());
-                auto mini = std::make_unique<InsertMiniView>();
-                mini->showVst();
-                if (const auto thumb = vstThumbs.find(it->get()->id); thumb != vstThumbs.end())
-                    mini->setVstSnapshot(thumb->second);
-                slot->setMiniView(std::move(mini));
-                slot->setSelected(dockedHost != nullptr && focusedInsertId == it->get()->id);
-                vstCards[it->get()->id] = slot;
-                place(slot);
+                dynamicsCardPaired = false;
+                slot->setSelected(dynamicsFocused);
             }
         }
+        place(slot);
     }
     chainRowCount = row;
 
     // Pad the list out to the fixed 8-slot chain; the spare VST rows are the
     // add control, so the insert list never changes length while you work. A
     // chain already holding its five VSTs gets no add row: the engine refuses
-    // a sixth insert, and the merged Gate/Comp card leaves one row spare here,
+    // a sixth insert, and the merged Dynamics card leaves one row spare here,
     // so the row would only open a picker that then has to refuse the plugin.
     const bool canAddVst =
         inserts == nullptr || static_cast<int>(inserts->size()) < kChainVstSlots;
@@ -708,6 +763,18 @@ void RackView::timerCallback() {
         startTimerHz(fps);
     }
 
+    // An output's row list follows live routing and device state; both only
+    // move on user action, so a few updates a second is plenty.
+    if (selectedIsOutput && sourceList.isVisible()) {
+        const auto now = juce::Time::getMillisecondCounter();
+        if (lastSourceRefreshMs == 0 || now - lastSourceRefreshMs >= 250) {
+            lastSourceRefreshMs = now;
+            refreshSourceList();
+        }
+    } else {
+        lastSourceRefreshMs = 0;
+    }
+
     // Built-in thumbnails read the strip's analyzer tap. It is re-armed every
     // tick because closing another view's panel switches the same tap off.
     auto* tap = (eqCard != nullptr || dynamicsCard != nullptr)
@@ -728,6 +795,9 @@ void RackView::timerCallback() {
     // The cards follow the engine, not just the layout: the EQ panel and the
     // dynamics knobs edit these values while the list stays on screen.
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    const bool eqBypassed = selectedIsOutput
+                                ? (currentOutput() != nullptr && currentOutput()->eqBypassed.get())
+                                : (currentChannel() != nullptr && currentChannel()->eqBypassed.get());
     if (eqCard != nullptr) {
         if (auto* channel = currentChannel()) {
             if (auto* mini = eqCard->miniView()) {
@@ -735,15 +805,14 @@ void RackView::timerCallback() {
                 mini->setSpectrumOffsetDb(channel->eqRtaOffsetDb);
                 mini->setWeighting(channel->eqRtaWeighting);
             }
-            eqCard->setBuiltInBypassed(channel->eqBypassed.get());
         } else if (auto* output = currentOutput()) {
             if (auto* mini = eqCard->miniView()) {
                 mini->setEqBands(output->eqBands, liveRateHz);
                 mini->setSpectrumOffsetDb(output->eqRtaOffsetDb);
                 mini->setWeighting(output->eqRtaWeighting);
             }
-            eqCard->setBuiltInBypassed(output->eqBypassed.get());
         }
+        if (eqCard != nullptr) eqCard->setBuiltInBypassed(eqBypassed);
     }
 
     if (tap != nullptr && eqCard != nullptr) {
@@ -755,36 +824,41 @@ void RackView::timerCallback() {
 
     if (tap != nullptr && dynamicsCard != nullptr) {
         tap->snapshot(false, tapLeft.data(), tapRight.data(), kLevelFrames);
-        const auto* compressor = dynamicsEffectFor(1);
-        const auto* gate = dynamicsEffectFor(2);
-        // The card is one block, so it reports one combined reduction, the
-        // same sum the editor's gauge shows.
+        const auto* compressorEffect = effectOfType(pluginrack::DynamicsEffectType::Compressor);
+        const auto* gateEffect = effectOfType(pluginrack::DynamicsEffectType::Gate);
+
+        // The card is one block, so it reports one combined reduction, the same
+        // sum the editor's gauge shows.
         float levelDb = -60.0f;
         float combinedGainDb = 0.0f;
-        if (compressor != nullptr) {
-            compressorMeter.update(tapLeft.data(), tapRight.data(), kLevelFrames, *compressor,
-                                   static_cast<double>(fps));
+        if (compressorEffect != nullptr) {
+            compressorMeter.update(tapLeft.data(), tapRight.data(), kLevelFrames,
+                                   *compressorEffect, static_cast<double>(fps));
             levelDb = compressorMeter.inputDb;
             combinedGainDb += compressorMeter.gainDb;
         }
-        if (gate != nullptr) {
-            gateMeter.update(tapLeft.data(), tapRight.data(), kLevelFrames, *gate,
+        if (gateEffect != nullptr) {
+            gateMeter.update(tapLeft.data(), tapRight.data(), kLevelFrames, *gateEffect,
                              static_cast<double>(fps));
-            if (compressor == nullptr) levelDb = gateMeter.inputDb;
+            if (compressorEffect == nullptr) levelDb = gateMeter.inputDb;
             combinedGainDb += gateMeter.gainDb;
         }
 
-        if (compressor != nullptr && gate != nullptr) {
-            dynamicsCard->setPairBypassed(compressor->bypassed, gate->bypassed);
-        } else if (const auto* single = compressor != nullptr ? compressor : gate) {
+        if (dynamicsCardPaired) {
+            dynamicsCard->setPairBypassed(compressorEffect != nullptr && compressorEffect->bypassed,
+                                          gateEffect != nullptr && gateEffect->bypassed);
+        } else if (const auto* single = compressorEffect != nullptr ? compressorEffect : gateEffect) {
             dynamicsCard->setBuiltInBypassed(single->bypassed);
         }
 
         if (auto* mini = dynamicsCard->miniView()) {
-            if (compressor != nullptr && gate != nullptr) mini->setDynamicsPair(*compressor, *gate);
-            else if (compressor != nullptr) mini->setDynamics(*compressor);
-            else if (gate != nullptr) mini->setDynamics(*gate);
-            if (compressor != nullptr || gate != nullptr)
+            if (compressorEffect != nullptr && gateEffect != nullptr)
+                mini->setDynamicsPair(*compressorEffect, *gateEffect);
+            else if (compressorEffect != nullptr)
+                mini->setDynamics(*compressorEffect);
+            else if (gateEffect != nullptr)
+                mini->setDynamics(*gateEffect);
+            if (compressorEffect != nullptr || gateEffect != nullptr)
                 mini->setLiveGain(levelDb, combinedGainDb);
         }
     }
@@ -1370,10 +1444,66 @@ void RackView::refreshDynamicsButtons() {
     apply(gateButton, pluginrack::DynamicsEffectType::Gate);
 }
 
+void RackView::SourceRowList::setRows(juce::StringArray channelNames,
+                                      juce::StringArray deviceNames) {
+    if (names == channelNames && devices == deviceNames) return;
+    names = std::move(channelNames);
+    devices = std::move(deviceNames);
+    repaint();
+}
+
+void RackView::SourceRowList::paint(juce::Graphics& g) {
+    if (names.isEmpty()) {
+        g.setColour(theme::dim());
+        g.setFont(theme::ui::captionFont());
+        g.drawFittedText("Nothing is routed to this output yet.",
+                         getLocalBounds().removeFromTop(60), juce::Justification::centredTop, 3);
+        return;
+    }
+
+    auto area = getLocalBounds();
+    for (int i = 0; i < names.size() && area.getHeight() > 0; ++i) {
+        auto row = area.removeFromTop(kRowH);
+        g.setColour(theme::control().withAlpha(0.6f));
+        g.fillRoundedRectangle(row.toFloat().reduced(0.0f, 1.0f), 3.0f);
+
+        auto text = row.reduced(6, 3);
+        g.setColour(theme::text());
+        g.setFont(theme::ui::bodyBoldFont());
+        g.drawFittedText(names[i], text.removeFromTop(15), juce::Justification::centredLeft, 1);
+        g.setColour(theme::dim());
+        g.setFont(theme::ui::captionFont());
+        g.drawFittedText(devices[i], text, juce::Justification::centredLeft, 1);
+        area.removeFromTop(2);
+    }
+}
+
+void RackView::refreshSourceList() {
+    juce::StringArray sourceNames;
+    juce::StringArray sourceDevices;
+    if (const auto* out = currentOutput()) {
+        for (const auto& channel : audioEngine.getChannels()) {
+            if (audioEngine.getSendGain(channel->id, out->id) <= -30.0f) continue;
+            sourceNames.add(channel->name);
+            const auto device = audioEngine.getChannelDeviceState(channel->id).deviceName;
+            sourceDevices.add(device.isNotEmpty() ? device : juce::String("No input device"));
+        }
+    }
+    sourceList.setRows(std::move(sourceNames), std::move(sourceDevices));
+}
+
 void RackView::refreshOutputButtons() {
     outputButtons.clear();
     const auto* ch = currentChannel();
+    const auto* out = currentOutput();
     const auto& outputs = audioEngine.getOutputs();
+
+    // With an output selected the column shows its inputs instead of the sends
+    // (an output has no sends of its own): which channels feed it, and the
+    // device each of those channels is receiving from.
+    refreshSourceList();
+    outputHeader.setText(out != nullptr ? "Inputs" : "Output", juce::dontSendNotification);
+
     for (size_t i = 0; i < outputs.size(); ++i) {
         auto* btn = outputButtons.add(new juce::TextButton(juce::String((int)i + 1)));
         btn->setClickingTogglesState(true);
@@ -1401,6 +1531,9 @@ void RackView::refreshOutputButtons() {
     // disable when output selected
     const bool isChannel = (currentChannel() != nullptr);
     for (auto* b : outputButtons) b->setEnabled(isChannel);
+    for (auto* b : outputButtons) b->setVisible(isChannel);
+    sourceList.setVisible(!isChannel && selectedId >= 0);
+    repaint();
 }
 
 void RackView::rebuild() {
@@ -1430,6 +1563,7 @@ void RackView::rebuild() {
     editorViewport.setVisible(hasChain);
     outputHeader.setVisible(hasChain);
     for (auto* b : outputButtons) b->setVisible(hasChain);
+    sourceList.setVisible(false);
 
     if (!hasChain) {
         closeEqWindow();
@@ -1478,9 +1612,9 @@ void RackView::resized() {
     // left column
     auto la = leftArea.reduced(4);
     la.removeFromTop(14);
-    auto selectorRow = la.removeFromTop(24);
+    auto selectorRow = la.removeFromTop(32);
     channelCombo.setBounds(selectorRow);
-    la.removeFromTop(4);
+    la.removeFromTop(6);
     nameLabel.setBounds(la.removeFromTop(20));
     subLabel.setBounds(la.removeFromTop(16));
     la.removeFromTop(10);
@@ -1605,6 +1739,7 @@ void RackView::resized() {
     ra.removeFromTop(14);
     outputHeader.setBounds(ra.removeFromTop(20));
     ra.removeFromTop(4);
+    sourceList.setBounds(ra);
     int y = ra.getY();
     const int btnH = 26;
     const int btnGap = 4;
@@ -1651,7 +1786,8 @@ void RackView::paint(juce::Graphics& g) {
     theme::ui::drawSectionCaption(g, { pluginArea.getX() + 8, pluginArea.getY() + 4, 80, 12 }, "INSERTS");
     theme::ui::drawSectionCaption(g, { centerArea.getX() + 10, centerArea.getY() + 6, 110, 12 },
                                   "PLUGIN EDITOR");
-    theme::ui::drawSectionCaption(g, { rightArea.getX() + 8, rightArea.getY() + 4, 70, 12 }, "OUTPUT");
+    theme::ui::drawSectionCaption(g, { rightArea.getX() + 8, rightArea.getY() + 4, 70, 12 },
+                                  selectedIsOutput ? "Inputs" : "Output");
 }
 
 void RackView::jumpToMixer() {
@@ -1782,24 +1918,13 @@ void RackView::clearChainPreview() {
 }
 
 int RackView::chainIndexForRow(int row) {
-    const auto* chain = selectedIsOutput
-                            ? (currentOutput() == nullptr ? nullptr : &currentOutput()->chain)
-                            : (currentChannel() == nullptr ? nullptr : &currentChannel()->chain);
+    const auto* chain = currentChain();
     if (chain == nullptr) return row;
-    int visible = 0;
-    bool pairSeen = false;
-    for (int index = 0; index < static_cast<int>(chain->size()); ++index) {
-        const auto& entry = (*chain)[static_cast<std::size_t>(index)];
-        if (entry.type == pluginrack::ChainItemType::Dynamics) {
-            // The pair's second row has no row of its own, and a drop between
-            // the two would split a single card, so it is never a landing spot.
-            if (pairSeen) continue;
-            pairSeen = true;
-        }
-        if (visible == row) return index;
-        ++visible;
-    }
-    return static_cast<int>(chain->size());
+    const auto* effects = currentEffects();
+    static const std::vector<pluginrack::DynamicsEffect> fallbackEffects =
+        pluginrack::defaultDynamicsEffects();
+    const auto rows = buildChainRows(*chain, effects != nullptr ? *effects : fallbackEffects);
+    return chainIndexForBoundary(rows, row, static_cast<int>(chain->size()));
 }
 
 void RackView::moveChainItemRaw(pluginrack::ChainItem item, int chainIndex) {
@@ -1809,38 +1934,50 @@ void RackView::moveChainItemRaw(pluginrack::ChainItem item, int chainIndex) {
         audioEngine.moveChannelChainItem(selectedId, item, chainIndex);
 }
 
-void RackView::moveDynamicsPair(pluginrack::ChainItem item, int targetRowIndex) {
-    const auto* chain = selectedIsOutput
-                            ? (currentOutput() == nullptr ? nullptr : &currentOutput()->chain)
-                            : (currentChannel() == nullptr ? nullptr : &currentChannel()->chain);
+void RackView::moveChainCard(const std::vector<pluginrack::ChainItem>& items, int targetRowIndex) {
+    if (items.empty()) return;
+    const auto* chain = currentChain();
     if (chain == nullptr) return;
 
-    pluginrack::ChainItem partner{pluginrack::ChainItemType::Dynamics, 0};
-    for (const auto& entry : *chain)
-        if (entry.type == pluginrack::ChainItemType::Dynamics && entry.id != item.id)
-            partner = entry;
+    // The card stands for every chain entry it covers, so its members follow
+    // the anchor and stay adjacent. Each move shifts the later indices, so the
+    // anchor is re-resolved before every follower.
+    const int anchorTarget = chainIndexForRow(targetRowIndex);
+    moveChainItemRaw(items.front(), anchorTarget);
 
-    moveChainItemRaw(item, chainIndexForRow(targetRowIndex));
-    if (partner.id == 0) return;
-
-    // The card stands for both rows, so the partner follows it. Removing it
-    // first shifts the anchor down when it sat before it.
-    const auto indexOf = [chain](const pluginrack::ChainItem& needle) {
-        for (int i = 0; i < static_cast<int>(chain->size()); ++i)
-            if ((*chain)[static_cast<std::size_t>(i)] == needle) return i;
-        return -1;
-    };
-    const int anchorIndex = indexOf(item);
-    const int partnerIndex = indexOf(partner);
-    if (anchorIndex < 0 || partnerIndex < 0) return;
-    moveChainItemRaw(partner, partnerIndex < anchorIndex ? anchorIndex : anchorIndex + 1);
+    for (std::size_t k = 1; k < items.size(); ++k) {
+        const auto* live = currentChain();
+        if (live == nullptr) return;
+        const auto position = std::find(live->begin(), live->end(), items[k]);
+        if (position == live->end()) continue;
+        const int current = static_cast<int>(std::distance(live->begin(), position));
+        const int target = anchorTarget + static_cast<int>(k);
+        if (current == target) continue;
+        moveChainItemRaw(items[k], target);
+    }
 }
 
 void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
-    if (item.type == pluginrack::ChainItemType::Dynamics)
-        moveDynamicsPair(item, targetIndex);
-    else
-        moveChainItemRaw(item, chainIndexForRow(targetIndex));
+    // A card moves as one, so collect every chain entry it covers.
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    if (const auto* chain = currentChain()) {
+        if (const auto* effects = currentEffects()) {
+            for (const auto& row : buildChainRows(*chain, *effects)) {
+                const bool holdsItem =
+                    std::any_of(row.begin(), row.end(), [&](int index) {
+                        return (*chain)[static_cast<std::size_t>(index)] == item;
+                    });
+                if (!holdsItem) continue;
+                if (row.size() > 1) {
+                    cardItems.clear();
+                    for (const int index : row)
+                        cardItems.push_back((*chain)[static_cast<std::size_t>(index)]);
+                }
+                break;
+            }
+        }
+    }
+    moveChainCard(cardItems, targetIndex);
     // The slot that reported this is still inside its own mouseUp() call, so
     // rebuilding the rows now would delete the component mid-event.
     juce::Component::SafePointer<RackView> safe(this);

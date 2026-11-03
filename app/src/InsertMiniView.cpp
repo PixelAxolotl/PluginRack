@@ -202,13 +202,11 @@ void InsertMiniView::paintDynamics(juce::Graphics& g) {
     g.setColour(theme::border().withAlpha(0.5f));
     g.drawLine(toX(kMinTransferDb), toY(kMinTransferDb), toX(0.0f), toY(0.0f), 1.0f);
 
-    // Both effects of the pair share these axes. A bypassed curve is dimmed
-    // rather than hidden, so the card never disagrees with its switches.
+    // A bypassed curve is dimmed rather than hidden, so the card never
+    // disagrees with its switches.
     if (hasGate) {
-        // Straight from the editor's own draw: only the part of the gate that
-        // deviates from unity, closed by the step that lifts the muted level to
-        // the knee. Drawing the whole range would just retrace the identity
-        // line past the threshold, which is what the panel avoids.
+        // Only the part of the gate that deviates from unity, closed by the
+        // step that lifts the muted level back to the knee.
         const float gateEndDb = juce::jlimit(
             kMinTransferDb, 0.0f,
             gateEffect.thresholdDb + std::max(gateEffect.kneeDb, 0.0f) * 0.5f);

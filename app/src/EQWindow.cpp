@@ -14,6 +14,10 @@ EQWindow::EQWindow(const juce::String& title,
       embedded(embeddedMode) {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
+    // A draggable window turns every press on the panel's background into a
+    // window move: clicking near the curve's edge threw the editor across the
+    // screen instead of editing. The title bar still moves it.
+    setDraggable(false);
     // Width floor leaves room for the four knob slots (Freq/Gain/Q/Delay)
     // with their 72 px value boxes intact.
     setResizeLimits(480, 320, 10000, 10000);

@@ -4,6 +4,8 @@
 #include <array>
 #include <utility>
 
+#include "LevelMeter.h"
+
 namespace {
 constexpr int kBufferSizes[] = { 32, 64, 128, 256, 480, 512, 1024, 2048, 4096 };
 constexpr int kAutoBufferItemId = 1; // ComboBox ids must be non-zero.
@@ -232,6 +234,21 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     addAndMakeVisible(rackThumbnailFpsCombo);
 
+    peakHoldLabel.setFont(theme::ui::bodyFont());
+    peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
+    peakHoldLabel.setTooltip("How long every level meter keeps its peak line before it falls back.");
+    addAndMakeVisible(peakHoldLabel);
+
+    theme::ui::styleCombo(peakHoldCombo);
+    for (const int ms : LevelMeter::kPeakHoldChoices)
+        peakHoldCombo.addItem(LevelMeter::peakHoldLabel(ms), ms);
+    peakHoldCombo.setTooltip("Peak-hold interval for the channel, output and mixer meters.");
+    peakHoldCombo.onChange = [this] {
+        const int ms = peakHoldCombo.getSelectedId();
+        if (ms > 0) LevelMeter::setPeakHoldMs(ms);
+    };
+    addAndMakeVisible(peakHoldCombo);
+
     theme::ui::styleToggle(closeToTrayToggle);
     closeToTrayToggle.setTooltip("Keep PluginRack running in the system tray when the window is closed.");
     closeToTrayToggle.onClick = [this] {
@@ -313,6 +330,8 @@ void SettingsView::refresh() {
             rackThumbnailFpsCombo.addItem(juce::String(thumbFps) + " fps", thumbFps);
         rackThumbnailFpsCombo.setSelectedId(thumbFps, juce::dontSendNotification);
     }
+    if (!peakHoldCombo.isPopupActive())
+        peakHoldCombo.setSelectedId(LevelMeter::peakHoldMs(), juce::dontSendNotification);
     reloadAllButton.setEnabled(!busy);
     reloadDevicesViewport.setEnabled(!busy);
     updatePendingState();
@@ -621,6 +640,10 @@ void SettingsView::resized() {
     rackThumbnailsLabel.setBounds(thumbRow.removeFromLeft(140));
     thumbRow.removeFromLeft(theme::ui::kRowGap);
     rackThumbnailFpsCombo.setBounds(thumbRow.removeFromLeft(90));
+    thumbRow.removeFromLeft(theme::ui::kSectionGap);
+    peakHoldLabel.setBounds(thumbRow.removeFromLeft(80));
+    thumbRow.removeFromLeft(theme::ui::kRowGap);
+    peakHoldCombo.setBounds(thumbRow.removeFromLeft(90));
     thumbRow.removeFromLeft(theme::ui::kSectionGap);
     closeToTrayToggle.setBounds(thumbRow.removeFromLeft(320));
 

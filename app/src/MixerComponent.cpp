@@ -482,7 +482,10 @@ void MixerComponent::OutputStrip::refresh() {
 }
 
 void MixerComponent::OutputStrip::refreshInserts() {
-    chainRowCount = static_cast<int>(output.chain.size());
+    // The compressor and the gate share the Dynamics card, so rows are not a
+    // one-to-one map of the chain any more.
+    const auto rows = buildChainRows(output.chain, output.effects);
+    chainRowCount = static_cast<int>(rows.size());
     const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
     while (slots.size() < totalRows) {
         auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
@@ -494,18 +497,47 @@ void MixerComponent::OutputStrip::refreshInserts() {
     }
     for (int i = chainRowCount; i < slots.size(); ++i)
         slots[i]->setAddSlot(i == chainRowCount);
-    for (int i = 0; i < chainRowCount; ++i) {
-        const auto item = output.chain[static_cast<std::size_t>(i)];
+
+    const auto compressor = std::find_if(output.effects.begin(), output.effects.end(),
+                                         [](const auto& effect) {
+                                             return effect.type
+                                                    == pluginrack::DynamicsEffectType::Compressor;
+                                         });
+    const auto gate = std::find_if(output.effects.begin(), output.effects.end(),
+                                   [](const auto& effect) {
+                                       return effect.type == pluginrack::DynamicsEffectType::Gate;
+                                   });
+    for (int r = 0; r < chainRowCount; ++r) {
+        const auto& indices = rows[static_cast<std::size_t>(r)];
+        const auto item = output.chain[static_cast<std::size_t>(indices.front())];
+        if (indices.size() > 1) {
+            // Compressor + gate: one switch each, and a click on the row opens
+            // the panel that carries both.
+            const int compIndex = compressorIndexInRow(output.chain, output.effects, indices);
+            const int gateIndex = indices.front() == compIndex ? indices.back() : indices.front();
+            const auto compItem = output.chain[static_cast<std::size_t>(compIndex)];
+            const auto gateItem = output.chain[static_cast<std::size_t>(gateIndex)];
+            slots[r]->setBuiltInPair(
+                "Dynamics", compItem,
+                CardSwitch{ compItem, compressor != output.effects.end() && compressor->bypassed,
+                            "C", "Compressor: click to bypass, right-click to open the panel" },
+                CardSwitch{ gateItem, gate != output.effects.end() && gate->bypassed, "G",
+                            "Gate: click to bypass, right-click to open the panel" });
+            continue;
+        }
         if (item.type == pluginrack::ChainItemType::Insert) {
             auto it = std::find_if(output.inserts.begin(), output.inserts.end(),
                                    [id = item.id](const auto& insert) { return insert->id == id; });
-            slots[i]->setInsert(it == output.inserts.end() ? nullptr : it->get());
+            slots[r]->setInsert(it == output.inserts.end() ? nullptr : it->get());
         } else if (item.type == pluginrack::ChainItemType::Eq) {
-            slots[i]->setBuiltIn(item, "EQ", output.eqBypassed.get());
+            slots[r]->setBuiltIn(item, "EQ", output.eqBypassed.get());
         } else {
             const auto it = std::find_if(output.effects.begin(), output.effects.end(),
                                          [id = item.id](const auto& effect) { return effect.id == id; });
-            slots[i]->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+            const bool isCompressor = it != output.effects.end()
+                                          ? it->type == pluginrack::DynamicsEffectType::Compressor
+                                          : item.id == 1;
+            slots[r]->setBuiltIn(item, isCompressor ? "Compressor" : "Gate",
                                  it != output.effects.end() && it->bypassed);
         }
     }
@@ -560,7 +592,31 @@ void MixerComponent::OutputStrip::reorderInsert(std::uint32_t insertId, int targ
 }
 
 void MixerComponent::OutputStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
-    audioEngine.moveOutputChainItem(output.id, item, targetIndex);
+    // A card moves as one: collect every chain entry it covers.
+    const auto rows = buildChainRows(output.chain, output.effects);
+    const int dest = chainIndexForBoundary(rows, targetIndex,
+                                           static_cast<int>(output.chain.size()));
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    for (const auto& row : rows) {
+        const bool holdsItem = std::any_of(row.begin(), row.end(), [this, &item](int index) {
+            return output.chain[static_cast<std::size_t>(index)] == item;
+        });
+        if (!holdsItem) continue;
+        if (row.size() > 1) {
+            cardItems.clear();
+            for (const int index : row)
+                cardItems.push_back(output.chain[static_cast<std::size_t>(index)]);
+        }
+        break;
+    }
+    for (std::size_t k = 0; k < cardItems.size(); ++k) {
+        const auto position = std::find(output.chain.begin(), output.chain.end(), cardItems[k]);
+        if (position == output.chain.end()) continue;
+        const int current = static_cast<int>(std::distance(output.chain.begin(), position));
+        const int target = dest + static_cast<int>(k);
+        if (current == target) continue;
+        audioEngine.moveOutputChainItem(output.id, cardItems[k], target);
+    }
     juce::Component::SafePointer<OutputStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;

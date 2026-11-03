@@ -2,8 +2,10 @@
 
 #include <JuceHeader.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "AudioEngine.h"
 #include "InsertMiniView.h"
@@ -29,6 +31,95 @@ inline std::function<void()>& pluginRemovingHook() {
 inline constexpr int kChainBuiltInSlots = 3;
 inline constexpr int kChainVstSlots = 5;
 inline constexpr int kChainSlotCount = kChainBuiltInSlots + kChainVstSlots;
+
+// One built-in effect as a card switch.
+struct CardSwitch {
+    pluginrack::ChainItem item;
+    bool bypassed = false;
+    juce::String label;
+    juce::String tooltip;
+};
+
+// The built-in rows as every view draws them: the compressor and the gate share
+// one "Dynamics" card (they are one editor and one gain-stage family), while
+// the EQ keeps a row of its own. Each entry lists the chain indices that row
+// covers, in chain order, so a drop can never split a card.
+inline std::vector<std::vector<int>> buildChainRows(
+        const std::vector<pluginrack::ChainItem>& chain,
+        const std::vector<pluginrack::DynamicsEffect>& effects) {
+    const int count = static_cast<int>(chain.size());
+    int compressorIndex = -1;
+    int gateIndex = -1;
+    for (int i = 0; i < count; ++i) {
+        const auto& item = chain[static_cast<std::size_t>(i)];
+        if (item.type != pluginrack::ChainItemType::Dynamics) continue;
+        if (compressorIndex >= 0 && gateIndex >= 0) continue;
+        // A scene keeps the effect ids it was saved with, so resolve by id and
+        // fall back to the chain row's own convention (row 1 is the
+        // compressor) before calling the effect a gate.
+        const auto effect = std::find_if(effects.begin(), effects.end(),
+                                         [&item](const auto& candidate) {
+                                             return candidate.id == item.id;
+                                         });
+        const bool isCompressor =
+            effect != effects.end()
+                ? effect->type == pluginrack::DynamicsEffectType::Compressor
+                : item.id == 1;
+        if (isCompressor) {
+            if (compressorIndex < 0) compressorIndex = i;
+        } else if (gateIndex < 0) {
+            gateIndex = i;
+        }
+    }
+
+    std::vector<std::vector<int>> rows;
+    std::vector<bool> claimed(static_cast<std::size_t>(count), false);
+    for (int i = 0; i < count; ++i) {
+        if (claimed[static_cast<std::size_t>(i)]) continue;
+        int partner = -1;
+        if (i == compressorIndex && gateIndex > i) partner = gateIndex;
+        else if (i == gateIndex && compressorIndex > i) partner = compressorIndex;
+        if (partner >= 0) {
+            rows.push_back({ i, partner });
+            claimed[static_cast<std::size_t>(partner)] = true;
+        } else {
+            rows.push_back({ i });
+        }
+        claimed[static_cast<std::size_t>(i)] = true;
+    }
+    return rows;
+}
+
+// Chain index a drop on a row boundary lands at. Rows do not map one-to-one to
+// chain entries once a card covers two of them.
+inline int chainIndexForBoundary(const std::vector<std::vector<int>>& rows, int row,
+                                 int chainSize) {
+    if (row < 0 || row >= static_cast<int>(rows.size())) return chainSize;
+    const auto& indices = rows[static_cast<std::size_t>(row)];
+    return indices.empty() ? chainSize : indices.front();
+}
+
+// Which chain entry of a paired card is the compressor. Both are Dynamics
+// rows, so the effect type decides; a scene whose saved ids no longer match
+// falls back to the row's own convention (id 1 is the compressor).
+inline int compressorIndexInRow(const std::vector<pluginrack::ChainItem>& chain,
+                                const std::vector<pluginrack::DynamicsEffect>& effects,
+                                const std::vector<int>& row) {
+    for (const int index : row) {
+        const auto& item = chain[static_cast<std::size_t>(index)];
+        const auto effect = std::find_if(effects.begin(), effects.end(),
+                                         [&item](const auto& candidate) {
+                                             return candidate.id == item.id;
+                                         });
+        const bool isCompressor =
+            effect != effects.end()
+                ? effect->type == pluginrack::DynamicsEffectType::Compressor
+                : item.id == 1;
+        if (isCompressor) return index;
+    }
+    return row.empty() ? -1 : row.front();
+}
+
 
 class IInsertHost {
 public:
@@ -117,25 +208,27 @@ public:
         removeButton.setTooltip("Remove this plugin");
         addAndMakeVisible(removeButton);
 
-        // The dynamics pair is drawn as one card, so it carries one switch per
-        // effect instead of the single bypass button.
-        compButton.setFontSize(9.0f);
-        compButton.setTooltip("Bypass the compressor");
-        compButton.setClickAction([this] {
-            const bool next = !compButton.getToggleState();
-            compButton.setToggleState(next);
-            host.setBuiltInBypass(compChainItem, next);
+        // A card can hold more than one effect (the Dynamics card carries the
+        // EQ and the compressor), so it carries one switch per effect instead
+        // of the single bypass button. Each switch follows the strip
+        // convention: left-click bypasses, right-click opens that effect.
+        pairFirstButton.setFontSize(9.0f);
+        pairFirstButton.setClickAction([this] {
+            const bool next = !pairFirstButton.getToggleState();
+            pairFirstButton.setToggleState(next);
+            host.setBuiltInBypass(pairFirst.item, next);
         });
-        addChildComponent(compButton);
+        pairFirstButton.onRightClick = [this] { host.activateBuiltIn(pairFirst.item); };
+        addChildComponent(pairFirstButton);
 
-        gateButton.setFontSize(9.0f);
-        gateButton.setTooltip("Bypass the gate");
-        gateButton.setClickAction([this] {
-            const bool next = !gateButton.getToggleState();
-            gateButton.setToggleState(next);
-            host.setBuiltInBypass(gateChainItem, next);
+        pairSecondButton.setFontSize(9.0f);
+        pairSecondButton.setClickAction([this] {
+            const bool next = !pairSecondButton.getToggleState();
+            pairSecondButton.setToggleState(next);
+            host.setBuiltInBypass(pairSecond.item, next);
         });
-        addChildComponent(gateButton);
+        pairSecondButton.onRightClick = [this] { host.activateBuiltIn(pairSecond.item); };
+        addChildComponent(pairSecondButton);
     }
 
     void setInsert(AudioEngine::InsertSlot* newInsert) {
@@ -145,6 +238,9 @@ public:
         builtIn = false;
         addSlot = false;
         addSlotPrimary = false;
+        paired = false;
+        pairFirstButton.setVisible(false);
+        pairSecondButton.setVisible(false);
         removeButton.setVisible(true);
         bypassButton.setVisible(true);
         if (insert != nullptr) {
@@ -178,6 +274,9 @@ public:
         builtIn = false;
         addSlot = true;
         addSlotPrimary = primary;
+        paired = false;
+        pairFirstButton.setVisible(false);
+        pairSecondButton.setVisible(false);
         nameLabel.setText(primary ? "+ Add VST3" : juce::String(),
                           juce::dontSendNotification);
         nameLabel.setColour(juce::Label::textColourId, theme::violet().withAlpha(0.75f));
@@ -194,6 +293,9 @@ public:
         builtIn = true;
         addSlot = false;
         addSlotPrimary = false;
+        paired = false;
+        pairFirstButton.setVisible(false);
+        pairSecondButton.setVisible(false);
         bypassButton.setVisible(true);
         nameLabel.setText(title, juce::dontSendNotification);
         nameLabel.setColour(juce::Label::textColourId, theme::text());
@@ -219,35 +321,39 @@ public:
 
     InsertMiniView* miniView() const { return mini.get(); }
 
-    // One card for the dynamics pair: both chain rows are shown as a single
-    // unit with a bypass switch each, because the two effects share one graph
-    // and one editor.
-    void setBuiltInPair(const juce::String& title,
-                        pluginrack::ChainItem compressorItem, bool compressorBypassed,
-                        pluginrack::ChainItem gateItem, bool gateBypassed) {
+    // One card for two built-in effects: both chain rows are shown as a single
+    // unit with a bypass switch each, because the two effects share one editor.
+    // bodyItem is what a plain click on the row opens.
+    void setBuiltInPair(const juce::String& title, pluginrack::ChainItem bodyItem,
+                        const CardSwitch& first, const CardSwitch& second) {
         insert = nullptr;
-        chainItem = compressorItem;
+        chainItem = bodyItem;
         builtIn = true;
         addSlot = false;
         paired = true;
-        compChainItem = compressorItem;
-        gateChainItem = gateItem;
+        pairFirst = first;
+        pairSecond = second;
+        pairFirstButton.setLabel(first.label);
+        pairFirstButton.setTooltip(first.tooltip);
+        pairSecondButton.setLabel(second.label);
+        pairSecondButton.setTooltip(second.tooltip);
         nameLabel.setText(title, juce::dontSendNotification);
         nameLabel.setColour(juce::Label::textColourId, theme::text());
         nameLabel.setTooltip(title);
         bypassButton.setVisible(false);
         removeButton.setVisible(false);
-        compButton.setVisible(true);
-        gateButton.setVisible(true);
-        setPairBypassed(compressorBypassed, gateBypassed);
-        setTooltip("Click to open the compressor and gate settings");
+        pairFirstButton.setVisible(true);
+        pairSecondButton.setVisible(true);
+        setPairBypassed(first.bypassed, second.bypassed);
+        setTooltip("Click to open the " + title.toLowerCase() + " panel - "
+                   "the switches bypass each effect");
         resized();
         repaint();
     }
 
-    void setPairBypassed(bool compressorBypassed, bool gateBypassed) {
-        compButton.setToggleState(compressorBypassed);
-        gateButton.setToggleState(gateBypassed);
+    void setPairBypassed(bool firstBypassed, bool secondBypassed) {
+        pairFirstButton.setToggleState(firstBypassed);
+        pairSecondButton.setToggleState(secondBypassed);
     }
 
     // Live bypass state for a built-in row: the EQ and dynamics panels switch
@@ -286,10 +392,15 @@ public:
             return;
         }
         if (paired) {
-            gateButton.setBounds(area.removeFromRight(20));
-            area.removeFromRight(3);
-            compButton.setBounds(area.removeFromRight(20));
-            area.removeFromRight(3);
+            // Square switches: both the rack card (36 px header) and the
+            // compact mixer row give them one side, centred vertically.
+            const int side = juce::jlimit(12, 24, area.getHeight());
+            auto buttons = area.removeFromRight(2 * side + 3)
+                               .withSizeKeepingCentre(2 * side + 3, side);
+            pairSecondButton.setBounds(buttons.removeFromRight(side));
+            buttons.removeFromRight(3);
+            pairFirstButton.setBounds(buttons.removeFromRight(side));
+            area.removeFromRight(4);
             nameLabel.setBounds(area);
             return;
         }
@@ -424,9 +535,9 @@ private:
     juce::Label nameLabel;
     MiniButton bypassButton{"B"};
     MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
-    MiniButton compButton{"C"};
-    MiniButton gateButton{"G"};
-    pluginrack::ChainItem compChainItem;
-    pluginrack::ChainItem gateChainItem;
+    MiniButton pairFirstButton{"EQ"};
+    MiniButton pairSecondButton{"C"};
+    CardSwitch pairFirst;
+    CardSwitch pairSecond;
     bool paired = false;
 };

@@ -67,14 +67,17 @@ private:
     AudioEngine::Channel* currentChannel();
     AudioEngine::Output* currentOutput();
     const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* currentInserts() const;
+    const std::vector<pluginrack::ChainItem>* currentChain() const;
+    const std::vector<pluginrack::DynamicsEffect>* currentEffects() const;
+    const pluginrack::DynamicsEffect* effectOfType(pluginrack::DynamicsEffectType type) const;
     AudioEngine::InsertSlot* findInsert(std::uint32_t insertId);
     // Maps a row index in the visible list to the chain index a drop lands on.
-    // The dynamics pair is one row but two chain entries, so a drop after the
-    // card has to skip past the second one.
+    // A card can cover two chain entries (the Dynamics card holds the EQ and
+    // the compressor), so rows do not map one-to-one.
     int chainIndexForRow(int row);
     void moveChainItemRaw(pluginrack::ChainItem item, int chainIndex);
-    // Moves both rows of the pair so the merged card keeps them adjacent.
-    void moveDynamicsPair(pluginrack::ChainItem item, int targetRowIndex);
+    // Moves every chain entry a card covers so the card keeps them adjacent.
+    void moveChainCard(const std::vector<pluginrack::ChainItem>& items, int targetRowIndex);
     // Resolves a dynamics row to its effect. Scenes store the effect ids they
     // were saved with (the gate's has moved), so a mismatched id falls back to
     // the effect type the row names.
@@ -104,6 +107,7 @@ private:
     void renameSelectedChain();
     void refreshEqButton();
     void refreshOutputButtons();
+    void refreshSourceList();
     // Card thumbnails: the timer refreshes the focused VST's snapshot and the
     // built-in graphs; the tap is re-armed every tick because another view can
     // switch it off.
@@ -119,6 +123,19 @@ private:
     std::uint32_t focusedInsertId = 0;
 
     // Channel selector
+    // A ComboBox takes its text font from the LookAndFeel, so scaling just this
+    // one control needs its own small override. Declared before the combo so it
+    // outlives it.
+    class SelectorLookAndFeel final : public juce::LookAndFeel_V4 {
+    public:
+        juce::Font getComboBoxFont(juce::ComboBox&) override {
+            return juce::Font(juce::FontOptions(15.0f, juce::Font::bold));
+        }
+        juce::Font getPopupMenuFont() override {
+            return juce::Font(juce::FontOptions(14.0f));
+        }
+    };
+    SelectorLookAndFeel selectorLookAndFeel;
     juce::ComboBox channelCombo;
     juce::TextButton inputChip;
     bool inputEditing = false;
@@ -158,8 +175,9 @@ private:
     // Cards that carry a mini view, so the timer can feed them without walking
     // the list. Cleared at the top of refreshSlots(), which rebuilds every row.
     InsertSlotComponent* eqCard = nullptr;
-    // Compressor and gate share one card, so one pointer covers both.
+    // Compressor card: the merged Dynamics card when the gate is there too.
     InsertSlotComponent* dynamicsCard = nullptr;
+    bool dynamicsCardPaired = false;
     std::map<std::uint32_t, InsertSlotComponent*> vstCards;
     // Last snapshot per insert. Kept after its card is rebuilt so a thumbnail
     // does not blink away every time the layout changes.
@@ -189,6 +207,23 @@ private:
     // Right output routing
     juce::Label outputHeader;
     juce::OwnedArray<juce::TextButton> outputButtons;
+    // Shown instead of the sends when an output is selected: the input channels
+    // that feed it, each with the device it is receiving from. Painted as rows
+    // because a row carries two strings.
+    class SourceRowList final : public juce::Component {
+    public:
+        void setRows(juce::StringArray channelNames, juce::StringArray deviceNames);
+        void paint(juce::Graphics& g) override;
+
+    private:
+        static constexpr int kRowH = 34;
+        juce::StringArray names;
+        juce::StringArray devices;
+    };
+    SourceRowList sourceList;
+    // Paces the Inputs refresh: sends and device names only move on user
+    // action, so a few times a second is enough.
+    juce::uint32 lastSourceRefreshMs = 0;
 
     // Far-right touch surface: drives whichever dial was touched last.
     TouchSlideBar touchBar;
