@@ -524,7 +524,10 @@ void ChannelStrip::resized() {
 }
 
 void ChannelStrip::refreshInserts() {
-    chainRowCount = static_cast<int>(channel.chain.size());
+    // The compressor and the gate share the Dynamics card, so rows are not a
+    // one-to-one map of the chain any more.
+    const auto rows = buildChainRows(channel.chain, channel.effects);
+    chainRowCount = static_cast<int>(rows.size());
     const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
     while (slots.size() < totalRows) {
         auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
@@ -536,18 +539,47 @@ void ChannelStrip::refreshInserts() {
     }
     for (int i = chainRowCount; i < slots.size(); ++i)
         slots[i]->setAddSlot(i == chainRowCount);
-    for (int i = 0; i < chainRowCount; ++i) {
-        const auto item = channel.chain[static_cast<std::size_t>(i)];
+
+    const auto compressor = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                         [](const auto& effect) {
+                                             return effect.type
+                                                    == pluginrack::DynamicsEffectType::Compressor;
+                                         });
+    const auto gate = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                   [](const auto& effect) {
+                                       return effect.type == pluginrack::DynamicsEffectType::Gate;
+                                   });
+    for (int r = 0; r < chainRowCount; ++r) {
+        const auto& indices = rows[static_cast<std::size_t>(r)];
+        const auto item = channel.chain[static_cast<std::size_t>(indices.front())];
+        if (indices.size() > 1) {
+            // Compressor + gate: one switch each, and a click on the row opens
+            // the panel that carries both.
+            const int compIndex = compressorIndexInRow(channel.chain, channel.effects, indices);
+            const int gateIndex = indices.front() == compIndex ? indices.back() : indices.front();
+            const auto compItem = channel.chain[static_cast<std::size_t>(compIndex)];
+            const auto gateItem = channel.chain[static_cast<std::size_t>(gateIndex)];
+            slots[r]->setBuiltInPair(
+                "Dynamics", compItem,
+                CardSwitch{ compItem, compressor != channel.effects.end() && compressor->bypassed,
+                            "C", "Compressor: click to bypass, right-click to open the panel" },
+                CardSwitch{ gateItem, gate != channel.effects.end() && gate->bypassed, "G",
+                            "Gate: click to bypass, right-click to open the panel" });
+            continue;
+        }
         if (item.type == pluginrack::ChainItemType::Insert) {
             auto it = std::find_if(channel.inserts.begin(), channel.inserts.end(),
                                    [id = item.id](const auto& insert) { return insert->id == id; });
-            slots[i]->setInsert(it == channel.inserts.end() ? nullptr : it->get());
+            slots[r]->setInsert(it == channel.inserts.end() ? nullptr : it->get());
         } else if (item.type == pluginrack::ChainItemType::Eq) {
-            slots[i]->setBuiltIn(item, "EQ", channel.eqBypassed.get());
+            slots[r]->setBuiltIn(item, "EQ", channel.eqBypassed.get());
         } else {
             const auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
                                          [id = item.id](const auto& effect) { return effect.id == id; });
-            slots[i]->setBuiltIn(item, item.id == 1 ? "Compressor" : "Gate",
+            const bool isCompressor = it != channel.effects.end()
+                                          ? it->type == pluginrack::DynamicsEffectType::Compressor
+                                          : item.id == 1;
+            slots[r]->setBuiltIn(item, isCompressor ? "Compressor" : "Gate",
                                  it != channel.effects.end() && it->bypassed);
         }
     }
@@ -723,7 +755,33 @@ void ChannelStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
 }
 
 void ChannelStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
-    audioEngine.moveChannelChainItem(channel.id, item, targetIndex);
+    // A card moves as one: collect every chain entry it covers.
+    const auto rows = buildChainRows(channel.chain, channel.effects);
+    const int dest = chainIndexForBoundary(rows, targetIndex,
+                                           static_cast<int>(channel.chain.size()));
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    for (const auto& row : rows) {
+        const bool holdsItem = std::any_of(row.begin(), row.end(), [this, &item](int index) {
+            return channel.chain[static_cast<std::size_t>(index)] == item;
+        });
+        if (!holdsItem) continue;
+        if (row.size() > 1) {
+            cardItems.clear();
+            for (const int index : row)
+                cardItems.push_back(channel.chain[static_cast<std::size_t>(index)]);
+        }
+        break;
+    }
+    // The move shifts the later indices, so the anchor is re-resolved before
+    // every follower keeps the card together.
+    for (std::size_t k = 0; k < cardItems.size(); ++k) {
+        const auto position = std::find(channel.chain.begin(), channel.chain.end(), cardItems[k]);
+        if (position == channel.chain.end()) continue;
+        const int current = static_cast<int>(std::distance(channel.chain.begin(), position));
+        const int target = dest + static_cast<int>(k);
+        if (current == target) continue;
+        audioEngine.moveChannelChainItem(channel.id, cardItems[k], target);
+    }
     juce::Component::SafePointer<ChannelStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;

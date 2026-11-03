@@ -59,7 +59,7 @@ LevelMeter::LevelMeter(juce::Slider& faderToFollow, juce::Atomic<float>& leftPea
     displayedPeakR = heldPeakR = rightPeakSource.get();
     displayedRmsL = leftRmsSource.get();
     displayedRmsR = rightRmsSource.get();
-    setTooltip("Levels - right-click to set the peak-hold interval");
+    setTooltip("Peak, RMS and the held peak (interval is set in Settings)");
     startTimerHz(30);
 }
 
@@ -71,17 +71,8 @@ void LevelMeter::setPeakHoldMs(int ms) {
     peakHoldMsValue.store(juce::jlimit(100, 1000, ms), std::memory_order_relaxed);
 }
 
-void LevelMeter::mouseDown(const juce::MouseEvent& event) {
-    if (!event.mods.isPopupMenu()) return;
-
-    juce::PopupMenu menu;
-    menu.addSectionHeader("Peak hold");
-    const int current = peakHoldMs();
-    for (const int ms : kPeakHoldChoices) {
-        menu.addItem(intervalText(ms), true, ms == current,
-                     [ms] { LevelMeter::setPeakHoldMs(ms); });
-    }
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this));
+juce::String LevelMeter::peakHoldLabel(int ms) {
+    return intervalText(ms);
 }
 
 void LevelMeter::setStereo(bool shouldBeStereo) {

@@ -26,6 +26,9 @@ public:
         repaint();
     }
     void setClickAction(std::function<void()> action) { clickAction = std::move(action); }
+    // Strip convention (EqButton): the left button toggles, the right button
+    // opens the effect's editor.
+    std::function<void()> onRightClick;
     void setEnabledState(bool state) { active = state; repaint(); }
     void setFontSize(float size) { fontSize = size; repaint(); }
 
@@ -58,8 +61,12 @@ public:
     void mouseExit(const juce::MouseEvent&) override { hovered = false; pressed = false; repaint(); }
     void mouseUp(const juce::MouseEvent&) override { pressed = false; repaint(); }
 
-    void mouseDown(const juce::MouseEvent&) override {
+    void mouseDown(const juce::MouseEvent& e) override {
         if (!active) return;
+        if (e.mods.isPopupMenu()) {
+            if (onRightClick) onRightClick();
+            return;
+        }
         pressed = true;
         repaint();
         if (clickAction) clickAction();
