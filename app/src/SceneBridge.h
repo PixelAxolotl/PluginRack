@@ -37,6 +37,14 @@ public:
     static juce::String getDefaultSaveName();
     static void setDefaultSaveName(const juce::String& name);
 
+    // The exit autosave runs in shutdown(), immediately before the process is
+    // terminated, so it cannot open a dialog. The failure is left here instead
+    // and shown on the next launch: without it a session that could not be
+    // written would silently come back as the previous one.
+    static void writeSaveFailureNote(const juce::String& error);
+    // Returns the pending note and deletes it, so it is shown exactly once.
+    static juce::String takeSaveFailureNote();
+
     static std::optional<pluginrack::Scene> load(juce::String& errorMessage);
     static std::optional<pluginrack::Scene> load(const juce::File& file, juce::String& errorMessage);
     static std::optional<pluginrack::Scene> loadNamed(const juce::String& name, juce::String& errorMessage);

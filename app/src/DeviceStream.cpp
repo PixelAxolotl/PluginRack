@@ -272,7 +272,7 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // indexes it does not have are reported via getInputError() and stay
     // silent — never remapped onto input 0.
     const int availableInputs = (int) dev->getInputChannelNames().size();
-    availableInputCount_ = availableInputs < 1 ? 1 : availableInputs;
+    availableInputCount_.store(availableInputs < 1 ? 1 : availableInputs, std::memory_order_relaxed);
     inputChannelCount_ = (numInputChannels < availableInputs) ? numInputChannels : availableInputs;
     if (inputChannelCount_ < 1) inputChannelCount_ = 1;
     if (inputChannelCount_ < numChannelsNeeded) {
@@ -331,7 +331,7 @@ void InputCapture::close() {
     deviceInputLatency = 0;
     deviceBufferSize = 0;
     inputChannelCount_ = 0;
-    availableInputCount_ = 0;
+    availableInputCount_.store(0, std::memory_order_relaxed);
     inputUnavailable_.store(false, std::memory_order_relaxed);
     writePos = 0;
     totalWritten.store(0, std::memory_order_relaxed);

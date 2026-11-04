@@ -108,7 +108,8 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         RouteCache cache;
         cache.channelIndex = channelIndex[route.channelId];
         cache.outputIndex = outputIndex[route.outputId];
-        cache.sendGain = dbToLinear(route.sendGainDb);
+        cache.sendGainL = dbToLinear(route.sendGainDb);
+        cache.sendGainR = dbToLinear(route.sendGainDbR.value_or(route.sendGainDb));
         routes_.push_back(cache);
     }
 
@@ -394,7 +395,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         if (route.channelIndex >= numChannels || route.outputIndex >= numOutputs) {
             continue;
         }
-        if (route.sendGain == 0.0f) {
+        if (route.sendGainL == 0.0f && route.sendGainR == 0.0f) {
             continue;
         }
         const int channelFrames =
@@ -409,8 +410,8 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             accumulators_.data() + (route.outputIndex * 2) * static_cast<std::size_t>(maxFrames);
         float* accRight = accLeft + maxFrames;
         for (int i = 0; i < frames; ++i) {
-            accLeft[i] += scratchLeft[i] * route.sendGain;
-            accRight[i] += scratchRight[i] * route.sendGain;
+            accLeft[i] += scratchLeft[i] * route.sendGainL;
+            accRight[i] += scratchRight[i] * route.sendGainR;
         }
     }
 

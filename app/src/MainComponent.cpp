@@ -417,7 +417,8 @@ void MainComponent::showMenu() {
         }
         juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
                                             "PluginRack",
-                                            "Reset engine to defaults (1 channel, 3 outputs)?",
+                                            "Reset engine to defaults (1 channel, 3 outputs)?\n"
+                                            "Strip names, device assignments and watched streams are kept.",
                                             "Reset", "Cancel", nullptr,
                                             juce::ModalCallbackFunction::create([this](int result) {
                                                 if (result != 1) return;
@@ -434,7 +435,7 @@ void MainComponent::showMenu() {
                                                 std::vector<std::uint32_t> chIds;
                                                 for (const auto& c : audioEngine.getChannels()) chIds.push_back(c->id);
                                                 for (std::size_t i = 1; i < chIds.size(); ++i)
-                                                    audioEngine.removeChannel(chIds[i]);
+                                                    (void)audioEngine.removeChannel(chIds[i]);
                                                 std::vector<std::uint32_t> outIds;
                                                 for (const auto& o : audioEngine.getOutputs()) outIds.push_back(o->id);
                                                 for (std::size_t i = 3; i < outIds.size(); ++i)
@@ -455,6 +456,10 @@ void MainComponent::showMenu() {
                                                     audioEngine.setChannelEq(c->id, pluginrack::defaultEqBands());
                                                     audioEngine.setChannelEqBypassed(c->id, true);
                                                     audioEngine.setChannelEqDelay(c->id, 0.0f);
+                                                    audioEngine.setChannelEqRtaOffset(c->id, 0.0f);
+                                                    audioEngine.setChannelEqRtaWeighting(c->id, 0);
+                                                    audioEngine.setChannelEffects(c->id, pluginrack::defaultDynamicsEffects());
+                                                    audioEngine.setChannelChain(c->id, AudioEngine::defaultChain());
                                                     audioEngine.setChannelGain(c->id, 0.0f);
                                                     audioEngine.setChannelTrim(c->id, 0.0f);
                                                     audioEngine.setChannelPan(c->id, 0.0f);
@@ -472,6 +477,10 @@ void MainComponent::showMenu() {
                                                     audioEngine.setOutputEq((int)i, pluginrack::defaultEqBands());
                                                     audioEngine.setOutputEqBypassed((int)i, true);
                                                     audioEngine.setOutputEqDelay((int)i, 0.0f);
+                                                    audioEngine.setOutputEqRtaOffset((int)i, 0.0f);
+                                                    audioEngine.setOutputEqRtaWeighting((int)i, 0);
+                                                    audioEngine.setOutputEffects(outputId, pluginrack::defaultDynamicsEffects());
+                                                    audioEngine.setOutputChain(outputId, AudioEngine::defaultChain());
                                                     audioEngine.setOutputGain(outputId, 0.0f);
                                                     audioEngine.setOutputMuted(outputId, false);
                                                     audioEngine.setOutputLayout(outputId, pluginrack::ChannelLayout::Stereo);
@@ -720,11 +729,24 @@ void MainComponent::initialiseAudio() {
     } else {
         audioEngine.openDefaultDevicesAsync();
     }
+    // A failed exit autosave restored the previous session instead of the one
+    // the user left: say so, or the state looks inexplicably stale.
+    const auto saveFailure = SceneBridge::takeSaveFailureNote();
+    if (saveFailure.isNotEmpty()) {
+        showError("The session from your last quit could not be saved, so the previous "
+                  "session was restored.\n" + saveFailure);
+    }
     timerCallback();
 }
 
 void MainComponent::saveSceneOnExit() {
-    SceneBridge::saveLast(audioEngine.makeScene());
+    // shutdown() terminates the process right after this returns, so a dialog
+    // cannot be shown here. Log it and leave a note the next launch surfaces.
+    const auto error = SceneBridge::saveLast(audioEngine.makeScene());
+    if (error.isNotEmpty()) {
+        juce::Logger::writeToLog("exit autosave failed: " + error);
+        SceneBridge::writeSaveFailureNote(error);
+    }
 }
 
 void MainComponent::refreshViews() {

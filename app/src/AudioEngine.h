@@ -24,6 +24,8 @@ public:
         std::uint32_t id = 0;
         juce::String pluginPath;
         juce::String pluginName;
+        // The VST3 class inside the bundle this slot hosts; 0 when unknown.
+        int pluginUniqueId = 0;
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
         int latencySamples = 0;
@@ -290,6 +292,10 @@ public:
     struct DeviceState {
         juce::String deviceName;
         juce::String error;
+        // Physical inputs the assigned device exposes; 0 when none is open and
+        // always 0 for outputs. Read under the same lock so the input menus can
+        // size themselves without touching the capture object.
+        int availableInputs = 0;
     };
     DeviceState getChannelDeviceState(std::uint32_t channelId) const;
     DeviceState getOutputDeviceState(std::uint32_t outputId) const;
@@ -319,7 +325,11 @@ public:
     void prepareInputs();
 
     void addChannel();
-    void removeChannel(std::uint32_t channelId);
+    // Removes a channel and its routes. Returns an empty string on success, or
+    // the reason the change was refused: the startup opener holds Channel*
+    // across a device probe, and the scene validator needs at least one
+    // channel, so the last strip cannot be removed.
+    juce::String removeChannel(std::uint32_t channelId);
     // Moves a channel to scene-order position targetIndex (clamped). The mixer's
     // drag handle calls this; the engine order is what scenes save, so the new
     // arrangement survives a save/load. Channel objects never move in memory
@@ -351,14 +361,21 @@ public:
     bool refreshDeviceAvailability();
     // Loads the VST3 on a worker and installs it on the message thread:
     // instantiation blocks for as long as the plugin needs to initialise, and
-    // doing that here froze the window. done() runs on the message thread with
-    // an error message, or an empty string on success.
-    void addPluginAsync(std::uint32_t channelId, const juce::File& file,
+    // doing that here froze the window. pluginUniqueId selects the class
+    // inside a multi-class bundle (0 = the bundle's first one). done() runs on
+    // the message thread with an error message, or an empty string on success.
+    void addPluginAsync(std::uint32_t channelId, const juce::File& file, int pluginUniqueId,
                         std::function<void(juce::String)> done);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
-    void addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
+    // Replaces a strip's chain order wholesale: "Reset to Defaults" needs to
+    // put the built-in rows back, which no move can express.
+    void setChannelChain(std::uint32_t channelId, const std::vector<pluginrack::ChainItem>& chain);
+    void setOutputChain(std::uint32_t outputId, const std::vector<pluginrack::ChainItem>& chain);
+    // The chain a freshly created or reset strip starts with.
+    static std::vector<pluginrack::ChainItem> defaultChain();
+    void addOutputPluginAsync(std::uint32_t outputId, const juce::File& file, int pluginUniqueId,
                               std::function<void(juce::String)> done);
     struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;

@@ -554,3 +554,112 @@ TEST_CASE("crashes are logged with a backtrace", "[crash]") {
     CHECK(contains(cmake, "/Zi"));
     CHECK(contains(cmake, "target_link_options(pluginrack_app PRIVATE /DEBUG)"));
 }
+
+TEST_CASE("scene save captures plugin state outside the audio lock", "[underrun][rt]") {
+    // render() only yields a few times for stateLock before it pushes silence,
+    // so makeScene must not run plugin code while holding it.
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto save = functionBody(cpp, "pluginrack::Scene AudioEngine::makeScene");
+    const auto lockStart = save.find("const juce::ScopedLock lock(stateLock)");
+    REQUIRE(lockStart != std::string::npos);
+    // The settings block is the last thing copied under the lock; everything
+    // after it (the plugin state capture) runs unlocked.
+    const auto lockEnd = save.find("scene.audio = std::move(audio);");
+    REQUIRE(lockEnd != std::string::npos);
+    const auto capture = save.find("getStateAsBase64");
+    REQUIRE(capture != std::string::npos);
+    CHECK(capture > lockEnd);
+}
+
+TEST_CASE("removing the last channel is refused instead of losing the session",
+          "[app][session]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    // A refusal needs a message, so the signature returns one like removeOutput.
+    CHECK(contains(cpp, "juce::String AudioEngine::removeChannel"));
+    const auto remove = functionBody(cpp, "juce::String AudioEngine::removeChannel");
+    CHECK(contains(remove, "isOpeningDevices()"));
+    CHECK(contains(remove, "Audio devices are still starting up"));
+    CHECK(contains(remove, "channels.size() <= 1"));
+    CHECK(contains(remove, "At least one channel is required"));
+
+    // ...and the strip has to show it, like the output strip does.
+    const auto mixer = readSource("app/src/MixerComponent.cpp");
+    const auto strips = functionBody(mixer, "void MixerComponent::rebuildChannelStrips");
+    CHECK(contains(strips, "removeChannel(id)"));
+    CHECK(contains(strips, "showMessageBoxAsync"));
+}
+
+TEST_CASE("exit autosave never swallows a failed save", "[app][session]") {
+    // shutdown() terminates the process right after this call, so the error is
+    // logged and left for the next launch instead of being dropped.
+    const auto mainComponent = readSource("app/src/MainComponent.cpp");
+    const auto exitSave = functionBody(mainComponent, "void MainComponent::saveSceneOnExit");
+    CHECK(contains(exitSave, "SceneBridge::saveLast"));
+    CHECK(contains(exitSave, "isNotEmpty()"));
+    CHECK(contains(exitSave, "writeSaveFailureNote"));
+
+    const auto bridge = readSource("app/src/SceneBridge.cpp");
+    CHECK(contains(bridge, "SceneBridge::writeSaveFailureNote"));
+    CHECK(contains(bridge, "SceneBridge::takeSaveFailureNote"));
+    const auto startup = functionBody(mainComponent, "void MainComponent::initialiseAudio");
+    CHECK(contains(startup, "takeSaveFailureNote"));
+}
+
+TEST_CASE("scenes are validated after loading, not only before saving", "[app][scene]") {
+    const auto bridge = readSource("app/src/SceneBridge.cpp");
+    const auto helper = functionBody(bridge, "std::optional<pluginrack::Scene> loadValidatedScene");
+    CHECK(contains(helper, "pluginrack::validate"));
+    const auto load = functionBody(
+        bridge, "std::optional<pluginrack::Scene> SceneBridge::load(const juce::File& file");
+    CHECK(contains(load, "loadValidatedScene"));
+    const auto last = functionBody(bridge, "std::optional<pluginrack::Scene> SceneBridge::loadLast");
+    CHECK(contains(last, "loadValidatedScene"));
+}
+
+TEST_CASE("the picked class inside a bundle reaches the loader", "[plugin][ui]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto choose = functionBody(cpp, "juce::PluginDescription chooseDescription");
+    CHECK(contains(choose, "description.uniqueId == pluginUniqueId"));
+
+    for (const char* signature : {"void AudioEngine::addPluginAsync",
+                                  "void AudioEngine::addOutputPluginAsync"}) {
+        const auto add = functionBody(cpp, signature);
+        CHECK(contains(add, "pluginUniqueId"));
+        CHECK(contains(add, "chooseDescription"));
+        CHECK_FALSE(contains(add, "descriptions.getReference(0)"));
+    }
+
+    // Scene restore reopens the same class the slot was created from.
+    const auto host = readSource("app/src/PluginHost.cpp");
+    const auto load = functionBody(host, "PluginHost::LoadedPlugin PluginHost::loadFromFile");
+    CHECK(contains(load, "description.uniqueId == pluginUniqueId"));
+}
+
+TEST_CASE("the plugin menu refreshes when the scan finishes", "[plugin][ui]") {
+    const auto menu = readSource("app/src/PluginMenu.cpp");
+    const auto refresh = functionBody(menu, "class ScanRefresh final : public juce::ChangeListener");
+    CHECK(contains(refresh, "addChangeListener"));
+    CHECK(contains(refresh, "isScanning()"));
+    CHECK(contains(refresh, "showAddPluginMenu"));
+    // The menu row must carry the class, not just the bundle path.
+    CHECK(contains(menu, "description.uniqueId"));
+}
+
+TEST_CASE("reset to defaults restores the dynamics rows and the chain", "[app][ui]") {
+    const auto mainComponent = readSource("app/src/MainComponent.cpp");
+    CHECK(contains(mainComponent, "setChannelEffects(c->id, pluginrack::defaultDynamicsEffects())"));
+    CHECK(contains(mainComponent, "setChannelChain(c->id, AudioEngine::defaultChain())"));
+    CHECK(contains(mainComponent, "setOutputEffects(outputId, pluginrack::defaultDynamicsEffects())"));
+    CHECK(contains(mainComponent, "setOutputChain(outputId, AudioEngine::defaultChain())"));
+    CHECK(contains(mainComponent, "Strip names, device assignments and watched streams are kept"));
+}
+
+TEST_CASE("input menus are sized by the device, not a fixed 16", "[app][ui]") {
+    for (const char* path : {"app/src/RackView.cpp", "app/src/ChannelStrip.cpp"}) {
+        const auto cpp = readSource(path);
+        CHECK_FALSE(contains(cpp, "juce::jlimit(1, 16"));
+        CHECK_FALSE(contains(cpp, "for (int i = 1; i <= 16; ++i)"));
+        CHECK(contains(cpp, "rebuildInputCombos"));
+        CHECK(contains(cpp, "deviceState.availableInputs"));
+    }
+}

@@ -17,6 +17,40 @@ std::vector<juce::File> lastSceneCandidates() {
     };
 }
 
+juce::File saveFailureNoteFile() {
+    return SceneBridge::getScenesDirectory().getChildFile("last-save-error.txt");
+}
+
+// The single error a save or load refused on, in the form the dialogs show.
+juce::String firstValidationError(const pluginrack::Scene& scene) {
+    const auto errors = pluginrack::validate(scene);
+    if (errors.empty()) return {};
+    return "Could not save the scene: " + juce::String(errors.front().message);
+}
+
+// Parses and validates. A file that is syntactically fine but semantically
+// broken (duplicate ids, unknown route target, out-of-range values) must never
+// reach restoreScene(), which trusts what it is given.
+std::optional<pluginrack::Scene> loadValidatedScene(const juce::File& file,
+                                                    juce::String& errorMessage) {
+    errorMessage.clear();
+    auto result = pluginrack::fromJson(file.loadFileAsString().toStdString());
+    if (!result.errors.empty()) {
+        errorMessage = "Could not load the saved scene: " + juce::String(result.errors.front());
+        return std::nullopt;
+    }
+    if (!result.scene.has_value()) {
+        errorMessage = "The saved scene is empty.";
+        return std::nullopt;
+    }
+    const auto errors = pluginrack::validate(*result.scene);
+    if (!errors.empty()) {
+        errorMessage = "Could not load the saved scene: " + juce::String(errors.front().message);
+        return std::nullopt;
+    }
+    return std::move(result.scene);
+}
+
 bool isReservedSaveName(const juce::String& name) {
     const juce::String lower = name.toLowerCase();
     // "default" is the scene file SceneBridge::save() writes; a named save of
@@ -92,10 +126,8 @@ juce::String SceneBridge::save(const pluginrack::Scene& scene) {
 }
 
 juce::String SceneBridge::save(const pluginrack::Scene& scene, const juce::File& file) {
-    const auto errors = pluginrack::validate(scene);
-    if (!errors.empty()) {
-        return "Could not save the scene: " + juce::String(errors.front().message);
-    }
+    const auto validationError = firstValidationError(scene);
+    if (validationError.isNotEmpty()) return validationError;
 
     const auto directoryResult = file.getParentDirectory().createDirectory();
     if (directoryResult.failed()) {
@@ -116,10 +148,8 @@ juce::String SceneBridge::saveNamed(const pluginrack::Scene& scene, const juce::
 }
 
 juce::String SceneBridge::saveLast(const pluginrack::Scene& scene) {
-    const auto errors = pluginrack::validate(scene);
-    if (!errors.empty()) {
-        return "Could not save the scene: " + juce::String(errors.front().message);
-    }
+    const auto validationError = firstValidationError(scene);
+    if (validationError.isNotEmpty()) return validationError;
 
     juce::String firstError;
     bool anySuccess = false;
@@ -204,6 +234,20 @@ void SceneBridge::setDefaultSaveName(const juce::String& name) {
     file.replaceWithText(sanitizeSaveName(name));
 }
 
+void SceneBridge::writeSaveFailureNote(const juce::String& error) {
+    const auto directoryResult = getScenesDirectory().createDirectory();
+    if (directoryResult.failed()) return;
+    saveFailureNoteFile().replaceWithText(error.substring(0, 4096));
+}
+
+juce::String SceneBridge::takeSaveFailureNote() {
+    const auto file = saveFailureNoteFile();
+    if (!file.existsAsFile()) return {};
+    const auto note = file.loadFileAsString().trim();
+    file.deleteFile();
+    return note;
+}
+
 std::optional<pluginrack::Scene> SceneBridge::load(juce::String& errorMessage) {
     return load(getSceneFile(), errorMessage);
 }
@@ -213,17 +257,7 @@ std::optional<pluginrack::Scene> SceneBridge::load(const juce::File& file, juce:
     if (!file.existsAsFile()) {
         return std::nullopt;
     }
-
-    auto result = pluginrack::fromJson(file.loadFileAsString().toStdString());
-    if (!result.errors.empty()) {
-        errorMessage = "Could not load the saved scene: " + juce::String(result.errors.front());
-        return std::nullopt;
-    }
-    if (!result.scene.has_value()) {
-        errorMessage = "The saved scene is empty.";
-        return std::nullopt;
-    }
-    return std::move(result.scene);
+    return loadValidatedScene(file, errorMessage);
 }
 
 std::optional<pluginrack::Scene> SceneBridge::loadNamed(const juce::String& name, juce::String& errorMessage) {
@@ -242,16 +276,15 @@ std::optional<pluginrack::Scene> SceneBridge::loadLast(juce::String& errorMessag
     for (const auto& file : lastSceneCandidates()) {
         if (!file.existsAsFile()) continue;
         anyExisting = true;
-        auto result = pluginrack::fromJson(file.loadFileAsString().toStdString());
-        if (!result.errors.empty()) {
-            if (firstError.isEmpty()) firstError = "Could not load the saved scene: " + juce::String(result.errors.front());
+        juce::String fileError;
+        auto scene = loadValidatedScene(file, fileError);
+        if (!scene.has_value()) {
+            // Keep looking: a corrupt last.json must not stop the older
+            // autosave next to it from restoring the session.
+            if (firstError.isEmpty()) firstError = fileError;
             continue;
         }
-        if (!result.scene.has_value()) {
-            if (firstError.isEmpty()) firstError = "The saved scene is empty.";
-            continue;
-        }
-        return std::move(result.scene);
+        return scene;
     }
     if (anyExisting && firstError.isNotEmpty()) {
         errorMessage = firstError;

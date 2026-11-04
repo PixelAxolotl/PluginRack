@@ -159,6 +159,11 @@ void to_json(nlohmann::json& j, const InsertSlot& slot) {
     if (!slot.pluginState.empty()) {
         j["pluginState"] = slot.pluginState;
     }
+    // Optional: absent in scenes written before the class identity was kept,
+    // and 0 means "the bundle's first class", which is the old behaviour.
+    if (slot.pluginUniqueId != 0) {
+        j["pluginUniqueId"] = slot.pluginUniqueId;
+    }
 }
 
 void from_json(const nlohmann::json& j, InsertSlot& slot) {
@@ -166,6 +171,7 @@ void from_json(const nlohmann::json& j, InsertSlot& slot) {
     j.at("id").get_to(slot.id);
     slot.pluginPath = j.value("pluginPath", std::string{});
     slot.pluginName = j.value("pluginName", std::string{});
+    slot.pluginUniqueId = j.value("pluginUniqueId", 0);
     slot.bypassed = j.value("bypassed", false);
     slot.pluginState = j.value("pluginState", std::string{});
 }

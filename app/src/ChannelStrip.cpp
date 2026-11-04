@@ -85,10 +85,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     modeCombo.addItem("MONO", 1);
     modeCombo.addItem("ST", 2);
-    for (int i = 1; i <= 16; ++i) {
-        inputComboA.addItem("A" + juce::String(i), i);
-        inputComboB.addItem("B" + juce::String(i), i);
-    }
     inputComboA.setTooltip("Physical input for this channel (1-based)");
     inputComboB.setTooltip("Physical input for the right side (1-based)");
     const auto styleCombo = [this](juce::ComboBox& combo) {
@@ -611,6 +607,17 @@ void ChannelStrip::refreshRouting() {
     }
 }
 
+void ChannelStrip::rebuildInputCombos(int count) {
+    if (count == inputComboCount) return;
+    inputComboCount = count;
+    inputComboA.clear(juce::dontSendNotification);
+    inputComboB.clear(juce::dontSendNotification);
+    for (int i = 1; i <= count; ++i) {
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
+    }
+}
+
 void ChannelStrip::refreshInput() {
     // Device name/error are written by the device-opener worker: take a locked
     // snapshot instead of reading the strip fields directly.
@@ -620,14 +627,18 @@ void ChannelStrip::refreshInput() {
     levelMeter.setStereo(!mono);
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     const int a = channel.inputChannels.empty() ? 1 : channel.inputChannels[0] + 1;
-    inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
     const int b = channel.inputChannels.size() > 1 ? channel.inputChannels[1] + 1 : a;
-    inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
-    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    // The device decides how many inputs exist; the 16 floor keeps the control
+    // usable before a device is open, and the mapping is always allowed so a
+    // saved index above the device's count is shown, never silently moved.
+    rebuildInputCombos(juce::jmax(16, deviceState.availableInputs, a, b));
+    inputComboA.setSelectedId(a, juce::dontSendNotification);
+    inputComboB.setSelectedId(b, juce::dontSendNotification);
+    const juce::String aText = "A" + juce::String(a);
     if (!hasInputDevice) inputChip.setButtonText("No input");
     else if (inputEditing) inputChip.setButtonText("Done");
     else if (mono) inputChip.setButtonText(aText);
-    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+    else inputChip.setButtonText(aText + " + A" + juce::String(b));
     inputChip.setToggleState(inputEditing, juce::dontSendNotification);
     modeCombo.setVisible(hasInputDevice && inputEditing);
     inputComboA.setVisible(hasInputDevice && inputEditing);
@@ -657,10 +668,11 @@ void ChannelStrip::applyInputMapping() {
 }
 
 void ChannelStrip::splitIntoMonoChannels() {
-    const auto device = audioEngine.getChannelDeviceState(channel.id).deviceName;
+    const auto deviceState = audioEngine.getChannelDeviceState(channel.id);
+    const auto& device = deviceState.deviceName;
     // The capture only stores what was requested; the device may expose more
     // physical inputs than this channel's mapping uses.
-    const int inputs = channel.input != nullptr ? channel.input->availableInputCount() : 0;
+    const int inputs = deviceState.availableInputs;
     if (device.isEmpty() || inputs < 2) {
         juce::AlertWindow::showMessageBoxAsync(
             juce::MessageBoxIconType::InfoIcon, "PluginRack",
@@ -702,11 +714,11 @@ void ChannelStrip::splitIntoMonoChannels() {
         });
 }
 
-juce::String ChannelStrip::insertPlugin(const juce::File& file) {
+juce::String ChannelStrip::insertPlugin(const juce::File& file, int pluginUniqueId) {
     // The load is asynchronous; the strip refreshes when it finishes.
     const auto channelId = channel.id;
     juce::Component::SafePointer<ChannelStrip> safe(this);
-    audioEngine.addPluginAsync(channelId, file, [safe](juce::String error) {
+    audioEngine.addPluginAsync(channelId, file, pluginUniqueId, [safe](juce::String error) {
         if (safe == nullptr) return;
         safe->refreshAfterInsertChange();
         if (error.isNotEmpty()) {

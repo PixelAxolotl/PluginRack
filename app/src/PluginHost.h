@@ -59,15 +59,20 @@ public:
                                     const juce::String& stateBase64 = {});
 
     // scanFile plus instantiate, for callers already on the message thread.
+    // pluginUniqueId selects the class inside a multi-class bundle; 0 falls
+    // back to the bundle's first class.
     static LoadedPlugin loadFromFile(const juce::File& file, double sampleRate,
-                                     int bufferSize, const juce::String& stateBase64 = {});
+                                     int bufferSize, const juce::String& stateBase64 = {},
+                                     int pluginUniqueId = 0);
     // Message thread: takes over the instance and prepares it to play.
     void adopt(const LoadedPlugin& loaded);
 
     // stateBase64 is an opaque blob previously returned by getStateAsBase64;
     // when non-empty it is applied before the plugin is prepared to play, so
     // a restored slot comes back with the settings it was saved with.
-    juce::String loadPlugin(const juce::File& file, const juce::String& stateBase64 = {});
+    // pluginUniqueId names the class inside a multi-class bundle.
+    juce::String loadPlugin(const juce::File& file, const juce::String& stateBase64 = {},
+                            int pluginUniqueId = 0);
     // Captures the plugin's own state (parameters, programs) as base64 text.
     // Empty when no plugin is loaded or the plugin exposes no state.
     juce::String getStateAsBase64() const;

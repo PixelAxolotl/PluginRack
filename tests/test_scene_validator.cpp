@@ -326,3 +326,239 @@ TEST_CASE("input mapping error names the channel and mapping") {
     REQUIRE(errors[0].message.find("channel 1") != std::string::npos);
     REQUIRE(errors[0].message.find("[2, 2]") != std::string::npos);
 }
+
+TEST_CASE("scene with no channels is rejected") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.clear();
+    scene.routes.clear();
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::NoChannels);
+}
+
+TEST_CASE("buffer size is bounded") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("below floor") {
+        scene.bufferFrames = 32;
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+        REQUIRE(errors[0].message.find("bufferFrames") != std::string::npos);
+    }
+    SECTION("above ceiling") {
+        scene.bufferFrames = 16384;
+        REQUIRE(pluginrack::validate(scene).size() == 1);
+    }
+    SECTION("both ends of the range are accepted") {
+        scene.bufferFrames = 64;
+        REQUIRE(pluginrack::validate(scene).empty());
+        scene.bufferFrames = 8192;
+        REQUIRE(pluginrack::validate(scene).empty());
+    }
+}
+
+TEST_CASE("analyzer settings are bounded") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("weighting above the known curves") {
+        scene.channels.front().eqRtaWeighting = 3;
+    }
+    SECTION("negative weighting") {
+        scene.outputs.front().eqRtaWeighting = -1;
+    }
+    SECTION("offset above ceiling") {
+        scene.channels.front().eqRtaOffsetDb = 61.0f;
+    }
+    SECTION("offset below floor") {
+        scene.outputs.front().eqRtaOffsetDb = -61.0f;
+    }
+    SECTION("non-finite offset") {
+        scene.channels.front().eqRtaOffsetDb = std::numeric_limits<float>::quiet_NaN();
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}
+
+TEST_CASE("dynamics parameters are bounded at the top of the UI ranges") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::DynamicsEffect& effect = scene.channels.front().effects.front();
+
+    SECTION("threshold above 0 dB") {
+        effect.thresholdDb = 1.0f;
+    }
+    SECTION("ratio above the gate range") {
+        effect.ratio = 81.0f;
+    }
+    SECTION("attack above the knob range") {
+        effect.attackMs = 201.0f;
+    }
+    SECTION("release above the knob range") {
+        effect.releaseMs = 1001.0f;
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("dynamics") != std::string::npos);
+}
+
+TEST_CASE("built-in default effects pass validation") {
+    pluginrack::Scene scene = makeValidScene();
+    REQUIRE(scene.channels.front().effects.size() == 2);
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("duplicate insert ids are rejected") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().inserts.push_back(pluginrack::InsertSlot{5, "a", "A"});
+    scene.channels.front().inserts.push_back(pluginrack::InsertSlot{5, "b", "B"});
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::DuplicateInsertId);
+    REQUIRE(errors[0].entityId == 1);
+}
+
+TEST_CASE("duplicate effect ids are rejected") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::DynamicsEffect duplicate = scene.channels.front().effects.front();
+    scene.channels.front().effects.push_back(duplicate);
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::DuplicateEffectId);
+    REQUIRE(errors[0].entityId == 1);
+}
+
+TEST_CASE("a chain that resolves to the strip's rows is accepted") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().inserts.push_back(pluginrack::InsertSlot{7, "a", "A"});
+    scene.channels.front().chain = {{pluginrack::ChainItemType::Eq, 0},
+                                    {pluginrack::ChainItemType::Dynamics, 1},
+                                    {pluginrack::ChainItemType::Insert, 7}};
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("chain entries must resolve to the strip's own rows") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::Channel& channel = scene.channels.front();
+
+    SECTION("unknown insert") {
+        channel.chain = {{pluginrack::ChainItemType::Insert, 99}};
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownChainItem);
+        REQUIRE(errors[0].message.find("unknown insert 99") != std::string::npos);
+    }
+    SECTION("stale dynamics row is tolerated") {
+        // Scenes written by earlier builds carry rows such as `Dynamics 2`
+        // next to effects 1 and 3. The mixer skips them, so validation must not
+        // refuse a real session over one.
+        channel.effects = {{1, pluginrack::DynamicsEffectType::Compressor, true},
+                           {3, pluginrack::DynamicsEffectType::Gate, true}};
+        channel.chain = {{pluginrack::ChainItemType::Eq, 0},
+                         {pluginrack::ChainItemType::Dynamics, 1},
+                         {pluginrack::ChainItemType::Dynamics, 2}};
+        REQUIRE(pluginrack::validate(scene).empty());
+    }
+    SECTION("Eq row with a non-zero id") {
+        channel.chain = {{pluginrack::ChainItemType::Eq, 4}};
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownChainItem);
+    }
+    SECTION("repeated row") {
+        channel.chain = {{pluginrack::ChainItemType::Dynamics, 1},
+                         {pluginrack::ChainItemType::Dynamics, 1}};
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::DuplicateChainItem);
+    }
+}
+
+TEST_CASE("output chain is validated the same way") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.outputs.front().chain = {{pluginrack::ChainItemType::Insert, 42}};
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownChainItem);
+    REQUIRE(errors[0].entityId == 1);
+}
+
+TEST_CASE("collection caps are enforced") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("too many insert slots") {
+        for (std::uint32_t i = 1; i <= 6; ++i)
+            scene.channels.front().inserts.push_back(
+                pluginrack::InsertSlot{i, "p", "n"});
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+        REQUIRE(errors[0].message.find("inserts") != std::string::npos);
+    }
+    SECTION("too many chain rows") {
+        for (std::uint32_t i = 0; i < 17; ++i)
+            scene.channels.front().chain.push_back({pluginrack::ChainItemType::Insert, i + 1});
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+        REQUIRE(errors[0].message.find("chain") != std::string::npos);
+    }
+    SECTION("too many channels") {
+        for (std::uint32_t i = 2; i <= 65; ++i) {
+            pluginrack::Channel channel;
+            channel.id = i;
+            scene.channels.push_back(channel);
+        }
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+        REQUIRE(errors[0].message.find("channels") != std::string::npos);
+    }
+    SECTION("too many outputs") {
+        for (std::uint32_t i = 2; i <= 33; ++i) {
+            pluginrack::Output output;
+            output.id = i;
+            scene.outputs.push_back(output);
+        }
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+        REQUIRE(errors[0].message.find("outputs") != std::string::npos);
+    }
+}
+
+TEST_CASE("watched devices must reference an existing strip") {
+    pluginrack::Scene scene = makeValidScene();
+
+    SECTION("unknown input strip") {
+        scene.audio = pluginrack::AudioSettings{};
+        scene.audio->watchedDevices.push_back({true, 99});
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownWatchedDevice);
+    }
+    SECTION("unknown output strip") {
+        scene.audio = pluginrack::AudioSettings{};
+        scene.audio->watchedDevices.push_back({false, 99});
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownWatchedDevice);
+    }
+    SECTION("strip listed twice") {
+        scene.audio = pluginrack::AudioSettings{};
+        scene.audio->watchedDevices.push_back({true, 1});
+        scene.audio->watchedDevices.push_back({true, 1});
+        const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+        REQUIRE(errors.size() == 1);
+        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnknownWatchedDevice);
+        REQUIRE(errors[0].message.find("listed twice") != std::string::npos);
+    }
+    SECTION("input and output strip may share the same id") {
+        scene.audio = pluginrack::AudioSettings{};
+        scene.audio->watchedDevices.push_back({true, 1});
+        scene.audio->watchedDevices.push_back({false, 1});
+        REQUIRE(pluginrack::validate(scene).empty());
+    }
+}

@@ -133,8 +133,9 @@ public:
     virtual ~IInsertHost() = default;
     // Starts an asynchronous load: returns an immediate validation error, or an
     // empty string when the plugin is being instantiated on the load worker.
-    // The view refreshes itself from the completion.
-    virtual juce::String insertPlugin(const juce::File&) = 0;
+    // pluginUniqueId names the class inside a multi-class bundle; 0 means "the
+    // bundle's first class". The view refreshes itself from the completion.
+    virtual juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) = 0;
     virtual void erasePlugin(std::uint32_t insertId) = 0;
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;
     virtual void refreshAfterInsertChange() = 0;
@@ -157,11 +158,11 @@ inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
     // The menu outlives this click, so the host is tracked through its other
     // base class: every host is a Component, and the cast back is checked.
     juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
-    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file) {
+    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file, int pluginUniqueId) {
         if (safeHost == nullptr) return;
         auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
         if (target == nullptr) return;
-        const auto error = target->insertPlugin(file);
+        const auto error = target->insertPlugin(file, pluginUniqueId);
         if (error.isNotEmpty()) {
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                    "PluginRack", error);

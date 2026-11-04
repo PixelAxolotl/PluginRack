@@ -55,6 +55,34 @@ TEST_CASE("old scene without inputChannels gets defaults") {
     REQUIRE(loaded.scene->channels[1].inputChannels == std::vector<int>{0, 1});
 }
 
+TEST_CASE("high physical input indexes round-trip and validate") {
+    // Devices can expose more than the 16 inputs the old menus offered; the
+    // mapping must keep the index the user picked instead of clamping it.
+    pluginrack::Scene original;
+    original.schemaVersion = 4;
+    original.name = "high-inputs";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+    pluginrack::Channel ch;
+    ch.id = 1;
+    ch.name = "adat";
+    ch.layout = pluginrack::ChannelLayout::Stereo;
+    ch.inputChannels = {20, 23};
+    original.channels.push_back(ch);
+    pluginrack::Output out;
+    out.id = 1;
+    out.name = "mains";
+    original.outputs.push_back(out);
+
+    REQUIRE(pluginrack::validate(original).empty());
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(pluginrack::toJson(original));
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->channels.front().inputChannels == std::vector<int>{20, 23});
+    REQUIRE(pluginrack::validate(*loaded.scene).empty());
+}
+
 TEST_CASE("invalid inputChannels mapping rejected") {
     pluginrack::Scene scene;
     scene.schemaVersion = 2;

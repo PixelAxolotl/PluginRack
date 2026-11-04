@@ -33,12 +33,6 @@ constexpr int kProbeRenderBlockFrames = 4096;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
 
-std::vector<pluginrack::ChainItem> defaultChain() {
-    return {{pluginrack::ChainItemType::Eq, 0},
-            {pluginrack::ChainItemType::Dynamics, 1},
-            {pluginrack::ChainItemType::Dynamics, 2}};
-}
-
 // Compact label for the clock description: the registered device type names
 // ("Windows Audio (Low Latency Mode)") are too long for the toolbar.
 juce::String shortDeviceTypeTag(const juce::String& type) {
@@ -62,6 +56,19 @@ void processEffectsMissingFromChain(
         if (std::find(chain.begin(), chain.end(), item) == chain.end())
             processors[i].process(left, right, frames);
     }
+}
+
+// Picks the class a menu row stood for. Falls back to the bundle's first class
+// when the id is unknown: a scene written before ids were kept, or a plugin
+// updated to a new class id, must still load rather than fail.
+juce::PluginDescription chooseDescription(const juce::Array<juce::PluginDescription>& descriptions,
+                                          int pluginUniqueId) {
+    if (pluginUniqueId != 0) {
+        for (const auto& description : descriptions) {
+            if (description.uniqueId == pluginUniqueId) return description;
+        }
+    }
+    return descriptions.getReference(0);
 }
 
 // render() must not block indefinitely, but giving up on the first failed
@@ -90,6 +97,12 @@ struct BriefTryLock {
     int attempts = 1;
     bool held = false;
 };
+}
+
+std::vector<pluginrack::ChainItem> AudioEngine::defaultChain() {
+    return {{pluginrack::ChainItemType::Eq, 0},
+            {pluginrack::ChainItemType::Dynamics, 1},
+            {pluginrack::ChainItemType::Dynamics, 2}};
 }
 
 AudioEngine::AudioEngine() {
@@ -574,23 +587,26 @@ void AudioEngine::releaseResources() {
     }
 }
 
-void AudioEngine::removeChannel(std::uint32_t channelId) {
+juce::String AudioEngine::removeChannel(std::uint32_t channelId) {
     // The startup opener holds Channel* across a device probe; refuse the
     // structural change until it is done instead of invalidating it.
-    if (isOpeningDevices()) return;
+    if (isOpeningDevices()) return "Audio devices are still starting up. Try again in a moment.";
     const juce::ScopedLock lock(stateLock);
-    for (auto it = channels.begin(); it != channels.end();) {
-        if ((*it)->id == channelId) {
-            (*it)->input.reset();
-            it = channels.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    const auto it = std::find_if(channels.begin(), channels.end(),
+                                 [channelId](const auto& channel) {
+                                     return channel->id == channelId;
+                                 });
+    if (it == channels.end()) return "The channel no longer exists.";
+    // validate() rejects a scene with no channels, so the exit autosave would
+    // silently keep the previous session. Mirror removeOutput's floor.
+    if (channels.size() <= 1) return "At least one channel is required.";
+    (*it)->input.reset();
+    channels.erase(it);
     routes.erase(std::remove_if(routes.begin(), routes.end(),
                                [channelId](const auto& route) { return route->channelId == channelId; }),
                   routes.end());
     pruneUnusedCaptures();
+    return {};
 }
 
 void AudioEngine::moveChannel(std::uint32_t channelId, int targetIndex) {
@@ -748,7 +764,7 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
 }
 
 void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file,
-                                 std::function<void(juce::String)> done) {
+                                 int pluginUniqueId, std::function<void(juce::String)> done) {
     {
         const juce::ScopedLock lock(stateLock);
         auto* channel = findChannel(channelId);
@@ -770,25 +786,27 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
     const int block = currentBufferSize;
     auto alive = prepareAliveToken_;
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
-    juce::Thread::launch([this, alive, channelId, file, rate, block,
+    juce::Thread::launch([this, alive, channelId, file, pluginUniqueId, rate, block,
                           done = std::move(done)]() mutable {
         juce::String scanError;
         const auto descriptions = PluginHost::scanFile(file, scanError);
         juce::MessageManager::callAsync(
-            [this, alive, channelId, file, rate, block, descriptions, scanError,
+            [this, alive, channelId, file, pluginUniqueId, rate, block, descriptions, scanError,
              done = std::move(done)]() mutable {
                 if (!alive->load(std::memory_order_acquire)) return;
 
                 auto loaded = PluginHost::LoadedPlugin{};
                 loaded.path = file.getFullPathName();
+                int resolvedUniqueId = 0;
                 if (descriptions.isEmpty()) {
                     loaded.error =
                         scanError.isNotEmpty()
                             ? scanError
                             : juce::String("No VST3 plugin was found in the selected file.");
                 } else {
-                    loaded = PluginHost::instantiate(descriptions.getReference(0), file, rate,
-                                                     block);
+                    const auto chosen = chooseDescription(descriptions, pluginUniqueId);
+                    resolvedUniqueId = chosen.uniqueId;
+                    loaded = PluginHost::instantiate(chosen, file, rate, block);
                 }
                 if (loaded.error.isNotEmpty()) {
                     juce::Logger::writeToLog("plugin: failed - " + loaded.error);
@@ -801,6 +819,7 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                 insert->pluginHost.adopt(loaded);
                 insert->pluginPath = loaded.path;
                 insert->pluginName = loaded.name;
+                insert->pluginUniqueId = resolvedUniqueId;
                 insert->latencySamples = insert->pluginHost.getLatencySamples();
 
                 juce::String error;
@@ -849,6 +868,18 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
     }
 }
 
+void AudioEngine::setChannelChain(std::uint32_t channelId,
+                                  const std::vector<pluginrack::ChainItem>& chain) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) channel->chain = chain;
+}
+
+void AudioEngine::setOutputChain(std::uint32_t outputId,
+                                 const std::vector<pluginrack::ChainItem>& chain) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* output = findOutput(outputId)) output->chain = chain;
+}
+
 void AudioEngine::moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item,
                                        int targetIndex) {
     const juce::ScopedLock lock(stateLock);
@@ -872,7 +903,7 @@ void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t inser
 }
 
 void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
-                                       std::function<void(juce::String)> done) {
+                                       int pluginUniqueId, std::function<void(juce::String)> done) {
     {
         const juce::ScopedLock lock(stateLock);
         auto* output = findOutput(outputId);
@@ -890,25 +921,27 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
     const int block = currentBufferSize;
     auto alive = prepareAliveToken_;
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
-    juce::Thread::launch([this, alive, outputId, file, rate, block,
+    juce::Thread::launch([this, alive, outputId, file, pluginUniqueId, rate, block,
                           done = std::move(done)]() mutable {
         juce::String scanError;
         const auto descriptions = PluginHost::scanFile(file, scanError);
         juce::MessageManager::callAsync(
-            [this, alive, outputId, file, rate, block, descriptions, scanError,
+            [this, alive, outputId, file, pluginUniqueId, rate, block, descriptions, scanError,
              done = std::move(done)]() mutable {
                 if (!alive->load(std::memory_order_acquire)) return;
 
                 auto loaded = PluginHost::LoadedPlugin{};
                 loaded.path = file.getFullPathName();
+                int resolvedUniqueId = 0;
                 if (descriptions.isEmpty()) {
                     loaded.error =
                         scanError.isNotEmpty()
                             ? scanError
                             : juce::String("No VST3 plugin was found in the selected file.");
                 } else {
-                    loaded = PluginHost::instantiate(descriptions.getReference(0), file, rate,
-                                                     block);
+                    const auto chosen = chooseDescription(descriptions, pluginUniqueId);
+                    resolvedUniqueId = chosen.uniqueId;
+                    loaded = PluginHost::instantiate(chosen, file, rate, block);
                 }
                 if (loaded.error.isNotEmpty()) {
                     juce::Logger::writeToLog("plugin: failed - " + loaded.error);
@@ -921,6 +954,7 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                 insert->pluginHost.adopt(loaded);
                 insert->pluginPath = loaded.path;
                 insert->pluginName = loaded.name;
+                insert->pluginUniqueId = resolvedUniqueId;
                 insert->latencySamples = insert->pluginHost.getLatencySamples();
 
                 juce::String error;
@@ -1321,100 +1355,132 @@ const std::vector<std::unique_ptr<AudioEngine::Route>>& AudioEngine::getRoutes()
 }
 
 pluginrack::Scene AudioEngine::makeScene() const {
-    const juce::ScopedLock lock(stateLock);
     pluginrack::Scene scene;
-    scene.name = "Default";
-    scene.sampleRate = currentSampleRate;
-    scene.bufferFrames = currentBufferSize;
-    for (const auto& channel : channels) {
-        pluginrack::Channel savedChannel;
-        savedChannel.id = channel->id;
-        savedChannel.name = channel->name.toStdString();
-        savedChannel.sourceKind = channel->sourceKind;
-        savedChannel.sourceDeviceId = channel->sourceDeviceId;
-        savedChannel.layout = channel->layout;
-        savedChannel.inputChannels = channel->inputChannels;
-        savedChannel.gainDb = channel->gainDb.get();
-        savedChannel.trimDb = channel->trimDb.get();
-        savedChannel.pan = channel->pan.get();
-        savedChannel.muted = channel->muted.get();
-        savedChannel.soloed = channel->soloed.get();
-        savedChannel.eqEnabled = !channel->eqBypassed.get();
-        savedChannel.eqBands = channel->eqBands;
-        savedChannel.eqDelayMs = channel->eqDelayMs;
-        savedChannel.eqRtaOffsetDb = channel->eqRtaOffsetDb;
-        savedChannel.eqRtaWeighting = channel->eqRtaWeighting;
-        savedChannel.effects = channel->effects;
-        savedChannel.chain = channel->chain;
-        for (const auto& insert : channel->inserts) {
-            pluginrack::InsertSlot savedInsert;
-            savedInsert.id = insert->id;
-            savedInsert.pluginPath = insert->pluginPath.toStdString();
-            savedInsert.pluginName = insert->pluginName.toStdString();
-            savedInsert.bypassed = insert->bypassed.get();
-            // Capture the live parameter/program state so reopening the scene
-            // does not reset every insert to its defaults.
-            savedInsert.pluginState = insert->pluginHost.getStateAsBase64().toStdString();
-            savedChannel.inserts.push_back(std::move(savedInsert));
+    // Plugin state capture is plugin code of unbounded length, and render()
+    // only waits a few yields for stateLock before it pushes silence. Record
+    // the hosts under the lock and ask them for their state after it is
+    // released. Safe because makeScene and every structural edit run on the
+    // message thread, and removePlugin parks retired slots instead of freeing
+    // them, so the recorded hosts stay alive until the capture finishes.
+    std::vector<std::vector<const PluginHost*>> channelHosts;
+    std::vector<std::vector<const PluginHost*>> outputHosts;
+    {
+        const juce::ScopedLock lock(stateLock);
+        scene.name = "Default";
+        scene.sampleRate = currentSampleRate;
+        scene.bufferFrames = currentBufferSize;
+        for (const auto& channel : channels) {
+            pluginrack::Channel savedChannel;
+            savedChannel.id = channel->id;
+            savedChannel.name = channel->name.toStdString();
+            savedChannel.sourceKind = channel->sourceKind;
+            savedChannel.sourceDeviceId = channel->sourceDeviceId;
+            savedChannel.layout = channel->layout;
+            savedChannel.inputChannels = channel->inputChannels;
+            savedChannel.gainDb = channel->gainDb.get();
+            savedChannel.trimDb = channel->trimDb.get();
+            savedChannel.pan = channel->pan.get();
+            savedChannel.muted = channel->muted.get();
+            savedChannel.soloed = channel->soloed.get();
+            savedChannel.eqEnabled = !channel->eqBypassed.get();
+            savedChannel.eqBands = channel->eqBands;
+            savedChannel.eqDelayMs = channel->eqDelayMs;
+            savedChannel.eqRtaOffsetDb = channel->eqRtaOffsetDb;
+            savedChannel.eqRtaWeighting = channel->eqRtaWeighting;
+            savedChannel.effects = channel->effects;
+            savedChannel.chain = channel->chain;
+            std::vector<const PluginHost*> hosts;
+            hosts.reserve(channel->inserts.size());
+            for (const auto& insert : channel->inserts) {
+                pluginrack::InsertSlot savedInsert;
+                savedInsert.id = insert->id;
+                savedInsert.pluginPath = insert->pluginPath.toStdString();
+                savedInsert.pluginName = insert->pluginName.toStdString();
+                savedInsert.pluginUniqueId = insert->pluginUniqueId;
+                savedInsert.bypassed = insert->bypassed.get();
+                savedChannel.inserts.push_back(std::move(savedInsert));
+                hosts.push_back(&insert->pluginHost);
+            }
+            channelHosts.push_back(std::move(hosts));
+            scene.channels.push_back(std::move(savedChannel));
         }
-        scene.channels.push_back(std::move(savedChannel));
-    }
-    for (const auto& output : outputs) {
-        pluginrack::Output savedOutput;
-        savedOutput.id = output->id;
-        savedOutput.name = output->name.toStdString();
-        savedOutput.layout = output->layout;
-        savedOutput.flipped = output->flipped.get();
-        savedOutput.gainDb = output->gainDb.get();
-        savedOutput.muted = output->muted.get();
-        savedOutput.deviceId = output->outputDeviceName.toStdString();
-        savedOutput.eqEnabled = !output->eqBypassed.get();
-        savedOutput.eqBands = output->eqBands;
-        savedOutput.eqDelayMs = output->eqDelayMs;
-        savedOutput.eqRtaOffsetDb = output->eqRtaOffsetDb;
-        savedOutput.eqRtaWeighting = output->eqRtaWeighting;
-        savedOutput.effects = output->effects;
-        savedOutput.chain = output->chain;
-        for (const auto& insert : output->inserts) {
-            pluginrack::InsertSlot savedInsert;
-            savedInsert.id = insert->id;
-            savedInsert.pluginPath = insert->pluginPath.toStdString();
-            savedInsert.pluginName = insert->pluginName.toStdString();
-            savedInsert.bypassed = insert->bypassed.get();
-            savedInsert.pluginState = insert->pluginHost.getStateAsBase64().toStdString();
-            savedOutput.inserts.push_back(std::move(savedInsert));
+        for (const auto& output : outputs) {
+            pluginrack::Output savedOutput;
+            savedOutput.id = output->id;
+            savedOutput.name = output->name.toStdString();
+            savedOutput.layout = output->layout;
+            savedOutput.flipped = output->flipped.get();
+            savedOutput.gainDb = output->gainDb.get();
+            savedOutput.muted = output->muted.get();
+            savedOutput.deviceId = output->outputDeviceName.toStdString();
+            savedOutput.eqEnabled = !output->eqBypassed.get();
+            savedOutput.eqBands = output->eqBands;
+            savedOutput.eqDelayMs = output->eqDelayMs;
+            savedOutput.eqRtaOffsetDb = output->eqRtaOffsetDb;
+            savedOutput.eqRtaWeighting = output->eqRtaWeighting;
+            savedOutput.effects = output->effects;
+            savedOutput.chain = output->chain;
+            std::vector<const PluginHost*> hosts;
+            hosts.reserve(output->inserts.size());
+            for (const auto& insert : output->inserts) {
+                pluginrack::InsertSlot savedInsert;
+                savedInsert.id = insert->id;
+                savedInsert.pluginPath = insert->pluginPath.toStdString();
+                savedInsert.pluginName = insert->pluginName.toStdString();
+                savedInsert.pluginUniqueId = insert->pluginUniqueId;
+                savedInsert.bypassed = insert->bypassed.get();
+                savedOutput.inserts.push_back(std::move(savedInsert));
+                hosts.push_back(&insert->pluginHost);
+            }
+            outputHosts.push_back(std::move(hosts));
+            scene.outputs.push_back(std::move(savedOutput));
         }
-        scene.outputs.push_back(std::move(savedOutput));
-    }
-    for (const auto& route : routes) {
-        pluginrack::Route savedRoute;
-        savedRoute.channelId = route->channelId;
-        savedRoute.outputId = route->outputId;
-        savedRoute.sendGainDb = route->sendGainDbL.get();
-        const float rightDb = route->sendGainDbR.get();
-        // Only a split pair needs the extra key; a matched send stores once.
-        if (rightDb != savedRoute.sendGainDb) {
-            savedRoute.sendGainDbR = rightDb;
+        for (const auto& route : routes) {
+            pluginrack::Route savedRoute;
+            savedRoute.channelId = route->channelId;
+            savedRoute.outputId = route->outputId;
+            savedRoute.sendGainDb = route->sendGainDbL.get();
+            const float rightDb = route->sendGainDbR.get();
+            // Only a split pair needs the extra key; a matched send stores once.
+            if (rightDb != savedRoute.sendGainDb) {
+                savedRoute.sendGainDbR = rightDb;
+            }
+            scene.routes.push_back(std::move(savedRoute));
         }
-        scene.routes.push_back(std::move(savedRoute));
+
+        // The tuning the session runs with travels with the save, so loading it
+        // restores the same buffers, stream modes and device watchdog.
+        const auto settings = getDeviceSettings();
+        pluginrack::AudioSettings audio;
+        audio.inputBuffer = settings.inputBuffer;
+        audio.outputBuffer = settings.outputBuffer;
+        audio.latencyTuningOptIn = settings.latencyTuningOptIn;
+        audio.lowLatencyInput = settings.lowLatencyInput;
+        audio.preferExclusive = settings.preferExclusive;
+        audio.lowLatencyOutputs = settings.lowLatencyOutputs;
+        audio.minimalClockFifo = settings.minimalClockFifo;
+        audio.fullDuplexInput = settings.fullDuplexInput;
+        audio.autoReloadDevices = settings.autoReloadDevices;
+        audio.rackThumbnailFps = settings.rackThumbnailFps;
+        audio.watchedDevices = getWatchedDevices();
+        scene.audio = std::move(audio);
     }
 
-    // The tuning the session runs with travels with the save, so loading it
-    // restores the same buffers, stream modes and device watchdog.
-    const auto settings = getDeviceSettings();
-    pluginrack::AudioSettings audio;
-    audio.inputBuffer = settings.inputBuffer;
-    audio.outputBuffer = settings.outputBuffer;
-    audio.latencyTuningOptIn = settings.latencyTuningOptIn;
-    audio.lowLatencyInput = settings.lowLatencyInput;
-    audio.preferExclusive = settings.preferExclusive;
-    audio.lowLatencyOutputs = settings.lowLatencyOutputs;
-    audio.minimalClockFifo = settings.minimalClockFifo;
-    audio.fullDuplexInput = settings.fullDuplexInput;
-    audio.autoReloadDevices = settings.autoReloadDevices;
-    audio.rackThumbnailFps = settings.rackThumbnailFps;
-    audio.watchedDevices = getWatchedDevices();
-    scene.audio = std::move(audio);
+    // Capture the live parameter/program state so reopening the scene does not
+    // reset every insert to its defaults. Runs unlocked: this is the part that
+    // enters plugin code.
+    for (std::size_t c = 0; c < channelHosts.size(); ++c) {
+        for (std::size_t i = 0; i < channelHosts[c].size(); ++i) {
+            scene.channels[c].inserts[i].pluginState =
+                channelHosts[c][i]->getStateAsBase64().toStdString();
+        }
+    }
+    for (std::size_t o = 0; o < outputHosts.size(); ++o) {
+        for (std::size_t i = 0; i < outputHosts[o].size(); ++i) {
+            scene.outputs[o].inserts[i].pluginState =
+                outputHosts[o][i]->getStateAsBase64().toStdString();
+        }
+    }
     return scene;
 }
 
@@ -1513,6 +1579,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->id = savedInsert.id;
             insert->pluginPath = savedInsert.pluginPath;
             insert->pluginName = savedInsert.pluginName;
+            insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
             // Scene restore still instantiates here, on the message thread:
@@ -1520,7 +1587,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             juce::Logger::writeToLog("scene: instantiating "
                                      + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
-                                                             juce::String(savedInsert.pluginState));
+                                                             juce::String(savedInsert.pluginState),
+                                                             savedInsert.pluginUniqueId);
             if (error.isNotEmpty()) {
                 loadErrors += channel->name + ": " + error + "\n";
             }
@@ -1574,12 +1642,14 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->id = savedInsert.id;
             insert->pluginPath = savedInsert.pluginPath;
             insert->pluginName = savedInsert.pluginName;
+            insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
             juce::Logger::writeToLog("scene: instantiating "
                                      + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
-                                                             juce::String(savedInsert.pluginState));
+                                                             juce::String(savedInsert.pluginState),
+                                                             savedInsert.pluginUniqueId);
             if (error.isNotEmpty()) {
                 loadErrors += output->name + ": " + error + "\n";
             }
@@ -2687,8 +2757,10 @@ std::vector<pluginrack::WatchedDevice> AudioEngine::getWatchedDevices() const {
 AudioEngine::DeviceState AudioEngine::getChannelDeviceState(std::uint32_t channelId) const {
     const juce::ScopedLock lock(stateLock);
     for (const auto& channel : channels) {
-        if (channel->id == channelId)
-            return {channel->inputDeviceName, channel->inputError};
+        if (channel->id == channelId) {
+            return {channel->inputDeviceName, channel->inputError,
+                    channel->input != nullptr ? channel->input->availableInputCount() : 0};
+        }
     }
     return {};
 }

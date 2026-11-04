@@ -34,7 +34,7 @@ public:
     void refreshDynamicsButtons();
 
     // IInsertHost
-    juce::String insertPlugin(const juce::File&) override;
+    juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
     void erasePlugin(std::uint32_t insertId) override;
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
     void refreshAfterInsertChange() override;
@@ -71,6 +71,7 @@ private:
     int chainBoundaryY(int targetIndex) const;
     void applyInputMapping();
     void splitIntoMonoChannels();
+    void rebuildInputCombos(int count);
     void paintDragHandle(juce::Graphics& g) const;
 
     AudioEngine::Channel& channel;
@@ -88,6 +89,9 @@ private:
     juce::ComboBox modeCombo;
     juce::ComboBox inputComboA;
     juce::ComboBox inputComboB;
+    // How many entries the input combos currently hold, so they are rebuilt
+    // only when the device's input count or the saved mapping changes.
+    int inputComboCount = 0;
     juce::Label inputErrorLabel{"", ""};
 
     juce::OwnedArray<InsertSlotComponent> slots;

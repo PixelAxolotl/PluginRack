@@ -162,6 +162,23 @@ Scenes are stored as JSON under:
 (rename), **Delete** and **DEF** (the save opened on startup). The last session
 is written on exit.
 
+Scenes are validated both ways: `save()` refuses to write a scene the engine
+could not restore, and `load()` refuses to apply one. A hand-edited file with
+duplicate strip or insert ids, an unknown route target, a chain row naming an
+insert the strip does not hold, or a value outside the ranges the controls
+expose is rejected with the first concrete reason instead of reaching the mixer.
+Loading continues to the next autosave candidate when one file is rejected, so a
+damaged `last.json` does not block the session saved next to it.
+
+Because an empty scene is invalid, a channel strip cannot be removed once it is
+the last one; the strip reports that instead of disappearing. Exit autosave
+failures cannot open a dialog (the process ends immediately afterwards), so the
+reason is logged and shown on the next launch.
+
+An insert also records which class inside a multi-class `.vst3` bundle it
+hosts, so reopening a scene loads the plugin that was picked rather than the
+bundle's first one.
+
 ### The plugin library
 
 The add-plugin menu is filled from:
@@ -324,6 +341,16 @@ working device mode per endpoint, or using ASIO where a driver exists.
 - Scenes are schema-versioned. Bump `kSchemaVersion` and read new fields with
   defaults; the audio tuning block is `std::optional` so older saves keep the
   live settings.
+- `makeScene()` must not hold `stateLock` across plugin code. It copies the
+  strip state under the lock, then asks each insert for its `getStateAsBase64()`
+  afterwards: `render()` only yields a few times for that lock before it pushes
+  silence, so a slow plugin inside it becomes an audible dropout.
+- Input menus are sized from `DeviceState::availableInputs` (via
+  `getChannelDeviceState()`), not a fixed count, so interfaces with more than 16
+  physical inputs stay patchable.
+- **Reset to Defaults must stay complete.** Anything a new strip starts with —
+  gains, EQ, dynamics, chain order, routing — has to be restored by the reset
+  callback, or the dialog lies about what it did.
 - One type, spacing and control vocabulary lives in `theme::ui` (`app/src/Theme.h`);
   page views share `PageHeader`, buttons come from `ConsoleLookAndFeel`, and new
   surfaces should use those instead of local colours and fonts.

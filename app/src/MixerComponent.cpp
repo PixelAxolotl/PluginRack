@@ -558,11 +558,11 @@ void MixerComponent::OutputStrip::mouseDoubleClick(const juce::MouseEvent&) {
     if (onDoubleClicked) onDoubleClicked();
 }
 
-juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
+juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file, int pluginUniqueId) {
     // The load is asynchronous; the strip refreshes when it finishes.
     const auto outputId = output.id;
     juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
-    audioEngine.addOutputPluginAsync(outputId, file, [safe](juce::String error) {
+    audioEngine.addOutputPluginAsync(outputId, file, pluginUniqueId, [safe](juce::String error) {
         if (safe == nullptr) return;
         safe->refreshAfterInsertChange();
         if (error.isNotEmpty()) {
@@ -928,7 +928,11 @@ void MixerComponent::rebuildChannelStrips() {
             // while the processors are still alive. Release-only on purpose (see
             // InsertHost.h): a rebuild here would re-dock a doomed insert.
             if (auto release = pluginRemovingHook()) release();
-            audioEngine.removeChannel(id);
+            const auto err = audioEngine.removeChannel(id);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                return;
+            }
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };

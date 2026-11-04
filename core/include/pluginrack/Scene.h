@@ -15,6 +15,12 @@ struct InsertSlot {
     std::uint32_t id = 0;
     std::string pluginPath;
     std::string pluginName;
+    // Which class inside a multi-class VST3 bundle this slot hosts. A bundle
+    // can expose several processors, and the path alone cannot say which one
+    // was picked. 0 means "not recorded" (scenes written before this existed,
+    // or a slot filled through the file browser), and the loader falls back to
+    // the bundle's first class.
+    int pluginUniqueId = 0;
     bool bypassed = false;
     // Opaque base64 blob of the plugin's own state (parameters, programs,
     // samples). The core engine never interprets it; the host layer captures
@@ -95,9 +101,9 @@ struct Route {
     std::uint32_t outputId = 0;
     float sendGainDb = 0.0f;
     // Right-side send level when it differs from the left. Absent means "same
-    // as sendGainDb", so scenes written before the split (and the core engine,
-    // which only has one send level) restore a matched pair. Only written to
-    // JSON when the two sides actually differ.
+    // as sendGainDb", so scenes written before the split restore a matched
+    // pair. Only written to JSON when the two sides actually differ. The live
+    // engine and the offline MixerEngine both apply the sides independently.
     std::optional<float> sendGainDbR;
 
     bool operator==(const Route&) const = default;

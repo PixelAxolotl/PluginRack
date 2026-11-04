@@ -220,6 +220,66 @@ TEST_CASE("slot plugin state is optional and survives a round trip") {
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginState == "bnVsbA==");
 }
 
+TEST_CASE("slot plugin class id is optional and survives a round trip") {
+    pluginrack::Scene original;
+    original.schemaVersion = 4;
+    original.name = "class-id";
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+
+    pluginrack::InsertSlot known;
+    known.id = 4;
+    known.pluginPath = "/plugins/drums.vst3";
+    known.pluginName = "Kick";
+    known.pluginUniqueId = 0x4B69636B;
+    channel.inserts.push_back(known);
+
+    pluginrack::InsertSlot unknown;
+    unknown.id = 5;
+    unknown.pluginPath = "/plugins/eq.dll";
+    unknown.pluginName = "EQ";
+    channel.inserts.push_back(unknown);
+
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    original.outputs.push_back(output);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("pluginUniqueId") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->channels.front().inserts[0].pluginUniqueId == 0x4B69636B);
+    REQUIRE(loaded.scene->channels.front().inserts[1].pluginUniqueId == 0);
+    // 0 is the "unknown" marker, so it is not written out.
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"pluginUniqueId\":0") == std::string::npos);
+}
+
+TEST_CASE("slots written before the class id existed load as unknown") {
+    const std::string json = R"({
+        "schemaVersion": 3,
+        "name": "legacy-class",
+        "sampleRate": 48000,
+        "bufferFrames": 256,
+        "channels": [{"id": 1, "inserts": [
+            {"id": 9, "pluginPath": "/plugins/drums.vst3", "pluginName": "Kick"}
+        ]}],
+        "outputs": [{"id": 1, "name": "mains"}],
+        "routes": []
+    })";
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->channels.front().inserts.front().pluginUniqueId == 0);
+}
+
 TEST_CASE("v3 slots without plugin state load with empty state") {
     const std::string json = R"({
         "schemaVersion": 3,

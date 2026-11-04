@@ -65,8 +65,9 @@ public:
 
     int inputChannelCount() const { return inputChannelCount_; }
     // Total inputs the device itself provides; may exceed inputChannelCount(),
-    // which is capped to what the opener requested.
-    int availableInputCount() const { return availableInputCount_; }
+    // which is capped to what the opener requested. Atomic because the opener
+    // writes it on its worker thread while the views read it.
+    int availableInputCount() const { return availableInputCount_.load(std::memory_order_relaxed); }
     juce::String getInputError() const
     {
         if (inputError.isNotEmpty()) return inputError;
@@ -150,7 +151,7 @@ private:
     juce::String inputError;
     juce::String activeDeviceType_;
     int inputChannelCount_ = 0;
-    int availableInputCount_ = 0;
+    std::atomic<int> availableInputCount_{0};
     std::atomic<bool> inputUnavailable_{false};
     int deviceInputLatency = 0;
     int deviceBufferSize = 0;

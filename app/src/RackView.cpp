@@ -156,10 +156,6 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
 
     modeCombo.addItem("MONO", 1);
     modeCombo.addItem("ST", 2);
-    for (int i = 1; i <= 16; ++i) {
-        inputComboA.addItem("A" + juce::String(i), i);
-        inputComboB.addItem("B" + juce::String(i), i);
-    }
     inputComboA.setTooltip("Physical input for this channel (1-based)");
     inputComboB.setTooltip("Physical input for the right side (1-based)");
     const auto styleInputCombo = [this](juce::ComboBox& combo) {
@@ -438,6 +434,17 @@ void RackView::refreshHeader() {
     refreshEqButton();
 }
 
+void RackView::rebuildInputCombos(int count) {
+    if (count == inputComboCount) return;
+    inputComboCount = count;
+    inputComboA.clear(juce::dontSendNotification);
+    inputComboB.clear(juce::dontSendNotification);
+    for (int i = 1; i <= count; ++i) {
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
+    }
+}
+
 void RackView::refreshInputControls() {
     auto* ch = currentChannel();
     if (ch == nullptr) {
@@ -449,18 +456,23 @@ void RackView::refreshInputControls() {
     }
 
     const bool mono = ch->layout == pluginrack::ChannelLayout::Mono;
-    const bool hasInputDevice = audioEngine.getChannelDeviceState(ch->id).deviceName.isNotEmpty();
+    const auto deviceState = audioEngine.getChannelDeviceState(ch->id);
+    const bool hasInputDevice = deviceState.deviceName.isNotEmpty();
     const int a = ch->inputChannels.empty() ? 1 : ch->inputChannels[0] + 1;
     const int b = ch->inputChannels.size() > 1 ? ch->inputChannels[1] + 1 : a;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
-    inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
-    inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
+    // The device decides how many inputs exist; the 16 floor keeps the control
+    // usable before a device is open, and the mapping is always allowed so a
+    // saved index above the device's count is shown, never silently moved.
+    rebuildInputCombos(juce::jmax(16, deviceState.availableInputs, a, b));
+    inputComboA.setSelectedId(a, juce::dontSendNotification);
+    inputComboB.setSelectedId(b, juce::dontSendNotification);
 
-    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    const juce::String aText = "A" + juce::String(a);
     if (!hasInputDevice) inputChip.setButtonText("No input");
     else if (inputEditing) inputChip.setButtonText("Done");
     else if (mono) inputChip.setButtonText(aText);
-    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+    else inputChip.setButtonText(aText + " + A" + juce::String(b));
 
     inputChip.setToggleState(inputEditing, juce::dontSendNotification);
     inputChip.setVisible(true);
@@ -1965,7 +1977,7 @@ void RackView::renameSelectedChain() {
     }), true);
 }
 
-juce::String RackView::insertPlugin(const juce::File& file) {
+juce::String RackView::insertPlugin(const juce::File& file, int pluginUniqueId) {
     // The load runs on the message thread because that is the only thread these
     // plugins tolerate, and some of them spend seconds initialising (Native
     // Instruments' Raum needs ~3.5 s). Show a wait cursor now so the window
@@ -1984,12 +1996,12 @@ juce::String RackView::insertPlugin(const juce::File& file) {
     };
     if (auto* ch = currentChannel()) {
         const auto channelId = ch->id;
-        audioEngine.addPluginAsync(channelId, file, finish);
+        audioEngine.addPluginAsync(channelId, file, pluginUniqueId, finish);
         return {};
     }
     if (auto* out = currentOutput()) {
         const auto outputId = out->id;
-        audioEngine.addOutputPluginAsync(outputId, file, finish);
+        audioEngine.addOutputPluginAsync(outputId, file, pluginUniqueId, finish);
         return {};
     }
     juce::MouseCursor::hideWaitCursor();
