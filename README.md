@@ -16,6 +16,9 @@ built-in effects.
   stereo layout (mono is upmixed for processing).
 - **VST3 inserts** — multiple host slots per channel and per output, hosted in-process,
   with bypass and plugin editors docked in the Rack view.
+- **Plugin library** — an empty insert slot opens a menu of what is actually
+  installed, grouped as VST3 ▸ vendor ▸ plugin, scanned from the standard VST3
+  folders plus any folders you add.
 - **Built-in Channel FX** — six-band EQ with delay, plus compressor and gate
   presented as one Compressor / Gate surface.
 - **Routing matrix** — every channel can feed every output with an independent
@@ -60,7 +63,10 @@ The toolbar switches between six views. `I/O` sits next to `Mixer`.
 
 ### Channel strips, inserts, and built-in FX
 
-Click an empty insert slot to load a VST3. Left-click a loaded slot to open or
+Click an empty insert slot to open the plugin menu. It lists everything found in
+the standard VST3 folders as **VST3 ▸ vendor ▸ plugin**, and ends with **Add
+plugin folder...** (scan another folder of your own), **Rescan plugin folders**
+and **Browse...** (pick a `.vst3` by hand). Left-click a loaded slot to open or
 focus its editor, right-click for bypass/removal options. The EQ and Gate/Comp
 cards are always present; the Gate/Comp card opens the panel that carries both
 effects, and each has its own **Enable** switch there. The gate starts bypassed,
@@ -151,6 +157,21 @@ Scenes are stored as JSON under:
 (rename), **Delete** and **DEF** (the save opened on startup). The last session
 is written on exit.
 
+### The plugin library
+
+The add-plugin menu is filled from:
+
+```text
+%APPDATA%\PluginRack\plugins\plugin-library.xml
+```
+
+The first launch walks the standard VST3 folders in the background; later
+launches reuse the cache and only rescan bundles whose file time changed. Each
+bundle is inspected in a short-lived child process, so a plugin that faults
+while it is being scanned is recorded in the blocked list instead of taking the
+app down. `PluginRack.exe --list-plugins` prints the same catalogue, grouped by
+vendor, from the command line.
+
 ### Troubleshooting
 
 | Symptom | What to do |
@@ -238,7 +259,8 @@ and the VST3 SDK are configured from the given paths.
 ```text
 app/     JUCE GUI application
   src/   MainComponent views, AudioEngine, DeviceStream (WASAPI/ASIO),
-         PluginHost (VST3), strips, EQ/dynamics windows, I/O and Settings views
+         PluginHost (VST3), PluginLibrary/PluginMenu (installed-plugin catalogue
+         and the add-plugin menu), strips, EQ/dynamics windows, I/O and Settings views
 core/    Platform-independent C++20 audio/routing core (no JUCE)
   include/pluginrack/  Scene model, mixer engine, EQ, dynamics, meters,
                        offline renderer, WAV writer, validation

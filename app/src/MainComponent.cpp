@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "PluginLibrary.h"
 #include "SceneBridge.h"
 
 ToolbarComponent::ToolbarComponent() {
@@ -382,6 +383,14 @@ void MainComponent::paint(juce::Graphics& g) {
         juce::MessageManager::callAsync([safe] {
             if (safe != nullptr) safe->initialiseAudio();
         });
+    }
+    // The plugin catalogue warms the Add-plugin menu: cached results are shown
+    // at once and only changed bundles are scanned, so this stays in the
+    // background even on a machine with a large collection.
+    if (!pluginScanQueued_) {
+        pluginScanQueued_ = true;
+        juce::MessageManager::callAsync(
+            [] { PluginLibrary::getInstance().beginBackgroundScan(); });
     }
 }
 

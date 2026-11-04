@@ -70,7 +70,6 @@ private:
         void erasePlugin(std::uint32_t insertId) override;
         void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
         void refreshAfterInsertChange() override;
-        void openPicker() override;
         void reorderInsert(std::uint32_t insertId, int targetIndex) override;
         void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
         void previewChainItem(int targetIndex) override;
@@ -118,7 +117,6 @@ private:
         int chainDropTarget = -1;
         int chainRowCount = 0;
         juce::Label vstHeader{"", "VST RACK"};
-        std::unique_ptr<juce::FileChooser> fileChooser;
         ValueEditSlider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
