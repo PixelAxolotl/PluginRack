@@ -4,6 +4,20 @@
 
 #include <atomic>
 
+// Tracks the plugin file currently inside plugin code so a crash can be blamed
+// on it, and remembers plugins that crashed the app while loading. A plugin
+// that faults in its own DllMain cannot be caught in-process, so a crashed
+// plugin is recorded and refused on later loads until the list is cleared.
+namespace PluginLoadGuard {
+void begin(const juce::File& file);   // any thread
+void end();                           // any thread
+juce::String currentLoadingPlugin();  // empty when nothing is loading
+juce::File blockedListFile();
+bool isBlocked(const juce::File& file);
+void block(const juce::File& file);
+int clearBlocked();                   // returns how many entries were dropped
+} // namespace PluginLoadGuard
+
 class PluginHost {
 public:
     // Result of instantiating a VST3 file. The instance is shared so it can be
@@ -20,9 +34,31 @@ public:
     PluginHost();
     ~PluginHost();
 
-    // Blocking instantiation. Only for callers that are already off the
-    // message thread or can afford the stall; the Add-VST path uses
-    // loadFromFile on a worker plus adopt on the message thread.
+    // Reads a bundle's descriptions. The enumeration loads the plugin binary and
+    // asks its factory for its classes, which takes seconds for some VST3s
+    // (Native Instruments' Raum needs ~3.3 s) and runs in a child process so the
+    // message thread never waits and a plugin that faults while scanning cannot
+    // take the app down. Any thread.
+    static juce::Array<juce::PluginDescription> scanFile(const juce::File& file,
+                                                         juce::String& error);
+
+    // The scan itself. Loads the plugin into the calling process: only the
+    // --scan-plugin child process uses this.
+    static juce::Array<juce::PluginDescription> scanFileInProcess(const juce::File& file,
+                                                                  juce::String& error);
+
+    // A description as one line of JSON, for the child-process handover.
+    static juce::String describeAsJson(const juce::PluginDescription& description);
+
+    // Creates the instance for an already scanned description and configures its
+    // buses and state. Message thread only: JUCE creates instances there, and
+    // loading the plugin's DLL on one thread and using it on another faults
+    // inside some VST3s (Native Instruments' Raum and Replika).
+    static LoadedPlugin instantiate(const juce::PluginDescription& description,
+                                    const juce::File& file, double sampleRate, int bufferSize,
+                                    const juce::String& stateBase64 = {});
+
+    // scanFile plus instantiate, for callers already on the message thread.
     static LoadedPlugin loadFromFile(const juce::File& file, double sampleRate,
                                      int bufferSize, const juce::String& stateBase64 = {});
     // Message thread: takes over the instance and prepares it to play.

@@ -499,24 +499,42 @@ TEST_CASE("an already-open input is reused or released before reopening",
     CHECK(close < open);
 }
 
-TEST_CASE("adding a VST never instantiates on the message thread", "[plugin][ui]") {
+TEST_CASE("adding a VST scans in a child process and creates on the message thread",
+          "[plugin][ui]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto add = functionBody(engine, "void AudioEngine::addPluginAsync");
-    CHECK(contains(add, "PluginHost::loadFromFile"));
+    // The scan runs in a child process (seconds of enumeration, and a plugin
+    // that faults there must not take the app down), so it is safe on a worker.
     CHECK(contains(add, "juce::Thread::launch"));
+    CHECK(contains(add, "PluginHost::scanFile"));
     CHECK(contains(add, "MessageManager::callAsync"));
-    // Install happens back on the message thread, after the instance exists.
+    // Creating the instance stays on the message thread: JUCE creates plugins
+    // there, and loading the DLL on one thread and using it on another faults
+    // inside some VST3s (Native Instruments' Raum and Replika).
+    CHECK(contains(add, "PluginHost::instantiate"));
+    CHECK_FALSE(contains(add, "PluginHost::loadFromFile"));
+    const auto post = add.find("juce::MessageManager::callAsync");
+    const auto create = add.find("PluginHost::instantiate(");
     const auto adopt = add.find("insert->pluginHost.adopt(loaded)");
-    const auto post = add.find("MessageManager::callAsync");
-    REQUIRE(adopt != std::string::npos);
     REQUIRE(post != std::string::npos);
-    CHECK(post < adopt);
+    REQUIRE(create != std::string::npos);
+    REQUIRE(adopt != std::string::npos);
+    CHECK(post < create);
+    CHECK(create < adopt);
 
-    // One format manager, serialised: the instantiation worker and the scene
-    // loader must not use it concurrently.
+    const auto addOutput = functionBody(engine, "void AudioEngine::addOutputPluginAsync");
+    CHECK(contains(addOutput, "juce::Thread::launch"));
+    CHECK(contains(addOutput, "PluginHost::scanFile"));
+    CHECK(contains(addOutput, "PluginHost::instantiate"));
+    CHECK_FALSE(contains(addOutput, "PluginHost::loadFromFile"));
+
+    // The child process is this executable with --scan-plugin, and the scan
+    // itself only runs there.
     const auto host = readSource("app/src/PluginHost.cpp");
+    CHECK(contains(host, "juce::ChildProcess"));
+    CHECK(contains(host, "--scan-plugin"));
+    CHECK(contains(host, "PluginHost::scanFileInProcess"));
     CHECK(contains(host, "sharedFormatLock()"));
-    CHECK(contains(host, "PluginHost::loadFromFile"));
     CHECK(contains(host, "plugin->prepareToPlay(currentSampleRate, currentBufferSize)"));
 
     const auto rack = readSource("app/src/RackView.cpp");

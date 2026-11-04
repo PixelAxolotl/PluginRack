@@ -198,13 +198,8 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     for (const Output& output : scene.outputs) {
         outputIds_.push_back(output.id);
     }
-    meters_.reset();
-    for (const std::uint32_t id : channelIds_) {
-        meters_.observeChannel(id, 0.0f);
-    }
-    for (const std::uint32_t id : outputIds_) {
-        meters_.observeOutput(id, 0.0f);
-    }
+    meters_.setTargets(channelIds_.data(), channelIds_.size(),
+                       outputIds_.data(), outputIds_.size());
     return true;
 }
 

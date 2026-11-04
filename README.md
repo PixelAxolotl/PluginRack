@@ -161,6 +161,10 @@ is written on exit.
 | Exclusive mode is refused or slower | Turn **Prefer exclusive mode** off and Apply. Shared WASAPI is the default. |
 | Round-trip measurement fails | Connect a physical cable from the clock output to the input chosen in **Listen on**; the app reports "No return" otherwise. |
 | The app crashed | The reason is written to `%APPDATA%\PluginRack\logs`: `PluginRack.log` has the run milestones and `crash-<time>.txt` has the fault address and a backtrace. Keep `PluginRack.pdb` next to the exe and run `llvm-symbolizer --obj=PluginRack.exe 0x<address>` to get the function and line. |
+| A plugin is refused after a crash | A plugin that crashed the app while it was loading is written to `%APPDATA%\PluginRack\plugins\blocked-plugin-loads.txt` and skipped on later loads, because a fault inside the plugin's own DLL cannot be caught in-process. Delete that line, or run `PluginRack.exe --clear-blocked-plugins`, to load it again. |
+| A plugin is suspected of crashing the app | Run `PluginRack.exe --test-plugin "<path to .vst3>"`: it loads that one plugin the same way the Add-VST button does, writes the result to the log and quits, so you can tell a broken plugin from a broken session. |
+| A second `PluginRack.exe` appears briefly | Adding a plugin scans its bundle in a short-lived child process (`PluginRack.exe --scan-plugin <file>`). That scan takes seconds for large VST3s and runs outside the window, so the UI keeps drawing and a plugin that faults while scanning cannot take the app down. The child exits as soon as it is done. |
+| Quitting does not unload the plugins | `shutdown` ends the process right after the scene is saved. Destroying a VST3 and letting Windows unload its DLL is plugin code, and some of them block or fault there (Native Instruments editors), so PluginRack does not run that teardown. |
 
 ## Development
 
