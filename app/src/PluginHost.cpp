@@ -281,7 +281,8 @@ void PluginHost::closeFloatingEditor() {
     closeEditorWindow(editorWindow);
 }
 
-juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& stateBase64) {
+juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& stateBase64,
+                                    int pluginUniqueId) {
     double sampleRate = 0.0;
     int bufferSize = 0;
     {
@@ -290,7 +291,7 @@ juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& 
         bufferSize = currentBufferSize;
     }
 
-    const auto loaded = loadFromFile(file, sampleRate, bufferSize, stateBase64);
+    const auto loaded = loadFromFile(file, sampleRate, bufferSize, stateBase64, pluginUniqueId);
     if (loaded.error.isNotEmpty()) {
         return loaded.error;
     }
@@ -522,7 +523,8 @@ PluginHost::LoadedPlugin PluginHost::instantiate(const juce::PluginDescription& 
 }
 
 PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double sampleRate,
-                                                  int bufferSize, const juce::String& stateBase64) {
+                                                  int bufferSize, const juce::String& stateBase64,
+                                                  int pluginUniqueId) {
     juce::String error;
     const auto descriptions = scanFile(file, error);
     if (descriptions.isEmpty()) {
@@ -530,6 +532,14 @@ PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double
         loaded.path = file.getFullPathName();
         loaded.error = error.isNotEmpty() ? error : "No VST3 plugin was found in the selected file.";
         return loaded;
+    }
+    // A bundle can hold several classes; the scene records which one this slot
+    // was created from. An unknown or absent id keeps the old first-class
+    // behaviour instead of failing the load.
+    for (const auto& description : descriptions) {
+        if (pluginUniqueId != 0 && description.uniqueId == pluginUniqueId) {
+            return instantiate(description, file, sampleRate, bufferSize, stateBase64);
+        }
     }
     return instantiate(descriptions.getReference(0), file, sampleRate, bufferSize, stateBase64);
 }

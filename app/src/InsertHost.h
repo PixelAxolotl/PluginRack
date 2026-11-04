@@ -12,6 +12,7 @@
 #include "MiniButton.h"
 #include "PluginMenu.h"
 #include "Theme.h"
+#include "pluginrack/ChainOrder.h"
 
 // Release-only hook fired synchronously BEFORE erasePlugin frees the
 // processor, so a docked editor for the doomed insert is destroyed while
@@ -41,87 +42,6 @@ struct CardSwitch {
     juce::String tooltip;
 };
 
-// The built-in rows as every view draws them: the compressor and the gate share
-// one "Dynamics" card (they are one editor and one gain-stage family), while
-// the EQ keeps a row of its own. Each entry lists the chain indices that row
-// covers, in chain order, so a drop can never split a card.
-inline std::vector<std::vector<int>> buildChainRows(
-        const std::vector<pluginrack::ChainItem>& chain,
-        const std::vector<pluginrack::DynamicsEffect>& effects) {
-    const int count = static_cast<int>(chain.size());
-    int compressorIndex = -1;
-    int gateIndex = -1;
-    for (int i = 0; i < count; ++i) {
-        const auto& item = chain[static_cast<std::size_t>(i)];
-        if (item.type != pluginrack::ChainItemType::Dynamics) continue;
-        if (compressorIndex >= 0 && gateIndex >= 0) continue;
-        // A scene keeps the effect ids it was saved with, so resolve by id and
-        // fall back to the chain row's own convention (row 1 is the
-        // compressor) before calling the effect a gate.
-        const auto effect = std::find_if(effects.begin(), effects.end(),
-                                         [&item](const auto& candidate) {
-                                             return candidate.id == item.id;
-                                         });
-        const bool isCompressor =
-            effect != effects.end()
-                ? effect->type == pluginrack::DynamicsEffectType::Compressor
-                : item.id == 1;
-        if (isCompressor) {
-            if (compressorIndex < 0) compressorIndex = i;
-        } else if (gateIndex < 0) {
-            gateIndex = i;
-        }
-    }
-
-    std::vector<std::vector<int>> rows;
-    std::vector<bool> claimed(static_cast<std::size_t>(count), false);
-    for (int i = 0; i < count; ++i) {
-        if (claimed[static_cast<std::size_t>(i)]) continue;
-        int partner = -1;
-        if (i == compressorIndex && gateIndex > i) partner = gateIndex;
-        else if (i == gateIndex && compressorIndex > i) partner = compressorIndex;
-        if (partner >= 0) {
-            rows.push_back({ i, partner });
-            claimed[static_cast<std::size_t>(partner)] = true;
-        } else {
-            rows.push_back({ i });
-        }
-        claimed[static_cast<std::size_t>(i)] = true;
-    }
-    return rows;
-}
-
-// Chain index a drop on a row boundary lands at. Rows do not map one-to-one to
-// chain entries once a card covers two of them.
-inline int chainIndexForBoundary(const std::vector<std::vector<int>>& rows, int row,
-                                 int chainSize) {
-    if (row < 0 || row >= static_cast<int>(rows.size())) return chainSize;
-    const auto& indices = rows[static_cast<std::size_t>(row)];
-    return indices.empty() ? chainSize : indices.front();
-}
-
-// Which chain entry of a paired card is the compressor. Both are Dynamics
-// rows, so the effect type decides; a scene whose saved ids no longer match
-// falls back to the row's own convention (id 1 is the compressor).
-inline int compressorIndexInRow(const std::vector<pluginrack::ChainItem>& chain,
-                                const std::vector<pluginrack::DynamicsEffect>& effects,
-                                const std::vector<int>& row) {
-    for (const int index : row) {
-        const auto& item = chain[static_cast<std::size_t>(index)];
-        const auto effect = std::find_if(effects.begin(), effects.end(),
-                                         [&item](const auto& candidate) {
-                                             return candidate.id == item.id;
-                                         });
-        const bool isCompressor =
-            effect != effects.end()
-                ? effect->type == pluginrack::DynamicsEffectType::Compressor
-                : item.id == 1;
-        if (isCompressor) return index;
-    }
-    return row.empty() ? -1 : row.front();
-}
-
-
 class IInsertHost;
 
 // One add-plugin flow for every insert host: the plugin library menu anchored
@@ -133,8 +53,9 @@ public:
     virtual ~IInsertHost() = default;
     // Starts an asynchronous load: returns an immediate validation error, or an
     // empty string when the plugin is being instantiated on the load worker.
-    // The view refreshes itself from the completion.
-    virtual juce::String insertPlugin(const juce::File&) = 0;
+    // pluginUniqueId names the class inside a multi-class bundle; 0 means "the
+    // bundle's first class". The view refreshes itself from the completion.
+    virtual juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) = 0;
     virtual void erasePlugin(std::uint32_t insertId) = 0;
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;
     virtual void refreshAfterInsertChange() = 0;
@@ -157,11 +78,11 @@ inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
     // The menu outlives this click, so the host is tracked through its other
     // base class: every host is a Component, and the cast back is checked.
     juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
-    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file) {
+    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file, int pluginUniqueId) {
         if (safeHost == nullptr) return;
         auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
         if (target == nullptr) return;
-        const auto error = target->insertPlugin(file);
+        const auto error = target->insertPlugin(file, pluginUniqueId);
         if (error.isNotEmpty()) {
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                    "PluginRack", error);
@@ -445,14 +366,18 @@ public:
         g.setColour(face);
         g.fillRoundedRectangle(r, 3.0f);
 
-        // Six-dot handle, centred in the gutter resized() leaves for it.
+        // Six-dot handle, centred in the gutter resized() leaves for it. Rack
+        // cards are taller than their header because of the mini view, so the
+        // grip follows the header row: centring it on the whole card would put
+        // the dots under the preview, where nobody can see or grab them.
         constexpr float dotSize = 2.5f;
         constexpr float dotGapX = 4.0f;
         constexpr float dotGapY = 4.0f;
         constexpr float gridW = dotSize * 2.0f + dotGapX;
         constexpr float gridH = dotSize * 3.0f + dotGapY * 2.0f;
         const float gridLeft = 3.0f + (20.0f - gridW) * 0.5f;
-        const float gridTop = (r.getHeight() - gridH) * 0.5f;
+        const float headerHeight = static_cast<float>(mini == nullptr ? getHeight() : kHeaderHeight);
+        const float gridTop = (headerHeight - gridH) * 0.5f;
         // An empty VST slot has nothing to reorder, so it carries no handle.
         if (!addSlot) {
             g.setColour(theme::dim());

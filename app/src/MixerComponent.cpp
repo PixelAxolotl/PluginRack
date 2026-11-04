@@ -11,6 +11,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     {
         const auto deviceState = audioEngine.getOutputDeviceState(output.id);
         deviceControl.setDeviceName(deviceState.deviceName);
+        deviceControl.setBackendType(deviceState.deviceType);
         deviceControl.setError(deviceState.error);
     }
     meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
@@ -38,6 +39,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
                 juce::MessageManager::callAsync([this, err] {
                     const auto deviceState = audioEngine.getOutputDeviceState(output.id);
                     deviceControl.setDeviceName(deviceState.deviceName);
+                    deviceControl.setBackendType(deviceState.deviceType);
                     deviceControl.setError(deviceState.error);
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
@@ -372,12 +374,14 @@ void MixerComponent::OutputStrip::resized() {
     // Same rows and heights as the input strip: cross and flip on the short
     // action row, name + device under it, then the mode field.
     auto actionsRow = area.removeFromTop(theme::metrics::kActionH);
-    removeOutputButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
-    actionsRow.removeFromRight(2);
-    flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    // The grip takes its lane before any action does: a button that eats the
+    // row would leave it zero-wide and make the strip impossible to drag.
     dragHandleBounds = dragHandleVisible
                            ? actionsRow.removeFromLeft(theme::metrics::kActionH)
                            : juce::Rectangle<int>();
+    removeOutputButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
+    actionsRow.removeFromRight(2);
+    flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
     area.removeFromTop(2);
     deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
@@ -473,6 +477,7 @@ void MixerComponent::OutputStrip::refresh() {
     // Locked snapshot: the device opener writes these strings off-thread.
     const auto deviceState = audioEngine.getOutputDeviceState(output.id);
     deviceControl.setDeviceName(deviceState.deviceName);
+    deviceControl.setBackendType(deviceState.deviceType);
     deviceControl.setError(deviceState.error);
     const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
@@ -484,7 +489,7 @@ void MixerComponent::OutputStrip::refresh() {
 void MixerComponent::OutputStrip::refreshInserts() {
     // The compressor and the gate share the Dynamics card, so rows are not a
     // one-to-one map of the chain any more.
-    const auto rows = buildChainRows(output.chain, output.effects);
+    const auto rows = pluginrack::buildChainRows(output.chain, output.effects);
     chainRowCount = static_cast<int>(rows.size());
     const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
     while (slots.size() < totalRows) {
@@ -513,7 +518,8 @@ void MixerComponent::OutputStrip::refreshInserts() {
         if (indices.size() > 1) {
             // Compressor + gate: one switch each, and a click on the row opens
             // the panel that carries both.
-            const int compIndex = compressorIndexInRow(output.chain, output.effects, indices);
+            const int compIndex =
+                pluginrack::compressorIndexInRow(output.chain, output.effects, indices);
             const int gateIndex = indices.front() == compIndex ? indices.back() : indices.front();
             const auto compItem = output.chain[static_cast<std::size_t>(compIndex)];
             const auto gateItem = output.chain[static_cast<std::size_t>(gateIndex)];
@@ -558,11 +564,11 @@ void MixerComponent::OutputStrip::mouseDoubleClick(const juce::MouseEvent&) {
     if (onDoubleClicked) onDoubleClicked();
 }
 
-juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file) {
+juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file, int pluginUniqueId) {
     // The load is asynchronous; the strip refreshes when it finishes.
     const auto outputId = output.id;
     juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
-    audioEngine.addOutputPluginAsync(outputId, file, [safe](juce::String error) {
+    audioEngine.addOutputPluginAsync(outputId, file, pluginUniqueId, [safe](juce::String error) {
         if (safe == nullptr) return;
         safe->refreshAfterInsertChange();
         if (error.isNotEmpty()) {
@@ -593,9 +599,7 @@ void MixerComponent::OutputStrip::reorderInsert(std::uint32_t insertId, int targ
 
 void MixerComponent::OutputStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
     // A card moves as one: collect every chain entry it covers.
-    const auto rows = buildChainRows(output.chain, output.effects);
-    const int dest = chainIndexForBoundary(rows, targetIndex,
-                                           static_cast<int>(output.chain.size()));
+    const auto rows = pluginrack::buildChainRows(output.chain, output.effects);
     std::vector<pluginrack::ChainItem> cardItems{ item };
     for (const auto& row : rows) {
         const bool holdsItem = std::any_of(row.begin(), row.end(), [this, &item](int index) {
@@ -609,14 +613,13 @@ void MixerComponent::OutputStrip::reorderChainItem(pluginrack::ChainItem item, i
         }
         break;
     }
-    for (std::size_t k = 0; k < cardItems.size(); ++k) {
-        const auto position = std::find(output.chain.begin(), output.chain.end(), cardItems[k]);
-        if (position == output.chain.end()) continue;
-        const int current = static_cast<int>(std::distance(output.chain.begin(), position));
-        const int target = dest + static_cast<int>(k);
-        if (current == target) continue;
-        audioEngine.moveOutputChainItem(output.id, cardItems[k], target);
-    }
+    // Plan the card against a simulated chain: the engine erases each item
+    // before inserting it, so a drop below the card lands where the marker
+    // showed instead of one row past it.
+    const auto moves =
+        pluginrack::planChainCardMoves(output.chain, rows, targetIndex, cardItems);
+    for (const auto& move : moves)
+        audioEngine.moveOutputChainItem(output.id, move.item, move.targetIndex);
     juce::Component::SafePointer<OutputStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
@@ -928,7 +931,11 @@ void MixerComponent::rebuildChannelStrips() {
             // while the processors are still alive. Release-only on purpose (see
             // InsertHost.h): a rebuild here would re-dock a doomed insert.
             if (auto release = pluginRemovingHook()) release();
-            audioEngine.removeChannel(id);
+            const auto err = audioEngine.removeChannel(id);
+            if (err.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
+                return;
+            }
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
@@ -943,9 +950,8 @@ void MixerComponent::rebuildChannelStrips() {
         s->onDoubleClicked = [this, id] {
             if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), false);
         };
-        // Reordering is a mixer-page affordance: the I/O page's boards keep the
-        // handle hidden so a strip there cannot be moved by accident.
-        s->setDragHandleVisible(sections_ == Sections::Both);
+        // Every board reorders from the same grip, including the I/O tabs.
+        s->setDragHandleVisible(true);
         s->onDragHandleStarted = [this] { channelInsertIndex = -1; };
         s->onDragHandleMoved = [this](juce::Point<int> screenPosition) {
             updateChannelDrag(screenPosition);
@@ -985,7 +991,7 @@ void MixerComponent::rebuildOutputStrips() {
         };
         // Output strips reorder with the same grip as the input strips.
         const int sourceIndex = outputIndex - 1;
-        s->setDragHandleVisible(sections_ == Sections::Both);
+        s->setDragHandleVisible(true);
         s->onDragHandleStarted = [this] { outputInsertIndex = -1; };
         s->onDragHandleMoved = [this](juce::Point<int> screenPosition) {
             updateOutputDrag(screenPosition);

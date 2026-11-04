@@ -156,10 +156,6 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
 
     modeCombo.addItem("MONO", 1);
     modeCombo.addItem("ST", 2);
-    for (int i = 1; i <= 16; ++i) {
-        inputComboA.addItem("A" + juce::String(i), i);
-        inputComboB.addItem("B" + juce::String(i), i);
-    }
     inputComboA.setTooltip("Physical input for this channel (1-based)");
     inputComboB.setTooltip("Physical input for the right side (1-based)");
     const auto styleInputCombo = [this](juce::ComboBox& combo) {
@@ -438,6 +434,17 @@ void RackView::refreshHeader() {
     refreshEqButton();
 }
 
+void RackView::rebuildInputCombos(int count) {
+    if (count == inputComboCount) return;
+    inputComboCount = count;
+    inputComboA.clear(juce::dontSendNotification);
+    inputComboB.clear(juce::dontSendNotification);
+    for (int i = 1; i <= count; ++i) {
+        inputComboA.addItem("A" + juce::String(i), i);
+        inputComboB.addItem("B" + juce::String(i), i);
+    }
+}
+
 void RackView::refreshInputControls() {
     auto* ch = currentChannel();
     if (ch == nullptr) {
@@ -449,18 +456,23 @@ void RackView::refreshInputControls() {
     }
 
     const bool mono = ch->layout == pluginrack::ChannelLayout::Mono;
-    const bool hasInputDevice = audioEngine.getChannelDeviceState(ch->id).deviceName.isNotEmpty();
+    const auto deviceState = audioEngine.getChannelDeviceState(ch->id);
+    const bool hasInputDevice = deviceState.deviceName.isNotEmpty();
     const int a = ch->inputChannels.empty() ? 1 : ch->inputChannels[0] + 1;
     const int b = ch->inputChannels.size() > 1 ? ch->inputChannels[1] + 1 : a;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
-    inputComboA.setSelectedId(juce::jlimit(1, 16, a), juce::dontSendNotification);
-    inputComboB.setSelectedId(juce::jlimit(1, 16, b), juce::dontSendNotification);
+    // The device decides how many inputs exist; the 16 floor keeps the control
+    // usable before a device is open, and the mapping is always allowed so a
+    // saved index above the device's count is shown, never silently moved.
+    rebuildInputCombos(juce::jmax(16, deviceState.availableInputs, a, b));
+    inputComboA.setSelectedId(a, juce::dontSendNotification);
+    inputComboB.setSelectedId(b, juce::dontSendNotification);
 
-    const juce::String aText = "A" + juce::String(juce::jlimit(1, 16, a));
+    const juce::String aText = "A" + juce::String(a);
     if (!hasInputDevice) inputChip.setButtonText("No input");
     else if (inputEditing) inputChip.setButtonText("Done");
     else if (mono) inputChip.setButtonText(aText);
-    else inputChip.setButtonText(aText + " + A" + juce::String(juce::jlimit(1, 16, b)));
+    else inputChip.setButtonText(aText + " + A" + juce::String(b));
 
     inputChip.setToggleState(inputEditing, juce::dontSendNotification);
     inputChip.setVisible(true);
@@ -580,7 +592,7 @@ void RackView::refreshSlots() {
     static const std::vector<pluginrack::DynamicsEffect> fallbackEffects =
         pluginrack::defaultDynamicsEffects();
     const auto& effects = effectList != nullptr ? *effectList : fallbackEffects;
-    const auto rows = buildChainRows(items, effects);
+    const auto rows = pluginrack::buildChainRows(items, effects);
 
     // Exactly one of these is live: currentChannel() refuses an output
     // selection and currentOutput() refuses a channel one.
@@ -627,7 +639,8 @@ void RackView::refreshSlots() {
         if (rowItems.size() > 1) {
             // Compressor and gate share the Dynamics card: one switch each, and
             // the panel a click opens is the one that carries both.
-            const int compIndex = compressorIndexInRow(items, effects, rowIndices);
+            const int compIndex =
+                pluginrack::compressorIndexInRow(items, effects, rowIndices);
             const int gateIndex =
                 rowIndices.front() == compIndex ? rowIndices.back() : rowIndices.front();
             const auto compressorItem = items[static_cast<std::size_t>(compIndex)];
@@ -1965,7 +1978,7 @@ void RackView::renameSelectedChain() {
     }), true);
 }
 
-juce::String RackView::insertPlugin(const juce::File& file) {
+juce::String RackView::insertPlugin(const juce::File& file, int pluginUniqueId) {
     // The load runs on the message thread because that is the only thread these
     // plugins tolerate, and some of them spend seconds initialising (Native
     // Instruments' Raum needs ~3.5 s). Show a wait cursor now so the window
@@ -1984,12 +1997,12 @@ juce::String RackView::insertPlugin(const juce::File& file) {
     };
     if (auto* ch = currentChannel()) {
         const auto channelId = ch->id;
-        audioEngine.addPluginAsync(channelId, file, finish);
+        audioEngine.addPluginAsync(channelId, file, pluginUniqueId, finish);
         return {};
     }
     if (auto* out = currentOutput()) {
         const auto outputId = out->id;
-        audioEngine.addOutputPluginAsync(outputId, file, finish);
+        audioEngine.addOutputPluginAsync(outputId, file, pluginUniqueId, finish);
         return {};
     }
     juce::MouseCursor::hideWaitCursor();
@@ -2054,16 +2067,6 @@ void RackView::clearChainPreview() {
     chainMarker.setVisible(false);
 }
 
-int RackView::chainIndexForRow(int row) {
-    const auto* chain = currentChain();
-    if (chain == nullptr) return row;
-    const auto* effects = currentEffects();
-    static const std::vector<pluginrack::DynamicsEffect> fallbackEffects =
-        pluginrack::defaultDynamicsEffects();
-    const auto rows = buildChainRows(*chain, effects != nullptr ? *effects : fallbackEffects);
-    return chainIndexForBoundary(rows, row, static_cast<int>(chain->size()));
-}
-
 void RackView::moveChainItemRaw(pluginrack::ChainItem item, int chainIndex) {
     if (selectedIsOutput)
         audioEngine.moveOutputChainItem(selectedId, item, chainIndex);
@@ -2075,23 +2078,17 @@ void RackView::moveChainCard(const std::vector<pluginrack::ChainItem>& items, in
     if (items.empty()) return;
     const auto* chain = currentChain();
     if (chain == nullptr) return;
+    const auto* effects = currentEffects();
+    static const std::vector<pluginrack::DynamicsEffect> fallbackEffects =
+        pluginrack::defaultDynamicsEffects();
+    const auto rows =
+        pluginrack::buildChainRows(*chain, effects != nullptr ? *effects : fallbackEffects);
 
-    // The card stands for every chain entry it covers, so its members follow
-    // the anchor and stay adjacent. Each move shifts the later indices, so the
-    // anchor is re-resolved before every follower.
-    const int anchorTarget = chainIndexForRow(targetRowIndex);
-    moveChainItemRaw(items.front(), anchorTarget);
-
-    for (std::size_t k = 1; k < items.size(); ++k) {
-        const auto* live = currentChain();
-        if (live == nullptr) return;
-        const auto position = std::find(live->begin(), live->end(), items[k]);
-        if (position == live->end()) continue;
-        const int current = static_cast<int>(std::distance(live->begin(), position));
-        const int target = anchorTarget + static_cast<int>(k);
-        if (current == target) continue;
-        moveChainItemRaw(items[k], target);
-    }
+    // Plan the whole card against a simulated chain: the engine erases each
+    // item before inserting it, so the followers must not be shifted by one
+    // when the card drops below its own rows.
+    const auto moves = pluginrack::planChainCardMoves(*chain, rows, targetRowIndex, items);
+    for (const auto& move : moves) moveChainItemRaw(move.item, move.targetIndex);
 }
 
 void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
@@ -2099,7 +2096,7 @@ void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
     std::vector<pluginrack::ChainItem> cardItems{ item };
     if (const auto* chain = currentChain()) {
         if (const auto* effects = currentEffects()) {
-            for (const auto& row : buildChainRows(*chain, *effects)) {
+            for (const auto& row : pluginrack::buildChainRows(*chain, *effects)) {
                 const bool holdsItem =
                     std::any_of(row.begin(), row.end(), [&](int index) {
                         return (*chain)[static_cast<std::size_t>(index)] == item;

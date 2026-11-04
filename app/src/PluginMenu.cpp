@@ -12,9 +12,14 @@ namespace {
 // chooser to outlive its async callback.
 std::unique_ptr<juce::FileChooser> activeChooser;
 
+using ChooseCallback = std::function<void(const juce::File&, int uniqueId)>;
+
 struct Entry {
     juce::String label;
     juce::File file;
+    // Which class inside the bundle this row stands for. A bundle can expose
+    // several processors, so the path alone does not identify the plugin.
+    int uniqueId = 0;
 };
 
 struct Vendor {
@@ -28,7 +33,7 @@ bool caseInsensitiveLess(const juce::String& a, const juce::String& b) {
 
 void addFormatBranch(juce::PopupMenu& menu, const juce::String& format,
                      const juce::Array<juce::PluginDescription>& plugins,
-                     const std::function<void(const juce::File&)>& onChoose) {
+                     const ChooseCallback& onChoose) {
     std::vector<Vendor> vendors;
     for (const auto& description : plugins) {
         const auto vendorName = PluginLibrary::vendorNameFor(description);
@@ -42,7 +47,7 @@ void addFormatBranch(juce::PopupMenu& menu, const juce::String& format,
         }
         vendor->entries.push_back(
             {PluginLibrary::displayNameFor(description),
-             juce::File(description.fileOrIdentifier)});
+             juce::File(description.fileOrIdentifier), description.uniqueId});
     }
 
     std::sort(vendors.begin(), vendors.end(), [](const Vendor& a, const Vendor& b) {
@@ -67,9 +72,10 @@ void addFormatBranch(juce::PopupMenu& menu, const juce::String& format,
             for (int suffix = 2; usedLabels.contains(label); ++suffix)
                 label = entry.label + " (" + juce::String(suffix) + ")";
             usedLabels.add(label);
-            vendorMenu.addItem(label, true, false, [onChoose, file = entry.file] {
-                onChoose(file);
-            });
+            vendorMenu.addItem(label, true, false,
+                               [onChoose, file = entry.file, uniqueId = entry.uniqueId] {
+                                   onChoose(file, uniqueId);
+                               });
         }
         formatMenu.addSubMenu(vendor.name, vendorMenu);
     }
@@ -79,7 +85,7 @@ void addFormatBranch(juce::PopupMenu& menu, const juce::String& format,
 
 void addPluginBranches(juce::PopupMenu& menu,
                        const juce::Array<juce::PluginDescription>& plugins,
-                       const std::function<void(const juce::File&)>& onChoose) {
+                       const ChooseCallback& onChoose) {
     juce::StringArray formats;
     for (const auto& description : plugins)
         formats.addIfNotAlreadyThere(description.pluginFormatName.isNotEmpty()
@@ -103,48 +109,102 @@ void addPluginBranches(juce::PopupMenu& menu,
     }
 }
 
-void reopenMenu(juce::Component::SafePointer<juce::Component> anchor,
-                std::function<void(const juce::File&)> onChoose) {
+void reopenMenu(juce::Component::SafePointer<juce::Component> anchor, ChooseCallback onChoose) {
     juce::MessageManager::callAsync([anchor, onChoose = std::move(onChoose)]() mutable {
         if (anchor == nullptr) return;
         PluginMenu::showAddPluginMenu(*anchor, std::move(onChoose));
     });
 }
 
-void addPluginFolder(juce::Component::SafePointer<juce::Component> anchor,
-                     std::function<void(const juce::File&)> onChoose) {
+// Adding a folder starts a background scan, so a menu reopened right away can
+// only show the catalogue from before it. This listener reopens the picker
+// once that scan finishes, which is when the new folder's plugins exist.
+// PluginLibrary clears `scanning` and broadcasts on the message thread, so a
+// plain ChangeListener is enough.
+class ScanRefresh final : public juce::ChangeListener {
+public:
+    static ScanRefresh& getInstance() {
+        // Deliberately leaked: it has to outlive the shutdown-time teardown of
+        // the library it listens to, and it is idle between scans.
+        static auto* instance = new ScanRefresh();
+        return *instance;
+    }
+
+    void refreshWhenScanFinishes(juce::Component::SafePointer<juce::Component> anchor,
+                                 ChooseCallback onChoose) {
+        pendingAnchor = anchor;
+        pendingChoose = std::move(onChoose);
+        if (!listening) {
+            PluginLibrary::getInstance().addChangeListener(this);
+            listening = true;
+        }
+    }
+
+private:
+    void changeListenerCallback(juce::ChangeBroadcaster*) override {
+        if (pendingAnchor == nullptr || !pendingAnchor->isShowing()) {
+            clearPending();
+            return;
+        }
+        if (PluginLibrary::getInstance().isScanning()) return;
+        auto anchor = pendingAnchor;
+        auto onChoose = std::move(pendingChoose);
+        clearPending();
+        PluginMenu::showAddPluginMenu(*anchor, std::move(onChoose));
+    }
+
+    void clearPending() {
+        pendingAnchor = nullptr;
+        pendingChoose = nullptr;
+        if (listening) {
+            PluginLibrary::getInstance().removeChangeListener(this);
+            listening = false;
+        }
+    }
+
+    juce::Component::SafePointer<juce::Component> pendingAnchor;
+    ChooseCallback pendingChoose;
+    bool listening = false;
+};
+
+void addPluginFolder(juce::Component::SafePointer<juce::Component> anchor, ChooseCallback onChoose) {
     activeChooser = std::make_unique<juce::FileChooser>(
         "Add a plugin folder", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
         juce::String());
     activeChooser->launchAsync(
         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [anchor, onChoose](const juce::FileChooser& chooser) {
+        [anchor, onChoose = std::move(onChoose)](const juce::FileChooser& chooser) mutable {
             const auto folder = chooser.getResult();
             if (folder == juce::File() || !folder.isDirectory()) return;
             auto& library = PluginLibrary::getInstance();
             library.addExtraFolder(folder);
+            // Reopen now (the status row shows the scan running) and again when
+            // it finishes, because only then does the menu list the new folder.
+            ScanRefresh::getInstance().refreshWhenScanFinishes(anchor, onChoose);
             library.rescan(folder);
             reopenMenu(anchor, std::move(onChoose));
         });
 }
 
-void browseForFile(std::function<void(const juce::File&)> onChoose) {
+void browseForFile(ChooseCallback onChoose) {
     activeChooser = std::make_unique<juce::FileChooser>(
         "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
         "*.vst3");
     activeChooser->launchAsync(
         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [onChoose = std::move(onChoose)](const juce::FileChooser& chooser) {
+        [onChoose = std::move(onChoose)](const juce::FileChooser& chooser) mutable {
             const auto file = chooser.getResult();
             if (file == juce::File()) return;
-            onChoose(file);
+            // Picked by path, so the class inside the bundle is unknown here:
+            // 0 asks the loader for the bundle's first class, as before.
+            onChoose(file, 0);
         });
 }
 
 // The rows that follow the plugin list: what was found, then the folder
 // actions, then the file-browser fallback.
 void addActionRows(juce::PopupMenu& menu, juce::Component::SafePointer<juce::Component> anchor,
-                   const std::function<void(const juce::File&)>& onChoose) {
+                   const ChooseCallback& onChoose) {
     auto& library = PluginLibrary::getInstance();
     menu.addSeparator();
     menu.addItem(library.getStatusText(), false, false, nullptr);
@@ -152,6 +212,7 @@ void addActionRows(juce::PopupMenu& menu, juce::Component::SafePointer<juce::Com
         addPluginFolder(anchor, onChoose);
     });
     menu.addItem("Rescan plugin folders", true, false, [anchor, onChoose] {
+        ScanRefresh::getInstance().refreshWhenScanFinishes(anchor, onChoose);
         PluginLibrary::getInstance().rescan();
         reopenMenu(anchor, onChoose);
     });
@@ -160,7 +221,7 @@ void addActionRows(juce::PopupMenu& menu, juce::Component::SafePointer<juce::Com
 
 void buildAddPluginMenu(juce::PopupMenu& menu,
                         juce::Component::SafePointer<juce::Component> anchor,
-                        const std::function<void(const juce::File&)>& onChoose) {
+                        const ChooseCallback& onChoose) {
     menu.addSectionHeader("ADD PLUGIN");
     addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);
     addActionRows(menu, anchor, onChoose);
@@ -170,8 +231,7 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
 
 namespace PluginMenu {
 
-void showAddPluginMenu(juce::Component& anchor,
-                       std::function<void(const juce::File&)> onChoose) {
+void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::File&, int)> onChoose) {
     auto& library = PluginLibrary::getInstance();
     // First click after launch: the cache is loaded, but a library that was
     // never scanned still needs one so the menu has something to show.

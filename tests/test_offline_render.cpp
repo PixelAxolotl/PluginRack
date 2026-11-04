@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -101,8 +102,33 @@ TEST_CASE("sine render has the expected amplitude and frequency") {
     REQUIRE(std::abs(signChanges - 880) <= 2);
 }
 
-TEST_CASE("render returns one buffer per output") {
+TEST_CASE("offline render matches the live engine's split send levels") {
     pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    scene.routes.front().sendGainDb = 0.0f;
+    scene.routes.front().sendGainDbR = -60.0f;
+
+    constexpr int kFrames = 512;
+    const std::vector<std::vector<float>> result =
+        pluginrack::renderSine(scene, allAvailable(scene), 440.0f, 1.0f, kFrames);
+    REQUIRE(result.size() == 1);
+
+    float peakLeft = 0.0f;
+    float peakRight = 0.0f;
+    for (int i = 0; i < kFrames; ++i) {
+        peakLeft = std::max(peakLeft, std::fabs(result[0][static_cast<std::size_t>(i) * 2]));
+        peakRight =
+            std::max(peakRight, std::fabs(result[0][static_cast<std::size_t>(i) * 2 + 1]));
+    }
+    // Right send is -60 dB, so the right side carries no usable signal; the
+    // old single-gain cache made both sides identical.
+    REQUIRE(peakLeft > 0.5f);
+    REQUIRE(peakRight < 0.002f);
+}
+
+TEST_CASE("render returns one buffer per output") {    pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     addOutput(scene, 1);
     addOutput(scene, 2);

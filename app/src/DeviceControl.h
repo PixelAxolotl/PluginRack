@@ -12,6 +12,9 @@ public:
 
     void setTitle(const juce::String& t) { title = t; updateTooltip(); repaint(); }
     void setDeviceName(const juce::String& n) { deviceName = n; updateTooltip(); repaint(); }
+    // Raw JUCE device type ("Windows Audio", "ASIO", ...) this stream actually
+    // opened in, drawn as a small tag so the backend is visible per strip.
+    void setBackendType(const juce::String& type) { backendType = type; updateTooltip(); repaint(); }
     void setError(const juce::String& e) { error = e; updateTooltip(); repaint(); }
     void setOnClick(std::function<void()> cb) { onClick = std::move(cb); }
     void setOnDoubleClick(std::function<void()> cb) { onDoubleClick = std::move(cb); }
@@ -34,6 +37,7 @@ private:
 
     juce::String title;
     juce::String deviceName;
+    juce::String backendType;
     juce::String error;
     std::function<void()> onClick;
     std::function<void()> onDoubleClick;

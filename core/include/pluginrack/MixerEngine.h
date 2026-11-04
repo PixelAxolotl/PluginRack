@@ -61,7 +61,10 @@ private:
     struct RouteCache {
         std::size_t channelIndex = 0;
         std::size_t outputIndex = 0;
-        float sendGain = 0.0f;
+        // The live engine treats the two sides independently; a route that
+        // only stored one level rendered a split send as a matched pair.
+        float sendGainL = 0.0f;
+        float sendGainR = 0.0f;
     };
 
     // Mutex and EQ state grouped behind one pointer so MixerEngine stays

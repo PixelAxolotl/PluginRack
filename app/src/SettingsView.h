@@ -8,8 +8,10 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "LatencyBudgetView.h"
 #include "PageHeader.h"
 #include "Theme.h"
+#include "WrappedLabel.h"
 
 class SettingsView final : public juce::Component, private juce::Timer {
 public:
@@ -33,14 +35,47 @@ private:
     void refreshListenChoices();
     void updateMeasurement(const AudioEngine::LatencyReport& report);
     juce::String listenTarget() const;
+    // Returns true when the text actually changed, so refresh() can re-run the
+    // layout only when a wrapped line grew or shrank.
+    bool setWrappedText(WrappedLabel& label, const juce::String& text, juce::Colour colour);
+    void layoutBodyToFit();
+    int layoutBody(int width);
     AudioEngine& audioEngine;
 
-    PageHeader header{ "Settings" };
-    juce::Label clockLabel;
-    juce::Label latencyLabel;
-    juce::Label bufferLabel;
-    juce::Label errorLabel;
+    // The page body scrolls under a pinned header: the six sections do not fit
+    // a 700 px tall window, and the device list at the bottom has to stay
+    // reachable. Panels are painted here so the controls above them stay plain
+    // JUCE widgets.
+    class Body final : public juce::Component {
+    public:
+        void setPanels(std::vector<juce::Rectangle<int>> panels) {
+            panels_ = std::move(panels);
+            repaint();
+        }
 
+        void paint(juce::Graphics& g) override {
+            for (const auto& panel : panels_)
+                theme::ui::drawPanel(g, panel);
+        }
+
+    private:
+        std::vector<juce::Rectangle<int>> panels_;
+    };
+
+    PageHeader header{ "Settings" };
+    Body body;
+    juce::Viewport viewport;
+
+    juce::Label statusCaption{ "", "AUDIO STATUS" };
+    juce::Label clockStatCaption{ "", "CLOCK" };
+    juce::Label clockStatValue;
+    juce::Label latencyStatCaption{ "", "LATENCY (EST.)" };
+    juce::Label latencyStatValue;
+    juce::Label bufferStatCaption{ "", "BUFFER" };
+    juce::Label bufferStatValue;
+    WrappedLabel issuesText;
+
+    juce::Label bufferCaption{ "", "BUFFER SIZE" };
     juce::Label inputBufferSizeLabel;
     juce::ComboBox inputBufferSizeCombo;
     juce::Label outputBufferSizeLabel;
@@ -56,6 +91,8 @@ private:
     juce::Label roundTripBeta { "", "BETA" };
     juce::Label measuredLabel;
     juce::Label measuredDetailLabel;
+    LatencyBudgetView budgetView;
+    juce::Label renderLoadLabel;
     juce::Label listenLabel { "", "Listen on" };
     juce::ComboBox listenCombo;
     juce::TextButton measureButton { "Measure Round-Trip" };
@@ -70,6 +107,13 @@ private:
     juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
     juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
     juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
+    juce::TextButton profileButton { "Find low-latency setting" };
+    WrappedLabel profileStatusLabel;
+    juce::TextButton forceAsioButton { "Force ASIO" };
+    WrappedLabel asioStatusLabel;
+    juce::String forceAsioStatus_;
+
+    juce::Label appCaption{ "", "APP" };
 
     // Rack view cost control: the thumbnail timer's rate. Applied straight to
     // the engine (no Apply step) because it is not a stream option.
@@ -96,6 +140,9 @@ private:
     // Staged settings: nothing reaches the engine until Apply.
     AudioEngine::DeviceSettings staged_;
     bool dirty_ = false;
+    // The latency budget draws nothing until a clock is open; the panel
+    // collapses rather than leaving a blank block of rows.
+    bool hasBudget_ = false;
     std::vector<AudioEngine::ReloadableDevice> reloadDevices_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsView)

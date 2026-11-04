@@ -12,6 +12,73 @@ constexpr int kTarget = 512;
 
 } // namespace
 
+TEST_CASE("a one-block read delay is the smallest survivable target") {
+    // The adaptive read-delay controller grows on `underrun`, so the floor it
+    // is given must be a delay the cursor can actually serve. A target below
+    // one block plus its look-ahead sample reports underrun on every callback,
+    // which used to feed the controller a starvation event per block and walk
+    // the delay up to the ring limit.
+    constexpr int kBlock = 128;
+    constexpr int kTooSmall = kBlock / 4;
+    constexpr int kFloor = kBlock + 32;
+
+    {
+        pluginrack::CaptureReadCursor cursor;
+        cursor.prepare(kCapacity, kTooSmall);
+        std::uint64_t written = static_cast<std::uint64_t>(kTooSmall);
+        int underruns = 0;
+        for (std::uint64_t epoch = 1; epoch < 50; ++epoch) {
+            const auto window = cursor.nextBlock(written, kBlock, epoch);
+            underruns += window.underrun ? 1 : 0;
+            written += static_cast<std::uint64_t>(kBlock);
+        }
+        CHECK(underruns > 0);
+    }
+    {
+        pluginrack::CaptureReadCursor cursor;
+        cursor.prepare(kCapacity, kFloor);
+        std::uint64_t written = static_cast<std::uint64_t>(kFloor);
+        int underruns = 0;
+        for (std::uint64_t epoch = 1; epoch < 500; ++epoch) {
+            const auto window = cursor.nextBlock(written, kBlock, epoch);
+            underruns += window.underrun ? 1 : 0;
+            written += static_cast<std::uint64_t>(kBlock);
+        }
+        // A steady writer at the floor must be quiet, or the controller would
+        // keep growing the delay forever.
+        CHECK(underruns == 0);
+    }
+}
+
+TEST_CASE("a re-prime restores the delay after a starvation") {
+    // A starvation leaves the cursor at the writer position. Without a re-prime
+    // the delay the owner asked for never exists, every later block is short,
+    // and an adaptive controller reads that as a new starvation every callback.
+    constexpr int kBlock = 128;
+    pluginrack::CaptureReadCursor cursor;
+    cursor.prepare(kCapacity, kBlock + 32);
+
+    std::uint64_t written = 1000;
+    bool sawUnderrun = false;
+    for (std::uint64_t epoch = 1; epoch <= 3; ++epoch) {
+        const auto window = cursor.nextBlock(written, kBlock, epoch);
+        sawUnderrun = sawUnderrun || window.underrun;
+    }
+    REQUIRE(sawUnderrun);
+
+    cursor.setTargetDelay(2 * kBlock);
+    cursor.requestReprime();
+    written += 2000;
+
+    int underruns = 0;
+    for (std::uint64_t epoch = 4; epoch < 300; ++epoch) {
+        const auto window = cursor.nextBlock(written, kBlock, epoch);
+        underruns += window.underrun ? 1 : 0;
+        written += static_cast<std::uint64_t>(kBlock);
+    }
+    CHECK(underruns == 0);
+}
+
 TEST_CASE("steady writer yields contiguous full blocks") {
     pluginrack::CaptureReadCursor cursor;
     cursor.prepare(kCapacity, kTarget);

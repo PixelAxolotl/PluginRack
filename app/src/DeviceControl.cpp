@@ -1,5 +1,7 @@
 ﻿#include "DeviceControl.h"
 
+#include "DeviceBackend.h"
+
 namespace {
 const juce::String kSystemDefault = "System Default";
 
@@ -88,6 +90,20 @@ void DeviceControl::paint(juce::Graphics& g) {
     }
     g.setColour(subColour);
     g.setFont(juce::Font(juce::FontOptions(narrow ? 10.0f : 11.0f)));
+
+    // Backend tag on the right of the device line: "ASIO" or "WASAPI" answers
+    // the one question the device name cannot.
+    const auto tag = deviceBackendTag(backendType);
+    if (tag.isNotEmpty() && error.isEmpty()) {
+        const auto tagFont = juce::Font(juce::FontOptions(9.0f, juce::Font::bold));
+        const int tagWidth = juce::GlyphArrangement::getStringWidthInt(tagFont, tag) + 10;
+        auto tagArea = textArea.removeFromRight(juce::jmin(tagWidth, textArea.getWidth() / 2));
+        g.setColour(deviceBackendIsAsio(backendType) ? theme::green() : theme::dim());
+        g.setFont(tagFont);
+        g.drawText(tag, tagArea, juce::Justification::centredRight, false);
+        g.setFont(juce::Font(juce::FontOptions(narrow ? 10.0f : 11.0f)));
+    }
+
     g.drawText(sub, textArea, juce::Justification::centredLeft, true);
 }
 

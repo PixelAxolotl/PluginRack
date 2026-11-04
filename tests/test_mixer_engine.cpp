@@ -124,6 +124,31 @@ TEST_CASE("send gain of -6 dB scales the route") {
     }
 }
 
+TEST_CASE("split send levels are applied per side") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1, 0.0f);
+    scene.routes.front().sendGainDbR = -60.0f;
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    // The live engine applies sendGainDbL to the left and sendGainDbR to the
+    // right; a single cached gain would have sent both at unity. -60 dB is the
+    // engine's silence floor, so the right side must be exactly silent.
+    const float leftExpected = 0.5f * kCenterPanGain;
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(leftExpected));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == 0.0f);
+    }
+}
+
 TEST_CASE("channel trim adds to the fader gain") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);

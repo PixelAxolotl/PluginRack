@@ -66,7 +66,7 @@ private:
         int getOutputIndex() const { return outputIndex; }
 
         // IInsertHost
-        juce::String insertPlugin(const juce::File&) override;
+        juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
         void erasePlugin(std::uint32_t insertId) override;
         void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
         void refreshAfterInsertChange() override;

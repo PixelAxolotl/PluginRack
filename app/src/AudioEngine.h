@@ -11,7 +11,9 @@
 #include <string>
 #include <vector>
 
+#include <pluginrack/AudioTelemetry.h>
 #include <pluginrack/EqEngine.h>
+#include <pluginrack/LatencyProfile.h>
 #include <pluginrack/Meters.h>
 #include <pluginrack/Scene.h>
 
@@ -24,6 +26,8 @@ public:
         std::uint32_t id = 0;
         juce::String pluginPath;
         juce::String pluginName;
+        // The VST3 class inside the bundle this slot hosts; 0 when unknown.
+        int pluginUniqueId = 0;
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
         int latencySamples = 0;
@@ -108,8 +112,7 @@ public:
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
-        // Guarded by stateLock: the device opener assigns these on its worker
-        // thread, so views must read them through getChannelDeviceState().
+        // Guarded by stateLock; read them through getChannelDeviceState().
         juce::String inputDeviceName;
         juce::String inputError;
         pluginrack::SourceKind sourceKind = pluginrack::SourceKind::Hardware;
@@ -118,6 +121,11 @@ public:
         std::vector<int> inputChannels{0, 1};
         // Shared per-device capture; several logical channels may map into it.
         std::shared_ptr<InputCapture> input;
+        // Fed by the clock's duplex callback instead of a capture: the same
+        // driver client plays and records, so there is no ring to read.
+        juce::Atomic<bool> duplexInput{false};
+        // Physical inputs the duplex device exposes, for the input menus.
+        int duplexInputChannels = 0;
     };
 
     struct Output {
@@ -171,8 +179,25 @@ public:
         double pluginMs = 0.0;
         double fifoMs = 0.0;
         double totalMs = 0.0;
+        // Per-stage split. inputDeviceMs/outputDeviceMs keep their historic
+        // meaning (device latency plus the FIFO/buffer the stream adds) so
+        // existing callers do not change; these break that total apart.
+        double inputDeviceLatencyMs = 0.0; // driver-reported capture latency only
+        double inputFifoDelayMs = 0.0;     // capture read delay (the jitter buffer)
+        double outputDeviceLatencyMs = 0.0; // driver-reported playback latency only
+        double outputBufferMs = 0.0;        // one device buffer on the clock output
+        double unexpectedMs = 0.0;          // measured - predicted; 0 when not measured
         int inputBufferSize = 0;
         int outputBufferSize = 0;
+        // What the user asked for (0 = "Auto: whatever the driver defaults
+        // to"). Comparing it with the granted size is the only way to tell a
+        // big buffer the app requested from one the driver imposed.
+        int requestedInputBufferSize = 0;
+        int requestedOutputBufferSize = 0;
+        juce::String clockDeviceType;
+        int inputReadDelayFrames = 0;
+        int clockFillFrames = 0;
+        int clockTargetFillFrames = 0;
         double sampleRate = 48000.0;
         std::uint64_t underruns = 0;
         std::uint64_t overruns = 0;
@@ -185,6 +210,9 @@ public:
         bool measuredValid = false;
         bool measuredAttempted = false;
         bool measureFailed = false;
+        // True when capture and playback are different devices. Duplex is then
+        // impossible and the read delay is the cost of bridging two clocks.
+        bool separateClocks = false;
     };
 
     struct FifoDiagnostics {
@@ -290,6 +318,13 @@ public:
     struct DeviceState {
         juce::String deviceName;
         juce::String error;
+        // Physical inputs the assigned device exposes; 0 when none is open and
+        // always 0 for outputs. Read under the same lock so the input menus can
+        // size themselves without touching the capture object.
+        int availableInputs = 0;
+        // Backend the stream actually opened in ("ASIO", "Windows Audio", ...).
+        // The strips show this so the user never has to guess.
+        juce::String deviceType;
     };
     DeviceState getChannelDeviceState(std::uint32_t channelId) const;
     DeviceState getOutputDeviceState(std::uint32_t outputId) const;
@@ -319,7 +354,11 @@ public:
     void prepareInputs();
 
     void addChannel();
-    void removeChannel(std::uint32_t channelId);
+    // Removes a channel and its routes. Returns an empty string on success, or
+    // the reason the change was refused: the startup opener holds Channel*
+    // across a device probe, and the scene validator needs at least one
+    // channel, so the last strip cannot be removed.
+    juce::String removeChannel(std::uint32_t channelId);
     // Moves a channel to scene-order position targetIndex (clamped). The mixer's
     // drag handle calls this; the engine order is what scenes save, so the new
     // arrangement survives a save/load. Channel objects never move in memory
@@ -343,6 +382,20 @@ public:
     juce::String getClockOutputDeviceName() const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
+    // ASIO drivers this build can reach; empty means "Force ASIO" is a no-op.
+    juce::StringArray getAsioDeviceNames() const;
+    // Points the clock output at the ASIO device that corresponds to the
+    // current clock endpoint, enabling the duplex switch so that interface can
+    // also carry a capture. Returns a user-facing status line: what happened,
+    // or what the user has to choose instead of guessing.
+    juce::String forceAsio();
+    // Moves input strips that name the same interface as `clockDevice` onto
+    // that device, so the clock's duplex callback can feed them. Returns how
+    // many strips moved. `previous` receives their old assignments so a failed
+    // clock open can put them back.
+    int retargetInputsToClockDevice(
+        const juce::String& clockDevice,
+        std::vector<std::pair<std::uint32_t, juce::String>>* previous = nullptr);
     // Message-thread watchdog: flags a strip whose assigned device is no longer
     // enumerated (unplugged or disabled while the stream was open), so the UI
     // shows it as missing instead of leaving the status dot green. Only adds
@@ -351,14 +404,21 @@ public:
     bool refreshDeviceAvailability();
     // Loads the VST3 on a worker and installs it on the message thread:
     // instantiation blocks for as long as the plugin needs to initialise, and
-    // doing that here froze the window. done() runs on the message thread with
-    // an error message, or an empty string on success.
-    void addPluginAsync(std::uint32_t channelId, const juce::File& file,
+    // doing that here froze the window. pluginUniqueId selects the class
+    // inside a multi-class bundle (0 = the bundle's first one). done() runs on
+    // the message thread with an error message, or an empty string on success.
+    void addPluginAsync(std::uint32_t channelId, const juce::File& file, int pluginUniqueId,
                         std::function<void(juce::String)> done);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
-    void addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
+    // Replaces a strip's chain order wholesale: "Reset to Defaults" needs to
+    // put the built-in rows back, which no move can express.
+    void setChannelChain(std::uint32_t channelId, const std::vector<pluginrack::ChainItem>& chain);
+    void setOutputChain(std::uint32_t outputId, const std::vector<pluginrack::ChainItem>& chain);
+    // The chain a freshly created or reset strip starts with.
+    static std::vector<pluginrack::ChainItem> defaultChain();
+    void addOutputPluginAsync(std::uint32_t outputId, const juce::File& file, int pluginUniqueId,
                               std::function<void(juce::String)> done);
     struct HighestLatencyInsert { std::uint32_t channelId = 0; std::uint32_t insertId = 0; juce::String name; int latencySamples = 0; };
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
@@ -430,6 +490,31 @@ public:
     LatencyReport getLatencyReport() const;
 
     FifoDiagnostics getFifoDiagnostics() const;
+    // Render-load summary from the clock callback: percentiles of the time
+    // spent inside render(), the share of a block period that p99 costs, and
+    // the fill distribution that shows whether the FIFO target is right.
+    pluginrack::AudioTelemetry::Summary getRenderTelemetry() const;
+
+    struct LatencyProfileState {
+        bool active = false;
+        bool finished = false;
+        bool failed = false;
+        int stepIndex = 0;
+        int totalSteps = 0;
+        int startBuffer = 0;
+        int currentBuffer = 0;
+        int remainingMs = 0;
+    };
+    // Guided search for the smallest buffer this device survives: it steps the
+    // size down one notch, watches for real audio events, and reverts to the
+    // starting size on the first failure. Every step goes through
+    // applyDeviceSettings, so a refused size still restores the previous one.
+    void startLatencyProfile();
+    void cancelLatencyProfile();
+    // Call from a UI timer while the search is active.
+    LatencyProfileState tickLatencyProfile();
+    LatencyProfileState getLatencyProfileState() const;
+    bool isLatencyProfileActive() const { return latencyProfile_.status().active; }
 
     // listenDevice selects the capture that listens for the returning click
     // (an open input device name). Empty means any open input.
@@ -492,6 +577,14 @@ private:
     // works on the render-miss path when the message thread holds the lock.
     void pushSilenceToOutputs(int frames);
     void pushSilenceToOutputsLocked(int frames);
+    // Audio thread: copies one capture window out of the duplex device buffers
+    // into a channel, applying its physical-channel mapping. Same rules as
+    // InputCapture::pull (mono maps one channel, the rest stay silent).
+    void pullDuplexInput(Channel& channel, int frames) const;
+    // Audio-thread telemetry: one record per clock callback. Never allocates
+    // or blocks, so it can be called on every exit path of render().
+    void recordRenderTelemetry(int frames, std::uint32_t renderNanos, std::uint16_t flags,
+                               std::int32_t outputFill) const;
     // Rebuilds the lock-free playback snapshot. Requires stateLock.
     void publishRenderOutputsLocked();
     // Drops captures no channel references anymore (closes their device).
@@ -533,6 +626,16 @@ private:
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
+    // Written by the clock callback only, read by the UI. Mutable so the
+    // const report getters can summarise it without a lock.
+    mutable pluginrack::AudioTelemetry renderTelemetry_;
+
+    // Guided buffer search state. Message thread only.
+    pluginrack::LatencyProfile latencyProfile_;
+    std::uint32_t latencyProfileLastMs_ = 0;
+    std::uint64_t latencyProfileLastEvents_ = 0;
+    bool latencyProfileAwaitingOpen_ = false;
+    int latencyProfileRequested_ = 0;
     // Lock-free playback snapshot for the render-miss silence path. Slots are
     // published under stateLock and never freed until the engine is destroyed
     // (retiredOutputs_), so the audio thread can load a pointer and push to it
@@ -565,12 +668,24 @@ private:
     mutable juce::CriticalSection deviceOpenActiveLock_;
     std::vector<juce::String> deviceOpenActive_;
 
-    std::atomic<bool> latencyTuningOptIn_{false};
-    std::atomic<bool> lowLatencyInput_{false};
+    // v5 graduation: a fresh session starts with the two bounded low-latency
+    // switches on. Both self-correct (a starvation grows the read delay / the
+    // FIFO target and a long calm period gives it back), which is what makes
+    // them safe to default on. Exclusive mode and the minimal clock FIFO stay
+    // opt-in because they cannot heal themselves.
+    std::atomic<bool> latencyTuningOptIn_{true};
+    std::atomic<bool> lowLatencyInput_{true};
     std::atomic<bool> preferExclusive_{false};
-    std::atomic<bool> lowLatencyOutputs_{false};
+    std::atomic<bool> lowLatencyOutputs_{true};
     std::atomic<bool> minimalClockFifo_{false};
     std::atomic<bool> fullDuplexInput_{false};
+    // Same-device duplex: the clock callback carries the captures too. The name
+    // is guarded by stateLock; the pointers are only touched on the audio
+    // thread inside that callback.
+    std::atomic<bool> duplexActive_{false};
+    juce::String duplexDeviceName_;
+    const float* const* duplexInputBuffers_ = nullptr;
+    int duplexInputBufferCount_ = 0;
     std::atomic<bool> autoReloadDevices_{false};
     std::atomic<int> rackThumbnailFps_{15};
     juce::CriticalSection watchedDevicesLock_;

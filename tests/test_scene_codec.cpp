@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -85,7 +85,7 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 5})");
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 6})");
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
@@ -137,7 +137,7 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     REQUIRE(loaded.scene.has_value());
     // v2 auto-migrates: saving a v2 scene always writes a v3 file.
     pluginrack::Scene expected = original;
-    expected.schemaVersion = 4;
+    expected.schemaVersion = 5;
     REQUIRE(*loaded.scene == expected);
     REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
@@ -176,7 +176,7 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
 
 TEST_CASE("slot plugin state is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "state";
 
     pluginrack::Channel channel;
@@ -220,6 +220,66 @@ TEST_CASE("slot plugin state is optional and survives a round trip") {
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginState == "bnVsbA==");
 }
 
+TEST_CASE("slot plugin class id is optional and survives a round trip") {
+    pluginrack::Scene original;
+    original.schemaVersion = 5;
+    original.name = "class-id";
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+
+    pluginrack::InsertSlot known;
+    known.id = 4;
+    known.pluginPath = "/plugins/drums.vst3";
+    known.pluginName = "Kick";
+    known.pluginUniqueId = 0x4B69636B;
+    channel.inserts.push_back(known);
+
+    pluginrack::InsertSlot unknown;
+    unknown.id = 5;
+    unknown.pluginPath = "/plugins/eq.dll";
+    unknown.pluginName = "EQ";
+    channel.inserts.push_back(unknown);
+
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    original.outputs.push_back(output);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("pluginUniqueId") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->channels.front().inserts[0].pluginUniqueId == 0x4B69636B);
+    REQUIRE(loaded.scene->channels.front().inserts[1].pluginUniqueId == 0);
+    // 0 is the "unknown" marker, so it is not written out.
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"pluginUniqueId\":0") == std::string::npos);
+}
+
+TEST_CASE("slots written before the class id existed load as unknown") {
+    const std::string json = R"({
+        "schemaVersion": 3,
+        "name": "legacy-class",
+        "sampleRate": 48000,
+        "bufferFrames": 256,
+        "channels": [{"id": 1, "inserts": [
+            {"id": 9, "pluginPath": "/plugins/drums.vst3", "pluginName": "Kick"}
+        ]}],
+        "outputs": [{"id": 1, "name": "mains"}],
+        "routes": []
+    })";
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->channels.front().inserts.front().pluginUniqueId == 0);
+}
+
 TEST_CASE("v3 slots without plugin state load with empty state") {
     const std::string json = R"({
         "schemaVersion": 3,
@@ -261,7 +321,7 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
 
 TEST_CASE("inputChannels round-trips with the channel layout") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "mapping";
 
     pluginrack::Channel mono;
@@ -345,12 +405,12 @@ TEST_CASE("v2 scene loads flat EQ and saves as v3") {
     REQUIRE(output.eqDelayMs == 0.0f);
 
     // The loaded scene saves as v4, completing the auto-migration.
-    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":4") != std::string::npos);
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":5") != std::string::npos);
 }
 
 TEST_CASE("scene v3 round-trip preserves eq bands") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "eq";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -388,7 +448,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     original.routes.push_back(route);
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":4") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":5") != std::string::npos);
     REQUIRE(json.find("eqBands") != std::string::npos);
 
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
@@ -410,7 +470,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
 
 TEST_CASE("scene audio settings round-trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "tuned";
 
     pluginrack::AudioSettings audio;
@@ -459,8 +519,47 @@ TEST_CASE("legacy audio tuning keys do not opt into beta latency modes") {
     CHECK_FALSE(audio.fullDuplexInput);
 }
 
-TEST_CASE("a scene without an audio block leaves the tuning unset") {
-    const pluginrack::SceneLoadResult loaded =
+TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {
+    pluginrack::Scene original;
+    original.schemaVersion = 5;
+    pluginrack::AudioSettings audio;
+    audio.lowLatencyInput = true;
+    audio.lowLatencyOutputs = true;
+    original.audio = audio;
+
+    const auto loaded = pluginrack::fromJson(pluginrack::toJson(original));
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->audio.has_value());
+    CHECK(loaded.scene->audio->lowLatencyInput);
+    CHECK(loaded.scene->audio->lowLatencyOutputs);
+    // The two aggressive modes still need their own opt-in.
+    CHECK_FALSE(loaded.scene->audio->minimalClockFifo);
+    CHECK_FALSE(loaded.scene->audio->preferExclusive);
+}
+
+TEST_CASE("a scene written with the retired stream class still loads") {
+    // The stream/monitor class is gone, but scenes saved with it must keep
+    // loading: unknown keys are ignored, so the output comes back as a monitor.
+    const auto loaded = pluginrack::fromJson(R"({
+        "schemaVersion": 5,
+        "outputs": [{"id": 1, "name": "mains", "streamOutput": true}]
+    })");
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->outputs.size() == 1);
+    CHECK(loaded.scene->outputs[0].name == "mains");
+
+    pluginrack::Scene fresh;
+    fresh.schemaVersion = 5;
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    fresh.outputs = {output};
+    CHECK(pluginrack::toJson(fresh).find("streamOutput") == std::string::npos);
+}
+
+TEST_CASE("a scene without an audio block leaves the tuning unset") {    const pluginrack::SceneLoadResult loaded =
         pluginrack::fromJson(R"({"schemaVersion": 3})");
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
@@ -469,7 +568,7 @@ TEST_CASE("a scene without an audio block leaves the tuning unset") {
 
 TEST_CASE("a split left and right send survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.name = "split-send";
 
     pluginrack::Channel channel;
@@ -501,7 +600,7 @@ TEST_CASE("a split left and right send survives a round trip") {
 
 TEST_CASE("a matched send stores one level and stays compact") {
     pluginrack::Scene original;
-    original.schemaVersion = 4;
+    original.schemaVersion = 5;
     original.channels.push_back(pluginrack::Channel{});
     original.outputs.push_back(pluginrack::Output{});
     pluginrack::Route route;
