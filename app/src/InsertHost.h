@@ -10,6 +10,7 @@
 #include "AudioEngine.h"
 #include "InsertMiniView.h"
 #include "MiniButton.h"
+#include "PluginMenu.h"
 #include "Theme.h"
 
 // Release-only hook fired synchronously BEFORE erasePlugin frees the
@@ -121,6 +122,12 @@ inline int compressorIndexInRow(const std::vector<pluginrack::ChainItem>& chain,
 }
 
 
+class IInsertHost;
+
+// One add-plugin flow for every insert host: the plugin library menu anchored
+// to the clicked slot, then insertPlugin with its immediate error surfaced.
+void openPluginPicker(IInsertHost& host, juce::Component& anchor);
+
 class IInsertHost {
 public:
     virtual ~IInsertHost() = default;
@@ -131,7 +138,7 @@ public:
     virtual void erasePlugin(std::uint32_t insertId) = 0;
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;
     virtual void refreshAfterInsertChange() = 0;
-    virtual void openPicker() = 0;
+    virtual void openPicker(juce::Component& anchor) { openPluginPicker(*this, anchor); }
     virtual void reorderInsert(std::uint32_t /*insertId*/, int /*targetIndex*/) {}
     virtual void reorderChainItem(pluginrack::ChainItem /*item*/, int /*targetIndex*/) {}
     virtual void previewChainItem(int /*targetIndex*/) {}
@@ -145,6 +152,22 @@ public:
     // true, skipping the floating editor). Default false keeps showEditor().
     virtual bool insertActivated(AudioEngine::InsertSlot* /*insert*/) { return false; }
 };
+
+inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
+    // The menu outlives this click, so the host is tracked through its other
+    // base class: every host is a Component, and the cast back is checked.
+    juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
+    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file) {
+        if (safeHost == nullptr) return;
+        auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
+        if (target == nullptr) return;
+        const auto error = target->insertPlugin(file);
+        if (error.isNotEmpty()) {
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "PluginRack", error);
+        }
+    });
+}
 
 class InsertSlotComponent final : public juce::Component, public juce::SettableTooltipClient {
 public:
@@ -465,7 +488,7 @@ public:
         dragOffset = e.y;
         repaint();
         if (insert == nullptr && !builtIn) {
-            host.openPicker();
+            host.openPicker(*this);
         } else if (builtIn && !dragging) {
             host.activateBuiltIn(chainItem);
         } else if (!dragging && !host.insertActivated(insert)) {

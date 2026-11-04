@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "pluginrack/Meters.h"
@@ -135,4 +137,64 @@ TEST_CASE("realtime meter updates do not register unknown ids") {
     meters.observeChannel(1, 0.0f);
     meters.observeChannelRealtime(1, 0.5f);
     REQUIRE(meters.channelPeak(1) == 0.5f);
+}
+
+TEST_CASE("setTargets replaces the metered id set") {
+    pluginrack::MeterBank meters;
+    const std::vector<std::uint32_t> channels{1, 2};
+    const std::vector<std::uint32_t> outputs{3};
+    meters.setTargets(channels.data(), channels.size(), outputs.data(), outputs.size());
+
+    meters.observeChannelRealtime(1, 0.5f);
+    meters.observeOutputRealtime(3, 0.25f);
+    REQUIRE(meters.channelPeak(1) == 0.5f);
+    REQUIRE(meters.outputPeak(3) == 0.25f);
+
+    const std::vector<std::uint32_t> nextChannels{7};
+    const std::vector<std::uint32_t> noOutputs;
+    meters.setTargets(nextChannels.data(), nextChannels.size(),
+                      noOutputs.data(), noOutputs.size());
+
+    // The old ids are gone, so realtime updates for them are ignored.
+    meters.observeChannelRealtime(1, 0.5f);
+    meters.observeOutputRealtime(3, 0.25f);
+    REQUIRE(meters.channelPeak(1) == 0.0f);
+    REQUIRE(meters.outputPeak(3) == 0.0f);
+
+    meters.observeChannelRealtime(7, 0.25f);
+    REQUIRE(meters.channelPeak(7) == 0.25f);
+}
+
+TEST_CASE("retargeting while the audio thread updates stays memory safe") {
+    pluginrack::MeterBank meters;
+    std::atomic<bool> stop{false};
+    const std::vector<std::uint32_t> first{1, 2, 3, 4};
+    const std::vector<std::uint32_t> second{5, 6, 7, 8};
+    meters.setTargets(first.data(), first.size(), first.data(), first.size());
+
+    std::thread audio([&meters, &stop] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (std::uint32_t id = 1; id <= 8; ++id) {
+                meters.observeChannelRealtime(id, 0.5f);
+                meters.observeOutputRealtime(id, 0.5f);
+                (void) meters.channelPeak(id);
+            }
+            meters.advance(64, 48000.0);
+        }
+    });
+
+    for (int i = 0; i < 2000; ++i) {
+        const auto& ids = (i % 2 == 0) ? first : second;
+        meters.setTargets(ids.data(), ids.size(), ids.data(), ids.size());
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    audio.join();
+
+    // The churn left usable storage behind: a fresh registration still reports.
+    const std::vector<std::uint32_t> after{42};
+    meters.setTargets(after.data(), after.size(), nullptr, 0);
+    meters.observeChannelRealtime(42, 0.75f);
+    REQUIRE(meters.channelPeak(42) == 0.75f);
+    REQUIRE(meters.channelPeak(1) == 0.0f);
 }

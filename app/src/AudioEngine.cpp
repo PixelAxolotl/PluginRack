@@ -762,52 +762,67 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
         }
     }
 
-    // Instantiation is a blocking driver call that can take seconds: build the
-    // instance on a worker and only touch the strip back here on the message
-    // thread. The window stays responsive meanwhile.
+    // Scanning happens in a child process (PluginHost::scanFile), so it is safe
+    // on a worker and keeps the window responsive through the seconds a large
+    // VST3 takes to enumerate its classes. Creating the instance has to run on
+    // the message thread, and the strip is left untouched until it exists.
     const double rate = currentSampleRate;
     const int block = currentBufferSize;
     auto alive = prepareAliveToken_;
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
     juce::Thread::launch([this, alive, channelId, file, rate, block,
                           done = std::move(done)]() mutable {
-        const auto loaded = PluginHost::loadFromFile(file, rate, block);
-        juce::MessageManager::callAsync([this, alive, channelId, file, loaded,
-                                         done = std::move(done)]() mutable {
-            if (!alive->load(std::memory_order_acquire)) return;
-            if (loaded.error.isNotEmpty()) {
-                juce::Logger::writeToLog("plugin: failed - " + loaded.error);
-                done(loaded.error);
-                return;
-            }
+        juce::String scanError;
+        const auto descriptions = PluginHost::scanFile(file, scanError);
+        juce::MessageManager::callAsync(
+            [this, alive, channelId, file, rate, block, descriptions, scanError,
+             done = std::move(done)]() mutable {
+                if (!alive->load(std::memory_order_acquire)) return;
 
-            auto insert = std::make_unique<InsertSlot>();
-            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-            insert->pluginHost.adopt(loaded);
-            insert->pluginPath = loaded.path;
-            insert->pluginName = loaded.name;
-            insert->latencySamples = insert->pluginHost.getLatencySamples();
-
-            juce::String error;
-            {
-                const juce::ScopedLock lock(stateLock);
-                auto* channel = findChannel(channelId);
-                if (channel == nullptr) {
-                    error = "The channel no longer exists.";
-                } else if (channel->inserts.size() >= 5) {
-                    error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                auto loaded = PluginHost::LoadedPlugin{};
+                loaded.path = file.getFullPathName();
+                if (descriptions.isEmpty()) {
+                    loaded.error =
+                        scanError.isNotEmpty()
+                            ? scanError
+                            : juce::String("No VST3 plugin was found in the selected file.");
                 } else {
-                    insert->id = nextInsertId++;
-                    const auto insertId = insert->id;
-                    channel->inserts.push_back(std::move(insert));
-                    channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                    loaded = PluginHost::instantiate(descriptions.getReference(0), file, rate,
+                                                     block);
                 }
-            }
-            juce::Logger::writeToLog(error.isEmpty()
-                                         ? "plugin: loaded " + loaded.name
-                                         : "plugin: install failed - " + error);
-            done(error);
-        });
+                if (loaded.error.isNotEmpty()) {
+                    juce::Logger::writeToLog("plugin: failed - " + loaded.error);
+                    done(loaded.error);
+                    return;
+                }
+
+                auto insert = std::make_unique<InsertSlot>();
+                insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+                insert->pluginHost.adopt(loaded);
+                insert->pluginPath = loaded.path;
+                insert->pluginName = loaded.name;
+                insert->latencySamples = insert->pluginHost.getLatencySamples();
+
+                juce::String error;
+                {
+                    const juce::ScopedLock lock(stateLock);
+                    auto* channel = findChannel(channelId);
+                    if (channel == nullptr) {
+                        error = "The channel no longer exists.";
+                    } else if (channel->inserts.size() >= 5) {
+                        error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                    } else {
+                        insert->id = nextInsertId++;
+                        const auto insertId = insert->id;
+                        channel->inserts.push_back(std::move(insert));
+                        channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                    }
+                }
+                juce::Logger::writeToLog(error.isEmpty()
+                                             ? "plugin: loaded " + loaded.name
+                                             : "plugin: install failed - " + error);
+                done(error);
+            });
     });
 }
 
@@ -877,43 +892,57 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
     juce::Thread::launch([this, alive, outputId, file, rate, block,
                           done = std::move(done)]() mutable {
-        const auto loaded = PluginHost::loadFromFile(file, rate, block);
-        juce::MessageManager::callAsync([this, alive, outputId, file, loaded,
-                                         done = std::move(done)]() mutable {
-            if (!alive->load(std::memory_order_acquire)) return;
-            if (loaded.error.isNotEmpty()) {
-                juce::Logger::writeToLog("plugin: failed - " + loaded.error);
-                done(loaded.error);
-                return;
-            }
+        juce::String scanError;
+        const auto descriptions = PluginHost::scanFile(file, scanError);
+        juce::MessageManager::callAsync(
+            [this, alive, outputId, file, rate, block, descriptions, scanError,
+             done = std::move(done)]() mutable {
+                if (!alive->load(std::memory_order_acquire)) return;
 
-            auto insert = std::make_unique<InsertSlot>();
-            insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
-            insert->pluginHost.adopt(loaded);
-            insert->pluginPath = loaded.path;
-            insert->pluginName = loaded.name;
-            insert->latencySamples = insert->pluginHost.getLatencySamples();
-
-            juce::String error;
-            {
-                const juce::ScopedLock lock(stateLock);
-                auto* output = findOutput(outputId);
-                if (output == nullptr) {
-                    error = "The output no longer exists.";
-                } else if (output->inserts.size() >= 5) {
-                    error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                auto loaded = PluginHost::LoadedPlugin{};
+                loaded.path = file.getFullPathName();
+                if (descriptions.isEmpty()) {
+                    loaded.error =
+                        scanError.isNotEmpty()
+                            ? scanError
+                            : juce::String("No VST3 plugin was found in the selected file.");
                 } else {
-                    insert->id = nextInsertId++;
-                    const auto insertId = insert->id;
-                    output->inserts.push_back(std::move(insert));
-                    output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                    loaded = PluginHost::instantiate(descriptions.getReference(0), file, rate,
+                                                     block);
                 }
-            }
-            juce::Logger::writeToLog(error.isEmpty()
-                                         ? "plugin: loaded " + loaded.name
-                                         : "plugin: install failed - " + error);
-            done(error);
-        });
+                if (loaded.error.isNotEmpty()) {
+                    juce::Logger::writeToLog("plugin: failed - " + loaded.error);
+                    done(loaded.error);
+                    return;
+                }
+
+                auto insert = std::make_unique<InsertSlot>();
+                insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
+                insert->pluginHost.adopt(loaded);
+                insert->pluginPath = loaded.path;
+                insert->pluginName = loaded.name;
+                insert->latencySamples = insert->pluginHost.getLatencySamples();
+
+                juce::String error;
+                {
+                    const juce::ScopedLock lock(stateLock);
+                    auto* output = findOutput(outputId);
+                    if (output == nullptr) {
+                        error = "The output no longer exists.";
+                    } else if (output->inserts.size() >= 5) {
+                        error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                    } else {
+                        insert->id = nextInsertId++;
+                        const auto insertId = insert->id;
+                        output->inserts.push_back(std::move(insert));
+                        output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
+                    }
+                }
+                juce::Logger::writeToLog(error.isEmpty()
+                                             ? "plugin: loaded " + loaded.name
+                                             : "plugin: install failed - " + error);
+                done(error);
+            });
     });
 }
 
@@ -1426,7 +1455,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
     std::vector<std::unique_ptr<Channel>> restoredChannels;
     std::vector<std::unique_ptr<Output>> restoredOutputs;
     std::vector<std::unique_ptr<Route>> restoredRoutes;
-    pluginrack::MeterBank restoredMeters;
+    std::vector<std::uint32_t> restoredChannelIds;
+    std::vector<std::uint32_t> restoredOutputIds;
     juce::String loadErrors;
     // Highest ids seen while building: applied to the next-id counters under
     // stateLock together with the vector swap below, so the counters and
@@ -1506,7 +1536,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             }
         }
         maxChannelId = juce::jmax(maxChannelId, channel->id + 1);
-        restoredMeters.observeChannel(channel->id, 0.0f);
+        restoredChannelIds.push_back(channel->id);
         restoredChannels.push_back(std::move(channel));
     }
     for (const auto& savedOutput : scene.outputs) {
@@ -1565,7 +1595,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             }
         }
         maxOutputId = juce::jmax(maxOutputId, output->id + 1);
-        restoredMeters.observeOutput(output->id, 0.0f);
+        restoredOutputIds.push_back(output->id);
         restoredOutputs.push_back(std::move(output));
     }
     for (const auto& savedRoute : scene.routes) {
@@ -1609,7 +1639,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         channels = std::move(restoredChannels);
         outputs = std::move(restoredOutputs);
         routes = std::move(restoredRoutes);
-        meters = std::move(restoredMeters);
+        meters.setTargets(restoredChannelIds.data(), restoredChannelIds.size(),
+                          restoredOutputIds.data(), restoredOutputIds.size());
         // Keep the old playbacks alive for the lock-free silence snapshot,
         // but close their devices once the lock is released.
         for (auto& output : oldOutputs) {

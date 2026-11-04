@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "PluginLibrary.h"
 #include "SceneBridge.h"
 
 ToolbarComponent::ToolbarComponent() {
@@ -234,12 +235,10 @@ void ViewRouter::setView(AppView view) {
 }
 
 void ViewRouter::refreshViews() {
-    // Belt and braces alongside the pre-erase hook: never rebuild the rack
-    // while it still holds an editor for an insert the engine has freed
-    // (scene restore already releases before its strip swap for the same
-    // reason). Null-guarded, so a second release is a no-op; releasing only
-    // deletes the editor and never calls back into the views.
-    releaseDockedEditor();
+    // Only orphaned editors are released here: with the insert still in the
+    // engine, rackView.rebuild() reuses the live editor instead of destroying
+    // and re-creating a plugin UI (some plugins hang on that teardown).
+    releaseOrphanedEditor();
     rackView.rebuild();
     routingView.rebuild();
     ioView.rebuild();
@@ -384,6 +383,14 @@ void MainComponent::paint(juce::Graphics& g) {
         juce::MessageManager::callAsync([safe] {
             if (safe != nullptr) safe->initialiseAudio();
         });
+    }
+    // The plugin catalogue warms the Add-plugin menu: cached results are shown
+    // at once and only changed bundles are scanned, so this stays in the
+    // background even on a machine with a large collection.
+    if (!pluginScanQueued_) {
+        pluginScanQueued_ = true;
+        juce::MessageManager::callAsync(
+            [] { PluginLibrary::getInstance().beginBackgroundScan(); });
     }
 }
 
@@ -721,11 +728,9 @@ void MainComponent::saveSceneOnExit() {
 }
 
 void MainComponent::refreshViews() {
-    // Belt and braces alongside the applyScene pre-close: never rebuild the
-    // mixer while the rack still holds an editor for an insert the engine
-    // has freed. Null-guarded, so a second release is a no-op; releasing
-    // only deletes the editor and never calls back into the views.
-    router.releaseDockedEditor();
+    // Only drop the docked editor when its insert is gone: a structure change
+    // (an insert being added) must not destroy and rebuild a live plugin UI.
+    router.releaseOrphanedEditor();
     mixer.rebuild();
     router.refreshViews();
 }

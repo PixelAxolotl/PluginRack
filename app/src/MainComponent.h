@@ -75,6 +75,7 @@ public:
     // refresh the device readouts in place so a missing device shows red.
     void refreshDeviceStrips();
     SettingsView& getSettingsView() { return settingsView; }
+    RackView& getRackView() { return rackView; }
     void resized() override;
 
     std::function<void(AppView)> onViewChanged;
@@ -89,6 +90,7 @@ public:
     // docked plugin editor is backed by a strip's plugin instance, and an
     // editor whose processor dies first is unsafe to delete.
     void releaseDockedEditor() { rackView.closeDockedEditor(); }
+    void releaseOrphanedEditor() { rackView.releaseOrphanedDockedEditor(); }
 
 private:
     class PlaceholderView final : public juce::Component {
@@ -128,6 +130,7 @@ public:
     void saveSceneOnExit();
     void initialiseAudio();
     SettingsView& settings() { return router.getSettingsView(); }
+    RackView& rack() { return router.getRackView(); }
 
 private:
     void saveScene();
@@ -158,6 +161,8 @@ private:
     // Startup: the audio restore is queued from the first paint, never from
     // the constructor, so the window is on screen before any device work.
     bool audioInitQueued_ = false;
+    // Same rule for the plugin scan: it spawns a child process per bundle.
+    bool pluginScanQueued_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

@@ -3,8 +3,11 @@
 #include "ConsoleLookAndFeel.h"
 #include "DeviceStream.h"
 #include "MainComponent.h"
+#include "PluginHost.h"
+#include "PluginLibrary.h"
 #include "SliderTouch.h"
 
+#include <cstdlib>
 #include <iostream>
 
 #if JUCE_WINDOWS
@@ -29,6 +32,23 @@ juce::File pluginRackLogDirectory() {
         .getChildFile("logs");
 }
 
+// Every line carries the milliseconds since the run started, so a stall shows
+// up as a jump between two lines without needing a profiler.
+class TimestampedLogger final : public juce::Logger {
+public:
+    TimestampedLogger(const juce::File& file, const juce::String& startMessage)
+        : sink(file, startMessage), startMs(juce::Time::getMillisecondCounterHiRes()) {}
+
+    void logMessage(const juce::String& message) override {
+        const auto elapsed = juce::Time::getMillisecondCounterHiRes() - startMs;
+        sink.logMessage(juce::String(elapsed, 1).paddedLeft(' ', 9) + " ms  " + message);
+    }
+
+private:
+    juce::FileLogger sink;
+    double startMs = 0.0;
+};
+
 void writeCrashReport(void* exceptionInfo) {
     juce::String text;
     text << "PluginRack crash\n"
@@ -48,6 +68,14 @@ void writeCrashReport(void* exceptionInfo) {
         }
     }
    #endif
+
+    // A plugin that faults in its own code can only be identified after the
+    // fact: record which file was in flight and refuse to load it next time.
+    const auto loadingPlugin = PluginLoadGuard::currentLoadingPlugin();
+    if (loadingPlugin.isNotEmpty()) {
+        text << "plugin: " << loadingPlugin << "\n";
+        PluginLoadGuard::block(juce::File(loadingPlugin));
+    }
 
     const auto backtrace = juce::SystemStats::getStackBacktrace();
     text << "stack:\n" << backtrace << "\n";
@@ -149,19 +177,74 @@ public:
 
     void initialise(const juce::String& commandLine) override {
         juce::SystemStats::setApplicationCrashHandler(&writeCrashReport);
-        pluginRackLogDirectory().createDirectory();
-        fileLogger = std::make_unique<juce::FileLogger>(
-            pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
-        juce::Logger::setCurrentLogger(fileLogger.get());
-        juce::Logger::writeToLog("initialise: " + commandLine);
 
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
+        // Child-process scan: reads the plugin's descriptions in a throwaway
+        // process so the main window never loads a plugin binary while it is
+        // starting up (see PluginHost::scanFile). No window, no audio, and no
+        // run log: a crash here is recorded by the handler above.
+        const int scanIndex = args.indexOf("--scan-plugin");
+        if (scanIndex >= 0) {
+            juce::String scanError;
+            const auto descriptions =
+                scanIndex + 1 < args.size()
+                    ? PluginHost::scanFileInProcess(juce::File(args[scanIndex + 1].unquoted()),
+                                                    scanError)
+                    : juce::Array<juce::PluginDescription>{};
+            for (const auto& description : descriptions) {
+                std::cout << "PLUGINDESC " << PluginHost::describeAsJson(description).toStdString()
+                          << "\n";
+            }
+            if (descriptions.isEmpty() && scanError.isNotEmpty()) {
+                std::cout << "PLUGINSCANERROR " << scanError.toStdString() << "\n";
+            }
+            std::cout.flush();
+            quit();
+            return;
+        }
+
+        pluginRackLogDirectory().createDirectory();
+        fileLogger = std::make_unique<TimestampedLogger>(
+            pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
+        juce::Logger::setCurrentLogger(fileLogger.get());
+        juce::Logger::writeToLog("initialise: " + commandLine);
+
+        if (args.contains("--clear-blocked-plugins")) {
+            const auto cleared = PluginLoadGuard::clearBlocked();
+            std::cout << "Cleared " << cleared << " blocked plugin(s) from "
+                      << PluginLoadGuard::blockedListFile().getFullPathName().toStdString()
+                      << "\n";
+            quit();
+            return;
+        }
+
+        if (args.contains("--list-plugins")) {
+            auto& library = PluginLibrary::getInstance();
+            library.scanBlocking();
+            const auto plugins = library.getPlugins();
+            std::cout << plugins.size() << " plugin(s) found:\n";
+            juce::String currentVendor;
+            for (const auto& description : plugins) {
+                const auto vendor = PluginLibrary::vendorNameFor(description);
+                if (vendor != currentVendor) {
+                    currentVendor = vendor;
+                    std::cout << "  " << vendor.toStdString() << "\n";
+                }
+                std::cout << "    " << PluginLibrary::displayNameFor(description).toStdString()
+                          << " (" << description.pluginFormatName.toStdString() << ") ["
+                          << description.fileOrIdentifier.toStdString() << "]\n";
+            }
+            if (plugins.isEmpty()) std::cout << "  (none)\n";
+            std::cout.flush();
+            quit();
+            return;
+        }
+
         if (args.contains("--list-devices")) {
             const auto inNames = DeviceEnumeration::inputs();
             const auto outNames = DeviceEnumeration::outputs();
-
             std::cout << "Input devices:\n";
             for (const auto& n : inNames) std::cout << "  " << n.toStdString() << "\n";
             if (inNames.isEmpty()) std::cout << "  (none)\n";
@@ -232,6 +315,139 @@ public:
             properties.getUserSettings()->setValue("closeToTray", enabled);
             properties.getUserSettings()->saveIfNeeded();
         });
+
+        // Diagnostic: drives the real Add-VST path (the same call the rack's
+        // picker makes) once the window and audio are up, then reports whether
+        // the message thread came back.
+        const int addStart = args.indexOf("--test-add");
+        if (addStart >= 0 && addStart + 1 < args.size()) {
+            const juce::File addFile(args[addStart + 1].unquoted());
+            juce::Timer::callAfterDelay(8000, [this, addFile] {
+                juce::Logger::writeToLog("test-add: inserting " + addFile.getFileName());
+                if (auto* component =
+                        dynamic_cast<MainComponent*>(mainWindow->getContentComponent())) {
+                    component->rack().insertPlugin(addFile);
+                }
+                juce::Timer::callAfterDelay(15000, [] {
+                    juce::Logger::writeToLog("test-add: still alive after 15 s, quitting");
+                    if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
+                });
+            });
+        }
+
+        // Plugin smoke test: loads one VST3 the way the Add-VST path does
+        // (message thread, audio already running), reports the result and quits.
+        // Useful when a plugin is suspected of crashing the host or of stalling
+        // the window; the timings land in the run log. The probe follows the
+        // Add-VST path exactly: scan in a child process on a worker, create on
+        // the message thread.
+        const int testStart = args.indexOf("--test-plugin");
+        const bool probeWithAudio = args.contains("--test-plugin-audio");
+        if (testStart >= 0 && testStart + 1 < args.size()) {
+            const juce::File testFile(args[testStart + 1].unquoted());
+            juce::Timer::callAfterDelay(5000, [testFile, probeWithAudio] {
+                juce::Logger::writeToLog("plugin: test load " + testFile.getFileName());
+                juce::Thread::launch([testFile, probeWithAudio] {
+                    juce::String scanError;
+                    const auto descriptions = PluginHost::scanFile(testFile, scanError);
+                    juce::MessageManager::callAsync([testFile, descriptions, scanError,
+                                                     probeWithAudio] {
+                        const auto blockedStart = juce::Time::getMillisecondCounterHiRes();
+                        juce::String result;
+                        if (descriptions.isEmpty()) {
+                            result = "failed - "
+                                   + (scanError.isNotEmpty()
+                                          ? scanError
+                                          : juce::String("No VST3 plugin was found in the selected file."));
+                        } else {
+                            PluginHost probe;
+                            const auto loaded = PluginHost::instantiate(
+                                descriptions.getReference(0), testFile, 48000.0, 480);
+                            if (loaded.error.isNotEmpty()) {
+                                result = "failed - " + loaded.error;
+                            } else {
+                                probe.prepareToPlay(48000.0, 480);
+                                probe.adopt(loaded);
+                                // Optional: run blocks through the plugin while
+                                // its editor is created, which is what happens
+                                // when a plugin is added mid-session.
+                                std::atomic<bool> pumping{probeWithAudio};
+                                std::thread audioThread;
+                                if (probeWithAudio) {
+                                    juce::Logger::writeToLog("plugin: test audio pumping");
+                                    audioThread = std::thread([&probe, &pumping] {
+                                        juce::AudioBuffer<float> block(2, 480);
+                                        while (pumping.load(std::memory_order_relaxed)) {
+                                            block.clear();
+                                            probe.processBlock(block);
+                                        }
+                                    });
+                                    juce::Thread::sleep(300);
+                                }
+                                // The rack docks an editor right after a plugin is
+                                // added, so the probe measures that too. Building
+                                // it is the last thing the add path does; tearing
+                                // it down is slow for some plugins and is not part
+                                // of adding, so it happens after the timing.
+                                auto* editor = probe.createEditorForDock();
+                                const auto blocked =
+                                    juce::Time::getMillisecondCounterHiRes() - blockedStart;
+                                result = "loaded " + testFile.getFileName()
+                                       + ", message thread blocked for "
+                                       + juce::String(blocked, 1) + " ms";
+                                juce::Logger::writeToLog("plugin: test " + result);
+                                // Dock and paint it the way the rack does: a
+                                // plugin whose editor paints on the message thread
+                                // stalls there, which a create-only probe misses.
+                                if (editor != nullptr) {
+                                    // The rack scales a docked editor to fit its
+                                    // bay, which only works for plugins that
+                                    // honour host content scaling: report both
+                                    // sizes so a plugin that ignores it is easy
+                                    // to spot.
+                                    const auto naturalWidth = editor->getWidth();
+                                    const auto naturalHeight = editor->getHeight();
+                                    editor->setScaleFactor(0.8f);
+                                    const auto scaledWidth = editor->getWidth();
+                                    const auto scaledHeight = editor->getHeight();
+                                    editor->setScaleFactor(1.0f);
+                                    juce::Logger::writeToLog(
+                                        "plugin: test editor "
+                                        + juce::String(naturalWidth) + "x"
+                                        + juce::String(naturalHeight)
+                                        + ", at host scale 0.8 "
+                                        + juce::String(scaledWidth) + "x"
+                                        + juce::String(scaledHeight));
+                                    juce::Component holder;
+                                    holder.setSize(juce::jmax(320, naturalWidth),
+                                                   juce::jmax(240, naturalHeight));
+                                    holder.addAndMakeVisible(editor);
+                                    editor->setBounds(holder.getLocalBounds());
+                                    juce::Logger::writeToLog("plugin: test editor docked");
+                                    juce::Image snapshot = holder.createComponentSnapshot(
+                                        holder.getLocalBounds(), true, 1.0f);
+                                    juce::Logger::writeToLog(
+                                        "plugin: test editor painted "
+                                        + juce::String(snapshot.getWidth()) + "x"
+                                        + juce::String(snapshot.getHeight()));
+                                    holder.removeChildComponent(editor);
+                                }
+                                pumping.store(false, std::memory_order_relaxed);
+                                if (audioThread.joinable()) audioThread.join();
+                                juce::Logger::writeToLog("plugin: test audio stopped");
+                                if (editor != nullptr) probe.destroyDockEditor(editor);
+                                std::cout << result.toStdString() << "\n";
+                                if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
+                                return;
+                            }
+                        }
+                        juce::Logger::writeToLog("plugin: test " + result);
+                        std::cout << result.toStdString() << "\n";
+                        if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
+                    });
+                });
+            });
+        }
     }
 
     void shutdown() override {
@@ -240,16 +456,22 @@ public:
             if (auto* mainComponent = dynamic_cast<MainComponent*>(mainWindow->getContentComponent()))
                 mainComponent->saveSceneOnExit();
         }
-        mainWindow.reset();
-        tooltipWindow.reset();
-        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
-        lookAndFeel.reset();
-        juce::Logger::setCurrentLogger(nullptr);
-        fileLogger.reset();
+        // Destroying a plugin is plugin code, and some VST3s (Native
+        // Instruments' Raum and Supercharger among them) block forever when
+        // their editor or processor is torn down; letting Windows unload their
+        // DLLs faults in the same place. The scene is saved and the log is
+        // written line by line, so the reliable way to close is to end the
+        // process without running any of that.
+        juce::Logger::writeToLog("shutdown: exiting without tearing plugins down");
+#if JUCE_WINDOWS
+        ::TerminateProcess(::GetCurrentProcess(), 0);
+#else
+        std::_Exit(0);
+#endif
     }
 
 private:
-    std::unique_ptr<juce::FileLogger> fileLogger;
+    std::unique_ptr<juce::Logger> fileLogger;
     juce::ApplicationProperties properties;
     std::unique_ptr<ConsoleLookAndFeel> lookAndFeel;
     std::unique_ptr<juce::TooltipWindow> tooltipWindow;
