@@ -684,24 +684,6 @@ void MixerComponent::OutputStrip::refreshAfterInsertChange() {
     });
 }
 
-void MixerComponent::OutputStrip::openPicker() {
-    fileChooser = std::make_unique<juce::FileChooser>(
-        "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
-        "*.vst3");
-    juce::Component::SafePointer<OutputStrip> safeThis(this);
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [safeThis](const juce::FileChooser& chooser) {
-                                 const auto file = chooser.getResult();
-                                 if (safeThis == nullptr || file == juce::File()) return;
-                                 const auto error = safeThis->insertPlugin(file);
-                                 if (error.isNotEmpty()) {
-                                     juce::AlertWindow::showMessageBoxAsync(
-                                         juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-                                 }
-                             });
-}
-
 MixerComponent::MixerComponent(AudioEngine& engine)
     : audioEngine(engine) {
     addChannelButton.onClick = [this] {

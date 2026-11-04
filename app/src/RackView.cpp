@@ -2132,24 +2132,6 @@ void RackView::refreshAfterInsertChange() {
     });
 }
 
-void RackView::openPicker() {
-    fileChooser = std::make_unique<juce::FileChooser>(
-        "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
-        "*.vst3");
-    juce::Component::SafePointer<RackView> safeThis(this);
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [safeThis](const juce::FileChooser& chooser) {
-                                 const auto file = chooser.getResult();
-                                 if (safeThis == nullptr || file == juce::File()) return;
-                                 const auto error = safeThis->insertPlugin(file);
-                                 if (error.isNotEmpty()) {
-                                     juce::AlertWindow::showMessageBoxAsync(
-                                         juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-                                 }
-                             });
-}
-
 bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     if (insert == nullptr) return false;
     eqFocused = false;

@@ -48,6 +48,10 @@ target_sources(pluginrack_app PRIVATE
     src/NativeThumbnail.h
     src/PluginHost.cpp
     src/PluginHost.h
+    src/PluginLibrary.cpp
+    src/PluginLibrary.h
+    src/PluginMenu.cpp
+    src/PluginMenu.h
     src/PluginKnobWatcher.cpp
     src/PluginKnobWatcher.h
     src/RackView.cpp

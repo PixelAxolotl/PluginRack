@@ -161,6 +161,8 @@ private:
     // Startup: the audio restore is queued from the first paint, never from
     // the constructor, so the window is on screen before any device work.
     bool audioInitQueued_ = false;
+    // Same rule for the plugin scan: it spawns a child process per bundle.
+    bool pluginScanQueued_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

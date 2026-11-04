@@ -4,6 +4,7 @@
 #include "DeviceStream.h"
 #include "MainComponent.h"
 #include "PluginHost.h"
+#include "PluginLibrary.h"
 #include "SliderTouch.h"
 
 #include <cstdlib>
@@ -215,6 +216,28 @@ public:
             std::cout << "Cleared " << cleared << " blocked plugin(s) from "
                       << PluginLoadGuard::blockedListFile().getFullPathName().toStdString()
                       << "\n";
+            quit();
+            return;
+        }
+
+        if (args.contains("--list-plugins")) {
+            auto& library = PluginLibrary::getInstance();
+            library.scanBlocking();
+            const auto plugins = library.getPlugins();
+            std::cout << plugins.size() << " plugin(s) found:\n";
+            juce::String currentVendor;
+            for (const auto& description : plugins) {
+                const auto vendor = PluginLibrary::vendorNameFor(description);
+                if (vendor != currentVendor) {
+                    currentVendor = vendor;
+                    std::cout << "  " << vendor.toStdString() << "\n";
+                }
+                std::cout << "    " << PluginLibrary::displayNameFor(description).toStdString()
+                          << " (" << description.pluginFormatName.toStdString() << ") ["
+                          << description.fileOrIdentifier.toStdString() << "]\n";
+            }
+            if (plugins.isEmpty()) std::cout << "  (none)\n";
+            std::cout.flush();
             quit();
             return;
         }
