@@ -22,7 +22,10 @@
 
 // Channel-centric rack view: 4 columns - channel strip | insert chain (EQ + VSTs)
 // | docked plugin editor | output routing. Reuses Mixer fader/meter/EqButton/slots.
-class RackView final : public juce::Component, public IInsertHost, private juce::Timer {
+class RackView final : public juce::Component,
+                       public IInsertHost,
+                       private juce::Timer,
+                       private juce::ComponentListener {
 public:
     explicit RackView(AudioEngine& engine);
     ~RackView() override;
@@ -40,6 +43,11 @@ public:
     // destructor calls back into its processor, so the processor must
     // still be alive when it is deleted.
     void closeDockedEditor();
+    // Releases the docked editor only when its insert is gone from the engine.
+    // A structure change (adding an insert) must not tear a live editor down and
+    // rebuild it: that costs a full UI re-create and some plugins hang on the
+    // teardown of an editor that was just created.
+    void releaseOrphanedDockedEditor();
 
     bool hasChainSelected() const { return selectedId >= 0; }
     std::uint32_t selectedChainId() const;
@@ -87,6 +95,10 @@ private:
     void refreshSlots();
     int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
+    // Centres the docked plugin editor in the bay and keeps it inside it.
+    void layoutDockedEditor();
+    void componentMovedOrResized(juce::Component& component, bool wasMoved,
+                                 bool wasResized) override;
     bool dockedHostAlive() const;
     // Focus switches only hide the docked plugin editor: destroying and
     // recreating a VST UI on every EQ/dynamics switch stalls the message
@@ -234,9 +246,16 @@ private:
     // Docked editor
     juce::AudioProcessorEditor* dockedEditor = nullptr;
     PluginHost* dockedHost = nullptr;
-    // Size the plugin asked for when it was docked; layout reuses it so the
-    // bay can never stretch the editor to fill.
+    // Size the plugin asked for when it was docked. The bay never stretches the
+    // editor to fill and never lets it grow past the bay: layoutDockedEditor
+    // centres it at this size, shrunk to fit when the bay is smaller.
     juce::Rectangle<int> dockedEditorSize;
+    // Set while layoutDockedEditor() is inside setBounds, so the editor's own
+    // resize callbacks cannot recurse back into it.
+    bool layingOutDockedEditor = false;
+    // A plugin may size itself after being placed; a couple of corrective passes
+    // are enough, and more would fight one that insists on its own minimum.
+    int dockedEditorLayoutPasses = 0;
     // Native plugin editors are captured on this worker: PrintWindow makes the
     // plugin repaint its whole UI, which stalled the message thread when it ran
     // inside the thumbnail timer.

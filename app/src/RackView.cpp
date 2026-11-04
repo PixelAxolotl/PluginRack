@@ -757,6 +757,9 @@ void RackView::timerCallback() {
         releaseMiniTap();
         return;
     }
+    // JUCE re-syncs a plugin's native window whenever the plugin resizes itself;
+    // keep it parked inside the bay.
+    if (dockedEditor != nullptr) layoutDockedEditor();
     const int fps = juce::jlimit(1, 60, audioEngine.getRackThumbnailFps());
     if (fps != miniTimerHz) {
         miniTimerHz = fps;
@@ -1011,9 +1014,69 @@ void RackView::refreshEditor() {
 
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
+    const auto dockStart = juce::Time::getMillisecondCounterHiRes();
+    auto dockElapsed = [dockStart] {
+        return juce::String(juce::Time::getMillisecondCounterHiRes() - dockStart, 1);
+    };
+    dockedEditorLayoutPasses = 0;
+    dockedEditor->addComponentListener(this);
     editorHolder.addAndMakeVisible(dockedEditor);
     knobWatcher.setPlugin(pluginInstance);
     resized();
+    // Some plugins (Native Instruments' Qt editors) create their own native
+    // window at their preferred size and put it back after it has been placed.
+    // Re-apply the bay fit once the plugin has settled instead of fighting it
+    // in a resize loop.
+    juce::Component::SafePointer<RackView> safe(this);
+    for (const int delayMs : {400, 1200}) {
+        juce::Timer::callAfterDelay(delayMs, [safe] {
+            if (safe == nullptr) return;
+            safe->dockedEditorLayoutPasses = 0;
+            safe->layoutDockedEditor();
+        });
+    }
+    // Docking a native plugin UI is the slow part of adding one (NI editors take
+    // ~1-2.5 s to attach), so it is reported in the run log.
+    juce::Logger::writeToLog("rack: editor docked " + dockElapsed() + " ms");
+}
+
+void RackView::layoutDockedEditor() {
+    if (dockedEditor == nullptr || layingOutDockedEditor) return;
+    const juce::ScopedValueSetter<bool> guard(layingOutDockedEditor, true);
+    const auto bay = editorHolder.getLocalBounds();
+    if (bay.isEmpty()) return;
+
+    // The bay is the allocation: the editor is centred in it and never bigger
+    // than it. Editors that refuse to shrink (Native Instruments' Qt windows
+    // report a fixed size and ignore frame requests) end up clipped at the bay
+    // edge rather than stretched or shifted off centre.
+    const int w = juce::jmin(juce::jmax(200, dockedEditor->getWidth()), bay.getWidth());
+    const int h = juce::jmin(juce::jmax(150, dockedEditor->getHeight()), bay.getHeight());
+    const auto placed = bay.withSizeKeepingCentre(w, h);
+    if (dockedEditor->getBounds() != placed) {
+        dockedEditor->setBounds(placed);
+        juce::Logger::writeToLog("rack: editor placed " + placed.toString() + " in bay "
+                                 + bay.toString());
+    }
+}
+
+void RackView::componentMovedOrResized(juce::Component& component, bool, bool wasResized) {
+    if (!wasResized || &component != dockedEditor || layingOutDockedEditor) return;
+    // A plugin is free to size itself once it is on screen; put it back, centred
+    // and inside the bay. Two passes settle it without fighting a plugin that
+    // keeps insisting on a size the bay cannot hold.
+    if (dockedEditorLayoutPasses >= 2) return;
+    ++dockedEditorLayoutPasses;
+    juce::Component::SafePointer<RackView> safe(this);
+    juce::MessageManager::callAsync([safe] {
+        if (safe == nullptr) return;
+        safe->layoutDockedEditor();
+    });
+}
+
+void RackView::releaseOrphanedDockedEditor() {
+    if (dockedHost != nullptr && dockedHostAlive()) return;
+    closeDockedEditor();
 }
 
 void RackView::closeDockedEditor() {
@@ -1028,6 +1091,8 @@ void RackView::closeDockedEditor() {
     // A capture may be reading the editor's native window right now; hold the
     // worker's lock so it has finished before that window is destroyed.
     const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
+    dockedEditor->removeComponentListener(this);
+    dockedEditorLayoutPasses = 0;
     // A floating window may have taken ownership of the editor (reparented
     // away from the dock): the window owns it now, so release our pointers
     // without deleting.
@@ -1716,13 +1781,10 @@ void RackView::resized() {
         noEditorBypass.setVisible(false);
     }
     if (dockedEditor != nullptr) {
-        // Keep the size the plugin declared; only the empty fallback tracks it.
-        const auto preferred = dockedEditorSize.isEmpty() ? dockedEditor->getBounds()
-                                                          : dockedEditorSize;
-        const int ew = juce::jmax(200, preferred.getWidth());
-        const int eh = juce::jmax(150, preferred.getHeight());
-        editorHolder.setSize(juce::jmax(vw, ew), juce::jmax(vh, eh));
-        dockedEditor->setBounds(editorHolder.getLocalBounds().withSizeKeepingCentre(ew, eh));
+        // The bay is the allocation: keep the holder at the visible size and let
+        // the layout centre the plugin inside it.
+        editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
+        layoutDockedEditor();
         noEditorLabel.setBounds(editorHolder.getLocalBounds());
     } else {
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
@@ -1829,33 +1891,33 @@ void RackView::renameSelectedChain() {
 }
 
 juce::String RackView::insertPlugin(const juce::File& file) {
-    // Loading runs on a worker; the strip is rebuilt from the completion, so
-    // the message thread never waits on the plugin's initialisation.
+    // The load runs on the message thread because that is the only thread these
+    // plugins tolerate, and some of them spend seconds initialising (Native
+    // Instruments' Raum needs ~3.5 s). Show a wait cursor now so the window
+    // explains the stall instead of just freezing.
     juce::Component::SafePointer<RackView> safe(this);
-    if (auto* ch = currentChannel()) {
-        const auto channelId = ch->id;
-        audioEngine.addPluginAsync(channelId, file, [safe](juce::String error) {
-            if (safe == nullptr) return;
+    juce::MouseCursor::showWaitCursor();
+    auto finish = [safe](juce::String error) {
+        if (safe != nullptr) {
             safe->refreshAfterInsertChange();
             if (error.isNotEmpty()) {
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
             }
-        });
+        }
+        juce::MouseCursor::hideWaitCursor();
+    };
+    if (auto* ch = currentChannel()) {
+        const auto channelId = ch->id;
+        audioEngine.addPluginAsync(channelId, file, finish);
         return {};
     }
     if (auto* out = currentOutput()) {
         const auto outputId = out->id;
-        audioEngine.addOutputPluginAsync(outputId, file, [safe](juce::String error) {
-            if (safe == nullptr) return;
-            safe->refreshAfterInsertChange();
-            if (error.isNotEmpty()) {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-            }
-        });
+        audioEngine.addOutputPluginAsync(outputId, file, finish);
         return {};
     }
+    juce::MouseCursor::hideWaitCursor();
     return "No chain is selected.";
 }
 
