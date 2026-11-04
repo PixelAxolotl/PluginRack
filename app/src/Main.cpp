@@ -4,6 +4,7 @@
 #include "DeviceStream.h"
 #include "MainComponent.h"
 #include "PluginHost.h"
+#include "PluginLibrary.h"
 #include "SliderTouch.h"
 
 #include <cstdlib>
@@ -219,6 +220,28 @@ public:
             return;
         }
 
+        if (args.contains("--list-plugins")) {
+            auto& library = PluginLibrary::getInstance();
+            library.scanBlocking();
+            const auto plugins = library.getPlugins();
+            std::cout << plugins.size() << " plugin(s) found:\n";
+            juce::String currentVendor;
+            for (const auto& description : plugins) {
+                const auto vendor = PluginLibrary::vendorNameFor(description);
+                if (vendor != currentVendor) {
+                    currentVendor = vendor;
+                    std::cout << "  " << vendor.toStdString() << "\n";
+                }
+                std::cout << "    " << PluginLibrary::displayNameFor(description).toStdString()
+                          << " (" << description.pluginFormatName.toStdString() << ") ["
+                          << description.fileOrIdentifier.toStdString() << "]\n";
+            }
+            if (plugins.isEmpty()) std::cout << "  (none)\n";
+            std::cout.flush();
+            quit();
+            return;
+        }
+
         if (args.contains("--list-devices")) {
             const auto inNames = DeviceEnumeration::inputs();
             const auto outNames = DeviceEnumeration::outputs();
@@ -377,9 +400,27 @@ public:
                                 // plugin whose editor paints on the message thread
                                 // stalls there, which a create-only probe misses.
                                 if (editor != nullptr) {
+                                    // The rack scales a docked editor to fit its
+                                    // bay, which only works for plugins that
+                                    // honour host content scaling: report both
+                                    // sizes so a plugin that ignores it is easy
+                                    // to spot.
+                                    const auto naturalWidth = editor->getWidth();
+                                    const auto naturalHeight = editor->getHeight();
+                                    editor->setScaleFactor(0.8f);
+                                    const auto scaledWidth = editor->getWidth();
+                                    const auto scaledHeight = editor->getHeight();
+                                    editor->setScaleFactor(1.0f);
+                                    juce::Logger::writeToLog(
+                                        "plugin: test editor "
+                                        + juce::String(naturalWidth) + "x"
+                                        + juce::String(naturalHeight)
+                                        + ", at host scale 0.8 "
+                                        + juce::String(scaledWidth) + "x"
+                                        + juce::String(scaledHeight));
                                     juce::Component holder;
-                                    holder.setSize(juce::jmax(320, editor->getWidth()),
-                                                   juce::jmax(240, editor->getHeight()));
+                                    holder.setSize(juce::jmax(320, naturalWidth),
+                                                   juce::jmax(240, naturalHeight));
                                     holder.addAndMakeVisible(editor);
                                     editor->setBounds(holder.getLocalBounds());
                                     juce::Logger::writeToLog("plugin: test editor docked");

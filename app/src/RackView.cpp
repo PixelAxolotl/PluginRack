@@ -1,6 +1,8 @@
 #include "RackView.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 
 #include "NativeThumbnail.h"
 
@@ -1008,9 +1010,10 @@ void RackView::refreshEditor() {
         return;
     }
 
-    // Whatever the plugin sized itself to before any layout pass; reused for
-    // every later pass so the editor is never stretched by the bay.
-    dockedEditorSize = dockedEditor->getBounds();
+    // The plugin's own size at 100%: the fit is measured from this, so no
+    // layout pass ever feeds back into the size it scales from.
+    dockedEditorNaturalSize = dockedEditor->getBounds();
+    dockedEditorScale = 1.0f;
 
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
@@ -1046,25 +1049,93 @@ void RackView::layoutDockedEditor() {
     const auto bay = editorHolder.getLocalBounds();
     if (bay.isEmpty()) return;
 
-    // The bay is the allocation: the editor is centred in it and never bigger
-    // than it. Editors that refuse to shrink (Native Instruments' Qt windows
-    // report a fixed size and ignore frame requests) end up clipped at the bay
-    // edge rather than stretched or shifted off centre.
-    const int w = juce::jmin(juce::jmax(200, dockedEditor->getWidth()), bay.getWidth());
-    const int h = juce::jmin(juce::jmax(150, dockedEditor->getHeight()), bay.getHeight());
-    const auto placed = bay.withSizeKeepingCentre(w, h);
-    if (dockedEditor->getBounds() != placed) {
-        dockedEditor->setBounds(placed);
-        juce::Logger::writeToLog("rack: editor placed " + placed.toString() + " in bay "
+    applyDockedEditorFit(bay);
+
+    // What the editor paints now: a VST3 re-sizes itself when its content scale
+    // changes, while a software-drawn editor keeps its own size and is scaled
+    // by its transform instead. Either way the result is centred in the bay and
+    // never leaves it.
+    const auto visual = dockedEditorVisualBounds();
+    const auto fitted = bay.withSizeKeepingCentre(
+        juce::jmax(1, juce::jmin(visual.getWidth(), bay.getWidth())),
+        juce::jmax(1, juce::jmin(visual.getHeight(), bay.getHeight())));
+
+    if (!dockedEditor->getTransform().isIdentity()) {
+        // The transform scales away from the component's top-left, so the
+        // position is what puts the scaled drawing in the middle.
+        if (dockedEditor->getPosition() != fitted.getPosition())
+            dockedEditor->setTopLeftPosition(fitted.getPosition());
+    } else if (dockedEditor->getBounds() != fitted) {
+        dockedEditor->setBounds(fitted);
+        juce::Logger::writeToLog("rack: editor placed " + fitted.toString() + " in bay "
                                  + bay.toString());
     }
 }
 
+void RackView::applyDockedEditorFit(const juce::Rectangle<int>& bay) {
+    if (dockedEditor == nullptr || bay.isEmpty()) return;
+    const int naturalWidth = dockedEditorNaturalSize.getWidth();
+    const int naturalHeight = dockedEditorNaturalSize.getHeight();
+    if (naturalWidth <= 0 || naturalHeight <= 0) return;
+
+    // Whichever of width/height is the tighter constraint decides the scale, so
+    // one axis fills the bay and the plugin keeps its own aspect ratio.
+    const auto fit = juce::jmin(static_cast<float>(bay.getWidth())
+                                    / static_cast<float>(naturalWidth),
+                                static_cast<float>(bay.getHeight())
+                                    / static_cast<float>(naturalHeight));
+    // Ignore sub-percent moves: dragging the window would otherwise re-lay out
+    // the plugin UI on every pixel.
+    if (fit <= 0.0f || std::abs(fit - dockedEditorScale) < 0.01f) return;
+
+    const auto before = dockedEditorVisualBounds();
+    {
+        // The plugin re-sizes itself inside this call, and that resize is ours:
+        // it must not be read as the plugin choosing a size of its own.
+        const juce::ScopedValueSetter<bool> echoGuard(applyingDockedEditorScale, true);
+        dockedEditor->setScaleFactor(fit);
+    }
+    // A plugin that does not support content scaling comes back at the size it
+    // already had. Remember that no scale is in effect, so a size the plugin
+    // picks later is still read as its own 100% size.
+    const auto after = dockedEditorVisualBounds();
+    const bool rescaled = after.getWidth() != before.getWidth()
+                       || after.getHeight() != before.getHeight();
+    dockedEditorScale = rescaled ? fit : 1.0f;
+}
+
+juce::Rectangle<int> RackView::dockedEditorVisualBounds() const {
+    if (dockedEditor == nullptr) return {};
+    // Only a pure scale is ever applied (AudioProcessorEditor::setScaleFactor
+    // installs exactly AffineTransform::scale), so the matrix diagonals are it.
+    const auto& transform = dockedEditor->getTransform();
+    return { dockedEditor->getX(), dockedEditor->getY(),
+             juce::roundToInt(static_cast<float>(dockedEditor->getWidth()) * transform.mat00),
+             juce::roundToInt(static_cast<float>(dockedEditor->getHeight()) * transform.mat11) };
+}
+
 void RackView::componentMovedOrResized(juce::Component& component, bool, bool wasResized) {
     if (!wasResized || &component != dockedEditor || layingOutDockedEditor) return;
-    // A plugin is free to size itself once it is on screen; put it back, centred
-    // and inside the bay. Two passes settle it without fighting a plugin that
-    // keeps insisting on a size the bay cannot hold.
+
+    if (!applyingDockedEditorScale && dockedEditorScale > 0.0f) {
+        // A resize that is not ours is the plugin picking a new UI size (some
+        // grow when a panel inside them is expanded). Move the baseline the fit
+        // is measured from, or the next pass would shrink it straight back.
+        const auto visual = dockedEditorVisualBounds();
+        const auto natural = juce::Point<int>(
+            juce::roundToInt(static_cast<float>(visual.getWidth()) / dockedEditorScale),
+            juce::roundToInt(static_cast<float>(visual.getHeight()) / dockedEditorScale));
+        const auto drifted = std::abs(natural.x - dockedEditorNaturalSize.getWidth())
+                                 > juce::jmax(2, dockedEditorNaturalSize.getWidth() / 50)
+                             || std::abs(natural.y - dockedEditorNaturalSize.getHeight())
+                                 > juce::jmax(2, dockedEditorNaturalSize.getHeight() / 50);
+        if (!visual.isEmpty() && drifted)
+            dockedEditorNaturalSize = { 0, 0, natural.x, natural.y };
+    }
+
+    // A plugin is free to size itself once it is on screen; put it back, fitted
+    // and centred in the bay. Two passes settle it without fighting a plugin
+    // that keeps insisting on a size the bay cannot hold.
     if (dockedEditorLayoutPasses >= 2) return;
     ++dockedEditorLayoutPasses;
     juce::Component::SafePointer<RackView> safe(this);
@@ -1100,7 +1171,9 @@ void RackView::closeDockedEditor() {
         && dockedEditor->getParentComponent() != &editorHolder) {
         dockedEditor = nullptr;
         dockedHost = nullptr;
-        dockedEditorSize = {};
+        dockedEditorNaturalSize = {};
+        dockedEditorScale = 1.0f;
+        applyingDockedEditorScale = false;
         return;
     }
     editorHolder.removeChildComponent(dockedEditor);
@@ -1117,7 +1190,9 @@ void RackView::closeDockedEditor() {
     }
     dockedEditor = nullptr;
     dockedHost = nullptr;
-    dockedEditorSize = {};
+    dockedEditorNaturalSize = {};
+    dockedEditorScale = 1.0f;
+    applyingDockedEditorScale = false;
 }
 
 void RackView::hideDockedEditor() {
@@ -1781,8 +1856,8 @@ void RackView::resized() {
         noEditorBypass.setVisible(false);
     }
     if (dockedEditor != nullptr) {
-        // The bay is the allocation: keep the holder at the visible size and let
-        // the layout centre the plugin inside it.
+        // The bay is the allocation: keep the holder at the visible size; the
+        // layout scales the plugin to fit that whole area.
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
         layoutDockedEditor();
         noEditorLabel.setBounds(editorHolder.getLocalBounds());
@@ -2130,24 +2205,6 @@ void RackView::refreshAfterInsertChange() {
         auto callback = safe->onStructureChanged;
         if (callback) callback();
     });
-}
-
-void RackView::openPicker() {
-    fileChooser = std::make_unique<juce::FileChooser>(
-        "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
-        "*.vst3");
-    juce::Component::SafePointer<RackView> safeThis(this);
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [safeThis](const juce::FileChooser& chooser) {
-                                 const auto file = chooser.getResult();
-                                 if (safeThis == nullptr || file == juce::File()) return;
-                                 const auto error = safeThis->insertPlugin(file);
-                                 if (error.isNotEmpty()) {
-                                     juce::AlertWindow::showMessageBoxAsync(
-                                         juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-                                 }
-                             });
 }
 
 bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {

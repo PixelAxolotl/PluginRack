@@ -61,7 +61,6 @@ public:
     void erasePlugin(std::uint32_t insertId) override;
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
     void refreshAfterInsertChange() override;
-    void openPicker() override;
     void reorderInsert(std::uint32_t insertId, int targetIndex) override;
     void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
     void previewChainItem(int targetIndex) override;
@@ -95,8 +94,15 @@ private:
     void refreshSlots();
     int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
-    // Centres the docked plugin editor in the bay and keeps it inside it.
+    // Scales the docked plugin editor to fit the bay and centres it in it.
     void layoutDockedEditor();
+    // Scales the docked editor so one axis fills the bay and the other fits,
+    // keeping the plugin's own aspect ratio. The tighter of width/height wins,
+    // so a wide UI (Ozone's EQ) is shrunk instead of clipped.
+    void applyDockedEditorFit(const juce::Rectangle<int>& bay);
+    // The editor's painted rectangle inside the bay: its bounds, multiplied by
+    // the scale when a software-drawn editor was scaled through a transform.
+    juce::Rectangle<int> dockedEditorVisualBounds() const;
     void componentMovedOrResized(juce::Component& component, bool wasMoved,
                                  bool wasResized) override;
     bool dockedHostAlive() const;
@@ -207,7 +213,6 @@ private:
     int chainDropTarget = -1;
     int chainRowCount = 0;
     juce::Label chainMarker;
-    std::unique_ptr<juce::FileChooser> fileChooser;
 
     // Center editor
     juce::Viewport editorViewport;
@@ -246,10 +251,17 @@ private:
     // Docked editor
     juce::AudioProcessorEditor* dockedEditor = nullptr;
     PluginHost* dockedHost = nullptr;
-    // Size the plugin asked for when it was docked. The bay never stretches the
-    // editor to fill and never lets it grow past the bay: layoutDockedEditor
-    // centres it at this size, shrunk to fit when the bay is smaller.
-    juce::Rectangle<int> dockedEditorSize;
+    // The plugin's own UI size at scale 1, measured when it was docked. The bay
+    // fits the editor to itself from this size (see applyDockedEditorFit), so a
+    // plugin that resizes its UI on its own moves this baseline with it.
+    juce::Rectangle<int> dockedEditorNaturalSize;
+    // Scale currently handed to the plugin. Stays 1 for a plugin that ignores
+    // content scaling, so the natural size above is never derived from a size
+    // that was not actually scaled.
+    float dockedEditorScale = 1.0f;
+    // Set while setScaleFactor() runs: the plugin re-sizes itself synchronously
+    // there, and that resize must not be read as the plugin choosing a size.
+    bool applyingDockedEditorScale = false;
     // Set while layoutDockedEditor() is inside setBounds, so the editor's own
     // resize callbacks cannot recurse back into it.
     bool layingOutDockedEditor = false;

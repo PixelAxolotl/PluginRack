@@ -702,24 +702,6 @@ void ChannelStrip::splitIntoMonoChannels() {
         });
 }
 
-void ChannelStrip::openPicker() {
-    fileChooser = std::make_unique<juce::FileChooser>(
-        "Select a VST3 plugin", juce::File::getSpecialLocation(juce::File::userHomeDirectory),
-        "*.vst3");
-    juce::Component::SafePointer<ChannelStrip> safeThis(this);
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [safeThis](const juce::FileChooser& chooser) {
-                                 const auto file = chooser.getResult();
-                                 if (safeThis == nullptr || file == juce::File()) return;
-                                 const auto error = safeThis->insertPlugin(file);
-                                 if (error.isNotEmpty()) {
-                                     juce::AlertWindow::showMessageBoxAsync(
-                                         juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-                                 }
-                             });
-}
-
 juce::String ChannelStrip::insertPlugin(const juce::File& file) {
     // The load is asynchronous; the strip refreshes when it finishes.
     const auto channelId = channel.id;
