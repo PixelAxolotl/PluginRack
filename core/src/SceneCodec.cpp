@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 4;
+constexpr int kSchemaVersion = 5;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -294,6 +294,7 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"eqDelayMs", output.eqDelayMs},
         {"eqRtaOffsetDb", output.eqRtaOffsetDb},
         {"eqRtaWeighting", output.eqRtaWeighting},
+        {"streamOutput", output.streamOutput},
     };
 }
 
@@ -329,6 +330,9 @@ void from_json(const nlohmann::json& j, Output& output) {
     output.eqDelayMs = j.value("eqDelayMs", 0.0f);
     output.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
     output.eqRtaWeighting = j.value("eqRtaWeighting", 0);
+    // Absent before stream/monitor classes existed: every output was treated
+    // as a monitor, which is the safe default.
+    output.streamOutput = j.value("streamOutput", false);
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(output.eqBands);
     }
@@ -397,16 +401,9 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     settings.minimalClockFifo = j.value("minimalClockFifo", false);
     settings.fullDuplexInput = j.value("fullDuplexInput", false);
     settings.autoReloadDevices = j.value("autoReloadDevices", false);
-    if (!settings.latencyTuningOptIn) {
-        // Scenes written before the explicit opt-in marker (or hand-edited
-        // scenes that omit it) must never turn on the beta latency modes just
-        // because their individual legacy keys are present.
-        settings.lowLatencyInput = false;
-        settings.preferExclusive = false;
-        settings.lowLatencyOutputs = false;
-        settings.minimalClockFifo = false;
-        settings.fullDuplexInput = false;
-    }
+    // The version-aware opt-in gate lives in fromJson(Scene): before v5 the
+    // individual keys could appear without the marker, and honouring them
+    // would silently switch an old session to aggressive latency modes.
     // Absent in scenes written before rack thumbnails existed: the default
     // rate is what those sessions were already running at.
     settings.rackThumbnailFps = j.value("rackThumbnailFps", 15);
@@ -434,7 +431,7 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 4) {
+        if (schemaVersion < 1 || schemaVersion > 5) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
                                     ", expected 1 to 4");
             return result;
@@ -456,6 +453,17 @@ SceneLoadResult fromJson(std::string_view text) {
         if (j.contains("audio")) {
             pluginrack::AudioSettings settings;
             j.at("audio").get_to(settings);
+            // Before v5 the individual tuning keys could exist without the
+            // explicit marker; honouring those would silently opt an old
+            // session into aggressive latency modes. v5 and later wrote the
+            // marker and the values together, so they are authoritative.
+            if (schemaVersion < 5 && !settings.latencyTuningOptIn) {
+                settings.lowLatencyInput = false;
+                settings.preferExclusive = false;
+                settings.lowLatencyOutputs = false;
+                settings.minimalClockFifo = false;
+                settings.fullDuplexInput = false;
+            }
             scene.audio = std::move(settings);
         }
         result.scene = scene;

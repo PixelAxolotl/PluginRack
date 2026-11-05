@@ -76,7 +76,7 @@ TEST_CASE("OutputPlayback FIFO holds eight device buffers and starts primed",
     // drains in the same callback.
     CHECK(contains(header, "int targetFillBlocks = 4"));
     CHECK(contains(header, "int primeBlocks = -1"));
-    CHECK(contains(body, "targetFillFrames = bufferSize * juce::jmax(0, targetFillBlocks)"));
+    CHECK(contains(body, "const int targetFrames = bufferSize * juce::jmax(0, targetFillBlocks)"));
     CHECK(contains(body, "bufferSize * 8"));
     CHECK(contains(body, "65536"));
     const auto engine = readSource("app/src/AudioEngine.cpp");
@@ -120,8 +120,10 @@ TEST_CASE("InputCapture ring buffer gets the same depth clamp", "[underrun]") {
     // output render block, so mismatched buffer settings cannot starve it.
     CHECK(contains(body, "capacityUnit * 4"));
     CHECK(contains(body, "65536"));
-    // Read delay is configurable (1 or 2 blocks); the ring must still clamp.
-    CHECK(contains(body, "blockFrames * juce::jmax(1, readDelayBlocks)"));
+    // Read delay is configurable (1 or 2 blocks); the plan owns that
+    // arithmetic and the ring must still clamp.
+    CHECK(contains(body, "delayPlan_.open(deviceBufferSize, renderBlockFrames, planConfig)"));
+    CHECK(contains(body, "planConfig.readDelayBlocks = juce::jmax(1, readDelayBlocks)"));
     CHECK(contains(body, "readCursor.prepare"));
 }
 
@@ -131,9 +133,10 @@ TEST_CASE("input read delay ignores the probe capacity reserve", "[underrun][lat
     // The reserve for an unfinished clock probe may only grow the ring. It must
     // not reach the delay unit, or it is added to every input as real latency.
     CHECK(contains(body, "capacityUnit = juce::jmax(blockFrames, capacityReserveFrames)"));
-    CHECK(contains(body,
-                   "const int delay = juce::jlimit(0, maxDelay, "
-                   "blockFrames * juce::jmax(1, readDelayBlocks))"));
+    // The delay comes from the plan, which is fed the device buffer and the
+    // render block only — the reserve never reaches it.
+    CHECK(contains(body, "delayPlan_.open(deviceBufferSize, renderBlockFrames, planConfig)"));
+    CHECK_FALSE(contains(body, "delayPlan_.open(capacityUnit"));
 
     const auto engine = readSource("app/src/AudioEngine.cpp");
     CHECK(contains(engine, "renderBlockFrames = currentBufferSize"));
@@ -142,21 +145,39 @@ TEST_CASE("input read delay ignores the probe capacity reserve", "[underrun][lat
                    "kProbeRenderBlockFrames)"));
 }
 
-TEST_CASE("input read delay does not accumulate across repeated underruns", "[underrun][latency]") {
+TEST_CASE("input read delay is owned by one bounded controller", "[underrun][latency]") {
     const auto source = readSource("app/src/DeviceStream.cpp");
     const auto body = functionBody(source, "bool InputCapture::pull");
-    // Backoff must be gated on the initial delay so repeated underruns during
-    // a device reload cannot grow the delay without bound.
-    CHECK(contains(body, "const int baseDelay = initialReadDelay_.load"));
-    CHECK(contains(body, "if (nextDelay > currentDelay && currentDelay <= baseDelay)"));
+    // The delay decision lives in DelayTargetController: it grows on a real
+    // starvation and gives the margin back slowly, clamped to the ring. The
+    // pull path must not grow the delay itself, or repeated underruns during a
+    // device reload could accumulate without bound.
+    CHECK(contains(body, "delayTarget_.onBlock("));
+    CHECK(contains(body, "readCursor.setTargetDelay(nextDelay)"));
+    CHECK_FALSE(contains(body, "currentDelay <= baseDelay"));
+    const auto open = functionBody(source, "juce::String InputCapture::open");
+    CHECK(contains(open, "delayPlan_.open(deviceBufferSize, renderBlockFrames, planConfig)"));
+    CHECK(contains(open, "readCursor.prepare(capacity, delay, 0.005)"));
+    // The delay is settled on the final render block, not on whatever the open
+    // happened to see.
+    CHECK(contains(body, "delayTarget_.onBlock(currentDelay, starved, window.overrun,"));
+    CHECK(contains(source, "void InputCapture::applyRenderBlockFrames"));
+    CHECK(contains(body, "const bool starved = window.underrun && primedEnough && settledIn"));
+    CHECK_FALSE(contains(body, "window.available) - currentDelay"));
+
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(functionBody(engine,
+                                "void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs)"),
+                   "applyRenderBlockFrames(maxBlockFrames_)"));
 }
 
 TEST_CASE("low-latency input backs off only after a real starvation", "[underrun][latency]") {
     const auto source = readSource("app/src/DeviceStream.cpp");
     const auto body = functionBody(source, "bool InputCapture::pull");
     // The first one-block pull is allowed to prime without becoming a false
-    // glitch; later starvation adds one block and keeps the cursor continuous.
+    // glitch; later starvation adds margin and keeps the cursor continuous.
     CHECK(contains(body, "written >= targetDelay + static_cast<std::uint64_t>(frames)"));
+    CHECK(contains(body, "const bool starved = window.underrun && primedEnough"));
     CHECK(contains(body, "const int nextDelay"));
     CHECK(contains(body, "readCursor.setTargetDelay(nextDelay)"));
 }
@@ -270,9 +291,13 @@ TEST_CASE("latency tuning options reach the device opens",
     CHECK(contains(engine, "preferExclusive_.load"));
     CHECK(contains(engine, "fullDuplexInput_.load"));
     const auto device = readSource("app/src/DeviceStream.cpp");
-    CHECK(contains(device, "blockFrames * juce::jmax(1, readDelayBlocks)"));
+    CHECK(contains(device, "delayPlan_.open(deviceBufferSize, renderBlockFrames, planConfig)"));
     CHECK(contains(device, "preferExclusive"));
-    CHECK(contains(device, "kTypeShared, kTypeLowLatency, kTypeExclusive"));
+    // The probe order is policy-driven so the clock can reach ASIO first while
+    // captures and extra outputs stay shareable.
+    CHECK(contains(device, "pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable())"));
+    CHECK(contains(device, "pluginrack::StreamRole::Input"));
+    CHECK_FALSE(contains(device, "juce::StringArray typeOrder { kTypeShared"));
     CHECK(contains(device, "typeSetup.setAttribute(\"deviceType\", chosenTypeName)"));
     CHECK_FALSE(contains(device, "manager.setCurrentAudioDeviceType(typeName, false)"));
     const auto settings = readSource("app/src/SettingsView.cpp");
@@ -654,6 +679,342 @@ TEST_CASE("reset to defaults restores the dynamics rows and the chain", "[app][u
     CHECK(contains(mainComponent, "Strip names, device assignments and watched streams are kept"));
 }
 
+TEST_CASE("the clock callback records render telemetry without locking",
+          "[latency][telemetry]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto render = functionBody(cpp, "void AudioEngine::render(int frames)");
+    CHECK(contains(render, "std::chrono::steady_clock::now()"));
+    // Every exit path that the user can hear must leave a record, or the p99
+    // would describe a filtered subset of callbacks.
+    CHECK(contains(render, "pluginrack::AudioTelemetry::flagRenderMiss"));
+    CHECK(contains(render, "pluginrack::AudioTelemetry::flagOversized"));
+    CHECK(contains(render, "recordRenderTelemetry(frames, elapsedNanos(), 0, clockFillFrames)"));
+
+    const auto record = functionBody(cpp, "void AudioEngine::recordRenderTelemetry");
+    CHECK(contains(record, "renderTelemetry_.push(sample)"));
+    CHECK_FALSE(contains(record, "ScopedLock"));
+    CHECK_FALSE(contains(record, "new "));
+
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "audioEngine.getRenderTelemetry()"));
+    CHECK(contains(settings, "render.renderWorstOverBlockPercent"));
+}
+
+TEST_CASE("the guided low-latency search only moves through the settings path",
+          "[latency][profile]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto tick = functionBody(cpp, "AudioEngine::LatencyProfileState AudioEngine::tickLatencyProfile");
+    // Every step is an ordinary Apply, so a refused buffer still restores the
+    // previous one through the existing safety net.
+    CHECK(contains(tick, "applyDeviceSettings(settings)"));
+    CHECK(contains(tick, "latencyProfile_.onApplied("));
+    CHECK(contains(tick, "takeDeviceOpenErrors()"));
+    CHECK(contains(tick, "pluginrack::LatencyProfile::Action::Revert"));
+
+    const auto start = functionBody(cpp, "void AudioEngine::startLatencyProfile");
+    CHECK(contains(start, "latencyProfile_.start("));
+
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "audioEngine.isLatencyProfileActive()"));
+    CHECK(contains(settings, "audioEngine.startLatencyProfile()"));
+    CHECK(contains(settings, "audioEngine.cancelLatencyProfile()"));
+    CHECK(contains(settings, "audioEngine.tickLatencyProfile()"));
+}
+
+TEST_CASE("a stream output gets a deeper FIFO than a monitored one", "[latency][outputs]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto open = functionBody(cpp, "juce::String AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(open, "out->streamOutput.get()"));
+    CHECK(contains(open, "targetBlocks = streamOutput ? 6"));
+    // The clock is never reclassified: the engine renders on its callback.
+    const auto setter = functionBody(cpp, "void AudioEngine::setOutputStreamClass");
+    CHECK(contains(setter, "if (output->id == clockOutputId) return;"));
+    CHECK(contains(setter, "setOutputDeviceImpl(outputId, deviceName, rate)"));
+
+    const auto scene = readSource("core/include/pluginrack/Scene.h");
+    CHECK(contains(scene, "bool streamOutput"));
+    const auto codec = readSource("core/src/SceneCodec.cpp");
+    CHECK(contains(codec, "\"streamOutput\""));
+    CHECK(contains(codec, "j.value(\"streamOutput\", false)"));
+}
+
+TEST_CASE("audio callbacks register with MMCSS and disable denormals",
+          "[latency][rt]") {
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto input = functionBody(device, "void InputCapture::audioDeviceIOCallbackWithContext");
+    const auto output = functionBody(device, "void OutputPlayback::audioDeviceIOCallbackWithContext");
+    for (const auto& body : {input, output}) {
+        CHECK(contains(body, "realtime::registerProAudioThread()"));
+        CHECK(contains(body, "juce::ScopedNoDenormals"));
+    }
+    const auto helper = readSource("app/src/RealtimeThread.h");
+    CHECK(contains(helper, "AvSetMmThreadCharacteristicsW"));
+    CHECK(contains(helper, "thread_local Registration"));
+}
+
+TEST_CASE("the clock FIFO is trimmed to its running depth after the hand-off",
+          "[underrun][latency]") {
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto header = readSource("app/src/DeviceStream.h");
+    CHECK(contains(header, "void setTargetFillBlocks(int blocks)"));
+    CHECK(contains(header, "std::atomic<bool> trimToTarget"));
+    const auto setter = functionBody(device, "void OutputPlayback::setTargetFillBlocks");
+    CHECK(contains(setter, "targetFillFrames.store(wanted"));
+    CHECK(contains(setter, "trimToTarget.store(true"));
+
+    // The trim must happen on the device callback (the only consumer) before
+    // the new block is pushed, so no second thread ever touches the FIFO.
+    const auto callback =
+        functionBody(device, "void OutputPlayback::audioDeviceIOCallbackWithContext");
+    CHECK(contains(callback, "trimToTarget.exchange(false"));
+    const auto trim = callback.find("trimToTarget.exchange");
+    const auto push = callback.find("renderHook(numSamples)");
+    CHECK(trim != std::string::npos);
+    CHECK(push != std::string::npos);
+    CHECK(trim < push);
+
+    // A synchronous open primes four blocks; the hand-off is where that
+    // latency is given back — to zero, because the block pushed in a callback
+    // is the block that same callback plays.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto open = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    const auto handoff = open.find("out->output = std::move(newPlayback);");
+    REQUIRE(handoff != std::string::npos);
+    const auto settle = open.find("setTargetFillBlocks(0)", handoff);
+    const auto activate = open.find("setRenderActive(true)", handoff);
+    REQUIRE(settle != std::string::npos);
+    REQUIRE(activate != std::string::npos);
+    CHECK(settle < activate);
+}
+
+TEST_CASE("an ASIO open failure explains the single-client rule", "[latency][devices]") {
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto open = functionBody(device, "juce::String openWithPreferredType");
+    // The most common ASIO failure is a second client on a driver that only
+    // accepts one; the raw driver error does not say that.
+    CHECK(contains(open, "if (chosenTypeName == kTypeAsio)"));
+    CHECK(contains(open, "ASIO interfaces accept one client"));
+    // ASIO must still be reachable end to end.
+    CHECK(contains(device, "createAudioIODeviceType_ASIO"));
+    CHECK(contains(device, "pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable())"));
+}
+
+TEST_CASE("the duplex clock carries its captures in one callback", "[latency][duplex]") {
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto header = readSource("app/src/DeviceStream.h");
+
+    // One driver client, both directions.
+    CHECK(contains(header, "int duplexInputChannels = 0"));
+    const auto openWithType = functionBody(device, "juce::String openWithPreferredType");
+    CHECK(contains(openWithType, "if (duplexInputChannels > 0)"));
+    CHECK(contains(openWithType, "wantInput = true"));
+
+    // Capture is handed to the engine before it renders, and the callback
+    // returns without touching the FIFO.
+    const auto callback =
+        functionBody(device, "void OutputPlayback::audioDeviceIOCallbackWithContext");
+    const auto feed = callback.find("duplexInputHook(inputChannelData, numInputChannels)");
+    const auto render = callback.find("renderHook(numSamples)");
+    const auto earlyReturn = callback.find("fillFrames.store(0, std::memory_order_relaxed)");
+    REQUIRE(feed != std::string::npos);
+    REQUIRE(render != std::string::npos);
+    REQUIRE(earlyReturn != std::string::npos);
+    CHECK(feed < render);
+    CHECK(render < earlyReturn);
+    // The render result is already in the device buffer: clearing it after the
+    // hook would erase the audio.
+    CHECK(contains(callback, "if (!rendered) {"));
+
+    // push() writes straight through instead of queueing.
+    const auto push = functionBody(device, "void OutputPlayback::push");
+    CHECK(contains(push, "if (duplex_.load(std::memory_order_relaxed))"));
+    CHECK(contains(push, "currentOutputChannels[ch]"));
+    CHECK(contains(push, "std::memcpy(dst, src.getReadPointer(srcCh)"));
+
+    // Engine: no second client, and the channel reads the callback's buffers.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto inputOpen = functionBody(engine, "juce::String AudioEngine::setChannelInputDeviceImpl");
+    CHECK(contains(inputOpen, "duplexActive_.load(std::memory_order_acquire)"));
+    CHECK(contains(inputOpen, "deviceName == duplexDeviceName_"));
+    CHECK(contains(inputOpen, "c->duplexInput = true"));
+    // A capture already holding the endpoint must be released before the
+    // duplex open, or a single-client driver refuses it.
+    const auto clockOpen = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(clockOpen, "if (c->inputDeviceName == deviceName) c->input.reset();"));
+    CHECK(contains(clockOpen, "inputCaptures_.erase(it)"));
+    const auto renderBody = functionBody(engine, "void AudioEngine::render(int frames)");
+    CHECK(contains(renderBody, "if (channel->duplexInput.get())"));
+    CHECK(contains(renderBody, "pullDuplexInput(*channel, frames)"));
+    const auto pull = functionBody(engine, "void AudioEngine::pullDuplexInput");
+    CHECK(contains(pull, "duplexInputBuffers_[source]"));
+    CHECK(contains(pull, "channel.inputChannels"));
+}
+
+TEST_CASE("a refused duplex open falls back to the split path", "[latency][duplex]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto open = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    const auto fallback = open.find("if (openErr.isNotEmpty() && duplexInputs > 0)");
+    REQUIRE(fallback != std::string::npos);
+    // Exactly one retry, and it is the output-only variant.
+    const auto retry = open.find("0);", fallback);
+    CHECK(retry != std::string::npos);
+    CHECK(contains(open, "Falling back keeps the clock alive"));
+}
+
+TEST_CASE("the audio backend is visible on the strips and in the budget",
+          "[latency][ui]") {
+    const auto helper = readSource("app/src/DeviceBackend.h");
+    CHECK(contains(helper, "\"ASIO\""));
+    CHECK(contains(helper, "\"WASAPI\""));
+    CHECK(contains(helper, "deviceBackendIsAsio"));
+
+    // Per-strip tag: the device line must name the backend, not only the device.
+    const auto control = readSource("app/src/DeviceControl.cpp");
+    CHECK(contains(control, "deviceBackendTag(backendType)"));
+    CHECK(contains(control, "deviceBackendIsAsio(backendType)"));
+    const auto controlHeader = readSource("app/src/DeviceControl.h");
+    CHECK(contains(controlHeader, "void setBackendType("));
+
+    // Every strip that shows a device must also set its backend.
+    for (const char* path : {"app/src/ChannelStrip.cpp", "app/src/MixerComponent.cpp"}) {
+        const auto cpp = readSource(path);
+        CHECK(contains(cpp, "setBackendType(deviceState.deviceType)"));
+        CHECK(contains(cpp, "setDeviceName(deviceState.deviceName)"));
+    }
+
+    // The engine exposes it and the Settings clock line prints it.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "getActiveDeviceType()"));
+    CHECK(contains(engine, "shortDeviceTypeTag(o->outputDeviceType)"));
+    const auto budget = readSource("app/src/LatencyBudgetView.h");
+    CHECK(contains(budget, "deviceBackendTag(report_.clockDeviceType)"));
+}
+
+TEST_CASE("Force ASIO picks the interface and reports what it did", "[latency][asio]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto force = functionBody(engine, "juce::String AudioEngine::forceAsio");
+    // It must never guess: no ASIO driver, no clock, or no convincing name all
+    // end in an explanation instead of a random device switch.
+    CHECK(contains(force, "if (asio.isEmpty())"));
+    CHECK(contains(force, "if (clockId == 0)"));
+    CHECK(contains(force, "if (match.empty())"));
+    CHECK(contains(force, "bestAsioDeviceMatch"));
+    // Arming duplex must not start an async device job: setOutputDevice refuses
+    // to run while one is in flight, which left the clock on WASAPI.
+    CHECK(contains(force, "applySettingsValues(settings)"));
+    CHECK_FALSE(contains(force, "applyDeviceSettings(settings)"));
+    // The capture strips follow the clock, or duplex never engages.
+    CHECK(contains(force, "retargetInputsToClockDevice(target)"));
+    const auto retarget = force.find("retargetInputsToClockDevice(target)");
+    const auto moveClock = force.find("setOutputDevice(clockId, target)");
+    REQUIRE(retarget != std::string::npos);
+    REQUIRE(moveClock != std::string::npos);
+    CHECK(retarget < moveClock);
+    CHECK(contains(force, "ASIO refused: "));
+
+    // The same adoption must happen when the clock is picked in the device
+    // menu, not only from the button.
+    const auto setOutput = functionBody(engine, "juce::String AudioEngine::setOutputDevice(");
+    CHECK(contains(setOutput, "if (isClock && fullDuplexInput_.load(std::memory_order_relaxed))"));
+    CHECK(contains(setOutput, "retargetInputsToClockDevice(deviceName, &previous)"));
+    // A refused clock must put the captures back, or those strips stay flagged
+    // duplex with nothing feeding them.
+    CHECK(contains(setOutput, "if (!error.isEmpty() && retargeted > 0)"));
+    CHECK(contains(setOutput, "c->duplexInput = false"));
+    CHECK(contains(setOutput, "prepareInputs()"));
+    const auto adopt = functionBody(engine, "int AudioEngine::retargetInputsToClockDevice");
+    CHECK(contains(adopt, "inputsToRetargetForClock("));
+    CHECK(contains(adopt, "c->duplexInput = true"));
+    CHECK(contains(adopt, "c->input.reset()"));
+
+    const auto enumeration = readSource("app/src/DeviceStream.cpp");
+    CHECK(contains(enumeration, "juce::StringArray asioDevices()"));
+    CHECK(contains(enumeration, "createAudioIODeviceType_ASIO"));
+
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "audioEngine.forceAsio()"));
+    CHECK(contains(settings, "forceAsioButton.setEnabled"));
+    CHECK(contains(settings, "No ASIO driver installed"));
+}
+
+TEST_CASE("only one GUI session runs, but CLI children are never blocked",
+          "[app][instance]") {
+    const auto main = readSource("app/src/Main.cpp");
+    const auto app = functionBody(main, "class PluginRackApplication final : public juce::JUCEApplication");
+    // The GUI takes the single-instance lock.
+    CHECK(contains(app, "bool moreThanOneInstanceAllowed() override"));
+    CHECK(contains(app, "return false;"));
+    // ...but the scanner and the CLI switches must still start alongside it,
+    // otherwise plugin scanning breaks while the app is open.
+    CHECK(contains(app, "getCommandLineParameterArray()"));
+    CHECK(contains(app, "arg.startsWith(\"--\")"));
+    CHECK(contains(app, "return true;"));
+    // A second GUI launch focuses the running window (possibly from the tray).
+    CHECK(contains(app, "void anotherInstanceStarted(const juce::String& commandLine) override"));
+    CHECK(contains(app, "mainWindow->setVisible(true)"));
+    CHECK(contains(app, "mainWindow->toFront(true)"));
+
+    // Every headless mode the child processes rely on is still handled here.
+    for (const char* flag : {"--scan-plugin", "--list-plugins", "--list-devices", "--screenshot"}) {
+        CHECK(contains(main, flag));
+    }
+}
+
+TEST_CASE("an Auto input buffer follows the clock instead of the driver's mood",
+          "[latency][input]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto open = functionBody(engine, "juce::String AudioEngine::setChannelInputDeviceImpl");
+    // Auto must resolve to the render block, and a device that refuses that
+    // size must fall back to its own default rather than leaving the strip
+    // silent.
+    CHECK(contains(open, "pluginrack::inputBufferRequest(requestedInputBufferSize_, renderBlockFrames)"));
+    CHECK(contains(open, "err, bufferRequest,"));
+    CHECK(contains(open, "requestedInputBufferSize_ == 0 && bufferRequest > 0"));
+    CHECK(contains(open, "err, 0,"));
+
+    const auto policy = readSource("core/include/pluginrack/InputBufferPolicy.h");
+    CHECK(contains(policy, "requestedBufferSize > 0 ? requestedBufferSize"));
+}
+
+TEST_CASE("an Auto output buffer settles on the device minimum and keeps it",
+          "[latency][output]") {
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto open = functionBody(device, "juce::String openWithPreferredType");
+    // Auto must not leave the driver free to change the period between launches.
+    CHECK(contains(open, "cachedBufferFor(selectedDeviceName)"));
+    CHECK(contains(open, "pluginrack::smallestSupportedBufferSize(available, current, 0)"));
+    CHECK(contains(open, "manager.setAudioDeviceSetup(liveSetup, true)"));
+    CHECK(contains(open, "rememberBufferFor(selectedDeviceName"));
+    // A refused size keeps the opened stream rather than failing the strip.
+    CHECK(contains(open, "if (manager.setAudioDeviceSetup(liveSetup, true).isEmpty())"));
+
+    const auto policy = readSource("core/include/pluginrack/OutputBufferPolicy.h");
+    CHECK(contains(policy, "if (requestedBufferSize > 0) return requestedBufferSize"));
+    CHECK(contains(policy, "smallest == 0 || size < smallest"));
+}
+
+TEST_CASE("the budget says when capture and playback are different devices",
+          "[latency][duplex]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto report = functionBody(engine, "AudioEngine::LatencyReport AudioEngine::getLatencyReport");
+    CHECK(contains(report, "report.separateClocks"));
+    CHECK(contains(report, "!inputChannel->duplexInput.get()"));
+    const auto header = readSource("app/src/AudioEngine.h");
+    CHECK(contains(header, "bool separateClocks"));
+
+    // ...and the panel explains what the read delay is for.
+    const auto view = readSource("app/src/LatencyBudgetView.h");
+    CHECK(contains(view, "report_.separateClocks"));
+    CHECK(contains(view, "bridges two clocks"));
+
+    // The button can move the clock onto the input's driver, which is the only
+    // way to drop that delay.
+    const auto force = functionBody(engine, "juce::String AudioEngine::forceAsio");
+    CHECK(contains(force, "asioClockFromInputs(inputNames, names)"));
+    CHECK(contains(force, "Clock moved onto "));
+    CHECK(contains(force, "different devices"));
+}
+
 TEST_CASE("input menus are sized by the device, not a fixed 16", "[app][ui]") {
     for (const char* path : {"app/src/RackView.cpp", "app/src/ChannelStrip.cpp"}) {
         const auto cpp = readSource(path);
@@ -662,4 +1023,36 @@ TEST_CASE("input menus are sized by the device, not a fixed 16", "[app][ui]") {
         CHECK(contains(cpp, "rebuildInputCombos"));
         CHECK(contains(cpp, "deviceState.availableInputs"));
     }
+}
+
+TEST_CASE("latency report splits every stage and reports the unexplained part",
+          "[latency][ui]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto report = functionBody(cpp, "AudioEngine::LatencyReport AudioEngine::getLatencyReport");
+    // The capture and playback totals each fold a queue into the driver figure;
+    // the budget has to show them apart or the user cannot tell which stage to
+    // shrink.
+    CHECK(contains(report, "inputReadDelaySamples = inputChannel->input->getReadDelaySamples()"));
+    CHECK(contains(report, "report.inputFifoDelayMs ="));
+    CHECK(contains(report, "report.inputDeviceLatencyMs ="));
+    CHECK(contains(report, "report.outputBufferMs ="));
+    CHECK(contains(report, "report.outputDeviceLatencyMs ="));
+    CHECK(contains(report, "clockTargetFillFrames = output->output->getTargetFillFrames()"));
+    CHECK(contains(report, "report.unexpectedMs = report.measuredValid"));
+
+    const auto header = readSource("app/src/AudioEngine.h");
+    for (const char* field : {"inputDeviceLatencyMs", "inputFifoDelayMs", "outputDeviceLatencyMs",
+                              "outputBufferMs", "unexpectedMs", "inputReadDelayFrames",
+                              "clockFillFrames", "clockTargetFillFrames"}) {
+        CHECK(contains(header, field));
+    }
+
+    // Settings must render the per-stage view, not only the single estimate.
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "budgetView.setReport(report)"));
+    CHECK(contains(settings, "LatencyBudgetView::preferredHeight()"));
+    const auto view = readSource("app/src/LatencyBudgetView.h");
+    CHECK(contains(view, "Predicted"));
+    CHECK(contains(view, "Unexplained"));
+    CHECK(contains(view, "report_.unexpectedMs"));
 }

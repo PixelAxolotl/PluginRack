@@ -113,6 +113,7 @@ private:
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::ComboBox modeCombo;
         MiniButton flipButton{"Flip"};
+        MiniButton streamButton{"Strm"};
         juce::OwnedArray<InsertSlotComponent> slots;
         int chainDropTarget = -1;
         int chainRowCount = 0;

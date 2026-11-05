@@ -173,7 +173,30 @@ class PluginRackApplication final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "PluginRack"; }
     const juce::String getApplicationVersion() override { return "0.1.0"; }
-    bool moreThanOneInstanceAllowed() override { return true; }
+
+    // One session per machine, with one deliberate exception: the plugin scanner
+    // and the reporting switches run this same executable as short-lived child
+    // processes. Blocking those would break scanning the moment the app is open,
+    // so any '--' mode stays outside the single-instance lock and only the GUI
+    // takes it.
+    bool moreThanOneInstanceAllowed() override {
+        for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
+            if (arg.startsWith("--")) return true;
+        }
+        return false;
+    }
+
+    // Called in the running instance when the user launches the app again.
+    void anotherInstanceStarted(const juce::String& commandLine) override {
+        juce::ignoreUnused(commandLine);
+        if (mainWindow == nullptr) return;
+        // Show the session that already exists instead of doing nothing: the
+        // window may be minimised, or hidden in the tray.
+        mainWindow->setVisible(true);
+        if (mainWindow->isMinimised()) mainWindow->setMinimised(false);
+        mainWindow->toFront(true);
+        juce::Logger::writeToLog("second launch: focused the running window");
+    }
 
     void initialise(const juce::String& commandLine) override {
         juce::SystemStats::setApplicationCrashHandler(&writeCrashReport);

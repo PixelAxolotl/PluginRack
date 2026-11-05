@@ -96,6 +96,10 @@ SettingsView::SettingsView(AudioEngine& engine)
     measuredDetailLabel.setColour(juce::Label::textColourId, theme::dim());
     measuredDetailLabel.setMinimumHorizontalScale(0.7f);
     addAndMakeVisible(measuredDetailLabel);
+    addAndMakeVisible(budgetView);
+    renderLoadLabel.setFont(theme::ui::captionFont());
+    renderLoadLabel.setColour(juce::Label::textColourId, theme::dim());
+    addAndMakeVisible(renderLoadLabel);
 
     listenLabel.setFont(theme::ui::bodyFont());
     listenLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -178,9 +182,43 @@ SettingsView::SettingsView(AudioEngine& engine)
         "render is covered by one block of silence. Switching reopens the "
         "devices.");
     fullDuplexToggle.setTooltip(
-        "When the input and clock output use the same endpoint, start capture "
-        "with one block of read delay. It is not a shared callback; the delay "
-        "grows automatically if the device starves.");
+        "When the input and the clock output use the same endpoint, capture and "
+        "render share one driver callback: no capture ring, no clock FIFO. If the "
+        "endpoint refuses to open both directions, the app falls back to a "
+        "separate capture automatically.");
+
+    theme::ui::styleButton(profileButton);
+    profileButton.setTooltip(
+        "Steps the buffer down one size at a time, watches for real glitches, "
+        "and goes back to the size you started from on the first failure. "
+        "Takes about a minute per step.");
+    profileButton.onClick = [this] {
+        if (audioEngine.isLatencyProfileActive()) {
+            audioEngine.cancelLatencyProfile();
+        } else {
+            audioEngine.startLatencyProfile();
+        }
+        refresh();
+    };
+    addAndMakeVisible(profileButton);
+    profileStatusLabel.setFont(theme::ui::captionFont());
+    profileStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+    addAndMakeVisible(profileStatusLabel);
+
+    theme::ui::styleButton(forceAsioButton);
+    forceAsioButton.setTooltip(
+        "Moves the clock output onto the ASIO driver for the same interface. "
+        "ASIO bypasses the Windows audio engine, so it reaches smaller buffers "
+        "and reports its real latency.");
+    forceAsioButton.onClick = [this] {
+        forceAsioStatus_ = audioEngine.forceAsio();
+        refresh();
+    };
+    addAndMakeVisible(forceAsioButton);
+    asioStatusLabel.setFont(theme::ui::captionFont());
+    asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+    asioStatusLabel.setMinimumHorizontalScale(0.7f);
+    addAndMakeVisible(asioStatusLabel);
 
     pendingLabel.setFont(theme::ui::captionFont());
     pendingLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -271,8 +309,15 @@ void SettingsView::refresh() {
     const auto report = audioEngine.getLatencyReport();
     if (report.valid) {
         latencyLabel.setText("Latency (est.): " + juce::String((int)std::round(report.totalMs)) + " ms", juce::dontSendNotification);
+        // Say who chose the buffer: "Auto" means the driver's own period, so a
+        // large figure is a driver fact the user can only change by picking an
+        // explicit size or a different device type.
+        const juce::String source = report.requestedOutputBufferSize > 0
+                                        ? juce::String(" (requested)")
+                                        : juce::String(" (driver default)");
         bufferLabel.setText("Sample rate: " + juce::String((int)report.sampleRate) + " Hz   Buffer: "
-                            + juce::String(report.inputBufferSize) + " in / " + juce::String(report.outputBufferSize) + " out",
+                            + juce::String(report.inputBufferSize) + " in / " + juce::String(report.outputBufferSize) + " out"
+                            + source,
                             juce::dontSendNotification);
     } else {
         latencyLabel.setText("Latency (est.): n/a", juce::dontSendNotification);
@@ -308,6 +353,24 @@ void SettingsView::refresh() {
     if (errors.isEmpty()) errors = "No audio errors.";
     errorLabel.setText(errors.trim(), juce::dontSendNotification);
 
+    // Render load says how much of each block the engine is spending. High p99
+    // is the honest reason a smaller buffer glitches, so it belongs next to
+    // the latency budget rather than in a log.
+    const auto render = audioEngine.getRenderTelemetry();
+    if (render.count > 0) {
+        renderLoadLabel.setText("Render p99: " + juce::String(render.renderP99Ms, 2) + " ms  -  "
+                                    + juce::String(render.renderWorstOverBlockPercent, 0)
+                                    + "% of a block  -  " + juce::String(render.renderMaxMs, 1)
+                                    + " ms max",
+                                juce::dontSendNotification);
+        renderLoadLabel.setColour(juce::Label::textColourId,
+                                  render.renderWorstOverBlockPercent > 70.0 ? theme::amber()
+                                                                            : theme::dim());
+    } else {
+        renderLoadLabel.setText("Render load: waiting for audio", juce::dontSendNotification);
+        renderLoadLabel.setColour(juce::Label::textColourId, theme::dim());
+    }
+
     const bool busy = audioEngine.isOpeningDevices();
     if (!dirty_) {
         lowLatencyInputToggle.setToggleState(staged_.lowLatencyInput, juce::dontSendNotification);
@@ -319,6 +382,49 @@ void SettingsView::refresh() {
     for (auto* toggle : { &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
                            &minimalClockFifoToggle, &fullDuplexToggle }) {
         toggle->setEnabled(!busy);
+    }
+
+    const auto profile = audioEngine.getLatencyProfileState();
+    profileButton.setButtonText(profile.active ? "Cancel search" : "Find low-latency setting");
+    profileButton.setEnabled(!busy);
+
+    const auto asioDrivers = audioEngine.getAsioDeviceNames();
+    forceAsioButton.setEnabled(!busy && !asioDrivers.isEmpty());
+    if (forceAsioStatus_.isNotEmpty()) {
+        asioStatusLabel.setText(forceAsioStatus_, juce::dontSendNotification);
+        asioStatusLabel.setColour(juce::Label::textColourId,
+                                  forceAsioStatus_.startsWith("Clock is now") ? theme::green()
+                                                                             : theme::amber());
+    } else if (asioDrivers.isEmpty()) {
+        asioStatusLabel.setText("No ASIO driver installed - using Windows Audio.",
+                                juce::dontSendNotification);
+        asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+    } else {
+        asioStatusLabel.setText("ASIO available: " + asioDrivers.joinIntoString(", "),
+                                juce::dontSendNotification);
+        asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+    }
+    if (profile.active) {
+        profileStatusLabel.setText("Step " + juce::String(profile.stepIndex) + " of "
+                                       + juce::String(profile.totalSteps) + " - "
+                                       + juce::String(profile.currentBuffer) + " samples - "
+                                       + juce::String(juce::jmax(0, profile.remainingMs) / 1000)
+                                       + " s left",
+                                   juce::dontSendNotification);
+        profileStatusLabel.setColour(juce::Label::textColourId, theme::amber());
+    } else if (profile.failed) {
+        profileStatusLabel.setText("Glitched - back at " + juce::String(profile.currentBuffer)
+                                       + " samples",
+                                   juce::dontSendNotification);
+        profileStatusLabel.setColour(juce::Label::textColourId, theme::red());
+    } else if (profile.finished) {
+        profileStatusLabel.setText("Stable at " + juce::String(profile.currentBuffer) + " samples",
+                                   juce::dontSendNotification);
+        profileStatusLabel.setColour(juce::Label::textColourId, theme::green());
+    } else {
+        profileStatusLabel.setText("Finds the smallest buffer this device survives.",
+                                   juce::dontSendNotification);
+        profileStatusLabel.setColour(juce::Label::textColourId, theme::dim());
     }
     inputBufferSizeCombo.setEnabled(!busy);
     outputBufferSizeCombo.setEnabled(!busy);
@@ -411,6 +517,7 @@ void SettingsView::updateMeasurement(const AudioEngine::LatencyReport& report) {
 
     measureButton.setButtonText(measuring ? "Cancel Measurement" : "Measure Round-Trip");
     measureButton.setEnabled(!busy && (measuring || ready));
+    budgetView.setReport(report);
 
     const auto setDetail = [this](const juce::String& text, juce::Colour colour) {
         measuredDetailLabel.setText(text, juce::dontSendNotification);
@@ -565,7 +672,10 @@ void SettingsView::pollAutoReload() {
     }
 }
 
-void SettingsView::timerCallback() { refresh(); }
+void SettingsView::timerCallback() {
+    if (audioEngine.isLatencyProfileActive()) (void) audioEngine.tickLatencyProfile();
+    refresh();
+}
 
 void SettingsView::resized() {
     auto area = getLocalBounds().reduced(theme::ui::kPagePad);
@@ -625,6 +735,9 @@ void SettingsView::resized() {
     measuredLabel.setBounds(measureRow);
     area.removeFromTop(2);
     measuredDetailLabel.setBounds(area.removeFromTop(16));
+    area.removeFromTop(theme::ui::kRowGap);
+    budgetView.setBounds(area.removeFromTop(LatencyBudgetView::preferredHeight()));
+    renderLoadLabel.setBounds(area.removeFromTop(16));
 
     area.removeFromTop(theme::ui::kSectionGap);
     placeCaption(area.removeFromTop(theme::ui::kSectionH), tuningLabel, tuningBeta);
@@ -634,6 +747,18 @@ void SettingsView::resized() {
         toggle->setBounds(area.removeFromTop(24).removeFromLeft(430));
         area.removeFromTop(4);
     }
+
+    area.removeFromTop(theme::ui::kRowGap);
+    auto profileRow = area.removeFromTop(theme::ui::kControlH);
+    profileButton.setBounds(profileRow.removeFromLeft(200));
+    profileRow.removeFromLeft(theme::ui::kRowGap);
+    profileStatusLabel.setBounds(profileRow);
+
+    area.removeFromTop(2);
+    auto asioRow = area.removeFromTop(theme::ui::kControlH);
+    forceAsioButton.setBounds(asioRow.removeFromLeft(120));
+    asioRow.removeFromLeft(theme::ui::kRowGap);
+    asioStatusLabel.setBounds(asioRow);
 
     area.removeFromTop(theme::ui::kRowGap);
     auto thumbRow = area.removeFromTop(theme::ui::kControlH);

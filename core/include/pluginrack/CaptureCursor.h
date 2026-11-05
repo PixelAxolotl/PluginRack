@@ -44,6 +44,7 @@ public:
         baselineWritten_ = 0;
         outputSinceBaseline_ = 0;
         ratePrimed_ = false;
+        reprime_ = false;
         current_ = Window{};
     }
 
@@ -76,6 +77,16 @@ public:
             baselineWritten_ = writtenClamped;
             outputSinceBaseline_ = 0;
             ratePrimed_ = true;
+            reprime_ = false;
+        } else if (reprime_) {
+            // A starvation reset the cursor to the writer position; put the
+            // delay back so the next block has the full window again.
+            cursor_ = static_cast<double>(
+                std::max<std::int64_t>(0, writtenClamped - target));
+            baselineWritten_ = writtenClamped;
+            outputSinceBaseline_ = 0;
+            ratePrimed_ = true;
+            reprime_ = false;
         }
 
         // Long-baseline writer rate: the number of input samples produced per
@@ -165,6 +176,13 @@ public:
         targetDelay_ = std::clamp(targetDelaySamples, 0, std::max(0, capacity_ - 1));
     }
 
+    // A starvation leaves the cursor at the writer position, so the delay the
+    // owner just asked for does not exist yet and every following block is
+    // short again. Ask for one re-prime: the next new epoch restarts at
+    // `written - target` with a fresh rate baseline. Deferred to an epoch
+    // boundary so channels sharing this capture still get one window each.
+    void requestReprime() noexcept { reprime_ = true; }
+
 private:
     int capacity_ = 0;
     int targetDelay_ = 0;
@@ -175,6 +193,7 @@ private:
     std::uint64_t servedEpoch_ = 0;
     bool primed_ = false;
     bool ratePrimed_ = false;
+    bool reprime_ = false;
     Window current_{};
 };
 

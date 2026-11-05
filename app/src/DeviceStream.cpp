@@ -1,8 +1,14 @@
-﻿#include "DeviceStream.h"
+#include "DeviceStream.h"
+
+#include "RealtimeThread.h"
+
+#include <pluginrack/DeviceTypePolicy.h>
+#include <pluginrack/OutputBufferPolicy.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <vector>
 
 namespace {
@@ -24,6 +30,35 @@ const juce::String kTypeLowLatency = "Windows Audio (Low Latency Mode)";
 const juce::String kTypeExclusive = "Windows Audio (Exclusive Mode)";
 const juce::String kTypeShared = "Windows Audio";
 const juce::String kTypeAsio = "ASIO";
+
+// Whether this build can reach an ASIO driver at all. Asking the policy to
+// order a type we cannot create would just spend a failed probe.
+bool asioAvailable() {
+#if JUCE_ASIO
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Endpoints remember the buffer size they settled on, so a later launch asks for
+// it directly. Without this "Auto" let the driver hand back 960 on one launch
+// and 480 on the next for the same device, which moved every latency derived
+// from the clock period.
+juce::CriticalSection bufferCacheLock;
+std::map<juce::String, int> bufferCache;
+
+int cachedBufferFor(const juce::String& deviceName) {
+    const juce::ScopedLock sl(bufferCacheLock);
+    const auto it = bufferCache.find(deviceName);
+    return it != bufferCache.end() ? it->second : 0;
+}
+
+void rememberBufferFor(const juce::String& deviceName, int bufferSize) {
+    if (deviceName.isEmpty() || bufferSize <= 0) return;
+    const juce::ScopedLock sl(bufferCacheLock);
+    bufferCache[deviceName] = bufferSize;
+}
 
 std::unique_ptr<juce::AudioIODeviceType> createTypeInstance(const juce::String& typeName) {
     if (typeName == kTypeLowLatency)
@@ -75,16 +110,22 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
                                    double engineSampleRate,
                                    int requestedBufferSize,
                                    juce::String& errorOut,
-                                   bool preferExclusive = false) {
+                                   bool preferExclusive,
+                                   pluginrack::StreamRole role,
+                                   int duplexInputChannels) {
+    if (duplexInputChannels > 0) {
+        wantInput = true;
+        numInputChannels = juce::jmax(1, duplexInputChannels);
+    }
     // Only name lookups happen here (no driver probe). The first type that
     // carries the endpoint is the single attempt we make: every extra type is
     // another full WASAPI probe, and a startup that keeps failing for a minute
     // is worse than a strip that goes silent with a clear error.
-    juce::StringArray typeOrder { kTypeShared, kTypeLowLatency, kTypeExclusive, kTypeAsio };
-    if (preferExclusive) {
-        typeOrder.removeString(kTypeExclusive);
-        typeOrder.insert(0, kTypeExclusive);
-    }
+    // The order itself comes from the shared policy so the clock can reach ASIO
+    // first while captures and extra outputs stay on shareable types.
+    juce::StringArray typeOrder;
+    for (const auto name : pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable()))
+        typeOrder.add(juce::String(name.data(), static_cast<int>(name.size())));
 
     juce::AudioIODeviceType* chosenType = nullptr;
     juce::String chosenTypeName;
@@ -131,7 +172,10 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
         setup.outputDeviceName = selectedDeviceName;
     if (requestedBufferSize >= 0) {
         setup.sampleRate = engineSampleRate; // 0 = driver default
-        setup.bufferSize = requestedBufferSize;
+        // Auto asks for the size this endpoint accepted last time; 0 on a first
+        // run lets the driver open, and the block below settles on its minimum.
+        setup.bufferSize = requestedBufferSize > 0 ? requestedBufferSize
+                                                   : cachedBufferFor(selectedDeviceName);
     }
     juce::XmlElement typeSetup("DEVICESETUP");
     typeSetup.setAttribute("deviceType", chosenTypeName);
@@ -144,6 +188,27 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     auto* device = err.isEmpty() ? manager.getCurrentAudioDevice() : nullptr;
     if (err.isEmpty() && device == nullptr)
         err = "Could not open " + selectedDeviceName + ".";
+
+    // Auto means "the lowest this endpoint supports", not "whatever the driver
+    // felt like today". Settle on it now and remember it for the next launch.
+    if (err.isEmpty() && requestedBufferSize <= 0) {
+        std::vector<int> available;
+        for (const int size : device->getAvailableBufferSizes()) available.push_back(size);
+        const int current = device->getCurrentBufferSizeSamples();
+        const int wanted = pluginrack::smallestSupportedBufferSize(available, current, 0);
+        if (wanted > 0 && wanted != current) {
+            auto liveSetup = manager.getAudioDeviceSetup();
+            liveSetup.bufferSize = wanted;
+            // A device may advertise a size it then refuses; keeping the opened
+            // stream is better than failing the whole strip over a few ms.
+            if (manager.setAudioDeviceSetup(liveSetup, true).isEmpty()) {
+                device = manager.getCurrentAudioDevice();
+            }
+        }
+        if (device != nullptr) {
+            rememberBufferFor(selectedDeviceName, device->getCurrentBufferSizeSamples());
+        }
+    }
     if (err.isEmpty() && requestedBufferSize > 0
         && device->getCurrentBufferSizeSamples() != requestedBufferSize) {
         err = "The device does not support a " + juce::String(requestedBufferSize)
@@ -151,6 +216,14 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     }
     if (err.isNotEmpty()) {
         manager.closeAudioDevice();
+        if (chosenTypeName == kTypeAsio) {
+            // ASIO drivers are single-client. Once the clock holds the
+            // interface, any second PluginRack stream (or another application)
+            // asking for it fails, and the raw driver error never says why.
+            err += "\nASIO interfaces accept one client: close the other "
+                   "stream or application using this interface, or give this "
+                   "stream its Windows Audio device instead.";
+        }
         errorOut = err;
         return {};
     }
@@ -210,6 +283,35 @@ juce::StringArray enumerate(bool wantInputs) {
 
 juce::StringArray inputs() { return enumerate(true); }
 juce::StringArray outputs() { return enumerate(false); }
+
+juce::StringArray asioDevices() {
+#if JUCE_ASIO
+    // Scanning ASIO probes the driver, so cache it briefly: "Force ASIO" asks
+    // on every UI timer tick.
+    static juce::CriticalSection lock;
+    static juce::StringArray cached;
+    static juce::int64 cachedAt = 0;
+    const auto now = juce::Time::currentTimeMillis();
+    {
+        const juce::ScopedLock sl(lock);
+        if (cachedAt != 0 && (now - cachedAt) < 5000) return cached;
+    }
+    juce::StringArray names;
+    if (auto type = std::unique_ptr<juce::AudioIODeviceType>(
+            juce::AudioIODeviceType::createAudioIODeviceType_ASIO())) {
+        type->scanForDevices();
+        names = type->getDeviceNames(false);
+        if (names.isEmpty()) names = type->getDeviceNames(true);
+        names.sort(true);
+    }
+    const juce::ScopedLock sl(lock);
+    cached = names;
+    cachedAt = now;
+    return names;
+#else
+    return {};
+#endif
+}
 }
 
 // ---------- InputCapture ----------
@@ -239,7 +341,8 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ true,
                                               numInputChannels, 0,
                                               engineSampleRate, requestedBufferSize, errorOut,
-                                              preferExclusive);
+                                              preferExclusive, pluginrack::StreamRole::Input,
+                                              0);
     if (activeDeviceType_.isEmpty()) {
         error = errorOut;
         return errorOut;
@@ -305,10 +408,24 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     // room to work without an audible block repeat. Low-latency mode uses one
     // block instead of two.
     const int maxDelay = juce::jmax(0, capacity - blockFrames - 2);
-    const int delay = juce::jlimit(0, maxDelay, blockFrames * juce::jmax(1, readDelayBlocks));
+    // The plan owns the arithmetic: it settles on one block plus a small
+    // headroom (the minimum CaptureReadCursor can serve) and is re-settled when
+    // the clock's real render block arrives.
+    pluginrack::InputDelayPlan::Config planConfig;
+    planConfig.readDelayBlocks = juce::jmax(1, readDelayBlocks);
+    delayPlan_.open(deviceBufferSize, renderBlockFrames, planConfig);
+    const int delay = juce::jlimit(0, maxDelay, delayPlan_.delay());
     readDelaySamples.store(delay, std::memory_order_relaxed);
     initialReadDelay_.store(delay, std::memory_order_relaxed);
     readCursor.prepare(capacity, delay, 0.005);
+    pluginrack::DelayTargetController::Config targetConfig;
+    targetConfig.blockFrames = juce::jmax(1, delayPlan_.blockFrames());
+    targetConfig.minDelaySamples = delayPlan_.floor();
+    // Hard ceiling: eight blocks is already a sick device.
+    targetConfig.maxDelaySamples = juce::jmin(maxDelay, delayPlan_.blockFrames() * 8);
+    delayTarget_.configure(targetConfig);
+    delayTarget_.reset(delay);
+    openedAtMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     lastPlayed_[0] = 0.0f;
     lastPlayed_[1] = 0.0f;
     lastUnderrunEpoch_ = 0;
@@ -346,6 +463,27 @@ void InputCapture::close() {
     latencySamples.store(0, std::memory_order_relaxed);
 }
 
+void InputCapture::applyRenderBlockFrames(int blockFrames) {
+    if (capacity <= 0 || blockFrames <= 0) return;
+    // A starvation already told us this device needs more than the minimum.
+    // Re-settling would give that safety back and glitch again.
+    if (inputUnderruns.load(std::memory_order_relaxed) != 0) return;
+
+    const int maxDelay = juce::jmax(0, capacity - blockFrames - 2);
+    const int delay = juce::jlimit(0, maxDelay, delayPlan_.applyRenderBlock(blockFrames));
+    if (delay == readDelaySamples.load(std::memory_order_relaxed)) return;
+
+    readDelaySamples.store(delay, std::memory_order_relaxed);
+    readCursor.setTargetDelay(delay);
+
+    pluginrack::DelayTargetController::Config config = delayTarget_.config();
+    config.blockFrames = juce::jmax(1, blockFrames);
+    config.minDelaySamples = delayPlan_.floor();
+    config.maxDelaySamples = juce::jmin(maxDelay, blockFrames * 8);
+    delayTarget_.configure(config);
+    delayTarget_.reset(delay);
+}
+
 bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                         const std::vector<int>& physicalChannels,
                         std::uint64_t epoch) {
@@ -379,25 +517,39 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
     const bool primedEnough = written >= targetDelay + static_cast<std::uint64_t>(frames);
     if (window.underrun && window.fresh && primedEnough) {
         inputUnderruns.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (window.overrun && window.fresh) inputOverruns.fetch_add(1, std::memory_order_relaxed);
 
-        // Low-latency input starts with one block of delay, but a separate
-        // input clock can drift or arrive late. Add one render block only
-        // after a real starvation, preserving the low setting while stable
-        // and recovering to the normal safety margin when it is not.
-        // Back off at most once: a single real starvation adds one render
-        // block of safety margin. Repeated underruns (e.g. during a device
-        // reload) must not keep growing the delay into an unreasonable
-        // amount, so once we have backed off beyond the initial delay we stop.
+    if (window.fresh) {
         const int currentDelay = readDelaySamples.load(std::memory_order_relaxed);
-        const int baseDelay = initialReadDelay_.load(std::memory_order_relaxed);
-        const int maxDelay = juce::jmax(0, capacity - frames - 2);
-        const int nextDelay = juce::jmin(maxDelay, currentDelay + frames);
-        if (nextDelay > currentDelay && currentDelay <= baseDelay) {
+        // The cursor clamps `available` to one block whenever it can serve a
+        // full window, so it cannot report how much history is left: deriving a
+        // fill error from it is always negative and would block every shrink.
+        // Calm is therefore "no starvation and no overrun", which is exactly
+        // what the controller needs; the cursor already steers clock drift
+        // through its read ratio.
+        const double blockMs = sampleRate > 0.0
+                                   ? static_cast<double>(frames) / sampleRate * 1000.0
+                                   : 0.0;
+        // The first half second is the device priming: a short window there is
+        // expected and says nothing about how much margin the stream needs.
+        const auto openedAt = openedAtMs_.load(std::memory_order_relaxed);
+        const bool settledIn = openedAt == 0
+                               || juce::Time::getMillisecondCounter() - openedAt > 500;
+        const bool starved = window.underrun && primedEnough && settledIn;
+        const int nextDelay = delayTarget_.onBlock(currentDelay, starved, window.overrun,
+                                                   0, blockMs);
+        if (nextDelay != currentDelay) {
             readDelaySamples.store(nextDelay, std::memory_order_relaxed);
             readCursor.setTargetDelay(nextDelay);
         }
+        if (starved) {
+            // The cursor drops to the writer position on a starvation, so the
+            // delay we just asked for does not exist yet. Re-prime it or every
+            // following block is short as well and the delay walks upward.
+            readCursor.requestReprime();
+        }
     }
-    if (window.overrun && window.fresh) inputOverruns.fetch_add(1, std::memory_order_relaxed);
 
     // Declick bookkeeping: mark the epoch that ended in a fade-out, then
     // designate the first full epoch after it as the ramp-in epoch. Both the
@@ -510,6 +662,8 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
 }
 
 void InputCapture::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const*, int, int numSamples, const juce::AudioIODeviceCallbackContext&) {
+    realtime::registerProAudioThread();
+    const juce::ScopedNoDenormals noDenormals;
     if (capacity <= 0 || numSamples <= 0) return;
     if (numSamples > capacity) {
         inputDroppedFrames.fetch_add((std::uint64_t) numSamples,
@@ -588,7 +742,9 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                   int targetFillBlocks,
                                   int primeBlocks,
                                   bool preferExclusive,
-                                  int renderBlockFrames) {
+                                  int renderBlockFrames,
+                                  pluginrack::StreamRole role,
+                                  int duplexInputChannels) {
     close();
     closing_.store(false, std::memory_order_relaxed);
     error.clear();
@@ -598,7 +754,8 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
                                               0, 2,
                                               engineSampleRate, requestedBufferSize, errorOut,
-                                              preferExclusive);
+                                              preferExclusive, role,
+                                              duplexInputChannels);
     if (activeDeviceType_.isEmpty()) {
         error = errorOut;
         return errorOut;
@@ -622,6 +779,17 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     }
 
     sampleRate = actual;
+    duplex_.store(duplexInputChannels > 0, std::memory_order_relaxed);
+    if (duplex_.load(std::memory_order_relaxed)) {
+        duplexInputChannels_.store(static_cast<int>(dev->getInputChannelNames().size()),
+                                   std::memory_order_relaxed);
+        deviceInputLatency_.store(dev->getInputLatencyInSamples(), std::memory_order_relaxed);
+        // The callback owns both directions and writes the render result
+        // straight into the device buffer, so a FIFO target here would only add
+        // latency: there is nothing to queue.
+        targetFillBlocks = 0;
+        primeBlocks = 0;
+    }
     bufferSize = dev->getCurrentBufferSizeSamples();
     if (bufferSize <= 0) bufferSize = 256;
     renderBlockFrames_ = renderBlockFrames > 0 ? renderBlockFrames : bufferSize;
@@ -630,13 +798,14 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     // spare blocks for bursts. The old fixed 16384 cap could make the ring
     // smaller than the priming target at large device buffer sizes, so the
     // first push was always dropped.
-    targetFillFrames = bufferSize * juce::jmax(0, targetFillBlocks);
+    const int targetFrames = bufferSize * juce::jmax(0, targetFillBlocks);
+    targetFillFrames.store(targetFrames, std::memory_order_relaxed);
     // The render block belongs to the clock output and can differ from this
     // device's callback size. Reserve enough room for a complete render block
     // as well as the normal device-buffer headroom; otherwise a small
     // non-clock buffer rejects every push from a larger clock block.
     const int renderHeadroom = juce::jmax(bufferSize, renderBlockFrames_ * 2);
-    capacity = juce::jmax(targetFillFrames + renderHeadroom,
+    capacity = juce::jmax(targetFrames + renderHeadroom,
                           juce::jmin(juce::jmax(bufferSize * 8,
                                                renderBlockFrames_ * 2),
                                      65536));
@@ -671,6 +840,10 @@ void OutputPlayback::close() {
     closing_.store(true, std::memory_order_relaxed);
     manager.removeAudioCallback(this);
     manager.closeAudioDevice();
+    duplex_.store(false, std::memory_order_relaxed);
+    duplexInputChannels_.store(0, std::memory_order_relaxed);
+    deviceInputLatency_.store(0, std::memory_order_relaxed);
+    duplexInputHook = nullptr;
     {
         // The clock device's render thread may still be inside push() from an
         // in-flight render. Keep close() from pulling the FIFO out from under
@@ -690,8 +863,39 @@ void OutputPlayback::close() {
     lowWatermarkActive = false;
 }
 
+void OutputPlayback::setTargetFillBlocks(int blocks) {
+    if (bufferSize <= 0) return;
+    const int wanted = bufferSize * juce::jmax(0, blocks);
+    if (wanted == targetFillFrames.load(std::memory_order_relaxed)) return;
+    targetFillFrames.store(wanted, std::memory_order_relaxed);
+    trimToTarget.store(true, std::memory_order_release);
+}
+
 void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     if (frames <= 0) return;
+
+    // Duplex: the render result goes straight into the device buffer that this
+    // same callback is about to hand to the driver. No queue, no latency, and
+    // no consumer to race with.
+    if (duplex_.load(std::memory_order_relaxed)) {
+        if (currentOutputChannels == nullptr) {
+            outputDroppedFrames.fetch_add((std::uint64_t) frames,
+                                          std::memory_order_relaxed);
+            return;
+        }
+        const int srcChans = juce::jmax(1, src.getNumChannels());
+        const int chans = juce::jmin(2, currentNumOutputChannels);
+        for (int ch = 0; ch < chans; ++ch) {
+            float* dst = currentOutputChannels[ch];
+            if (dst == nullptr) continue;
+            const int srcCh = juce::jmin(ch, srcChans - 1);
+            std::memcpy(dst, src.getReadPointer(srcCh),
+                        sizeof(float) * (std::size_t) frames);
+        }
+        fillFrames.store(0, std::memory_order_relaxed);
+        return;
+    }
+
     const juce::SpinLock::ScopedTryLockType lock(fifoLock);
     if (!lock.isLocked() || fifo == nullptr) {
         outputDroppedFrames.fetch_add((std::uint64_t) frames,
@@ -754,13 +958,27 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
 
 void OutputPlayback::pushSilence(int frames) {
     if (frames <= 0) return;
+
+    if (duplex_.load(std::memory_order_relaxed)) {
+        // Nothing is queued in duplex mode: silence the device buffer directly.
+        if (currentOutputChannels != nullptr) {
+            for (int ch = 0; ch < juce::jmin(2, currentNumOutputChannels); ++ch) {
+                if (currentOutputChannels[ch] != nullptr) {
+                    juce::FloatVectorOperations::clear(currentOutputChannels[ch], frames);
+                }
+            }
+        }
+        return;
+    }
+
     const juce::SpinLock::ScopedTryLockType lock(fifoLock);
     if (!lock.isLocked() || fifo == nullptr || capacity <= 0) return;
     // Only top the FIFO back up to its target. A single missed render is
     // already covered by the buffered audio; inserting silence on top of a
     // full FIFO would both delay the dropout and spam the dropped-frame
     // counter for the whole stall.
-    if (targetFillFrames > 0 && fifo->getNumReady() >= targetFillFrames) {
+    if (targetFillFrames.load(std::memory_order_relaxed) > 0
+        && fifo->getNumReady() >= targetFillFrames.load(std::memory_order_relaxed)) {
         return;
     }
     if (frames > capacity || fifo->getFreeSpace() < frames) {
@@ -795,7 +1013,9 @@ void OutputPlayback::pushSilence(int frames) {
     fillFrames.store(fifo->getNumReady(), std::memory_order_relaxed);
 }
 
-void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext&) {
+void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext&) {
+    realtime::registerProAudioThread();
+    const juce::ScopedNoDenormals noDenormals;
     if (closing_.load(std::memory_order_relaxed)) {
         for (int ch = 0; ch < numOutputChannels; ++ch) {
             if (outputChannelData[ch] != nullptr) {
@@ -808,8 +1028,48 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     currentOutputChannels = outputChannelData;
     currentNumOutputChannels = numOutputChannels;
 
+    // Duplex: this callback owns both directions, so hand the capture to the
+    // engine before it renders. No ring, no second device client.
+    const bool duplex = duplex_.load(std::memory_order_relaxed);
+    if (duplex && duplexInputHook) {
+        duplexInputHook(inputChannelData, numInputChannels);
+    }
+
+    // A stream opened before its feed was running is primed deep enough to
+    // survive the hand-off. Once it is fed every callback that prime is pure
+    // latency, so drop the stale backlog here, on the only thread that reads
+    // this FIFO, before the new block is pushed.
+    if (trimToTarget.exchange(false, std::memory_order_acquire)) {
+        const int ready = fifo->getNumReady();
+        const int target = juce::jmax(0, targetFillFrames.load(std::memory_order_relaxed));
+        if (ready > target) {
+            auto stale = fifo->read(ready - target);
+            juce::ignoreUnused(stale);
+            deviceFadeInRemaining = 64;
+            lowWatermarkActive = false;
+        }
+    }
+
+    bool rendered = false;
     if (renderActive.load() && renderHook) {
         renderHook(numSamples);
+        rendered = true;
+    }
+
+    if (duplex) {
+        // push() wrote the rendered block straight into these buffers, so a
+        // clear here would erase it. Only a callback that did not render needs
+        // one, and there is no FIFO to drain either way.
+        if (!rendered) {
+            for (int ch = 0; ch < numOutputChannels; ++ch) {
+                if (outputChannelData[ch] != nullptr) {
+                    juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
+                }
+            }
+        }
+        currentOutputChannels = nullptr;
+        fillFrames.store(0, std::memory_order_relaxed);
+        return;
     }
 
     // clear device
@@ -830,9 +1090,10 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     // When the fill is on target this remains the old memcpy fast path.
     const int readyBefore = fifo->getNumReady();
     constexpr double kMaxDriftCorrection = 0.005;
-    const int fillScale = juce::jmax(1, juce::jmax(targetFillFrames, bufferSize));
-    const double fillCorrection = targetFillFrames > 0
-        ? std::clamp((double)(readyBefore - targetFillFrames)
+    const int targetFill = targetFillFrames.load(std::memory_order_relaxed);
+    const int fillScale = juce::jmax(1, juce::jmax(targetFill, bufferSize));
+    const double fillCorrection = targetFill > 0
+        ? std::clamp((double)(readyBefore - targetFill)
                          / (double)fillScale * kMaxDriftCorrection,
                      -kMaxDriftCorrection, kMaxDriftCorrection)
         : 0.0;
@@ -856,6 +1117,13 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
         // Fade the short tail to silence; the next complete block fades back
         // in instead of starting at an arbitrary amplitude.
         deviceFadeInRemaining = 64;
+        // A zero target assumes the render hook always pushes exactly one
+        // device block before this read. If that assumption ever fails, buy
+        // one block of margin back rather than glitching on every callback.
+        if (targetFillFrames.load(std::memory_order_relaxed) == 0
+            && !trimToTarget.load(std::memory_order_relaxed)) {
+            targetFillFrames.store(bufferSize, std::memory_order_relaxed);
+        }
     }
 
     const int chans = juce::jmin(2, numOutputChannels);
@@ -915,8 +1183,9 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const*, int,
     const int ready = fifo->getNumReady();
     fillFrames.store(ready, std::memory_order_relaxed);
     // Count low-watermark events, not every callback spent below the mark: a
-    // persistent starvation would otherwise inflate the counter forever.
-    const bool low = ready < bufferSize;
+    // persistent starvation would otherwise inflate the counter forever. A
+    // zero target (the clock's running depth) is not a watermark at all.
+    const bool low = targetFill > 0 && ready < bufferSize;
     if (low) {
         if (!lowWatermarkActive) {
             outputLowWatermarks.fetch_add(1, std::memory_order_relaxed);

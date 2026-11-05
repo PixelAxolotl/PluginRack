@@ -17,6 +17,7 @@ target_sources(pluginrack_app PRIVATE
     src/ChannelStrip.h
     src/ConsoleLookAndFeel.cpp
     src/ConsoleLookAndFeel.h
+    src/DeviceBackend.h
     src/DeviceControl.cpp
     src/DeviceControl.h
     src/DeviceMenu.cpp
@@ -25,7 +26,9 @@ target_sources(pluginrack_app PRIVATE
     src/InsertMiniView.h
     src/IoView.cpp
     src/IoView.h
+    src/LatencyBudgetView.h
     src/PageHeader.h
+    src/RealtimeThread.h
     src/DeviceMenu.h
     src/DynamicsWindow.cpp
     src/DynamicsWindow.h

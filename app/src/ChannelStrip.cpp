@@ -644,6 +644,7 @@ void ChannelStrip::refreshInput() {
     inputComboA.setVisible(hasInputDevice && inputEditing);
     inputComboB.setVisible(hasInputDevice && inputEditing && !mono);
     deviceControl.setDeviceName(deviceState.deviceName);
+    deviceControl.setBackendType(deviceState.deviceType);
     deviceControl.setError(deviceState.error);
     inputErrorLabel.setText(deviceState.error, juce::dontSendNotification);
     inputErrorLabel.setVisible(deviceState.error.isNotEmpty());

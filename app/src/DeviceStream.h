@@ -1,8 +1,12 @@
-﻿#pragma once
+#pragma once
 
 #include <JuceHeader.h>
 
+#include <pluginrack/AudioTelemetry.h>
 #include <pluginrack/CaptureCursor.h>
+#include <pluginrack/DelayTargetController.h>
+#include <pluginrack/DeviceTypePolicy.h>
+#include <pluginrack/InputDelayPlan.h>
 
 #include <atomic>
 #include <cstdint>
@@ -13,6 +17,9 @@
 namespace DeviceEnumeration {
 juce::StringArray inputs();
 juce::StringArray outputs();
+// ASIO driver names only. Empty when this build has no ASIO support or no
+// driver is installed, which is exactly what "Force ASIO" needs to know.
+juce::StringArray asioDevices();
 }
 
 class InputCapture : public juce::AudioIODeviceCallback {
@@ -62,6 +69,11 @@ public:
     // Device type the last successful open() selected (e.g. "Windows Audio
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
     juce::String getActiveDeviceType() const { return activeDeviceType_; }
+
+    // The clock has negotiated its buffer: settle the read delay on the real
+    // render block instead of the placeholder the open may have used. Skipped
+    // once a starvation has taught this device that it needs more.
+    void applyRenderBlockFrames(int blockFrames);
 
     int inputChannelCount() const { return inputChannelCount_; }
     // Total inputs the device itself provides; may exceed inputChannelCount(),
@@ -146,6 +158,15 @@ private:
     std::uint64_t fadeInEpoch_ = 0;
     std::atomic<int> readDelaySamples{0};
     std::atomic<int> initialReadDelay_{0};
+    // Owns the read-delay target: grows on a real starvation and gives the
+    // latency back only after a long calm period. Reader-thread only.
+    pluginrack::DelayTargetController delayTarget_;
+    // Where the delay comes from: one place that knows the device buffer and
+    // the final render block, so every load settles on the same value.
+    pluginrack::InputDelayPlan delayPlan_;
+    // Starvation reports in the first half second are the device priming, not
+    // a sign the margin is too small; honouring them made loads inconsistent.
+    std::atomic<std::uint32_t> openedAtMs_{0};
     double sampleRate = 0.0;
     juce::String error;
     juce::String inputError;
@@ -190,7 +211,16 @@ public:
                       // FIFO. Independent output buffers can be smaller than
                       // the clock block, so the FIFO must still fit a whole
                       // render block.
-                      int renderBlockFrames = 0);
+                      int renderBlockFrames = 0,
+                      // The clock is the only stream allowed to prefer ASIO or
+                      // exclusive WASAPI; captures and extra outputs must stay
+                      // on types other applications can share.
+                      pluginrack::StreamRole role = pluginrack::StreamRole::Output,
+                      // > 0 opens the endpoint for capture as well, so one
+                      // driver client serves the clock and its inputs. The
+                      // callback then renders and writes straight into the
+                      // device buffer: no input ring, no output FIFO.
+                      int duplexInputChannels = 0);
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -201,7 +231,7 @@ public:
                (double) juce::jmax(1, capacity);
     }
     int getFillFrames() const { return fillFrames.load(std::memory_order_relaxed); }
-    int getTargetFillFrames() const { return targetFillFrames; }
+    int getTargetFillFrames() const { return targetFillFrames.load(std::memory_order_relaxed); }
     juce::String getError() const { return error; }
     // Device type the last successful open() selected (e.g. "Windows Audio
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
@@ -214,6 +244,20 @@ public:
 
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
+    // Duplex only: called at the top of each callback with the captured input
+    // channels, before the render hook runs. Valid only during the call.
+    void setDuplexInputHook(std::function<void(const float* const*, int)> hook) {
+        duplexInputHook = std::move(hook);
+    }
+    bool isDuplex() const { return duplex_.load(std::memory_order_relaxed); }
+    int getDuplexInputChannels() const { return duplexInputChannels_.load(std::memory_order_relaxed); }
+    int getDuplexInputLatencySamples() const { return deviceInputLatency_.load(std::memory_order_relaxed); }
+    // Depth the FIFO is held at while this stream is actually being fed, in
+    // device buffers. A device opened before its render hook is running needs
+    // a deep prime so it never starves during the hand-off, but that prime is
+    // pure latency once rendering starts — this retargets it and lets the
+    // device callback discard the stale backlog.
+    void setTargetFillBlocks(int blocks);
 
     void push(const juce::AudioBuffer<float>& src, int frames);
     // Fills the FIFO with a fade-to-silence block. Used by the engine's
@@ -240,7 +284,9 @@ private:
     int capacity = 0;
     int bufferSize = 256;
     int renderBlockFrames_ = 0;
-    int targetFillFrames = 0;
+    // Atomic because the device callback can raise it (a short read at a zero
+    // target) while the message thread lowers it on a reopen.
+    std::atomic<int> targetFillFrames{0};
     double sampleRate = 0.0;
     juce::String error;
     juce::String activeDeviceType_;
@@ -263,6 +309,16 @@ private:
     float lastPushedSample[2] = {0.0f, 0.0f};
     std::function<void(int)> renderHook;
     std::atomic<bool> renderActive{true};
+    // Duplex mode: capture and playback share one driver client, so the input
+    // arrives in the same callback that produces the output. The hook hands the
+    // input pointers to the engine, and push() writes straight to the device.
+    std::atomic<bool> duplex_{false};
+    std::atomic<int> duplexInputChannels_{0};
+    std::atomic<int> deviceInputLatency_{0};
+    std::function<void(const float* const*, int)> duplexInputHook;
+    // Set by setTargetFillBlocks(); the device callback performs the trim so
+    // the FIFO is only ever consumed by one thread.
+    std::atomic<bool> trimToTarget{false};
     float* const* currentOutputChannels = nullptr;
     int currentNumOutputChannels = 0;
 };

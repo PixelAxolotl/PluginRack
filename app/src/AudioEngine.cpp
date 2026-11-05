@@ -1,5 +1,11 @@
 #include "AudioEngine.h"
 
+#include "DeviceBackend.h"
+
+#include <pluginrack/AsioDeviceMatch.h>
+#include <pluginrack/InputBufferPolicy.h>
+#include <pluginrack/InputFollowPolicy.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -34,12 +40,10 @@ constexpr int kProbeRenderBlockFrames = 4096;
 const juce::String kNoSuchDevice = "No such device: ";
 
 // Compact label for the clock description: the registered device type names
-// ("Windows Audio (Low Latency Mode)") are too long for the toolbar.
+// ("Windows Audio (Low Latency Mode)") are too long for the toolbar. The shared
+// helper keeps the strips and the budget wording identical.
 juce::String shortDeviceTypeTag(const juce::String& type) {
-    if (type == "Windows Audio (Low Latency Mode)") return "LowLatency";
-    if (type == "Windows Audio (Exclusive Mode)") return "Exclusive";
-    if (type == "Windows Audio") return "Shared";
-    return type;
+    return deviceBackendTag(type);
 }
 
 // Scenes saved before the built-in dynamics rows existed can carry effects
@@ -151,6 +155,13 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
         const juce::ScopedLock lock(stateLock);
         maxBlockFrames_ = juce::jmax(1, maxBlockFrames);
         currentBufferSize = maxBlockFrames_;
+        // The clock has negotiated. Settle every capture's read delay on the
+        // real block now, so the value cannot depend on which device finished
+        // probing first at load.
+        for (auto& entry : inputCaptures_) {
+            if (entry.second.capture != nullptr)
+                entry.second.capture->applyRenderBlockFrames(maxBlockFrames_);
+        }
         for (auto& channel : channels) {
             channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
             channel->buffer.clear();
@@ -292,6 +303,14 @@ void AudioEngine::AnalyzerTap::snapshot(bool postEq, float* destL, float* destR,
 void AudioEngine::render(int frames) {
     if (frames <= 0) return;
 
+    const auto renderStart = std::chrono::steady_clock::now();
+    const auto elapsedNanos = [&renderStart] {
+        const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - renderStart)
+                               .count();
+        return static_cast<std::uint32_t>(juce::jlimit<std::int64_t>(0, 4'000'000'000, nanos));
+    };
+
     // Yield proportionally to the block budget: a 32-sample block cannot
     // afford as many scheduler yields as a 512-sample one.
     const BriefTryLock lock(stateLock, juce::jlimit(1, 16, frames / 16));
@@ -303,6 +322,8 @@ void AudioEngine::render(int frames) {
         // repeated the last block (an audible stutter). A clean faded dropout
         // is the correct fallback; the next real block fades back in.
         pushSilenceToOutputs(frames);
+        recordRenderTelemetry(frames, elapsedNanos(),
+                              pluginrack::AudioTelemetry::flagRenderMiss, 0);
         outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
@@ -311,6 +332,8 @@ void AudioEngine::render(int frames) {
     if (maxBlockFrames_ > 0 && frames > maxBlockFrames_) {
         oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
         pushSilenceToOutputsLocked(frames);
+        recordRenderTelemetry(frames, elapsedNanos(),
+                              pluginrack::AudioTelemetry::flagOversized, 0);
         outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
@@ -320,7 +343,9 @@ void AudioEngine::render(int frames) {
     // buffers are preallocated in prepareToPlay; clear used range only.
     for (auto& channel : channels) {
         channel->buffer.clear(0, frames);
-        if (channel->input) {
+        if (channel->duplexInput.get()) {
+            pullDuplexInput(*channel, frames);
+        } else if (channel->input) {
             channel->input->pull(channel->buffer, frames, channel->inputChannels, epoch);
         }
     }
@@ -564,7 +589,131 @@ void AudioEngine::render(int frames) {
         }
     }
 
+    std::int32_t clockFillFrames = 0;
+    for (const auto& output : outputs) {
+        if (output->id == clockOutputId && output->output != nullptr) {
+            clockFillFrames = static_cast<std::int32_t>(output->output->getFillFrames());
+        }
+    }
+    recordRenderTelemetry(frames, elapsedNanos(), 0, clockFillFrames);
+
     outputSampleCounter_ += (std::uint64_t)frames;
+}
+
+void AudioEngine::pullDuplexInput(Channel& channel, int frames) const {
+    if (duplexInputBuffers_ == nullptr || duplexInputBufferCount_ <= 0 || frames <= 0) return;
+    const int numDest = juce::jmin(2, static_cast<int>(channel.inputChannels.size()));
+    for (int i = 0; i < numDest; ++i) {
+        const int source = channel.inputChannels[static_cast<std::size_t>(i)];
+        if (source < 0 || source >= duplexInputBufferCount_) continue;
+        const float* in = duplexInputBuffers_[source];
+        if (in == nullptr) continue;
+        std::memcpy(channel.buffer.getWritePointer(i), in,
+                    sizeof(float) * static_cast<std::size_t>(frames));
+    }
+}
+
+void AudioEngine::recordRenderTelemetry(int frames, std::uint32_t renderNanos,
+                                        std::uint16_t flags,
+                                        std::int32_t outputFill) const {
+    pluginrack::AudioTelemetry::Sample sample;
+    sample.blockFrames = static_cast<std::uint32_t>(juce::jmax(0, frames));
+    sample.renderNanos = renderNanos;
+    sample.outputFillFrames = outputFill;
+    sample.flags = flags;
+    renderTelemetry_.push(sample);
+}
+
+pluginrack::AudioTelemetry::Summary AudioEngine::getRenderTelemetry() const {
+    const int blockFrames = maxBlockFrames_ > 0 ? maxBlockFrames_ : currentBufferSize;
+    return renderTelemetry_.summarise(static_cast<std::uint32_t>(juce::jmax(0, blockFrames)),
+                                      currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
+}
+
+void AudioEngine::startLatencyProfile() {
+    const auto diagnostics = getFifoDiagnostics();
+    latencyProfileLastEvents_ = diagnostics.inputUnderruns + diagnostics.inputOverruns
+                              + diagnostics.outputUnderruns + diagnostics.outputLowWatermarks
+                              + diagnostics.renderMisses;
+    const int startBuffer = currentBufferSize > 0 ? currentBufferSize : 480;
+    latencyProfile_.start(startBuffer, pluginrack::LatencyProfile::Config{});
+    latencyProfileLastMs_ = juce::Time::getMillisecondCounter();
+    latencyProfileAwaitingOpen_ = false;
+    (void) takeDeviceOpenErrors();
+    tickLatencyProfile();
+}
+
+void AudioEngine::cancelLatencyProfile() {
+    if (!latencyProfile_.status().active) return;
+    const int startBuffer = latencyProfile_.status().startBuffer;
+    latencyProfile_.cancel();
+    latencyProfileAwaitingOpen_ = false;
+    if (startBuffer > 0) {
+        auto settings = getDeviceSettings();
+        settings.inputBuffer = startBuffer;
+        settings.outputBuffer = startBuffer;
+        applyDeviceSettings(settings);
+    }
+}
+
+AudioEngine::LatencyProfileState AudioEngine::tickLatencyProfile() {
+    if (!latencyProfile_.status().active) return getLatencyProfileState();
+
+    const auto now = juce::Time::getMillisecondCounter();
+    const double elapsedMs = latencyProfileLastMs_ == 0
+                                 ? 0.0
+                                 : static_cast<double>(now - latencyProfileLastMs_);
+    latencyProfileLastMs_ = now;
+
+    const auto diagnostics = getFifoDiagnostics();
+    const auto events = diagnostics.inputUnderruns + diagnostics.inputOverruns
+                      + diagnostics.outputUnderruns + diagnostics.outputLowWatermarks
+                      + diagnostics.renderMisses;
+    // A device reload can reset counters; never treat that as negative input.
+    const auto delta = events >= latencyProfileLastEvents_ ? events - latencyProfileLastEvents_ : 0;
+    latencyProfileLastEvents_ = events;
+
+    // The step we applied last tick has finished opening: that is the only
+    // point where a refusal is attributable to this step.
+    if (latencyProfileAwaitingOpen_ && !isOpeningDevices()) {
+        latencyProfileAwaitingOpen_ = false;
+        const bool refused = !takeDeviceOpenErrors().isEmpty();
+        latencyProfile_.onApplied(latencyProfileRequested_, refused);
+    }
+
+    const auto action = latencyProfile_.tick(
+        static_cast<int>(juce::jmin<std::uint64_t>(delta, 1000)), elapsedMs);
+    if (action == pluginrack::LatencyProfile::Action::Apply) {
+        const int target = latencyProfile_.status().currentBuffer;
+        auto settings = getDeviceSettings();
+        settings.inputBuffer = target;
+        settings.outputBuffer = target;
+        latencyProfileRequested_ = target;
+        (void) takeDeviceOpenErrors();
+        applyDeviceSettings(settings);
+        latencyProfileAwaitingOpen_ = true;
+    } else if (action == pluginrack::LatencyProfile::Action::Revert) {
+        auto settings = getDeviceSettings();
+        const int target = latencyProfile_.status().startBuffer;
+        settings.inputBuffer = target;
+        settings.outputBuffer = target;
+        applyDeviceSettings(settings);
+    }
+    return getLatencyProfileState();
+}
+
+AudioEngine::LatencyProfileState AudioEngine::getLatencyProfileState() const {
+    const auto status = latencyProfile_.status();
+    LatencyProfileState state;
+    state.active = status.active;
+    state.finished = status.finished;
+    state.failed = status.failed;
+    state.stepIndex = status.stepIndex;
+    state.totalSteps = status.totalSteps;
+    state.startBuffer = status.startBuffer;
+    state.currentBuffer = status.currentBuffer;
+    state.remainingMs = status.remainingMs;
+    return state;
 }
 
 void AudioEngine::releaseResources() {
@@ -746,6 +895,16 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
             }
         }
         if (wasClock) {
+            // The duplex callback left with this output: stop the channels from
+            // reading capture pointers that no longer update.
+            duplexActive_.store(false, std::memory_order_release);
+            duplexDeviceName_.clear();
+            duplexInputBuffers_ = nullptr;
+            duplexInputBufferCount_ = 0;
+            for (auto& c : channels) {
+                c->duplexInput = false;
+                c->duplexInputChannels = 0;
+            }
             clockOutputId = 0;
             for (auto& o2 : outputs) {
                 if (o2->output != nullptr) {
@@ -1171,6 +1330,33 @@ void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
     }
 }
 
+void AudioEngine::setOutputStreamClass(std::uint32_t outputId, bool streamOutput) {
+    juce::String deviceName;
+    {
+        const juce::ScopedLock lock(stateLock);
+        for (auto& output : outputs) {
+            if (output->id != outputId) continue;
+            output->streamOutput = streamOutput;
+            // The clock cannot stop being the monitored output: the whole
+            // engine renders against its callback.
+            if (output->id == clockOutputId) return;
+            deviceName = output->outputDeviceName;
+            break;
+        }
+    }
+    if (deviceName.isEmpty() || deviceName == "None - silent") return;
+    // The FIFO depth is chosen when the stream opens, so applying the class
+    // means reopening this one output rather than every device.
+    const double rate = currentSampleRate;
+    startDeviceJob([this, outputId, deviceName, rate](const std::function<bool()>& shouldExit) {
+        if (shouldExit()) return;
+        beginDeviceOpen("output " + deviceName);
+        const auto result = setOutputDeviceImpl(outputId, deviceName, rate);
+        endDeviceOpen("output " + deviceName);
+        juce::ignoreUnused(result);
+    });
+}
+
 void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands) {
     // Message thread: stateLock serializes the band copy and the coefficient
     // rebuild against render()'s taps (mirrors core's EqState mutex). Bypass
@@ -1410,6 +1596,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
             savedOutput.name = output->name.toStdString();
             savedOutput.layout = output->layout;
             savedOutput.flipped = output->flipped.get();
+            savedOutput.streamOutput = output->streamOutput.get();
             savedOutput.gainDb = output->gainDb.get();
             savedOutput.muted = output->muted.get();
             savedOutput.deviceId = output->outputDeviceName.toStdString();
@@ -1613,6 +1800,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         output->name = savedOutput.name;
         output->layout = savedOutput.layout;
         output->flipped = savedOutput.flipped;
+        output->streamOutput = savedOutput.streamOutput;
         output->gainDb = savedOutput.gainDb;
         output->muted = savedOutput.muted;
         output->buffer.setSize(2, bufferSize);
@@ -1827,11 +2015,41 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     if (deviceName == "None - silent" || deviceName.isEmpty()) {
         const juce::ScopedLock sl(stateLock);
         channel->input.reset();
+        channel->duplexInput = false;
+        channel->duplexInputChannels = 0;
         channel->inputDeviceName = "None - silent";
         channel->sourceDeviceId.clear();
         channel->inputError.clear();
         pruneUnusedCaptures();
         return {};
+    }
+
+    {
+        // The clock's duplex callback already owns this endpoint for capture.
+        // Opening a second client on it is exactly what ASIO refuses, so the
+        // channel is fed from that callback instead of a capture ring.
+        const juce::ScopedLock sl(stateLock);
+        if (duplexActive_.load(std::memory_order_acquire) && deviceName == duplexDeviceName_) {
+            int available = 0;
+            for (const auto& o : outputs) {
+                if (o->id == clockOutputId && o->output != nullptr) {
+                    available = o->output->getDuplexInputChannels();
+                }
+            }
+            for (auto& c : channels) {
+                if (c->inputDeviceName != deviceName) continue;
+                c->input.reset();
+                c->duplexInput = true;
+                c->duplexInputChannels = available;
+            }
+            channel->inputDeviceName = deviceName;
+            channel->sourceDeviceId = deviceName.toStdString();
+            channel->inputError.clear();
+            pruneUnusedCaptures();
+            return {};
+        }
+        channel->duplexInput = false;
+        channel->duplexInputChannels = 0;
     }
 
     // The shared capture for this device must cover the highest physical index
@@ -1927,12 +2145,27 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     const bool inputPreferExclusive = preferExclusive_.load(std::memory_order_relaxed)
                                    && !(clockDevice.isNotEmpty() && clockDevice == deviceName);
     const double requestedRate = engineRate > 0.0 ? engineRate : currentSampleRate;
-    const auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
-                                       requestedRate, needed, err, requestedInputBufferSize_,
-                                       renderBlockFrames,
-                                       useLowLatencyInput ? 1 : 2,
-                                       inputPreferExclusive,
-                                       capacityReserveFrames);
+    // Auto (0) follows the render block instead of handing the driver a "you
+    // decide": the driver picks a different shared-mode period between launches
+    // (480 one time, 600 the next) and the read delay moved with it.
+    const int bufferRequest =
+        pluginrack::inputBufferRequest(requestedInputBufferSize_, renderBlockFrames);
+    auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
+                                 requestedRate, needed, err, bufferRequest,
+                                 renderBlockFrames,
+                                 useLowLatencyInput ? 1 : 2,
+                                 inputPreferExclusive,
+                                 capacityReserveFrames);
+    if (openErr.isNotEmpty() && requestedInputBufferSize_ == 0 && bufferRequest > 0) {
+        // This device will not follow the engine's period. Its own default is
+        // still valid, just less predictable; better than a silent strip.
+        openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
+                                requestedRate, needed, err, 0,
+                                renderBlockFrames,
+                                useLowLatencyInput ? 1 : 2,
+                                inputPreferExclusive,
+                                capacityReserveFrames);
+    }
     if (openErr.isNotEmpty()) {
         if (!forceReopen) {
             const juce::ScopedLock sl(stateLock);
@@ -1997,10 +2230,79 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Try again in a moment.";
     }
+    // Moving the clock to an ASIO interface must take its captures with it,
+    // otherwise the duplex match never fires, the clock opens output-only and
+    // the input keeps its own read delay. Works from the device menu too, not
+    // just the Force ASIO button.
+    bool isClock = false;
+    {
+        const juce::ScopedLock lock(stateLock);
+        isClock = clockOutputId == outputId;
+    }
+    int retargeted = 0;
+    std::vector<std::pair<std::uint32_t, juce::String>> previous;
+    if (isClock && fullDuplexInput_.load(std::memory_order_relaxed))
+        retargeted = retargetInputsToClockDevice(deviceName, &previous);
+
     const auto error = setOutputDeviceImpl(outputId, deviceName, currentSampleRate);
+    if (!error.isEmpty() && retargeted > 0) {
+        // The clock refused: put the captures back, or those strips stay
+        // flagged as duplex with nothing feeding them and go silent.
+        {
+            const juce::ScopedLock lock(stateLock);
+            for (auto& c : channels) {
+                for (const auto& [id, name] : previous) {
+                    if (c->id != id) continue;
+                    c->input.reset();
+                    c->duplexInput = false;
+                    c->duplexInputChannels = 0;
+                    c->inputDeviceName = name;
+                    c->sourceDeviceId = name.toStdString();
+                }
+            }
+        }
+        prepareInputs();
+    }
     // The previous figure described the previous output chain.
     if (error.isEmpty()) resetLatencyMeasurement();
     return error;
+}
+
+int AudioEngine::retargetInputsToClockDevice(
+    const juce::String& clockDevice,
+    std::vector<std::pair<std::uint32_t, juce::String>>* previous) {
+    const juce::StringArray asio = DeviceEnumeration::asioDevices();
+    if (asio.isEmpty() || clockDevice.isEmpty() || clockDevice == "None - silent") return 0;
+
+    std::vector<std::string> names;
+    names.reserve(static_cast<std::size_t>(asio.size()));
+    for (const auto& name : asio) names.push_back(name.toStdString());
+
+    std::vector<std::pair<std::uint32_t, std::string>> assignments;
+    {
+        const juce::ScopedLock lock(stateLock);
+        for (const auto& c : channels)
+            assignments.emplace_back(c->id, c->inputDeviceName.toStdString());
+    }
+
+    int retargeted = 0;
+    for (const auto id : pluginrack::inputsToRetargetForClock(assignments, clockDevice.toStdString(), names)) {
+        const juce::ScopedLock lock(stateLock);
+        for (auto& c : channels) {
+            if (c->id != id) continue;
+            if (previous != nullptr) previous->emplace_back(c->id, c->inputDeviceName);
+            // Release the endpoint now: the clock's duplex callback will feed
+            // this strip, and a single-client driver refuses a second client.
+            c->input.reset();
+            c->inputDeviceName = clockDevice;
+            c->sourceDeviceId = clockDevice.toStdString();
+            c->duplexInput = true;
+            c->inputError.clear();
+            ++retargeted;
+        }
+    }
+    if (retargeted > 0) pruneUnusedCaptures();
+    return retargeted;
 }
 
 juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
@@ -2035,6 +2337,17 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         {
             const juce::ScopedLock sl(stateLock);
             wasClock = (clockOutputId == outputId);
+            if (wasClock) {
+                // Dropping the clock also drops the duplex capture path.
+                duplexActive_.store(false, std::memory_order_release);
+                duplexDeviceName_.clear();
+                duplexInputBuffers_ = nullptr;
+                duplexInputBufferCount_ = 0;
+                for (auto& c : channels) {
+                    c->duplexInput = false;
+                    c->duplexInputChannels = 0;
+                }
+            }
             if (out->output != nullptr) {
                 // Keep the object alive: the lock-free render-miss path may
                 // still hold its raw pointer until the snapshot is rebuilt.
@@ -2097,7 +2410,12 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         targetBlocks = 1;
         primeBlocks = minimalClockFifo_.load(std::memory_order_relaxed) ? 0 : 1;
     } else if (!isClock) {
-        targetBlocks = lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4;
+        // A stream/recording send is not monitored in the room, so it can hold
+        // a deeper queue and survive a slower device without forcing every
+        // other path to wait behind it.
+        const bool streamOutput = out->streamOutput.get();
+        targetBlocks = streamOutput ? 6
+                                    : (lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4);
         primeBlocks = targetBlocks;
     }
     // Exclusive mode is limited to a standalone clock output. It is not safe
@@ -2105,9 +2423,64 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // endpoint is also used by an input capture.
     const bool preferExclusive = preferExclusive_.load(std::memory_order_relaxed)
                               && isClock && !sharesClockInput;
+
+    // Duplex: when a capture is assigned to this same endpoint and the user
+    // opted in, open both directions in one driver client. ASIO refuses a
+    // second client on the same interface, and for any driver this removes the
+    // capture ring and the clock FIFO from the path.
+    int duplexInputs = 0;
+    if (isClock && fullDuplexInput_.load(std::memory_order_relaxed)) {
+        const juce::ScopedLock sl(stateLock);
+        for (const auto& c : channels) {
+            if (c->inputDeviceName != deviceName) continue;
+            duplexInputs = juce::jmax(1, duplexInputs);
+            for (const int index : c->inputChannels) {
+                duplexInputs = juce::jmax(duplexInputs, index + 1);
+            }
+        }
+        if (duplexInputs > 0) {
+            // A separate capture that already holds this endpoint would make
+            // the duplex open fail on any single-client driver (ASIO), and the
+            // fallback would silently keep the input on its own clock. Release
+            // it first: prepareToPlayImpl re-marks these strips as duplex.
+            for (auto& c : channels) {
+                if (c->inputDeviceName == deviceName) c->input.reset();
+            }
+            const auto it = inputCaptures_.find(deviceName);
+            if (it != inputCaptures_.end()) inputCaptures_.erase(it);
+        }
+    }
+
     auto openErr = newPlayback->open(openName, engineRate, err, requestedOutputBufferSize_,
                                      targetBlocks, primeBlocks, preferExclusive,
-                                     renderBlockFrames);
+                                     renderBlockFrames,
+                                     isClock ? pluginrack::StreamRole::Clock
+                                             : pluginrack::StreamRole::Output,
+                                     duplexInputs);
+    if (openErr.isNotEmpty() && duplexInputs > 0) {
+        // This endpoint has no usable input side, or another client holds it.
+        // Falling back keeps the clock alive; the split path still works.
+        openErr = newPlayback->open(openName, engineRate, err, requestedOutputBufferSize_,
+                                     targetBlocks, primeBlocks, preferExclusive,
+                                     renderBlockFrames,
+                                     isClock ? pluginrack::StreamRole::Clock
+                                            : pluginrack::StreamRole::Output,
+                                     0);
+        duplexInputs = 0;
+    }
+
+    // Publish the duplex decision before the inputs are prepared below: that
+    // pass decides whether a channel opens its own capture or is fed by this
+    // callback.
+    if (isClock) {
+        duplexInputBuffers_ = nullptr;
+        duplexInputBufferCount_ = 0;
+        {
+            const juce::ScopedLock sl(stateLock);
+            duplexDeviceName_ = duplexInputs > 0 ? deviceName : juce::String();
+        }
+        duplexActive_.store(duplexInputs > 0, std::memory_order_release);
+    }
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
@@ -2171,6 +2544,21 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         }
         out->output = std::move(newPlayback);
         if (isClock) {
+            // Duplex: the callback now owns both directions, so hand render()
+            // the capture pointers as they arrive.
+            if (duplexInputs > 0) {
+                out->output->setDuplexInputHook([this](const float* const* in, int count) {
+                    duplexInputBuffers_ = in;
+                    duplexInputBufferCount_ = count;
+                });
+            }
+            // A synchronous open (Apply, scene load, device change) primes the
+            // clock FIFO four blocks deep so the hand-off cannot starve. Once
+            // the hook below is running the clock renders and drains in the
+            // same callback, so that prime is pure latency: retarget it to the
+            // running depth (zero — the block pushed this callback is the
+            // block the device plays) and let the callback drop the backlog.
+            out->output->setTargetFillBlocks(0);
             out->output->setRenderActive(true);
         }
         out->outputDeviceName = deviceName;
@@ -2283,6 +2671,91 @@ juce::StringArray AudioEngine::getAvailableOutputDevices() const {
     return DeviceEnumeration::outputs();
 }
 
+juce::StringArray AudioEngine::getAsioDeviceNames() const {
+    return DeviceEnumeration::asioDevices();
+}
+
+juce::String AudioEngine::forceAsio() {    const auto asio = DeviceEnumeration::asioDevices();
+    if (asio.isEmpty()) {
+        return "No ASIO driver found. Install the interface driver (or an ASIO "
+               "bridge such as ASIO4ALL) and reopen Settings.";
+    }
+
+    std::uint32_t clockId = 0;
+    juce::String currentDevice;
+    {
+        const juce::ScopedLock lock(stateLock);
+        clockId = clockOutputId;
+        for (const auto& o : outputs) {
+            if (o->id == clockOutputId) {
+                currentDevice = o->outputDeviceName;
+                break;
+            }
+        }
+    }
+    if (clockId == 0) {
+        return "Assign an output device first: the ASIO device becomes the clock.";
+    }
+
+    std::vector<std::string> names;
+    names.reserve(static_cast<std::size_t>(asio.size()));
+    for (const auto& name : asio) names.push_back(name.toStdString());
+    std::string match = pluginrack::bestAsioDeviceMatch(currentDevice.toStdString(), names);
+    bool movedClockToInput = false;
+    if (match.empty()) {
+        // The clock endpoint has no ASIO driver of its own (a virtual Windows
+        // cable, for example) but an input strip is already on an interface.
+        // Duplex is impossible across two devices, so move the clock onto that
+        // interface instead: that is the only way to lose the read delay.
+        std::vector<std::string> inputNames;
+        {
+            const juce::ScopedLock lock(stateLock);
+            for (const auto& c : channels) {
+                if (c->inputDeviceName.isNotEmpty() && c->inputDeviceName != "None - silent")
+                    inputNames.push_back(c->inputDeviceName.toStdString());
+            }
+        }
+        match = pluginrack::asioClockFromInputs(inputNames, names);
+        movedClockToInput = !match.empty();
+        if (match.empty()) {
+            return "Pick the ASIO device for the clock by hand: " + asio.joinIntoString(", ")
+                 + ". The capture buffer cannot be removed while capture and playback "
+                   "run on different devices.";
+        }
+    }
+    const juce::String target(match);
+
+    // 1. Arm duplex without a device job: applyDeviceSettings would start an
+    //    async reopen, and setOutputDevice refuses to run while that is in
+    //    flight ("devices are still starting up"), so the clock never moved.
+    auto settings = getDeviceSettings();
+    settings.fullDuplexInput = true;
+    settings.latencyTuningOptIn = true;
+    applySettingsValues(settings);
+
+    // 2. Point the input strips on this interface at the ASIO device, before
+    //    the clock moves: the duplex match is "capture device == clock device",
+    //    so doing it afterwards leaves the clock on the split path.
+    const int retargeted = retargetInputsToClockDevice(target);
+
+    // 3. Move the clock. It now sees a duplex capture, so one driver client
+    //    carries both directions and the read delay disappears.
+    const auto error = setOutputDevice(clockId, target);
+    if (error.isNotEmpty()) return "ASIO refused: " + error;
+
+    if (retargeted > 0) {
+        return "Clock and " + juce::String(retargeted) + " input"
+             + (retargeted == 1 ? "" : "s") + " are now on " + target
+             + " - one callback, no capture delay.";
+    }
+    if (movedClockToInput) {
+        return "Clock moved onto " + target + " to share the input's driver - "
+               "the capture read delay is gone.";
+    }
+    return "Clock is now on " + target
+         + ". Assign an input on that interface to use it for capture too.";
+}
+
 bool AudioEngine::refreshDeviceAvailability() {
     // Enumerate before taking stateLock: the scan creates a device manager and
     // must never run with the audio lock held.
@@ -2377,9 +2850,25 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
 
     int inputDeviceSamples = 0;
     int inputBufferSize = 0;
-    if (inputChannel != nullptr && inputChannel->input != nullptr) {
-        inputDeviceSamples = inputChannel->input->getLatencySamples();
-        inputBufferSize = inputChannel->input->getDeviceBufferSize();
+    int inputReadDelaySamples = 0;
+    if (inputChannel != nullptr) {
+        if (inputChannel->duplexInput.get()) {
+            // Duplex: the capture latency is the same device's input latency,
+            // and there is no read delay at all.
+            for (const auto& output : outputs) {
+                if (output->id == clockOutputId && output->output != nullptr) {
+                    inputDeviceSamples = output->output->getDuplexInputLatencySamples();
+                    break;
+                }
+            }
+            inputBufferSize = inputChannel->duplexInputChannels > 0
+                                  ? inputChannel->duplexInputChannels
+                                  : 0;
+        } else if (inputChannel->input != nullptr) {
+            inputDeviceSamples = inputChannel->input->getLatencySamples();
+            inputReadDelaySamples = inputChannel->input->getReadDelaySamples();
+            inputBufferSize = inputChannel->input->getDeviceBufferSize();
+        }
         if (inputBufferSize <= 0) inputBufferSize = currentBufferSize;
     }
 
@@ -2401,6 +2890,7 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     int outputDeviceSamples = 0;
     int outputBufferSize = 0;
     int outputFillFrames = 0;
+    int clockTargetFillFrames = 0;
     bool valid = false;
     if (clockOutputId != 0) {
         for (const auto& output : outputs) {
@@ -2409,6 +2899,8 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                 outputBufferSize = output->output->getBufferSize();
                 if (outputBufferSize <= 0) outputBufferSize = currentBufferSize;
                 outputFillFrames = output->output->getFillFrames();
+                clockTargetFillFrames = output->output->getTargetFillFrames();
+                report.clockDeviceType = output->outputDeviceType;
                 for (const auto& insert : output->inserts) {
                     pluginSamples += insert->latencySamples;
                     if (insert->latencySamples > maxInsertSamples) {
@@ -2438,6 +2930,33 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     report.maxInsertMs = maxInsertSamples / sampleRate * 1000.0;
     report.fifoMs = fifoMs;
     report.totalMs = report.inputDeviceMs + report.pluginMs + report.outputDeviceMs + report.fifoMs;
+    // Split the two device totals so the budget can show what the app chose
+    // (the read delay and the device buffer) separately from what the driver
+    // reports. InputCapture::getLatencySamples() is device latency + read
+    // delay; OutputPlayback::getLatencySamples() is device latency + one
+    // device buffer.
+    report.inputReadDelayFrames = inputReadDelaySamples;
+    report.inputFifoDelayMs = inputReadDelaySamples / sampleRate * 1000.0;
+    report.inputDeviceLatencyMs =
+        juce::jmax(0, inputDeviceSamples - inputReadDelaySamples) / sampleRate * 1000.0;
+    report.outputBufferMs = outputBufferSize / sampleRate * 1000.0;
+    report.outputDeviceLatencyMs =
+        juce::jmax(0, outputDeviceSamples - outputBufferSize) / sampleRate * 1000.0;
+    report.clockFillFrames = outputFillFrames;
+    report.clockTargetFillFrames = clockTargetFillFrames;
+    if (inputChannel != nullptr && clockOutputId != 0) {
+        for (const auto& output : outputs) {
+            if (output->id != clockOutputId) continue;
+            // Different endpoints mean two independent clocks; the capture
+            // buffer cannot be removed without moving one of them.
+            report.separateClocks = !inputChannel->duplexInput.get()
+                                 && inputChannel->inputDeviceName.isNotEmpty()
+                                 && inputChannel->inputDeviceName != output->outputDeviceName;
+            break;
+        }
+    }
+    report.requestedInputBufferSize = requestedInputBufferSize_;
+    report.requestedOutputBufferSize = requestedOutputBufferSize_;
     report.inputBufferSize = inputBufferSize;
     report.outputBufferSize = outputBufferSize;
     report.sampleRate = sampleRate;
@@ -2464,6 +2983,11 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     report.measureFailed = latencyMeasureFailed_.load(std::memory_order_relaxed);
     report.measuredAttempted = report.measuredValid || report.measureFailed
         || latencyMeasureActive_.load(std::memory_order_relaxed);
+    // What the model cannot explain: the part of the physical round trip that
+    // is neither our queues nor the plugin chain. A large positive value is
+    // the signature of hidden buffering (rate conversion, a virtual cable, a
+    // driver that reports a smaller period than it runs).
+    report.unexpectedMs = report.measuredValid ? report.measuredMs - report.totalMs : 0.0;
     return report;
 }
 
@@ -2758,8 +3282,22 @@ AudioEngine::DeviceState AudioEngine::getChannelDeviceState(std::uint32_t channe
     const juce::ScopedLock lock(stateLock);
     for (const auto& channel : channels) {
         if (channel->id == channelId) {
+            juce::String type;
+            if (channel->input != nullptr) {
+                type = channel->input->getActiveDeviceType();
+            } else if (channel->duplexInput.get()) {
+                // Fed by the clock's callback: that is the device's backend.
+                for (const auto& o : outputs) {
+                    if (o->id == clockOutputId) {
+                        type = o->outputDeviceType;
+                        break;
+                    }
+                }
+            }
             return {channel->inputDeviceName, channel->inputError,
-                    channel->input != nullptr ? channel->input->availableInputCount() : 0};
+                    channel->input != nullptr ? channel->input->availableInputCount()
+                                              : channel->duplexInputChannels,
+                    type};
         }
     }
     return {};
@@ -2769,7 +3307,7 @@ AudioEngine::DeviceState AudioEngine::getOutputDeviceState(std::uint32_t outputI
     const juce::ScopedLock lock(stateLock);
     for (const auto& output : outputs) {
         if (output->id == outputId)
-            return {output->outputDeviceName, output->outputError};
+            return {output->outputDeviceName, output->outputError, 0, output->outputDeviceType};
     }
     return {};
 }

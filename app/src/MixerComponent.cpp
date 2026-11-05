@@ -11,6 +11,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     {
         const auto deviceState = audioEngine.getOutputDeviceState(output.id);
         deviceControl.setDeviceName(deviceState.deviceName);
+        deviceControl.setBackendType(deviceState.deviceType);
         deviceControl.setError(deviceState.error);
     }
     meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
@@ -38,6 +39,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
                 juce::MessageManager::callAsync([this, err] {
                     const auto deviceState = audioEngine.getOutputDeviceState(output.id);
                     deviceControl.setDeviceName(deviceState.deviceName);
+                    deviceControl.setBackendType(deviceState.deviceType);
                     deviceControl.setError(deviceState.error);
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
@@ -88,6 +90,18 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
         audioEngine.setOutputFlipped(output.id, next);
     });
     addAndMakeVisible(flipButton);
+
+    // Monitor outputs are listened to live and keep the shallow FIFO; a stream
+    // or recording send is not heard in the room, so it can hold a deeper
+    // queue and ride out its own device clock.
+    streamButton.setToggleState(output.streamOutput.get());
+    streamButton.setTooltip("Stream output: deeper queue, tolerates a slower device");
+    streamButton.setClickAction([this] {
+        const bool next = !streamButton.getToggleState();
+        streamButton.setToggleState(next);
+        audioEngine.setOutputStreamClass(output.id, next);
+    });
+    addAndMakeVisible(streamButton);
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -375,6 +389,8 @@ void MixerComponent::OutputStrip::resized() {
     removeOutputButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
     actionsRow.removeFromRight(2);
     flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    actionsRow.removeFromRight(2);
+    streamButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
     dragHandleBounds = dragHandleVisible
                            ? actionsRow.removeFromLeft(theme::metrics::kActionH)
                            : juce::Rectangle<int>();
@@ -473,6 +489,7 @@ void MixerComponent::OutputStrip::refresh() {
     // Locked snapshot: the device opener writes these strings off-thread.
     const auto deviceState = audioEngine.getOutputDeviceState(output.id);
     deviceControl.setDeviceName(deviceState.deviceName);
+    deviceControl.setBackendType(deviceState.deviceType);
     deviceControl.setError(deviceState.error);
     const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);

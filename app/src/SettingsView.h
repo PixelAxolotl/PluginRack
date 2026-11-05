@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "LatencyBudgetView.h"
 #include "PageHeader.h"
 #include "Theme.h"
 
@@ -56,6 +57,8 @@ private:
     juce::Label roundTripBeta { "", "BETA" };
     juce::Label measuredLabel;
     juce::Label measuredDetailLabel;
+    LatencyBudgetView budgetView;
+    juce::Label renderLoadLabel;
     juce::Label listenLabel { "", "Listen on" };
     juce::ComboBox listenCombo;
     juce::TextButton measureButton { "Measure Round-Trip" };
@@ -70,6 +73,11 @@ private:
     juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
     juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
     juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
+    juce::TextButton profileButton { "Find low-latency setting" };
+    juce::Label profileStatusLabel;
+    juce::TextButton forceAsioButton { "Force ASIO" };
+    juce::Label asioStatusLabel;
+    juce::String forceAsioStatus_;
 
     // Rack view cost control: the thumbnail timer's rate. Applied straight to
     // the engine (no Apply step) because it is not a stream option.

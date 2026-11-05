@@ -92,6 +92,10 @@ struct Output {
     float eqRtaOffsetDb = 0.0f;
     // Analyzer weighting: 0 = Z (flat), 1 = A, 2 = C. Display only.
     int eqRtaWeighting = 0;
+    // Stream outputs tolerate queue depth that a monitored output cannot: a
+    // recording or stream send is not heard live, so it can hold a deeper FIFO
+    // to ride out a slow device. The clock output is always a monitor.
+    bool streamOutput = false;
 
     bool operator==(const Output&) const = default;
 };
@@ -128,6 +132,9 @@ struct AudioSettings {
     // scenes that happened to contain tuning keys migrate back to the stable
     // defaults instead of silently enabling the aggressive modes on startup.
     bool latencyTuningOptIn = false;
+    // Scene v5 graduated the two bounded low-latency switches in the engine's
+    // own defaults (a fresh session runs with them on), but the schema stays
+    // conservative: an absent key means off, and pre-v5 scenes never opt in.
     bool lowLatencyInput = false;
     bool preferExclusive = false;
     bool lowLatencyOutputs = false;
@@ -144,7 +151,7 @@ struct AudioSettings {
 };
 
 struct Scene {
-    int schemaVersion = 4;
+    int schemaVersion = 5;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;

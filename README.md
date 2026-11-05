@@ -29,15 +29,23 @@ built-in effects.
 - **Scenes** — names, gains, pan, mute/solo, EQ, dynamics, insert plugin state,
   routing sends, device choices and the audio tuning are saved as JSON and
   restored exactly.
-- **Latency controls** *(BETA)* — device buffer selection, adaptive low-latency
-  input/output FIFOs, a minimal clock FIFO, optional exclusive WASAPI, and a
-  round-trip latency measurement. Shared WASAPI remains the stable default.
+- **Latency controls** *(BETA)* — an adaptive capture read delay, adaptive
+  low-latency input/output FIFOs, a minimal clock FIFO, optional exclusive
+  WASAPI, a guided buffer search, a per-stage latency budget with a measured
+  round-trip, and per-output monitor/stream classes. Shared WASAPI remains the
+  stable fallback.
 
 ## Using PluginRack
 
 Launch `PluginRack.exe`. Audio devices open on a background thread, so the window
 is usable immediately; the toolbar shows `Starting audio...` with progress while
 the driver is probed.
+
+Only one session runs at a time. Launching the app again does not start a second
+copy — it brings the running window to the front, restoring it from the tray or
+from a minimised state. The headless switches (`--screenshot`, `--list-devices`,
+`--list-plugins`, `--scan-plugin`, …) and the out-of-process plugin scanner are
+exempt: they are short-lived children of the running app and keep working.
 
 ### Views
 
@@ -97,32 +105,96 @@ Buffer and latency changes are **staged**: nothing is applied until you press
 **Apply**. **Revert** discards the staged values. The tuning travels with the
 scene: **Save** stores the buffer sizes, the five latency switches, their
 explicit opt-in marker, and the auto-reload state; loading a save restores them
-before the devices reopen. All five beta latency switches are off by default.
-Scenes written before the opt-in marker are treated as stable defaults, so an
-old save cannot silently select exclusive or low-latency operation.
+before the devices reopen. Since scene schema v5 the two self-correcting
+switches (**Low-latency input** and **Low-latency outputs**) are on for a new
+session; exclusive mode and the minimal clock FIFO stay opt-in. Scenes written
+before v5 keep their exact previous behaviour: without the opt-in marker every
+switch stays off, so an old save cannot silently select exclusive or
+low-latency operation.
 
-- **Input / Output buffer** — `Auto (driver default)` or an explicit size. If a
-  device refuses the new size, the previous setting is restored automatically.
+- **Find low-latency setting** — steps the buffer down one size at a time,
+  listens for real audio events for about 45 s per step, and returns to the size
+  you started from on the first glitch. Each step is a normal **Apply**, so a
+  device that refuses a size still restores the previous one. The progress line
+  shows the step, the size under test and the time left.
+- **Input / Output buffer** — `Auto (driver default)` or an explicit size. Auto is
+  no longer "whatever the driver felt like": for the output it settles on the
+  **smallest buffer the endpoint advertises** and remembers it per device, and
+  for the input it requests the clock's own block, so the same rig lands on the
+  same numbers on every launch. If a device refuses the new size, the previous
+  setting is restored automatically.
+- **Latency budget** — the round-trip section lists each stage separately
+  (input device, capture read delay, plugin chain, clock FIFO, output device,
+  output buffer), then the predicted total, the measured total and the
+  **unexplained** remainder. A residual larger than one device block means
+  something outside the app is buffering (rate conversion, a virtual cable, a
+  driver that runs a larger period than it reports). **Render p99** under it
+  shows how much of a block the engine spends, which is the real reason a
+  smaller buffer glitches.
 - **Low-latency input** *(BETA)* — the capture starts with one render block of
-  read delay instead of two (about 10 ms), then adds a block automatically after
-  a real starvation.
+  read delay instead of two (about 10 ms). The read delay is now adaptive: a
+  real starvation adds a fraction of a block, and a long calm period gives the
+  margin back a few samples at a time.
 - **Prefer exclusive mode** *(BETA)* — try exclusive WASAPI for the standalone
   clock output. Shared mode remains first for other streams and same-device
   input because exclusive clients cannot share an endpoint reliably.
-- **Low-latency outputs** *(BETA)* — non-clock outputs keep two device buffers
-  instead of four (about 20 ms on those outputs); bounded drift correction keeps
-  separate device clocks from slowly draining that margin.
-- **Minimal clock FIFO** *(BETA)* — the clock starts with no primed FIFO; a
-  missed render is covered by one block of silence (about 10 ms).
+- **Low-latency outputs** *(BETA)* — non-clock **monitor** outputs keep two
+  device buffers instead of four (about 20 ms on those outputs); bounded drift
+  correction keeps separate device clocks from slowly draining that margin.
+- **Minimal clock FIFO** *(BETA)* — the clock opens with no primed FIFO. The
+  clock also drops its queue to zero once it starts rendering (the block it
+  pushes in a callback is the block the device plays in that same callback), so
+  this switch only changes how it survives a device hand-off.
 - **Same-device input (one-block start)** *(BETA)* — when the input and the clock
-  output are the same endpoint, start with one block of read delay. The capture
-  adds a block automatically if that aggressive setting starves.
+  output are the same endpoint, start with one block of read delay.
 
-Latency depends on the driver-reported buffers and plugin chain. Start with the
-stable shared-WASAPI defaults, then lower the input/output buffers one step at a
-time while watching the underrun diagnostics. Exclusive mode can be slower or
-glitch during a switch, so it is only used for the standalone clock when
-explicitly requested.
+Each output strip has a **Strm** button: a stream or recording send is not
+monitored in the room, so it holds a deeper queue and can tolerate a slower
+device without forcing the monitored path to wait behind it. The clock output is
+always a monitor.
+
+**Which backend is running:** every strip shows a small tag next to its device
+name — `ASIO`, `WASAPI`, `WASAPI LL` (low latency mode) or `WASAPI excl`
+(exclusive) — coloured green for ASIO. The Settings clock line repeats it in
+brackets, and the latency budget names it on its first row, so the backend is
+never a guess.
+
+Latency depends on the driver-reported buffers and plugin chain. Exclusive mode
+can be slower or glitch during a switch, so it is only used for the standalone
+clock when explicitly requested.
+
+The buffer size in **Auto** is the driver's, not the app's: Windows shared-mode
+WASAPI hands out a period of about 10–20 ms, so at 48 kHz that is 480 or 960
+frames and at 96 kHz 960 or 1920. PluginRack asks for 48 kHz and `Auto`, so a
+960-sample buffer means you are at 20 ms per direction — pick an explicit size
+(128, 256) and press **Apply**, and if the driver refuses it the app restores the
+previous size and says so. Exclusive WASAPI or ASIO is the only way to go lower.
+
+### ASIO
+
+ASIO is built in whenever JUCE's bundled ASIO headers are present, and the device
+menu already lists every ASIO driver next to the Windows Audio endpoints. Pick
+the ASIO device name (for example `Focusrite USB ASIO`) as the **clock output**
+and the engine drives it directly: the buffer sizes are the interface's own
+(typically 64–512), and the driver reports its real input/output latency, which
+the latency budget then shows.
+
+**Force ASIO** in Settings does that in one click: it matches the clock's current
+Windows endpoint to its ASIO driver by name (`Speakers (Focusrite USB Audio)` →
+`Focusrite USB ASIO`), switches the clock to it and arms the duplex switch.
+Input strips that name the same interface follow the clock automatically — they
+are released from their own client and fed by the clock's callback, so the input
+read delay disappears without pressing anything else. This also happens when the
+ASIO device is picked from an output's device menu. If the clock is refused, the
+inputs are put back exactly as they were.
+
+One rule: an ASIO driver allows a single client — unless you turn on
+**Same-device input**. With that switch on, the clock opens the interface for
+both directions in one driver callback: capture arrives in the same callback as
+the render, so there is no capture ring and no clock FIFO for that interface (the
+budget shows a zero clock FIFO and a duplex input figure instead of a read
+delay). If the endpoint refuses to open both ways, the app retries output-only
+and keeps working.
 
 ### Reloading devices
 
