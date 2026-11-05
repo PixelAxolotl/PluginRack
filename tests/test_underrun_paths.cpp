@@ -721,21 +721,16 @@ TEST_CASE("the guided low-latency search only moves through the settings path",
     CHECK(contains(settings, "audioEngine.tickLatencyProfile()"));
 }
 
-TEST_CASE("a stream output gets a deeper FIFO than a monitored one", "[latency][outputs]") {
+TEST_CASE("a non-clock output keeps the monitor FIFO depth", "[latency][outputs]") {
     const auto cpp = readSource("app/src/AudioEngine.cpp");
     const auto open = functionBody(cpp, "juce::String AudioEngine::setOutputDeviceImpl");
-    CHECK(contains(open, "out->streamOutput.get()"));
-    CHECK(contains(open, "targetBlocks = streamOutput ? 6"));
-    // The clock is never reclassified: the engine renders on its callback.
-    const auto setter = functionBody(cpp, "void AudioEngine::setOutputStreamClass");
-    CHECK(contains(setter, "if (output->id == clockOutputId) return;"));
-    CHECK(contains(setter, "setOutputDeviceImpl(outputId, deviceName, rate)"));
-
+    CHECK(contains(open, "lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4"));
+    // The retired stream-output class no longer deepens any output.
+    CHECK_FALSE(contains(open, "streamOutput"));
     const auto scene = readSource("core/include/pluginrack/Scene.h");
-    CHECK(contains(scene, "bool streamOutput"));
+    CHECK_FALSE(contains(scene, "bool streamOutput"));
     const auto codec = readSource("core/src/SceneCodec.cpp");
-    CHECK(contains(codec, "\"streamOutput\""));
-    CHECK(contains(codec, "j.value(\"streamOutput\", false)"));
+    CHECK_FALSE(contains(codec, "j.value(\"streamOutput\""));
 }
 
 TEST_CASE("audio callbacks register with MMCSS and disable denormals",

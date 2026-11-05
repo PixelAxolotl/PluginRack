@@ -538,35 +538,25 @@ TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {
     CHECK_FALSE(loaded.scene->audio->preferExclusive);
 }
 
-TEST_CASE("an output keeps its stream class across a round trip") {
-    pluginrack::Scene original;
-    original.schemaVersion = 5;
-    pluginrack::Output monitor;
-    monitor.id = 1;
-    monitor.name = "mains";
-    pluginrack::Output stream;
-    stream.id = 2;
-    stream.name = "twitch";
-    stream.streamOutput = true;
-    original.outputs = {monitor, stream};
-
-    const auto loaded = pluginrack::fromJson(pluginrack::toJson(original));
-    REQUIRE(loaded.errors.empty());
-    REQUIRE(loaded.scene.has_value());
-    REQUIRE(loaded.scene->outputs.size() == 2);
-    CHECK_FALSE(loaded.scene->outputs[0].streamOutput);
-    CHECK(loaded.scene->outputs[1].streamOutput);
-}
-
-TEST_CASE("an output without a stream class loads as a monitor") {
+TEST_CASE("a scene written with the retired stream class still loads") {
+    // The stream/monitor class is gone, but scenes saved with it must keep
+    // loading: unknown keys are ignored, so the output comes back as a monitor.
     const auto loaded = pluginrack::fromJson(R"({
-        "schemaVersion": 4,
-        "outputs": [{"id": 1, "name": "mains"}]
+        "schemaVersion": 5,
+        "outputs": [{"id": 1, "name": "mains", "streamOutput": true}]
     })");
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->outputs.size() == 1);
-    CHECK_FALSE(loaded.scene->outputs[0].streamOutput);
+    CHECK(loaded.scene->outputs[0].name == "mains");
+
+    pluginrack::Scene fresh;
+    fresh.schemaVersion = 5;
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    fresh.outputs = {output};
+    CHECK(pluginrack::toJson(fresh).find("streamOutput") == std::string::npos);
 }
 
 TEST_CASE("a scene without an audio block leaves the tuning unset") {    const pluginrack::SceneLoadResult loaded =

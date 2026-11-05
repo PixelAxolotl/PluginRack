@@ -64,11 +64,14 @@ The toolbar switches between six views. `I/O` sits next to `Mixer`.
   instead of being cut off. Plugins that do not support host content scaling
   keep their own size and are centred in the bay. The Gate/Comp card has one
   switch per effect (`C` and `G`); both effects are also switched inside the
-  editor panel.
+  editor panel. Drag a card's six-dot grip to reorder the insert chain; the
+  cyan bar shows where it will land.
 - **Mixer** — all channel and output strips side by side, with add/remove
-  channel/output controls.
+  channel/output controls. Each strip's six-dot grip drags it to a new
+  position in the row.
 - **I/O** — the same strips as the Mixer, split into an **Inputs** tab and an
-  **Outputs** tab so a large rack can be patched one side at a time.
+  **Outputs** tab so a large rack can be patched one side at a time. The strips
+  reorder there too, from the same grip.
 - **Routing** — the full channel-to-output matrix with an independent send level
   per cell, L and R.
 - **Saves** — scene save/load and the autosave/last-session entries.
@@ -148,11 +151,6 @@ low-latency operation.
   this switch only changes how it survives a device hand-off.
 - **Same-device input (one-block start)** *(BETA)* — when the input and the clock
   output are the same endpoint, start with one block of read delay.
-
-Each output strip has a **Strm** button: a stream or recording send is not
-monitored in the room, so it holds a deeper queue and can tolerate a slower
-device without forcing the monitored path to wait behind it. The clock output is
-always a monitor.
 
 **Which backend is running:** every strip shows a small tag next to its device
 name — `ASIO`, `WASAPI`, `WASAPI LL` (low latency mode) or `WASAPI excl`

@@ -314,8 +314,12 @@ void MainComponent::timerCallback() {
             if (deviceErrors.isNotEmpty())
                 showError("Some audio devices could not be opened:\n" + deviceErrors);
         }
+        // With no clock output the strips already say so on their own device
+        // rows; repeating it as a warning in the header only adds noise over
+        // the output strips. The Menu keeps the full clock line.
         const auto clockDesc = audioEngine.getClockDescription();
-        toolbar.setClockText(clockDesc, clockDesc.startsWith("No output"));
+        const bool noClock = clockDesc.startsWith("No output");
+        toolbar.setClockText(noClock ? juce::String() : clockDesc, false);
     }
 
     // A device can vanish while its stream is open (unplugged, disabled in

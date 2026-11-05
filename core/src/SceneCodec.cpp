@@ -294,7 +294,6 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"eqDelayMs", output.eqDelayMs},
         {"eqRtaOffsetDb", output.eqRtaOffsetDb},
         {"eqRtaWeighting", output.eqRtaWeighting},
-        {"streamOutput", output.streamOutput},
     };
 }
 
@@ -330,9 +329,8 @@ void from_json(const nlohmann::json& j, Output& output) {
     output.eqDelayMs = j.value("eqDelayMs", 0.0f);
     output.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
     output.eqRtaWeighting = j.value("eqRtaWeighting", 0);
-    // Absent before stream/monitor classes existed: every output was treated
-    // as a monitor, which is the safe default.
-    output.streamOutput = j.value("streamOutput", false);
+    // Scenes written before the stream-output class was retired still carry
+    // "streamOutput"; unknown keys are ignored, so they load as monitors.
     if (j.contains("eqBands")) {
         j.at("eqBands").get_to(output.eqBands);
     }

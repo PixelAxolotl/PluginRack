@@ -1330,33 +1330,6 @@ void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
     }
 }
 
-void AudioEngine::setOutputStreamClass(std::uint32_t outputId, bool streamOutput) {
-    juce::String deviceName;
-    {
-        const juce::ScopedLock lock(stateLock);
-        for (auto& output : outputs) {
-            if (output->id != outputId) continue;
-            output->streamOutput = streamOutput;
-            // The clock cannot stop being the monitored output: the whole
-            // engine renders against its callback.
-            if (output->id == clockOutputId) return;
-            deviceName = output->outputDeviceName;
-            break;
-        }
-    }
-    if (deviceName.isEmpty() || deviceName == "None - silent") return;
-    // The FIFO depth is chosen when the stream opens, so applying the class
-    // means reopening this one output rather than every device.
-    const double rate = currentSampleRate;
-    startDeviceJob([this, outputId, deviceName, rate](const std::function<bool()>& shouldExit) {
-        if (shouldExit()) return;
-        beginDeviceOpen("output " + deviceName);
-        const auto result = setOutputDeviceImpl(outputId, deviceName, rate);
-        endDeviceOpen("output " + deviceName);
-        juce::ignoreUnused(result);
-    });
-}
-
 void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands) {
     // Message thread: stateLock serializes the band copy and the coefficient
     // rebuild against render()'s taps (mirrors core's EqState mutex). Bypass
@@ -1596,7 +1569,6 @@ pluginrack::Scene AudioEngine::makeScene() const {
             savedOutput.name = output->name.toStdString();
             savedOutput.layout = output->layout;
             savedOutput.flipped = output->flipped.get();
-            savedOutput.streamOutput = output->streamOutput.get();
             savedOutput.gainDb = output->gainDb.get();
             savedOutput.muted = output->muted.get();
             savedOutput.deviceId = output->outputDeviceName.toStdString();
@@ -1800,7 +1772,6 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         output->name = savedOutput.name;
         output->layout = savedOutput.layout;
         output->flipped = savedOutput.flipped;
-        output->streamOutput = savedOutput.streamOutput;
         output->gainDb = savedOutput.gainDb;
         output->muted = savedOutput.muted;
         output->buffer.setSize(2, bufferSize);
@@ -2410,12 +2381,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         targetBlocks = 1;
         primeBlocks = minimalClockFifo_.load(std::memory_order_relaxed) ? 0 : 1;
     } else if (!isClock) {
-        // A stream/recording send is not monitored in the room, so it can hold
-        // a deeper queue and survive a slower device without forcing every
-        // other path to wait behind it.
-        const bool streamOutput = out->streamOutput.get();
-        targetBlocks = streamOutput ? 6
-                                    : (lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4);
+        targetBlocks = lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4;
         primeBlocks = targetBlocks;
     }
     // Exclusive mode is limited to a standalone clock output. It is not safe

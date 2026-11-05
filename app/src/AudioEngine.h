@@ -142,8 +142,6 @@ public:
         juce::Atomic<bool> muted{false};
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
         juce::Atomic<bool> flipped{false};
-        // Monitor (false) or stream/record (true). Picks the output FIFO depth.
-        juce::Atomic<bool> streamOutput{false};
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
@@ -448,7 +446,6 @@ public:
     void setOutputName(std::uint32_t outputId, const juce::String& name);
     void setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout);
     void setOutputFlipped(std::uint32_t outputId, bool flipped);
-    void setOutputStreamClass(std::uint32_t outputId, bool streamOutput);
 
     // EQ API mirroring core MixerEngine: setChannelEq/setOutputEq swap bands
     // (bypass state kept) and rebuild coefficients on the message thread

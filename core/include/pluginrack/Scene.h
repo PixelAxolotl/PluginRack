@@ -92,10 +92,6 @@ struct Output {
     float eqRtaOffsetDb = 0.0f;
     // Analyzer weighting: 0 = Z (flat), 1 = A, 2 = C. Display only.
     int eqRtaWeighting = 0;
-    // Stream outputs tolerate queue depth that a monitored output cannot: a
-    // recording or stream send is not heard live, so it can hold a deeper FIFO
-    // to ride out a slow device. The clock output is always a monitor.
-    bool streamOutput = false;
 
     bool operator==(const Output&) const = default;
 };

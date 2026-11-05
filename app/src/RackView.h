@@ -78,10 +78,6 @@ private:
     const std::vector<pluginrack::DynamicsEffect>* currentEffects() const;
     const pluginrack::DynamicsEffect* effectOfType(pluginrack::DynamicsEffectType type) const;
     AudioEngine::InsertSlot* findInsert(std::uint32_t insertId);
-    // Maps a row index in the visible list to the chain index a drop lands on.
-    // A card can cover two chain entries (the Dynamics card holds the EQ and
-    // the compressor), so rows do not map one-to-one.
-    int chainIndexForRow(int row);
     void moveChainItemRaw(pluginrack::ChainItem item, int chainIndex);
     // Moves every chain entry a card covers so the card keeps them adjacent.
     void moveChainCard(const std::vector<pluginrack::ChainItem>& items, int targetRowIndex);

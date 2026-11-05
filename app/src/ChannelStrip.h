@@ -92,7 +92,6 @@ private:
     // How many entries the input combos currently hold, so they are rebuilt
     // only when the device's input count or the saved mapping changes.
     int inputComboCount = 0;
-    juce::Label inputErrorLabel{"", ""};
 
     juce::OwnedArray<InsertSlotComponent> slots;
     int chainDropTarget = -1;
