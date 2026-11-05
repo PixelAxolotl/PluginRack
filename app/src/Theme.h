@@ -60,6 +60,8 @@ inline constexpr int kSectionGap = 14;  // between sections
 inline constexpr int kRowGap = 6;       // between controls on one row
 inline constexpr int kControlH = 24;    // standard field / button height
 inline constexpr int kMeasureW = 150;   // standard action button width
+inline constexpr int kPanelPad = 12;    // inset inside a captioned panel
+inline constexpr int kLabelW = 104;     // label column shared by settings rows
 
 inline juce::Font titleFont() {
     return juce::Font(juce::FontOptions(kTitlePt, juce::Font::bold));

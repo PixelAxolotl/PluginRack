@@ -72,7 +72,8 @@ target_sources(pluginrack_app PRIVATE
     src/TouchSlideBar.cpp
     src/TouchSlideBar.h
     src/ValueEditSlider.cpp
-    src/ValueEditSlider.h)
+    src/ValueEditSlider.h
+    src/WrappedLabel.h)
 
 target_compile_features(pluginrack_app PRIVATE cxx_std_20)
 target_compile_definitions(pluginrack_app PRIVATE

@@ -43,7 +43,7 @@ public:
             g.drawText(label, bounds, juce::Justification::centredLeft, true);
             if (detail.isNotEmpty()) {
                 const int labelWidth = juce::GlyphArrangement::getStringWidthInt(g.getCurrentFont(), label);
-                g.setColour(theme::dim().withAlpha(0.7f));
+                g.setColour(theme::dim());
                 g.drawText(detail, bounds.withTrimmedLeft(labelWidth + 8),
                            juce::Justification::centredLeft, true);
             }

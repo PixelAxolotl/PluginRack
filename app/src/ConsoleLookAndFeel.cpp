@@ -17,6 +17,12 @@ ConsoleLookAndFeel::ConsoleLookAndFeel() {
     setColour(juce::TooltipWindow::backgroundColourId, panel());
     setColour(juce::TooltipWindow::textColourId, text());
     setColour(juce::TooltipWindow::outlineColourId, border());
+
+    // One scrollbar face for every viewport in the app, so a page that scrolls
+    // reads as part of the console instead of a browser control.
+    setColour(juce::ScrollBar::backgroundColourId, bg());
+    setColour(juce::ScrollBar::thumbColourId, line());
+    setColour(juce::ScrollBar::trackColourId, bg());
 }
 
 void ConsoleLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,

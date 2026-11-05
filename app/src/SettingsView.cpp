@@ -42,21 +42,47 @@ SettingsView::SettingsView(AudioEngine& engine)
     staged_ = audioEngine.getDeviceSettings();
 
     addAndMakeVisible(header);
+    viewport.setViewedComponent(&body, false);
+    viewport.setScrollBarsShown(true, false);
+    addAndMakeVisible(viewport);
 
-    const auto styleLabel = [this](juce::Label& l) {
-        l.setFont(theme::ui::bodyFont());
-        l.setColour(juce::Label::textColourId, theme::dim());
-        addAndMakeVisible(l);
+    const auto add = [this](juce::Component& component) { body.addAndMakeVisible(component); };
+    const auto styleCaption = [this, add](juce::Label& label) {
+        label.setFont(theme::ui::sectionFont());
+        label.setColour(juce::Label::textColourId, theme::dim());
+        add(label);
     };
-    styleLabel(clockLabel);
-    styleLabel(latencyLabel);
-    styleLabel(bufferLabel);
-    styleLabel(errorLabel);
+    const auto styleStatCaption = [this](juce::Label& label) {
+        label.setFont(theme::ui::sectionFont());
+        label.setColour(juce::Label::textColourId, theme::dim());
+        label.setJustificationType(juce::Justification::centredLeft);
+        body.addAndMakeVisible(label);
+    };
+    const auto styleStatValue = [this](juce::Label& label) {
+        label.setFont(theme::ui::bodyBoldFont());
+        label.setColour(juce::Label::textColourId, theme::text());
+        label.setJustificationType(juce::Justification::centredLeft);
+        label.setMinimumHorizontalScale(0.7f);
+        body.addAndMakeVisible(label);
+    };
 
+    // AUDIO STATUS: the numbers that describe the running engine, then the
+    // sentence that explains what is wrong with it.
+    styleCaption(statusCaption);
+    styleStatCaption(clockStatCaption);
+    styleStatValue(clockStatValue);
+    styleStatCaption(latencyStatCaption);
+    styleStatValue(latencyStatValue);
+    styleStatCaption(bufferStatCaption);
+    styleStatValue(bufferStatValue);
+    issuesText.setText("Waiting for audio", theme::dim());
+    add(issuesText);
+
+    styleCaption(bufferCaption);
     for (auto* label : { &inputBufferSizeLabel, &outputBufferSizeLabel }) {
         label->setFont(theme::ui::bodyFont());
         label->setColour(juce::Label::textColourId, theme::text());
-        addAndMakeVisible(*label);
+        add(*label);
     }
     inputBufferSizeLabel.setText("Input buffer", juce::dontSendNotification);
     outputBufferSizeLabel.setText("Output buffer", juce::dontSendNotification);
@@ -67,6 +93,9 @@ SettingsView::SettingsView(AudioEngine& engine)
             combo->addItem(juce::String(s) + " samples", s + 1);
         }
         theme::ui::styleCombo(*combo);
+        // The wheel is the page's scroll gesture here; it must not change a
+        // setting when the pointer happens to rest over a field.
+        combo->setScrollWheelEnabled(false);
     }
     inputBufferSizeCombo.onChange = [this] {
         const int id = inputBufferSizeCombo.getSelectedId();
@@ -78,33 +107,43 @@ SettingsView::SettingsView(AudioEngine& engine)
         staged_.outputBuffer = id <= kAutoBufferItemId ? 0 : id - 1;
         updatePendingState();
     };
-    addAndMakeVisible(inputBufferSizeCombo);
-    addAndMakeVisible(outputBufferSizeCombo);
+    add(inputBufferSizeCombo);
+    add(outputBufferSizeCombo);
+
+    pendingLabel.setFont(theme::ui::captionFont());
+    pendingLabel.setColour(juce::Label::textColourId, theme::dim());
+    pendingLabel.setJustificationType(juce::Justification::centredRight);
+    add(pendingLabel);
+
+    for (auto* button : { &applyButton, &revertButton }) {
+        theme::ui::styleButton(*button);
+        add(*button);
+    }
+    applyButton.onClick = [this] { applyPending(); };
+    revertButton.onClick = [this] { revertPending(); };
 
     roundTripLabel.setText("ROUND-TRIP LATENCY", juce::dontSendNotification);
-    roundTripLabel.setFont(theme::ui::sectionFont());
-    roundTripLabel.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
-    addAndMakeVisible(roundTripLabel);
+    styleCaption(roundTripLabel);
     theme::ui::styleBetaLabel(roundTripBeta);
-    addAndMakeVisible(roundTripBeta);
+    add(roundTripBeta);
 
     measuredLabel.setFont(juce::Font(juce::FontOptions(20.0f, juce::Font::bold)));
     measuredLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(measuredLabel);
+    add(measuredLabel);
 
     measuredDetailLabel.setFont(theme::ui::captionFont());
     measuredDetailLabel.setColour(juce::Label::textColourId, theme::dim());
     measuredDetailLabel.setMinimumHorizontalScale(0.7f);
-    addAndMakeVisible(measuredDetailLabel);
-    addAndMakeVisible(budgetView);
+    add(measuredDetailLabel);
+    add(budgetView);
     renderLoadLabel.setFont(theme::ui::captionFont());
     renderLoadLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(renderLoadLabel);
+    add(renderLoadLabel);
 
     listenLabel.setFont(theme::ui::bodyFont());
     listenLabel.setColour(juce::Label::textColourId, theme::dim());
     listenLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(listenLabel);
+    add(listenLabel);
 
     theme::ui::styleCombo(listenCombo);
     listenCombo.setTooltip("Which open input listens for the click coming back");
@@ -113,7 +152,7 @@ SettingsView::SettingsView(AudioEngine& engine)
                                                             : listenCombo.getText();
         refresh();
     };
-    addAndMakeVisible(listenCombo);
+    add(listenCombo);
 
     theme::ui::styleButton(measureButton);
     measureButton.setTooltip(
@@ -125,14 +164,12 @@ SettingsView::SettingsView(AudioEngine& engine)
         else audioEngine.startLatencyMeasurement(listenSelection_);
         refresh();
     };
-    addAndMakeVisible(measureButton);
+    add(measureButton);
 
     tuningLabel.setText("LATENCY TUNING (OPT-IN)", juce::dontSendNotification);
-    tuningLabel.setFont(theme::ui::sectionFont());
-    tuningLabel.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
-    addAndMakeVisible(tuningLabel);
+    styleCaption(tuningLabel);
     theme::ui::styleBetaLabel(tuningBeta);
-    addAndMakeVisible(tuningBeta);
+    add(tuningBeta);
 
     const std::array<std::pair<juce::ToggleButton*, AudioEngine::LatencyOption>, 5> tuningToggles {{
         { &lowLatencyInputToggle, AudioEngine::LatencyOption::LowLatencyInput },
@@ -163,7 +200,7 @@ SettingsView::SettingsView(AudioEngine& engine)
                                       || staged_.fullDuplexInput;
             updatePendingState();
         };
-        addAndMakeVisible(*toggle);
+        add(*toggle);
     }
     lowLatencyInputToggle.setTooltip(
         "Input capture keeps one render block of read delay instead of two. "
@@ -200,10 +237,8 @@ SettingsView::SettingsView(AudioEngine& engine)
         }
         refresh();
     };
-    addAndMakeVisible(profileButton);
-    profileStatusLabel.setFont(theme::ui::captionFont());
-    profileStatusLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(profileStatusLabel);
+    add(profileButton);
+    add(profileStatusLabel);
 
     theme::ui::styleButton(forceAsioButton);
     forceAsioButton.setTooltip(
@@ -214,35 +249,68 @@ SettingsView::SettingsView(AudioEngine& engine)
         forceAsioStatus_ = audioEngine.forceAsio();
         refresh();
     };
-    addAndMakeVisible(forceAsioButton);
-    asioStatusLabel.setFont(theme::ui::captionFont());
-    asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
-    asioStatusLabel.setMinimumHorizontalScale(0.7f);
-    addAndMakeVisible(asioStatusLabel);
+    add(forceAsioButton);
+    add(asioStatusLabel);
 
-    pendingLabel.setFont(theme::ui::captionFont());
-    pendingLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(pendingLabel);
+    // APP
+    styleCaption(appCaption);
 
-    for (auto* button : { &applyButton, &revertButton, &reloadAllButton }) {
-        theme::ui::styleButton(*button);
-        addAndMakeVisible(*button);
-    }
-    applyButton.onClick = [this] { applyPending(); };
-    revertButton.onClick = [this] { revertPending(); };
+    rackThumbnailsLabel.setFont(theme::ui::bodyFont());
+    rackThumbnailsLabel.setColour(juce::Label::textColourId, theme::text());
+    rackThumbnailsLabel.setTooltip(
+        "How often the Rack view redraws the snapshot of the plugin editor it "
+        "shows in each insert card.");
+    add(rackThumbnailsLabel);
+
+    theme::ui::styleCombo(rackThumbnailFpsCombo);
+    for (const int fps : { 5, 10, 15, 20, 30 })
+        rackThumbnailFpsCombo.addItem(juce::String(fps) + " fps", fps);
+    rackThumbnailFpsCombo.setTooltip(
+        "Thumbnail refresh rate. Lower costs less CPU when a heavy plugin "
+        "editor is open.");
+    rackThumbnailFpsCombo.setScrollWheelEnabled(false);
+    rackThumbnailFpsCombo.onChange = [this] {
+        audioEngine.setRackThumbnailFps(rackThumbnailFpsCombo.getSelectedId());
+    };
+    add(rackThumbnailFpsCombo);
+
+    peakHoldLabel.setFont(theme::ui::bodyFont());
+    peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
+    peakHoldLabel.setTooltip("How long every level meter keeps its peak line before it falls back.");
+    add(peakHoldLabel);
+
+    theme::ui::styleCombo(peakHoldCombo);
+    for (const int ms : LevelMeter::kPeakHoldChoices)
+        peakHoldCombo.addItem(LevelMeter::peakHoldLabel(ms), ms);
+    peakHoldCombo.setTooltip("Peak-hold interval for the channel, output and mixer meters.");
+    peakHoldCombo.setScrollWheelEnabled(false);
+    peakHoldCombo.onChange = [this] {
+        const int ms = peakHoldCombo.getSelectedId();
+        if (ms > 0) LevelMeter::setPeakHoldMs(ms);
+    };
+    add(peakHoldCombo);
+
+    theme::ui::styleToggle(closeToTrayToggle);
+    closeToTrayToggle.setTooltip("Keep PluginRack running in the system tray when the window is closed.");
+    closeToTrayToggle.onClick = [this] {
+        if (onCloseToTrayChanged) onCloseToTrayChanged(closeToTrayToggle.getToggleState());
+    };
+    add(closeToTrayToggle);
+
+    // AUDIO DEVICES
+    devicesLabel.setText("AUDIO DEVICES", juce::dontSendNotification);
+    styleCaption(devicesLabel);
+
+    theme::ui::styleButton(reloadAllButton);
+    add(reloadAllButton);
     reloadAllButton.onClick = [this] {
         audioEngine.reloadAllDevicesAsync();
         refresh();
     };
 
-    devicesLabel.setText("AUDIO DEVICES", juce::dontSendNotification);
-    devicesLabel.setFont(theme::ui::sectionFont());
-    devicesLabel.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
-    addAndMakeVisible(devicesLabel);
-
     reloadDevicesViewport.setViewedComponent(&reloadDevicesHolder, false);
     reloadDevicesViewport.setScrollBarsShown(true, false);
-    addAndMakeVisible(reloadDevicesViewport);
+    add(reloadDevicesViewport);
     theme::ui::styleToggle(autoReloadToggle);
     autoReloadToggle.setTooltip(
         "Reopens a checked device by itself when it reports an error. Three "
@@ -252,47 +320,7 @@ SettingsView::SettingsView(AudioEngine& engine)
         if (autoReloadToggle.getToggleState()) pushWatchedDevices();
         refresh();
     };
-    addAndMakeVisible(autoReloadToggle);
-
-    rackThumbnailsLabel.setFont(theme::ui::bodyFont());
-    rackThumbnailsLabel.setColour(juce::Label::textColourId, theme::text());
-    rackThumbnailsLabel.setTooltip(
-        "How often the Rack view redraws the snapshot of the plugin editor it "
-        "shows in each insert card.");
-    addAndMakeVisible(rackThumbnailsLabel);
-
-    theme::ui::styleCombo(rackThumbnailFpsCombo);
-    for (const int fps : { 5, 10, 15, 20, 30 })
-        rackThumbnailFpsCombo.addItem(juce::String(fps) + " fps", fps);
-    rackThumbnailFpsCombo.setTooltip(
-        "Thumbnail refresh rate. Lower costs less CPU when a heavy plugin "
-        "editor is open.");
-    rackThumbnailFpsCombo.onChange = [this] {
-        audioEngine.setRackThumbnailFps(rackThumbnailFpsCombo.getSelectedId());
-    };
-    addAndMakeVisible(rackThumbnailFpsCombo);
-
-    peakHoldLabel.setFont(theme::ui::bodyFont());
-    peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
-    peakHoldLabel.setTooltip("How long every level meter keeps its peak line before it falls back.");
-    addAndMakeVisible(peakHoldLabel);
-
-    theme::ui::styleCombo(peakHoldCombo);
-    for (const int ms : LevelMeter::kPeakHoldChoices)
-        peakHoldCombo.addItem(LevelMeter::peakHoldLabel(ms), ms);
-    peakHoldCombo.setTooltip("Peak-hold interval for the channel, output and mixer meters.");
-    peakHoldCombo.onChange = [this] {
-        const int ms = peakHoldCombo.getSelectedId();
-        if (ms > 0) LevelMeter::setPeakHoldMs(ms);
-    };
-    addAndMakeVisible(peakHoldCombo);
-
-    theme::ui::styleToggle(closeToTrayToggle);
-    closeToTrayToggle.setTooltip("Keep PluginRack running in the system tray when the window is closed.");
-    closeToTrayToggle.onClick = [this] {
-        if (onCloseToTrayChanged) onCloseToTrayChanged(closeToTrayToggle.getToggleState());
-    };
-    addAndMakeVisible(closeToTrayToggle);
+    add(autoReloadToggle);
 
     startTimer(250);
     refresh();
@@ -305,23 +333,36 @@ void SettingsView::setCloseToTrayEnabled(bool enabled) {
 void SettingsView::refresh() {
     audioEngine.pollLatencyMeasurement();
     if (!dirty_) staged_ = audioEngine.getDeviceSettings();
-    clockLabel.setText("Clock: " + audioEngine.getClockDescription(), juce::dontSendNotification);
+    bool relayout = false;
+
     const auto report = audioEngine.getLatencyReport();
+    if (hasBudget_ != report.valid) {
+        hasBudget_ = report.valid;
+        relayout = true;
+    }
+    const auto clockDescription = audioEngine.getClockDescription();
+    clockStatValue.setText(clockDescription, juce::dontSendNotification);
+    clockStatValue.setTooltip(clockDescription);
+    latencyStatValue.setText(report.valid
+                                 ? juce::String((int) std::round(report.totalMs)) + " ms"
+                                 : juce::String("n/a"),
+                             juce::dontSendNotification);
     if (report.valid) {
-        latencyLabel.setText("Latency (est.): " + juce::String((int)std::round(report.totalMs)) + " ms", juce::dontSendNotification);
         // Say who chose the buffer: "Auto" means the driver's own period, so a
         // large figure is a driver fact the user can only change by picking an
         // explicit size or a different device type.
-        const juce::String source = report.requestedOutputBufferSize > 0
-                                        ? juce::String(" (requested)")
-                                        : juce::String(" (driver default)");
-        bufferLabel.setText("Sample rate: " + juce::String((int)report.sampleRate) + " Hz   Buffer: "
-                            + juce::String(report.inputBufferSize) + " in / " + juce::String(report.outputBufferSize) + " out"
-                            + source,
-                            juce::dontSendNotification);
+        bufferStatCaption.setText(report.requestedOutputBufferSize > 0
+                                      ? juce::String("BUFFER - REQUESTED")
+                                      : juce::String("BUFFER - DRIVER DEFAULT"),
+                                  juce::dontSendNotification);
+        bufferStatValue.setText((report.inputBufferSize > 0
+                                     ? juce::String(report.inputBufferSize) + " in / "
+                                     : juce::String())
+                                    + juce::String(report.outputBufferSize) + " out",
+                                juce::dontSendNotification);
     } else {
-        latencyLabel.setText("Latency (est.): n/a", juce::dontSendNotification);
-        bufferLabel.setText("Sample rate: n/a", juce::dontSendNotification);
+        bufferStatCaption.setText("BUFFER", juce::dontSendNotification);
+        bufferStatValue.setText("n/a", juce::dontSendNotification);
     }
 
     // The staged choice is shown whether or not a device is open, so the page
@@ -335,23 +376,52 @@ void SettingsView::refresh() {
         else outputBufferSizeCombo.setSelectedId(kAutoBufferItemId, juce::dontSendNotification);
     }
 
-    juce::String errors;
+    // Device errors and counted glitches are different kinds of bad news: a
+    // device error means audio is not flowing, a counter means it stuttered.
+    juce::String deviceIssues;
     for (const auto& [stripName, stripError] : audioEngine.getDeviceErrors())
-        errors += stripName + ": " + stripError + "\n";
-    if (report.underruns + report.overruns > 0) errors += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
+        deviceIssues += stripName + ": " + stripError + "\n";
+    deviceIssues = deviceIssues.trim();
+
+    juce::String countedIssues;
+    if (report.underruns + report.overruns > 0) countedIssues += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
     const auto fifo = audioEngine.getFifoDiagnostics();
     if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0) {
-        errors += "Input capture: " + juce::String((juce::int64)fifo.inputUnderruns)
+        countedIssues += "Input capture: " + juce::String((juce::int64)fifo.inputUnderruns)
             + " underruns / " + juce::String((juce::int64)fifo.inputOverruns)
             + " overruns\n";
     }
     if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0) {
-        errors += "Output safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
+        countedIssues += "Output safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
             + " low-watermark events / " + juce::String((juce::int64)fifo.renderMisses)
             + " render misses\n";
     }
-    if (errors.isEmpty()) errors = "No audio errors.";
-    errorLabel.setText(errors.trim(), juce::dontSendNotification);
+    countedIssues = countedIssues.trim();
+
+    juce::String issues;
+    juce::Colour issuesColour = theme::green();
+    if (deviceIssues.isNotEmpty()) {
+        issues = deviceIssues;
+        issuesColour = theme::red();
+        if (countedIssues.isNotEmpty()) issues += "\n" + countedIssues;
+    } else if (countedIssues.isNotEmpty()) {
+        issues = countedIssues;
+        issuesColour = theme::amber();
+    } else {
+        issues = "No audio errors.";
+    }
+    relayout |= setWrappedText(issuesText, issues, issuesColour);
+
+    // The header keeps the answer visible when the body is scrolled down to the
+    // tuning or device sections.
+    if (audioEngine.isOpeningDevices())
+        header.setStatus("Starting audio...", theme::amber());
+    else if (deviceIssues.isNotEmpty())
+        header.setStatus("Device error", theme::red());
+    else if (countedIssues.isNotEmpty())
+        header.setStatus("Audio glitches", theme::amber());
+    else
+        header.setStatus("No audio errors", theme::green());
 
     // Render load says how much of each block the engine is spending. High p99
     // is the honest reason a smaller buffer glitches, so it belongs next to
@@ -391,40 +461,39 @@ void SettingsView::refresh() {
     const auto asioDrivers = audioEngine.getAsioDeviceNames();
     forceAsioButton.setEnabled(!busy && !asioDrivers.isEmpty());
     if (forceAsioStatus_.isNotEmpty()) {
-        asioStatusLabel.setText(forceAsioStatus_, juce::dontSendNotification);
-        asioStatusLabel.setColour(juce::Label::textColourId,
-                                  forceAsioStatus_.startsWith("Clock is now") ? theme::green()
-                                                                             : theme::amber());
+        relayout |= setWrappedText(asioStatusLabel, forceAsioStatus_,
+                                   forceAsioStatus_.startsWith("Clock is now") ? theme::green()
+                                                                              : theme::amber());
     } else if (asioDrivers.isEmpty()) {
-        asioStatusLabel.setText("No ASIO driver installed - using Windows Audio.",
-                                juce::dontSendNotification);
-        asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+        relayout |= setWrappedText(asioStatusLabel,
+                                   "No ASIO driver installed - using Windows Audio.",
+                                   theme::dim());
     } else {
-        asioStatusLabel.setText("ASIO available: " + asioDrivers.joinIntoString(", "),
-                                juce::dontSendNotification);
-        asioStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+        relayout |= setWrappedText(asioStatusLabel,
+                                   "ASIO available: " + asioDrivers.joinIntoString(", "),
+                                   theme::dim());
     }
     if (profile.active) {
-        profileStatusLabel.setText("Step " + juce::String(profile.stepIndex) + " of "
+        relayout |= setWrappedText(profileStatusLabel,
+                                   "Step " + juce::String(profile.stepIndex) + " of "
                                        + juce::String(profile.totalSteps) + " - "
                                        + juce::String(profile.currentBuffer) + " samples - "
                                        + juce::String(juce::jmax(0, profile.remainingMs) / 1000)
                                        + " s left",
-                                   juce::dontSendNotification);
-        profileStatusLabel.setColour(juce::Label::textColourId, theme::amber());
+                                   theme::amber());
     } else if (profile.failed) {
-        profileStatusLabel.setText("Glitched - back at " + juce::String(profile.currentBuffer)
+        relayout |= setWrappedText(profileStatusLabel,
+                                   "Glitched - back at " + juce::String(profile.currentBuffer)
                                        + " samples",
-                                   juce::dontSendNotification);
-        profileStatusLabel.setColour(juce::Label::textColourId, theme::red());
+                                   theme::red());
     } else if (profile.finished) {
-        profileStatusLabel.setText("Stable at " + juce::String(profile.currentBuffer) + " samples",
-                                   juce::dontSendNotification);
-        profileStatusLabel.setColour(juce::Label::textColourId, theme::green());
+        relayout |= setWrappedText(profileStatusLabel,
+                                   "Stable at " + juce::String(profile.currentBuffer) + " samples",
+                                   theme::green());
     } else {
-        profileStatusLabel.setText("Finds the smallest buffer this device survives.",
-                                   juce::dontSendNotification);
-        profileStatusLabel.setColour(juce::Label::textColourId, theme::dim());
+        relayout |= setWrappedText(profileStatusLabel,
+                                   "Finds the smallest buffer this device survives.",
+                                   theme::dim());
     }
     inputBufferSizeCombo.setEnabled(!busy);
     outputBufferSizeCombo.setEnabled(!busy);
@@ -445,6 +514,17 @@ void SettingsView::refresh() {
     refreshListenChoices();
     updateMeasurement(report);
     pollAutoReload();
+
+    // Wrapped lines decide the section heights, so only a change in one of them
+    // is worth re-running the layout.
+    if (relayout) layoutBodyToFit();
+}
+
+bool SettingsView::setWrappedText(WrappedLabel& label, const juce::String& text,
+                                  juce::Colour colour) {
+    if (label.getText() == text && label.getTextColour() == colour) return false;
+    label.setText(text, colour);
+    return true;
 }
 
 void SettingsView::updatePendingState() {
@@ -681,110 +761,256 @@ void SettingsView::resized() {
     auto area = getLocalBounds().reduced(theme::ui::kPagePad);
     header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
     area.removeFromTop(theme::ui::kHeaderGap);
+    viewport.setBounds(area);
+    layoutBodyToFit();
+}
 
-    // Caption plus its BETA tag, which follows the caption's own text width so
-    // the two never overlap as the words change.
-    const auto placeCaption = [](juce::Rectangle<int> row, juce::Label& caption,
-                                 juce::Label& badge) {
-        caption.setBounds(row);
-        const int textWidth = juce::GlyphArrangement::getStringWidthInt(caption.getFont(),
-                                                                       caption.getText());
-        badge.setBounds(row.getX() + textWidth + 8, row.getY(), 44, row.getHeight());
+void SettingsView::layoutBodyToFit() {
+    const int available = viewport.getWidth();
+    if (available <= 0) return;
+
+    const int height = layoutBody(available);
+    // A scrollbar steals width, which can push a wrapped line onto another
+    // line. Lay out once more at the narrower width so the two agree.
+    if (height > viewport.getHeight())
+        layoutBody(juce::jmax(1, available - viewport.getScrollBarThickness()));
+}
+
+int SettingsView::layoutBody(int width) {
+    constexpr int pad = theme::ui::kPanelPad;
+    constexpr int kStatH = 34;
+    constexpr int kToggleH = 24;
+    constexpr int kToggleGap = 4;
+    constexpr int kDeviceRowH = 24;
+    constexpr int kMaxDeviceRows = 6;
+    const int innerW = juce::jmax(1, width - 2 * pad);
+
+    body.setSize(width, body.getHeight());
+
+    std::vector<juce::Rectangle<int>> panels;
+    int y = 0;
+
+    // A section is its caption and then the panel under it: the caption is a
+    // label so it scrolls with the content it names.
+    const auto startSection = [&](juce::Label& caption, juce::Label* badge) {
+        caption.setBounds(0, y, width, theme::ui::kSectionH);
+        if (badge != nullptr) {
+            // The BETA tag follows the caption's own width so the two never
+            // overlap as the words change.
+            const int textWidth =
+                juce::GlyphArrangement::getStringWidthInt(caption.getFont(), caption.getText());
+            badge->setBounds(textWidth + 8, y, 44, theme::ui::kSectionH);
+        }
+        y += theme::ui::kSectionH + theme::ui::kRowGap;
+        return y;
+    };
+    const auto endSection = [&](juce::Rectangle<int> panel) {
+        panels.push_back(panel);
+        y = panel.getBottom() + theme::ui::kSectionGap;
     };
 
-    const int lineH = 20;
-    clockLabel.setBounds(area.removeFromTop(lineH));
-    area.removeFromTop(2);
-    latencyLabel.setBounds(area.removeFromTop(lineH));
-    area.removeFromTop(2);
-    bufferLabel.setBounds(area.removeFromTop(lineH));
-    area.removeFromTop(theme::ui::kRowGap);
-    errorLabel.setBounds(area.removeFromTop(60));
-    area.removeFromTop(theme::ui::kRowGap);
+    // AUDIO STATUS
+    {
+        const int panelTop = startSection(statusCaption, nullptr);
+        const int issuesH =
+            WrappedLabel::heightFor(issuesText.getText(), innerW, issuesText.getFont());
+        const int panelH = pad + kStatH + (issuesH > 0 ? 10 + issuesH : 0) + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
 
-    auto fields = area.removeFromTop(theme::ui::kControlH);
-    inputBufferSizeLabel.setBounds(fields.removeFromLeft(92));
-    fields.removeFromLeft(theme::ui::kRowGap);
-    inputBufferSizeCombo.setBounds(fields.removeFromLeft(160));
-    fields.removeFromLeft(theme::ui::kSectionGap);
-    outputBufferSizeLabel.setBounds(fields.removeFromLeft(96));
-    fields.removeFromLeft(theme::ui::kRowGap);
-    outputBufferSizeCombo.setBounds(fields.removeFromLeft(160));
+        auto inner = panel.reduced(pad);
+        auto stats = inner.removeFromTop(kStatH);
+        constexpr int kStatGap = 18;
+        const auto placeStat = [](juce::Rectangle<int> cell, juce::Label& caption,
+                                  juce::Label& value) {
+            caption.setBounds(cell.removeFromTop(13));
+            value.setBounds(cell.removeFromTop(18));
+        };
+        // The clock is the lead: half the row, then the two numbers that say
+        // how it is performing, so the three never drift apart.
+        auto clockCell = stats.removeFromLeft(stats.getWidth() / 2);
+        stats.removeFromLeft(kStatGap);
+        const int statW = (stats.getWidth() - kStatGap) / 2;
+        auto latencyCell = stats.removeFromLeft(statW);
+        stats.removeFromLeft(kStatGap);
+        placeStat(clockCell, clockStatCaption, clockStatValue);
+        placeStat(latencyCell, latencyStatCaption, latencyStatValue);
+        placeStat(stats, bufferStatCaption, bufferStatValue);
 
-    area.removeFromTop(theme::ui::kRowGap);
-    auto pendingRow = area.removeFromTop(theme::ui::kControlH);
-    applyButton.setBounds(pendingRow.removeFromLeft(90));
-    pendingRow.removeFromLeft(theme::ui::kRowGap);
-    revertButton.setBounds(pendingRow.removeFromLeft(90));
-    pendingRow.removeFromLeft(theme::ui::kSectionGap);
-    pendingLabel.setBounds(pendingRow);
-
-    area.removeFromTop(theme::ui::kSectionGap);
-    placeCaption(area.removeFromTop(theme::ui::kSectionH), roundTripLabel, roundTripBeta);
-    area.removeFromTop(theme::ui::kRowGap);
-    auto measureRow = area.removeFromTop(28);
-    measureButton.setBounds(measureRow.removeFromRight(theme::ui::kMeasureW)
-                                .withSizeKeepingCentre(theme::ui::kMeasureW,
-                                                       theme::ui::kControlH));
-    measureRow.removeFromRight(10);
-    listenCombo.setBounds(measureRow.removeFromRight(220)
-                              .withSizeKeepingCentre(220, theme::ui::kControlH));
-    measureRow.removeFromRight(theme::ui::kRowGap);
-    listenLabel.setBounds(measureRow.removeFromRight(64));
-    measureRow.removeFromRight(12);
-    measuredLabel.setBounds(measureRow);
-    area.removeFromTop(2);
-    measuredDetailLabel.setBounds(area.removeFromTop(16));
-    area.removeFromTop(theme::ui::kRowGap);
-    budgetView.setBounds(area.removeFromTop(LatencyBudgetView::preferredHeight()));
-    renderLoadLabel.setBounds(area.removeFromTop(16));
-
-    area.removeFromTop(theme::ui::kSectionGap);
-    placeCaption(area.removeFromTop(theme::ui::kSectionH), tuningLabel, tuningBeta);
-    area.removeFromTop(theme::ui::kRowGap);
-    for (auto* toggle : { &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
-                           &minimalClockFifoToggle, &fullDuplexToggle }) {
-        toggle->setBounds(area.removeFromTop(24).removeFromLeft(430));
-        area.removeFromTop(4);
+        if (issuesH > 0)
+            issuesText.setBounds(inner.removeFromTop(10 + issuesH).withTrimmedTop(10));
+        else
+            issuesText.setBounds({});
+        endSection(panel);
     }
 
-    area.removeFromTop(theme::ui::kRowGap);
-    auto profileRow = area.removeFromTop(theme::ui::kControlH);
-    profileButton.setBounds(profileRow.removeFromLeft(200));
-    profileRow.removeFromLeft(theme::ui::kRowGap);
-    profileStatusLabel.setBounds(profileRow);
+    // BUFFER SIZE
+    {
+        const int panelTop = startSection(bufferCaption, nullptr);
+        const int panelH = pad + theme::ui::kControlH + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
+        auto inner = panel.reduced(pad);
 
-    area.removeFromTop(2);
-    auto asioRow = area.removeFromTop(theme::ui::kControlH);
-    forceAsioButton.setBounds(asioRow.removeFromLeft(120));
-    asioRow.removeFromLeft(theme::ui::kRowGap);
-    asioStatusLabel.setBounds(asioRow);
+        auto row = inner.removeFromTop(theme::ui::kControlH);
+        inputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        inputBufferSizeCombo.setBounds(row.removeFromLeft(150));
+        row.removeFromLeft(18);
+        outputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        outputBufferSizeCombo.setBounds(row.removeFromLeft(150));
 
-    area.removeFromTop(theme::ui::kRowGap);
-    auto thumbRow = area.removeFromTop(theme::ui::kControlH);
-    rackThumbnailsLabel.setBounds(thumbRow.removeFromLeft(140));
-    thumbRow.removeFromLeft(theme::ui::kRowGap);
-    rackThumbnailFpsCombo.setBounds(thumbRow.removeFromLeft(90));
-    thumbRow.removeFromLeft(theme::ui::kSectionGap);
-    peakHoldLabel.setBounds(thumbRow.removeFromLeft(80));
-    thumbRow.removeFromLeft(theme::ui::kRowGap);
-    peakHoldCombo.setBounds(thumbRow.removeFromLeft(90));
-    thumbRow.removeFromLeft(theme::ui::kSectionGap);
-    closeToTrayToggle.setBounds(thumbRow.removeFromLeft(320));
+        // Apply closes the row: the hand leaves the fields and lands on it.
+        applyButton.setBounds(row.removeFromRight(90));
+        row.removeFromRight(theme::ui::kRowGap);
+        revertButton.setBounds(row.removeFromRight(90));
+        row.removeFromRight(theme::ui::kSectionGap);
+        pendingLabel.setBounds(row);
+        endSection(panel);
+    }
 
-    area.removeFromTop(theme::ui::kSectionGap);
-    devicesLabel.setBounds(area.removeFromTop(theme::ui::kSectionH));
-    area.removeFromTop(theme::ui::kRowGap);
-    reloadAllButton.setBounds(area.removeFromTop(theme::ui::kControlH).removeFromLeft(220));
+    // ROUND-TRIP LATENCY
+    {
+        const int panelTop = startSection(roundTripLabel, &roundTripBeta);
+        constexpr int kHeadlineH = 30;
+        constexpr int kDetailH = 16;
+        const int budgetH = hasBudget_ ? LatencyBudgetView::preferredHeight() : 0;
+        const int panelH = pad + kHeadlineH + 2 + kDetailH
+                           + (budgetH > 0 ? 8 + budgetH + 6 : 10) + kDetailH + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
+        auto inner = panel.reduced(pad);
 
-    // The list only exists when at least one device is open; without it the
-    // auto-reload switch sits directly under the reload action.
-    area.removeFromTop(theme::ui::kRowGap);
-    const bool hasDevices = !reloadDevices_.empty();
-    reloadDevicesViewport.setVisible(hasDevices);
-    reloadDevicesViewport.setBounds(hasDevices
-                                        ? area.removeFromTop(96).removeFromLeft(430)
-                                        : juce::Rectangle<int>());
-    area.removeFromTop(theme::ui::kRowGap);
-    autoReloadToggle.setBounds(area.removeFromTop(theme::ui::kControlH).removeFromLeft(380));
+        auto headline = inner.removeFromTop(kHeadlineH);
+        measureButton.setBounds(headline.removeFromRight(theme::ui::kMeasureW)
+                                    .withSizeKeepingCentre(theme::ui::kMeasureW,
+                                                           theme::ui::kControlH));
+        headline.removeFromRight(10);
+        listenCombo.setBounds(headline.removeFromRight(200)
+                                  .withSizeKeepingCentre(200, theme::ui::kControlH));
+        headline.removeFromRight(theme::ui::kRowGap);
+        listenLabel.setBounds(headline.removeFromRight(64)
+                                  .withSizeKeepingCentre(64, theme::ui::kControlH));
+        headline.removeFromRight(12);
+        measuredLabel.setBounds(headline.withSizeKeepingCentre(headline.getWidth(), 26));
+
+        inner.removeFromTop(2);
+        measuredDetailLabel.setBounds(inner.removeFromTop(kDetailH));
+        budgetView.setVisible(budgetH > 0);
+        if (budgetH > 0) {
+            inner.removeFromTop(8);
+            // The stage list is read label to value; on a wide window that
+            // distance would be a screen wide, so the rows keep a readable
+            // measure instead of stretching to the panel edge.
+            budgetView.setBounds(inner.removeFromTop(budgetH).removeFromLeft(
+                juce::jmin(inner.getWidth(), 760)));
+            inner.removeFromTop(6);
+        } else {
+            budgetView.setBounds({});
+            inner.removeFromTop(10);
+        }
+        renderLoadLabel.setBounds(inner.removeFromTop(kDetailH));
+        endSection(panel);
+    }
+
+    // LATENCY TUNING (OPT-IN)
+    {
+        const int panelTop = startSection(tuningLabel, &tuningBeta);
+        constexpr int kActionW = 200;
+        const int statusW = juce::jmax(120, innerW - kActionW - theme::ui::kSectionGap);
+        const int profileStatusH = WrappedLabel::heightFor(profileStatusLabel.getText(), statusW,
+                                                           profileStatusLabel.getFont());
+        const int asioStatusH = WrappedLabel::heightFor(asioStatusLabel.getText(), statusW,
+                                                        asioStatusLabel.getFont());
+        const int profileRowH = juce::jmax(theme::ui::kControlH, profileStatusH);
+        const int asioRowH = juce::jmax(theme::ui::kControlH, asioStatusH);
+        constexpr int kToggleW = 430;
+        constexpr int kToggleColGap = 24;
+        // Five opt-in switches read as one list in a narrow window and as rows
+        // of two when the panel is wide enough to hold them side by side.
+        const bool twoColumns = innerW >= 2 * kToggleW + kToggleColGap;
+        const int toggleRows = twoColumns ? 3 : 5;
+        const int togglesH = toggleRows * kToggleH + (toggleRows - 1) * kToggleGap;
+        const int panelH = pad + togglesH + 10 + profileRowH + 6 + asioRowH + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
+        auto inner = panel.reduced(pad);
+
+        const std::array<juce::ToggleButton*, 5> toggles{{
+            &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
+            &minimalClockFifoToggle, &fullDuplexToggle,
+        }};
+        const int columnW = twoColumns ? (innerW - kToggleColGap) / 2 : innerW;
+        for (int i = 0; i < (int) toggles.size(); ++i) {
+            const int column = twoColumns ? i % 2 : 0;
+            const int line = twoColumns ? i / 2 : i;
+            toggles[i]->setBounds(column * (columnW + kToggleColGap),
+                                  inner.getY() + line * (kToggleH + kToggleGap),
+                                  juce::jmin(kToggleW, columnW), kToggleH);
+        }
+        inner.removeFromTop(togglesH);
+
+        inner.removeFromTop(10);
+        auto profileRow = inner.removeFromTop(profileRowH);
+        profileButton.setBounds(profileRow.removeFromLeft(kActionW)
+                                    .withSizeKeepingCentre(kActionW, theme::ui::kControlH));
+        profileRow.removeFromLeft(theme::ui::kSectionGap);
+        profileStatusLabel.setBounds(profileRow.withSizeKeepingCentre(
+            profileRow.getWidth(), juce::jmax(1, profileStatusH)));
+
+        inner.removeFromTop(6);
+        auto asioRow = inner.removeFromTop(asioRowH);
+        forceAsioButton.setBounds(asioRow.removeFromLeft(kActionW)
+                                      .withSizeKeepingCentre(kActionW, theme::ui::kControlH));
+        asioRow.removeFromLeft(theme::ui::kSectionGap);
+        asioStatusLabel.setBounds(
+            asioRow.withSizeKeepingCentre(asioRow.getWidth(), juce::jmax(1, asioStatusH)));
+        endSection(panel);
+    }
+
+    // APP
+    {
+        const int panelTop = startSection(appCaption, nullptr);
+        const int panelH = pad + theme::ui::kControlH + 6 + theme::ui::kControlH + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
+        auto inner = panel.reduced(pad);
+
+        auto row = inner.removeFromTop(theme::ui::kControlH);
+        rackThumbnailsLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        rackThumbnailFpsCombo.setBounds(row.removeFromLeft(90));
+        row.removeFromLeft(24);
+        peakHoldLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        peakHoldCombo.setBounds(row.removeFromLeft(90));
+
+        inner.removeFromTop(6);
+        closeToTrayToggle.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(320));
+        endSection(panel);
+    }
+
+    // AUDIO DEVICES
+    {
+        const int panelTop = startSection(devicesLabel, nullptr);
+        const bool hasDevices = !reloadDevices_.empty();
+        const int rows = juce::jlimit(0, kMaxDeviceRows, (int) reloadDevices_.size());
+        const int listH = rows * kDeviceRowH;
+        const int panelH = pad + theme::ui::kControlH + (hasDevices ? 6 + listH : 0) + 6
+                           + theme::ui::kControlH + pad;
+        const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
+        auto inner = panel.reduced(pad);
+
+        reloadAllButton.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(220));
+
+        // The list sizes to its rows; only a long list needs its own scrollbar,
+        // which keeps the page's scroll the one the wheel reaches for.
+        reloadDevicesViewport.setVisible(hasDevices);
+        if (hasDevices) {
+            inner.removeFromTop(6);
+            reloadDevicesViewport.setBounds(inner.removeFromTop(listH).removeFromLeft(430));
+        } else {
+            reloadDevicesViewport.setBounds({});
+        }
+
+        inner.removeFromTop(6);
+        autoReloadToggle.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(380));
+        endSection(panel);
+    }
+
+    body.setPanels(std::move(panels));
+    body.setSize(width, y);
+    return y;
 }
