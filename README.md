@@ -6,6 +6,7 @@ hosting on every input and an open-ended, many-to-many routing matrix.
 PluginRack hosts your own VST3 inserts in the live routing path, so a stream or
 recording can run through the plugins you already own instead of a fixed set of
 built-in effects.
+<img width="1203" height="674" alt="image" src="https://github.com/user-attachments/assets/d6dcdd4e-05f8-4cc1-8030-6cbf7b0b42eb" />
 
 > Status: early development, Windows x64 only. Interfaces and the scene format
 > can still change.
