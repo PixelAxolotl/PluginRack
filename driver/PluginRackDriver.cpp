@@ -32,13 +32,14 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject,
     return PcInitializeAdapterDriver(driverObject, nullptr, nullptr);
 }
 
-extern "C" NTSTATUS AddDevice(PDEVICE_OBJECT physicalDeviceObject) {
+extern "C" NTSTATUS AddDevice(PDRIVER_OBJECT driverObject,
+                            PDEVICE_OBJECT physicalDeviceObject) {
     // PortCls creates the functional device object and attaches the
     // adapter; the miniport (see PluginRackMiniport.cpp) exposes the
     // WaveRT pins. Endpoint names, KS node types (speaker on render,
     // microphone on capture), and the bridge SDDL live in the INF.
-    return PcAddAdapterDevice(physicalDeviceObject, nullptr, 0, nullptr,
-                              GUID_PLUGINRACK_ADAPTER);
+    return PcAddAdapterDevice(driverObject, physicalDeviceObject, nullptr,
+                              0, 0);
 }
 
 NTSTATUS BridgeCreate(PDEVICE_OBJECT /*deviceObject*/, PIRP irp) {
@@ -80,7 +81,7 @@ NTSTATUS BridgeIoControl(PDEVICE_OBJECT deviceObject, PIRP irp) {
         }
         // Single client per slot: second opener rejected until release.
         if (InterlockedCompareExchange(&slot->clientConnected, 1, 0) != 0) {
-            status = STATUS_ALREADY_EXISTS;
+            status = STATUS_SHARING_VIOLATION;
             break;
         }
         auto* h = static_cast<pluginrack::driver::SharedRingHeader*>(

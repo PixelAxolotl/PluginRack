@@ -46,14 +46,14 @@ struct EndpointSlot {
     std::uint32_t slotIndex = 0;
     // Shared ring: header + interleaved float32 stereo payload.
     void* ringBase = nullptr; // system-mapped MDL address (DISPATCH_LEVEL safe)
-    MDL* ringMdl = nullptr;
+    PMDL ringMdl = nullptr;
     std::uint32_t ringFrames = 0;
     // WaveRT side: cyclic buffer owned by the miniport stream.
     void* waveBuffer = nullptr;
     std::uint32_t waveFrames = 0;
     std::uint32_t wavePosition = 0; // position cursor, frames
-    EX_TIMER* timer = nullptr; // ExSetTimer: drives position + bridging
-    KEVENT* notifyEvent = nullptr; // connect/telemetry only, never per block
+    PEX_TIMER timer = nullptr; // ExSetTimer: drives position + bridging
+    PKEVENT notifyEvent = nullptr; // connect/telemetry only, never per block
     volatile LONG clientConnected = 0;
 };
 
@@ -66,7 +66,7 @@ struct AdapterExtension {
 
 extern "C" {
 DRIVER_INITIALIZE DriverEntry;
-NTSTATUS AddDevice(PDEVICE_OBJECT physicalDeviceObject);
+DRIVER_ADD_DEVICE AddDevice;
 }
 
 // Bridge dispatch: Create/Close/ DeviceIoControl on \\.\PluginRackBridge.
