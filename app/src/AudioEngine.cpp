@@ -5,6 +5,7 @@
 #include <pluginrack/AsioDeviceMatch.h>
 #include <pluginrack/InputBufferPolicy.h>
 #include <pluginrack/InputFollowPolicy.h>
+#include <pluginrack/VirtualAudioProtocol.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1990,9 +1991,27 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         channel->duplexInputChannels = 0;
         channel->inputDeviceName = "None - silent";
         channel->sourceDeviceId.clear();
+        channel->sourceKind = pluginrack::SourceKind::Hardware;
         channel->inputError.clear();
         pruneUnusedCaptures();
         return {};
+    }
+
+    // Virtual endpoints need the kernel driver, which does not exist yet.
+    // Record the assignment (scene-safe via the stable logical id) and report
+    // it as missing, exactly like an unplugged device: the scene loads, the
+    // strip shows the warning, and nothing blocks.
+    if (pluginrack::virt::isVirtualEndpointId(deviceName.toStdString())) {
+        const juce::ScopedLock sl(stateLock);
+        channel->input.reset();
+        channel->duplexInput = false;
+        channel->duplexInputChannels = 0;
+        channel->inputDeviceName = deviceName;
+        channel->sourceDeviceId = deviceName.toStdString();
+        channel->sourceKind = pluginrack::SourceKind::VirtualInput;
+        channel->inputError = "Virtual driver not installed.";
+        pruneUnusedCaptures();
+        return channel->inputError;
     }
 
     {
@@ -2302,14 +2321,23 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         }
     }
 
+    // Virtual endpoints need the kernel driver, which does not exist yet.
+    // Record the assignment (scene-safe via the stable logical id) and report
+    // it as missing, exactly like an unplugged device: the scene loads, the
+    // strip shows the warning, and nothing blocks.
+    if (pluginrack::virt::isVirtualEndpointId(deviceName.toStdString())) {
+        const juce::ScopedLock sl(stateLock);
+        out->outputDeviceName = deviceName;
+        out->outputError = "Virtual driver not installed.";
+        return out->outputError;
+    }
+
     if (deviceName == "None - silent" || deviceName.isEmpty()) {
         bool wasClock = false;
         OutputPlayback* retiredPlayback = nullptr;
         {
             const juce::ScopedLock sl(stateLock);
-            wasClock = (clockOutputId == outputId);
-            if (wasClock) {
-                // Dropping the clock also drops the duplex capture path.
+            wasClock = (clockOutputId == outputId);            if (wasClock) {                // Dropping the clock also drops the duplex capture path.
                 duplexActive_.store(false, std::memory_order_release);
                 duplexDeviceName_.clear();
                 duplexInputBuffers_ = nullptr;
