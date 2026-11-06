@@ -6,6 +6,7 @@
 #include <pluginrack/InputBufferPolicy.h>
 #include <pluginrack/InputFollowPolicy.h>
 #include <pluginrack/VirtualAudioProtocol.h>
+#include <pluginrack/VirtualAudioProtocol.h>
 
 #include <algorithm>
 #include <cmath>
@@ -2658,11 +2659,19 @@ juce::String AudioEngine::getClockDescription() const {
 }
 
 juce::StringArray AudioEngine::getAvailableInputDevices() const {
-    return DeviceEnumeration::inputs();
+    auto devices = DeviceEnumeration::inputs();
+    // Virtual inputs are always listed: without the driver they select into
+    // the clean missing-driver error, and scene ids stay stable.
+    devices.add(juce::String(pluginrack::virt::makeVirtualInputId(1)));
+    devices.add(juce::String(pluginrack::virt::makeVirtualInputId(2)));
+    return devices;
 }
 
 juce::StringArray AudioEngine::getAvailableOutputDevices() const {
-    return DeviceEnumeration::outputs();
+    auto devices = DeviceEnumeration::outputs();
+    devices.add(juce::String(pluginrack::virt::makeVirtualOutputId(1)));
+    devices.add(juce::String(pluginrack::virt::makeVirtualOutputId(2)));
+    return devices;
 }
 
 juce::StringArray AudioEngine::getAsioDeviceNames() const {
