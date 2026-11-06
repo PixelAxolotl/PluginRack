@@ -1,0 +1,92 @@
+; PluginRack.inf — installs the PluginRack virtual audio adapter.
+; x64, Windows 10 1803+. Attestation-signed via Partner Center; install with
+; pnputil /add-driver or DiInstallDriver. Upgrade and uninstall cleanly
+; remove all four endpoints.
+;
+; Replace the placeholder GUID with the real adapter GUID at fork time
+; (must match GUID_PLUGINRACK_ADAPTER in PluginRackDriver.h).
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=MEDIA
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/06/2026,1.0.0.0
+CatalogFile=PluginRack.cat
+PnpLockdown=1
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+PluginRack.sys = 1,,
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%Provider%=PluginRack,NTamd64
+
+[PluginRack.NTamd64]
+%AdapterDesc%=PluginRack_Device, PluginRackAdapter
+
+[PluginRack_Device.NT]
+CopyFiles=PluginRack_Files
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Render0%,PluginRack_Render0
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Render1%,PluginRack_Render1
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Capture0%,PluginRack_Capture0
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Capture1%,PluginRack_Capture1
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Bridge%,PluginRack_Bridge
+
+[PluginRack_Files]
+PluginRack.sys
+
+[PluginRack_Device.NT.Services]
+AddService=PluginRack,0x00000002,PluginRack_Service
+
+[PluginRack_Service]
+DisplayName=%ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\PluginRack.sys
+
+; Render endpoints: speaker node so game/app pickers list them as outputs.
+[PluginRack_Render0]
+FriendlyName=%Render0Name%
+Category=Audio
+; KSNODETYPE_SPEAKER pin category via topology descriptor in the binary.
+[PluginRack_Render1]
+FriendlyName=%Render1Name%
+Category=Audio
+
+; Capture endpoints: microphone node so Discord/OBS list them as mics.
+[PluginRack_Capture0]
+FriendlyName=%Capture0Name%
+Category=Audio
+[PluginRack_Capture1]
+FriendlyName=%Capture1Name%
+Category=Audio
+
+; Private engine bridge: locked-down ACL, never shown in Sound settings.
+; SDDL: System + Admins full, interactive/authenticated read-write.
+[PluginRack_Bridge]
+FriendlyName=%BridgeName%
+Security="D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)"
+
+[Strings]
+Provider="PluginRack"
+DiskName="PluginRack Install Media"
+AdapterDesc="PluginRack Virtual Audio Adapter"
+ServiceDesc="PluginRack Virtual Audio"
+KSNAME_Render0="PluginRack Input 1/2"
+KSNAME_Render1="PluginRack Input 3/4"
+KSNAME_Capture0="PluginRack Output 1/2"
+KSNAME_Capture1="PluginRack Output 3/4"
+KSNAME_Bridge="PluginRackBridge"
+Render0Name="PluginRack Input 1/2"
+Render1Name="PluginRack Input 3/4"
+Capture0Name="PluginRack Output 1/2"
+Capture1Name="PluginRack Output 3/4"
+BridgeName="PluginRack Engine Bridge"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3E0-00A0C9223196}"
