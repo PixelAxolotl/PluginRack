@@ -298,8 +298,8 @@ Everything below is for building and working on PluginRack.
 
 ### Build
 
-The SDK paths default to the author's machine (`C:/Users/thorz/JUCE` and
-`C:/Users/thorz/vst3sdk`). Override them on the configure line.
+The SDK paths are read from the `JUCE_DIR` and `VST3_SDK_DIR` environment
+variables when set, or can be supplied on the configure line.
 
 ```powershell
 # From a Visual Studio Developer PowerShell / after vcvars64.bat

@@ -9,17 +9,27 @@ namespace {
 // VST3 bundles are folders ending in .vst3. VST2 (.dll) joins this wildcard
 // when that format is compiled in (JUCE_PLUGINHOST_VST).
 constexpr const char* kBundleWildcard = "*.vst3";
+constexpr int kMaxScanDepth = 8;
+constexpr int kMaxScanBundles = 4096;
 
 bool caseInsensitiveLess(const juce::String& a, const juce::String& b) {
     return a.compareIgnoreCase(b) < 0;
 }
 
-void collectBundles(const juce::File& folder, juce::Array<juce::File>& bundles) {
-    if (!folder.isDirectory()) return;
+bool collectBundles(const juce::File& folder, juce::Array<juce::File>& bundles, int depth) {
+    if (!folder.isDirectory() || depth > kMaxScanDepth) return true;
     for (const auto& entry : juce::RangedDirectoryIterator(
-             folder, true, kBundleWildcard, juce::File::findFilesAndDirectories)) {
-        bundles.addIfNotAlreadyThere(entry.getFile());
+             folder, false, "*", juce::File::findFilesAndDirectories)) {
+        const auto file = entry.getFile();
+        if (file.isSymbolicLink()) continue;
+        if (file.isDirectory()) {
+            if (!collectBundles(file, bundles, depth + 1)) return false;
+        } else if (file.hasFileExtension(".vst3")) {
+            bundles.addIfNotAlreadyThere(file);
+            if (bundles.size() >= kMaxScanBundles) return false;
+        }
     }
+    return true;
 }
 
 juce::int64 cachedModTimeFor(const juce::Array<juce::PluginDescription>& plugins,
@@ -200,6 +210,27 @@ void PluginLibrary::ensureCacheLoaded() {
     juce::Array<juce::PluginDescription> loadedPlugins;
     juce::Array<juce::File> loadedFolders;
     readCacheXml(*xml, loadedPlugins, loadedFolders);
+    // The cache is advisory. Never restore scan roots from user-writable XML,
+    // and only retain entries that still point at an existing bundle below a
+    // platform-provided scan root.
+    loadedFolders.clear();
+    juce::Array<juce::File> trustedRoots;
+    juce::VST3PluginFormat format;
+    const auto defaults = format.getDefaultLocationsToSearch();
+    for (int i = 0; i < defaults.getNumPaths(); ++i)
+        trustedRoots.add(juce::File(defaults[i]));
+    for (int i = loadedPlugins.size(); --i >= 0;) {
+        const juce::File file(loadedPlugins.getReference(i).fileOrIdentifier);
+        bool underTrustedRoot = false;
+        for (const auto& root : trustedRoots)
+            if (file.isAChildOf(root)) {
+                underTrustedRoot = true;
+                break;
+            }
+        if (!file.isAbsolutePath(file.getFullPathName()) || !underTrustedRoot
+            || !file.existsAsFile() || file.isSymbolicLink())
+            loadedPlugins.remove(i);
+    }
     sortPlugins(loadedPlugins);
 
     const juce::ScopedLock lock(listLock);
@@ -228,7 +259,12 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
     else folders = getScanFolders();
 
     juce::Array<juce::File> bundles;
-    for (const auto& folder : folders) collectBundles(folder, bundles);
+    for (const auto& folder : folders) {
+        if (!collectBundles(folder, bundles, 0)) {
+            juce::Logger::writeToLog("plugin scan: bundle limit reached");
+            break;
+        }
+    }
     std::sort(bundles.begin(), bundles.end(),
               [](const juce::File& a, const juce::File& b) {
                   return caseInsensitiveLess(a.getFullPathName(), b.getFullPathName());

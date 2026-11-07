@@ -1,6 +1,7 @@
 #include "PluginHost.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 
 namespace {
@@ -342,6 +343,11 @@ bool describeFromJson(const juce::String& text, juce::PluginDescription& descrip
 constexpr const char* kScanFlag = "--scan-plugin";
 constexpr const char* kScanResultPrefix = "PLUGINDESC ";
 constexpr const char* kScanErrorPrefix = "PLUGINSCANERROR ";
+constexpr int kMaxPluginStateBase64Chars = 1 * 1024 * 1024;
+
+bool isRemotePath(const juce::File& file) {
+    return file.getFullPathName().startsWith("\\\\");
+}
 
 } // namespace
 
@@ -349,6 +355,10 @@ juce::Array<juce::PluginDescription> PluginHost::scanFile(const juce::File& file
                                                           juce::String& error) {
     juce::Array<juce::PluginDescription> descriptions;
 
+    if (isRemotePath(file)) {
+        error = "Network plugin paths are not supported.";
+        return descriptions;
+    }
     if (!file.exists()) {
         error = "The selected VST3 does not exist.";
         return descriptions;
@@ -364,9 +374,10 @@ juce::Array<juce::PluginDescription> PluginHost::scanFile(const juce::File& file
 
     const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     juce::ChildProcess child;
-    const auto command = executable.getFullPathName().quoted() + " " + kScanFlag + " "
-                       + file.getFullPathName().quoted();
-    if (!executable.existsAsFile() || !child.start(command, juce::ChildProcess::wantStdOut)) {
+    const juce::StringArray arguments { executable.getFullPathName(), kScanFlag,
+                                        file.getFullPathName() };
+    if (!executable.existsAsFile()
+        || !child.start(arguments, juce::ChildProcess::wantStdOut)) {
         juce::Logger::writeToLog("plugin: scan process unavailable, scanning in-process");
         return scanFileInProcess(file, error);
     }
@@ -405,6 +416,10 @@ juce::Array<juce::PluginDescription> PluginHost::scanFileInProcess(const juce::F
                                                                    juce::String& error) {
     juce::Array<juce::PluginDescription> descriptions;
 
+    if (isRemotePath(file)) {
+        error = "Network plugin paths are not supported.";
+        return descriptions;
+    }
     if (!file.exists()) {
         error = "The selected VST3 does not exist.";
         return descriptions;
@@ -446,6 +461,10 @@ PluginHost::LoadedPlugin PluginHost::instantiate(const juce::PluginDescription& 
                                                  const juce::String& stateBase64) {
     LoadedPlugin loaded;
     loaded.path = file.getFullPathName();
+    if (isRemotePath(file)) {
+        loaded.error = "Network plugin paths are not supported.";
+        return loaded;
+    }
     if (!file.exists()) {
         loaded.error = "The selected VST3 does not exist.";
         return loaded;
@@ -507,9 +526,17 @@ PluginHost::LoadedPlugin PluginHost::instantiate(const juce::PluginDescription& 
     // when a project is reopened, and it avoids a default-parameters render
     // pass slipping through before the restore takes effect.
     if (stateBase64.isNotEmpty()) {
+        if (stateBase64.length() > kMaxPluginStateBase64Chars) {
+            loaded.error = "The saved plugin state is too large.";
+            return loaded;
+        }
         juce::MemoryBlock state;
-        if (state.fromBase64Encoding(stateBase64)) {
+        if (state.fromBase64Encoding(stateBase64)
+            && state.getSize() <= static_cast<std::size_t>(INT_MAX)) {
             candidate->setStateInformation(state.getData(), (int) state.getSize());
+        } else if (state.getSize() > static_cast<std::size_t>(INT_MAX)) {
+            loaded.error = "The saved plugin state is too large.";
+            return loaded;
         }
     }
 

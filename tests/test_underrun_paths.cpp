@@ -641,6 +641,38 @@ TEST_CASE("scenes are validated after loading, not only before saving", "[app][s
     CHECK(contains(last, "loadValidatedScene"));
 }
 
+TEST_CASE("scene and plugin inputs are bounded before native code runs", "[app][security]") {
+    const auto bridge = readSource("app/src/SceneBridge.cpp");
+    const auto helper = functionBody(bridge, "std::optional<pluginrack::Scene> loadValidatedScene");
+    CHECK(contains(bridge, "fileSize > kMaxSceneFileBytes"));
+    CHECK(contains(bridge, "kMaxSceneFileBytes"));
+    CHECK(contains(helper, "loadFileAsString"));
+
+    const auto host = readSource("app/src/PluginHost.cpp");
+    CHECK(contains(host, "kMaxPluginStateBase64Chars"));
+    CHECK(contains(host, "INT_MAX"));
+}
+
+TEST_CASE("save names reject Windows device names and excessive lengths", "[app][security]") {
+    const auto bridge = readSource("app/src/SceneBridge.cpp");
+    CHECK(contains(bridge, "kMaxSaveNameLength"));
+    CHECK(contains(bridge, "startsWith(\"com\")"));
+    CHECK(contains(bridge, "startsWith(\"lpt\")"));
+}
+
+TEST_CASE("plugin discovery and child scanning are bounded", "[plugin][security]") {
+    const auto library = readSource("app/src/PluginLibrary.cpp");
+    CHECK(contains(library, "kMaxScanBundles"));
+    CHECK(contains(library, "kMaxScanDepth"));
+    CHECK(contains(library, "isSymbolicLink"));
+
+    const auto host = readSource("app/src/PluginHost.cpp");
+    const auto scan = functionBody(host, "juce::Array<juce::PluginDescription> PluginHost::scanFile");
+    CHECK(contains(scan, "StringArray"));
+    CHECK_FALSE(contains(scan, "getFullPathName().quoted()"));
+    CHECK(contains(scan, "Network plugin paths are not supported"));
+}
+
 TEST_CASE("the picked class inside a bundle reaches the loader", "[plugin][ui]") {
     const auto cpp = readSource("app/src/AudioEngine.cpp");
     const auto choose = functionBody(cpp, "juce::PluginDescription chooseDescription");
@@ -942,7 +974,7 @@ TEST_CASE("only one GUI session runs, but CLI children are never blocked",
     // ...but the scanner and the CLI switches must still start alongside it,
     // otherwise plugin scanning breaks while the app is open.
     CHECK(contains(app, "getCommandLineParameterArray()"));
-    CHECK(contains(app, "arg.startsWith(\"--\")"));
+    CHECK(contains(app, "arg == \"--scan-plugin\""));
     CHECK(contains(app, "return true;"));
     // A second GUI launch focuses the running window (possibly from the tray).
     CHECK(contains(app, "void anotherInstanceStarted(const juce::String& commandLine) override"));

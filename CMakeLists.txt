@@ -8,8 +8,8 @@ add_subdirectory(tools)
 add_subdirectory(tests)
 
 option(PLUGINRACK_BUILD_APP "Build the JUCE desktop app when its SDKs are available" ON)
-set(JUCE_DIR "C:/Users/thorz/JUCE" CACHE PATH "Path to the JUCE source tree")
-set(VST3_SDK_DIR "C:/Users/thorz/vst3sdk" CACHE PATH "Path to the VST3 SDK")
+set(JUCE_DIR "$ENV{JUCE_DIR}" CACHE PATH "Path to the JUCE source tree")
+set(VST3_SDK_DIR "$ENV{VST3_SDK_DIR}" CACHE PATH "Path to the VST3 SDK")
 
 if(PLUGINRACK_BUILD_APP)
     if(EXISTS "${JUCE_DIR}/CMakeLists.txt"

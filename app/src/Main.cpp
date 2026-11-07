@@ -60,10 +60,6 @@ void writeCrashReport(void* exceptionInfo) {
         if (auto* record = info->ExceptionRecord) {
             text << "exception: 0x"
                  << juce::String::toHexString((juce::int64) record->ExceptionCode)
-                 << " at 0x"
-                 << juce::String::toHexString(
-                        (juce::int64) reinterpret_cast<juce::pointer_sized_int>(
-                            record->ExceptionAddress))
                  << "\n";
         }
     }
@@ -181,7 +177,8 @@ public:
     // takes it.
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
-            if (arg.startsWith("--")) return true;
+            if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins")
+                return true;
         }
         return false;
     }
@@ -479,6 +476,8 @@ public:
             if (auto* mainComponent = dynamic_cast<MainComponent*>(mainWindow->getContentComponent()))
                 mainComponent->saveSceneOnExit();
         }
+        if (auto* settings = properties.getUserSettings())
+            settings->saveIfNeeded();
         // Destroying a plugin is plugin code, and some VST3s (Native
         // Instruments' Raum and Supercharger among them) block forever when
         // their editor or processor is torn down; letting Windows unload their

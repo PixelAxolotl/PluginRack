@@ -4,6 +4,9 @@
 #include <pluginrack/SceneValidator.h>
 
 namespace {
+constexpr juce::int64 kMaxSceneFileBytes = 8 * 1024 * 1024;
+constexpr int kMaxSaveNameLength = 64;
+
 std::vector<juce::File> lastSceneCandidates() {
     const auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
                          .getChildFile("PluginRack")
@@ -34,6 +37,11 @@ juce::String firstValidationError(const pluginrack::Scene& scene) {
 std::optional<pluginrack::Scene> loadValidatedScene(const juce::File& file,
                                                     juce::String& errorMessage) {
     errorMessage.clear();
+    const auto fileSize = file.getSize();
+    if (fileSize < 0 || fileSize > kMaxSceneFileBytes) {
+        errorMessage = "The saved scene is too large.";
+        return std::nullopt;
+    }
     auto result = pluginrack::fromJson(file.loadFileAsString().toStdString());
     if (!result.errors.empty()) {
         errorMessage = "Could not load the saved scene: " + juce::String(result.errors.front());
@@ -75,6 +83,19 @@ juce::String sanitizeSaveName(const juce::String& name) {
     }
     if (result.endsWithIgnoreCase(".json")) result = result.dropLastCharacters(5);
     return result;
+}
+
+bool isWindowsReservedName(const juce::String& name) {
+    auto stem = name.upToFirstOccurrenceOf(".", false, false).toLowerCase();
+    if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul") return true;
+    if (stem.length() == 4 && (stem.startsWith("com") || stem.startsWith("lpt")))
+        return stem[3] >= '1' && stem[3] <= '9';
+    return false;
+}
+
+bool isValidSaveName(const juce::String& name) {
+    return name.isNotEmpty() && name.length() <= kMaxSaveNameLength
+        && !isWindowsReservedName(name);
 }
 }
 
@@ -142,6 +163,10 @@ juce::String SceneBridge::save(const pluginrack::Scene& scene, const juce::File&
 juce::String SceneBridge::saveNamed(const pluginrack::Scene& scene, const juce::String& name) {
     const auto clean = sanitizeSaveName(name);
     if (clean.isEmpty()) return "Please enter a save name.";
+    if (clean.length() > kMaxSaveNameLength)
+        return "Save names must be 64 characters or fewer.";
+    if (isWindowsReservedName(clean))
+        return "That name is reserved by Windows.";
     if (isReservedSaveName(clean)) return "That name is reserved. Please choose another.";
 
     return save(scene, getSaveFile(clean));
@@ -185,6 +210,10 @@ juce::String SceneBridge::renameSave(const juce::String& oldName, const juce::St
     const auto oldClean = sanitizeSaveName(oldName);
     const auto newClean = sanitizeSaveName(newName);
     if (oldClean.isEmpty() || newClean.isEmpty()) return "Please enter a valid name.";
+    if (newClean.length() > kMaxSaveNameLength)
+        return "Save names must be 64 characters or fewer.";
+    if (isWindowsReservedName(newClean))
+        return "That name is reserved by Windows.";
     if (isReservedSaveName(newClean)) return "That name is reserved. Please choose another.";
     if (oldClean.equalsIgnoreCase(newClean)) return {};
 
@@ -204,6 +233,7 @@ juce::String SceneBridge::renameSave(const juce::String& oldName, const juce::St
 juce::String SceneBridge::moveSave(const juce::String& name, const juce::File& destinationDirectory) {
     const auto clean = sanitizeSaveName(name);
     if (clean.isEmpty() || isReservedSaveName(clean)) return "Invalid save name.";
+    if (!isValidSaveName(clean)) return "Invalid save name.";
     const auto source = getSaveFile(clean);
     if (!source.existsAsFile()) return "The save does not exist.";
     if (!destinationDirectory.exists() && !destinationDirectory.createDirectory().wasOk())
@@ -262,7 +292,7 @@ std::optional<pluginrack::Scene> SceneBridge::load(const juce::File& file, juce:
 
 std::optional<pluginrack::Scene> SceneBridge::loadNamed(const juce::String& name, juce::String& errorMessage) {
     const auto clean = sanitizeSaveName(name);
-    if (clean.isEmpty()) {
+    if (!isValidSaveName(clean)) {
         errorMessage = "Please enter a save name.";
         return std::nullopt;
     }
