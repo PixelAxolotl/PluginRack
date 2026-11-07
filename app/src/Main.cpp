@@ -5,6 +5,7 @@
 #include "MainComponent.h"
 #include "PluginHost.h"
 #include "PluginLibrary.h"
+#include "RestrictedHost.h"
 #include "SliderTouch.h"
 
 #include <cstdlib>
@@ -201,6 +202,15 @@ public:
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
+        // Restricted plugin host (PR-01): a VST3 runs here with reduced
+        // rights, never in the main app. Launched only by RestrictedHost.
+        const int hostIndex = args.indexOf("--plugin-host");
+        if (hostIndex >= 0 && hostIndex + 1 < args.size()) {
+            const int code = RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()));
+            ::exit(code);
+            return;
+        }
+
         // Child-process scan: reads the plugin's descriptions in a throwaway
         // process so the main window never loads a plugin binary while it is
         // starting up (see PluginHost::scanFile). No window, no audio, and no
@@ -230,6 +240,9 @@ public:
             pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
         juce::Logger::setCurrentLogger(fileLogger.get());
         juce::Logger::writeToLog("initialise: " + commandLine);
+        // PR-01 trust boundary: plugins run with the user's rights.
+        juce::Logger::writeToLog("warning: VST3 plugins run with your user rights; "
+                                 "only load plugins from publishers you trust");
 
         if (args.contains("--clear-blocked-plugins")) {
             const auto cleared = PluginLoadGuard::clearBlocked();
@@ -287,6 +300,7 @@ public:
             int shotH = 900;
             bool haveW = false;
             AppView shotView = AppView::Rack;
+            juce::String shotEffect;
             for (int a = idx + 2; a < args.size(); ++a) {
                 const auto tok = args[a].toLowerCase();
                 if (tok.isEmpty()) continue;
@@ -296,6 +310,7 @@ public:
                 else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
                 else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
+                else if (tok == "multiband" || tok == "deesser" || tok == "limiter") shotEffect = tok;
                 else if (tok.containsOnly("0123456789")) {
                     if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
                     else shotH = juce::jmax(1, tok.getIntValue());
@@ -306,6 +321,35 @@ public:
             auto* comp = new MainComponent();
             comp->selectView(shotView);
             comp->setSize(shotW, shotH);
+            // Visual diagnostics: build one built-in on the first channel,
+            // focus it in the rack editor bay, and paint one timer frame so
+            // the screenshot shows its traces instead of an empty pane.
+            juce::Component* focusedEffect = nullptr;
+            if (shotEffect.isNotEmpty() && shotView == AppView::Rack) {
+                if (!comp->getChannelsForDiagnostics().empty()) {
+                    const auto afterInsert = [&focusedEffect, shotEffect] {
+                        if (focusedEffect != nullptr) {
+                            if (shotEffect == "multiband")
+                                static_cast<MultibandWindow*>(focusedEffect)->timerCallback();
+                            else if (shotEffect == "deesser")
+                                static_cast<DeEsserWindow*>(focusedEffect)->timerCallback();
+                            else
+                                static_cast<LimiterWindow*>(focusedEffect)->timerCallback();
+                            focusedEffect->repaint();
+                        }
+                    };
+                    if (shotEffect == "multiband") {
+                        focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::Multiband);
+                        afterInsert();
+                    } else if (shotEffect == "deesser") {
+                        focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::DeEsser);
+                        afterInsert();
+                    } else if (shotEffect == "limiter") {
+                        focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::Limiter);
+                        afterInsert();
+                    }
+                }
+            }
             juce::Image snapshot = comp->createComponentSnapshot(comp->getLocalBounds(), false, 1.0f);
             juce::PNGImageFormat png;
             if (auto stream = outPath.createOutputStream()) {

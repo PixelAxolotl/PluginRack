@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure core/tests
+        run: >
+          cmake -B build/ci -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DPLUGINRACK_BUILD_APP=OFF
+      - name: Build core and tests
+        run: cmake --build build/ci --parallel 4
+      - name: Run tests
+        run: ctest --test-dir build/ci --output-on-failure
+      - name: Dependency advisory scan (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+        continue-on-error: true
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json

@@ -50,6 +50,14 @@ EQWindow::EQWindow(const juce::String& title,
     Component::addAndMakeVisible(stereoTag);
     bypassButton.setFontSize(9.0f);
     soloButton.setFontSize(9.0f);
+    flipButton.setFontSize(9.0f);
+    flipButton.setTooltip("Flip phase (polarity) of the EQ output");
+    flipButton.setClickAction([this] {
+        const bool next = !flipButton.getToggleState();
+        flipButton.setToggleState(next);
+        if (applyPhaseFlip) applyPhaseFlip(next);
+    });
+    Component::addAndMakeVisible(flipButton);
 
     bypassButton.setTooltip("Bypass the selected band");
     bypassButton.setClickAction([this] {
@@ -411,6 +419,10 @@ void EQWindow::setDelayMs(float delayMs) {
                        juce::dontSendNotification);
 }
 
+void EQWindow::setPhaseFlip(bool flipped) {
+    flipButton.setToggleState(flipped);
+}
+
 void EQWindow::syncControls() {
     const auto& bands = curve.getBands();
     const int sel = curve.getSelectedBand();
@@ -513,6 +525,8 @@ void EQWindow::resized() {
     bypassButton.setBounds(right.removeFromTop(22));
     right.removeFromTop(4);
     soloButton.setBounds(right.removeFromTop(22));
+    right.removeFromTop(4);
+    flipButton.setBounds(right.removeFromTop(22));
 
     // Four label+knob slots across the remaining middle (bands, then delay).
     const int knobW = juce::jmax(1, controlsRow.getWidth() / 4);

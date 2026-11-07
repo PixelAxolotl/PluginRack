@@ -25,6 +25,37 @@ void fillSignal(float* L, float* R, int n) {
 
 } // namespace
 
+TEST_CASE("eq phase flip inverts the signal") {
+    auto bands = defaultEqBands();
+    for (auto& band : bands) {
+        band.enabled = false; // flip only: no band may touch the block
+    }
+    EqEngine e;
+    e.prepare(44100, 512);
+    e.setBands(bands);
+    e.setPhaseFlip(true);
+    REQUIRE(e.phaseFlip());
+
+    constexpr int kFrames = 32;
+    std::vector<float> L(static_cast<std::size_t>(kFrames));
+    std::vector<float> R(static_cast<std::size_t>(kFrames));
+    fillSignal(L.data(), R.data(), kFrames);
+    std::vector<float> origL = L;
+    std::vector<float> origR = R;
+    e.process(L.data(), R.data(), kFrames);
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(L[static_cast<std::size_t>(i)] == -origL[static_cast<std::size_t>(i)]);
+        REQUIRE(R[static_cast<std::size_t>(i)] == -origR[static_cast<std::size_t>(i)]);
+    }
+    e.setPhaseFlip(false);
+    REQUIRE(!e.phaseFlip());
+    e.process(L.data(), R.data(), kFrames);
+    for (int i = 0; i < kFrames; ++i) {
+        // Flip is off now: the buffer keeps its negated values untouched.
+        REQUIRE(L[static_cast<std::size_t>(i)] == -origL[static_cast<std::size_t>(i)]);
+    }
+}
+
 TEST_CASE("eq flat passes audio") {
     EqEngine e;
     e.prepare(44100, 512);

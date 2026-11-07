@@ -1,12 +1,13 @@
 #include "MainComponent.h"
 
+#include <cmath>
 #include <vector>
 
 #include "PluginLibrary.h"
 #include "SceneBridge.h"
 
 ToolbarComponent::ToolbarComponent() {
-    for (auto* b : { &racksButton, &mixerButton, &routingButton, &ioButton,
+    for (auto* b : { &racksButton, &mixerButton, &patchesButton, &routingButton, &ioButton,
                      &savesButton, &settingsButton }) {
         b->setClickingTogglesState(true);
         theme::ui::styleButton(*b);
@@ -14,6 +15,7 @@ ToolbarComponent::ToolbarComponent() {
 
     racksButton.onClick = [this] { selectView(AppView::Rack); };
     mixerButton.onClick = [this] { selectView(AppView::Mixer); };
+    patchesButton.onClick = [this] { selectView(AppView::Patches); };
     routingButton.onClick = [this] { selectView(AppView::Routing); };
     ioButton.onClick = [this] { selectView(AppView::IO); };
     savesButton.onClick = [this] { selectView(AppView::Saves); };
@@ -21,6 +23,7 @@ ToolbarComponent::ToolbarComponent() {
 
     racksButton.setTooltip("Rack view: plugin chains");
     mixerButton.setTooltip("Mixer view: faders, meters, inline routing");
+    patchesButton.setTooltip("Patches view: inputs to outputs map");
     routingButton.setTooltip("Routing view: full channel/output matrix");
     ioButton.setTooltip("I/O view: input and output devices, round-trip measurement");
     savesButton.setTooltip("Saves view: saved scenes");
@@ -47,6 +50,7 @@ ToolbarComponent::ToolbarComponent() {
 
     addAndMakeVisible(racksButton);
     addAndMakeVisible(mixerButton);
+    addAndMakeVisible(patchesButton);
     addAndMakeVisible(routingButton);
     addAndMakeVisible(ioButton);
     addAndMakeVisible(settingsButton);
@@ -73,6 +77,7 @@ void ToolbarComponent::setView(AppView view) {
 void ToolbarComponent::updateNavToggles() {
     racksButton.setToggleState(currentView == AppView::Rack, juce::dontSendNotification);
     mixerButton.setToggleState(currentView == AppView::Mixer, juce::dontSendNotification);
+    patchesButton.setToggleState(currentView == AppView::Patches, juce::dontSendNotification);
     routingButton.setToggleState(currentView == AppView::Routing, juce::dontSendNotification);
     ioButton.setToggleState(currentView == AppView::IO, juce::dontSendNotification);
     savesButton.setToggleState(currentView == AppView::Saves, juce::dontSendNotification);
@@ -120,6 +125,8 @@ void ToolbarComponent::resized() {
     racksButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
     mixerButton.setBounds(area.removeFromLeft(64));
+    area.removeFromLeft(4);
+    patchesButton.setBounds(area.removeFromLeft(76));
     area.removeFromLeft(4);
     ioButton.setBounds(area.removeFromLeft(48));
     area.removeFromLeft(4);
@@ -178,6 +185,7 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
     , routingView(audioEngine)
+    , patchesView(audioEngine)
     , ioView(audioEngine)
     , savesView([this](const pluginrack::Scene& scene) {
           return onRestoreRequested ? onRestoreRequested(scene) : juce::String();
@@ -211,6 +219,7 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
     addAndMakeVisible(routingView);
+    addAndMakeVisible(patchesView);
     addAndMakeVisible(ioView);
     addAndMakeVisible(savesView);
     addAndMakeVisible(settingsView);
@@ -223,12 +232,14 @@ void ViewRouter::setView(AppView view) {
     if (view == AppView::Rack) rackView.rebuild();
     if (view == AppView::Mixer) mixerView.rebuild();
     if (view == AppView::Routing) routingView.rebuild();
+    if (view == AppView::Patches) patchesView.rebuild();
     if (view == AppView::IO) ioView.rebuild();
     if (view == AppView::Saves) savesView.rebuild();
     if (view == AppView::Settings) settingsView.refresh();
     mixerView.setVisible(view == AppView::Mixer);
     rackView.setVisible(view == AppView::Rack);
     routingView.setVisible(view == AppView::Routing);
+    patchesView.setVisible(view == AppView::Patches);
     ioView.setVisible(view == AppView::IO);
     savesView.setVisible(view == AppView::Saves);
     settingsView.setVisible(view == AppView::Settings);
@@ -241,6 +252,7 @@ void ViewRouter::refreshViews() {
     releaseOrphanedEditor();
     rackView.rebuild();
     routingView.rebuild();
+    patchesView.rebuild();
     ioView.rebuild();
     savesView.rebuild();
     settingsView.refresh();
@@ -255,6 +267,7 @@ void ViewRouter::resized() {
     mixerView.setBounds(getLocalBounds());
     rackView.setBounds(getLocalBounds());
     routingView.setBounds(getLocalBounds());
+    patchesView.setBounds(getLocalBounds());
     ioView.setBounds(getLocalBounds());
     savesView.setBounds(getLocalBounds());
     settingsView.setBounds(getLocalBounds());
@@ -377,6 +390,76 @@ void MainComponent::selectView(AppView view) {
     router.setView(view);
 }
 
+const std::vector<std::unique_ptr<AudioEngine::Channel>>& MainComponent::getChannelsForDiagnostics() {
+    return audioEngine.getChannels();
+}
+
+void MainComponent::feedDiagnosticsSignal(int /*numBins*/, double sampleRateHz) {
+    // Headless screenshot: no audio engine runs, so the analyzer taps stay
+    // silent and one timer frame of zeros floors every RTA to -60 dB.
+    // Synthesize a broadband-ish spectrum: pink-noise magnitude with a
+    // gentle sweep, written straight into spectrumAvg-equivalent level
+    // (the post ring the Multiband/De-esser windows snapshot). One frame
+    // of zeros floored it before; this gives a real trace for the capture.
+    const auto& channels = audioEngine.getChannels();
+    if (channels.empty()) return;
+    auto* channel = channels.front().get();
+    // Write the legacy strip tap AND every per-plugin tap, so the editor
+    // and the mini previews — which now read their own taps — all show the
+    // same synthetic spectrum in the capture.
+    constexpr int n = 8192;
+    auto fillRing = [&](juce::AudioBuffer<float>& ring) {
+        for (int i = 0; i < n; ++i) {
+            float s = 0.0f;
+            for (int b = 0; b < 16; ++b) {
+                const double f = 80.0 * std::pow(150.0, b / 15.0); // 80Hz..12kHz log
+                const double level = 0.18 / std::sqrt(1.0 + b * 0.8)
+                                   * (0.8 + 0.2 * std::sin(i * 0.0007 + b * 1.3));
+                s += static_cast<float>(level * std::sin(
+                    2.0 * juce::MathConstants<double>::pi * f * i / sampleRateHz + b));
+            }
+            ring.setSample(0, i, s * 0.35f);
+            ring.setSample(1, i, s * 0.35f);
+        }
+    };
+    for (auto* tap : {&channel->analyzerTap, &channel->eqTap, &channel->dynamicsTap,
+                      &channel->multibandTap, &channel->deEsserTap, &channel->limiterTap}) {
+        fillRing(tap->pre);
+        fillRing(tap->post);
+        tap->preWrite.set(0);
+        tap->postWrite.set(0);
+        tap->setMode(AudioEngine::AnalyzerTap::kPost);
+    }
+}
+
+juce::Component* MainComponent::focusDiagnosticsEffect(pluginrack::ChainItemType type) {
+    router.getRackView().setSelectedChannel(1, false);
+    const auto& channels = audioEngine.getChannels();
+    std::vector<pluginrack::ChainItem> chain;
+    if (!channels.empty()) {
+        auto* channel = channels.front().get();
+        if (type == pluginrack::ChainItemType::Multiband) {
+            for (auto& e : channel->multibandEffects)
+                if (!e.bypassed) chain.push_back({type, e.id});
+        } else if (type == pluginrack::ChainItemType::DeEsser) {
+            for (auto& e : channel->deEsserEffects)
+                if (!e.bypassed) chain.push_back({type, e.id});
+        } else if (type == pluginrack::ChainItemType::Limiter) {
+            for (auto& e : channel->limiterEffects)
+                if (!e.bypassed) chain.push_back({type, e.id});
+        }
+        if (!chain.empty()) {
+            audioEngine.setChannelChain(channel->id, chain);
+        }
+    }
+    router.getRackView().activateBuiltIn({type, !chain.empty() ? chain.front().id : 1});
+    // focusMultiband/focusDeEsser already call rebuild(), so the mini cards
+    // exist — but feed them the synthetic signal so their previews also
+    // show a trace instead of an empty pane. Then repaint both surfaces.
+    feedDiagnosticsSignal(4097, 48000.0);
+    return router.getRackView().getFocusedDiagnosticsEffect();
+}
+
 void MainComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
     // Queue the audio startup only once the first frame has been drawn: a
@@ -462,6 +545,10 @@ void MainComponent::showMenu() {
                                                     audioEngine.setChannelEqDelay(c->id, 0.0f);
                                                     audioEngine.setChannelEqRtaOffset(c->id, 0.0f);
                                                     audioEngine.setChannelEqRtaWeighting(c->id, 0);
+                                                    audioEngine.setChannelMultibandRtaOffset(c->id, 0.0f);
+                                                    audioEngine.setChannelMultibandRtaWeighting(c->id, 0);
+                                                    audioEngine.setChannelDeEsserRtaOffset(c->id, 0.0f);
+                                                    audioEngine.setChannelDeEsserRtaWeighting(c->id, 0);
                                                     audioEngine.setChannelEffects(c->id, pluginrack::defaultDynamicsEffects());
                                                     audioEngine.setChannelChain(c->id, AudioEngine::defaultChain());
                                                     audioEngine.setChannelGain(c->id, 0.0f);
@@ -483,6 +570,10 @@ void MainComponent::showMenu() {
                                                     audioEngine.setOutputEqDelay((int)i, 0.0f);
                                                     audioEngine.setOutputEqRtaOffset((int)i, 0.0f);
                                                     audioEngine.setOutputEqRtaWeighting((int)i, 0);
+                                                    audioEngine.setOutputMultibandRtaOffset((int)i, 0.0f);
+                                                    audioEngine.setOutputMultibandRtaWeighting((int)i, 0);
+                                                    audioEngine.setOutputDeEsserRtaOffset((int)i, 0.0f);
+                                                    audioEngine.setOutputDeEsserRtaWeighting((int)i, 0);
                                                     audioEngine.setOutputEffects(outputId, pluginrack::defaultDynamicsEffects());
                                                     audioEngine.setOutputChain(outputId, AudioEngine::defaultChain());
                                                     audioEngine.setOutputGain(outputId, 0.0f);

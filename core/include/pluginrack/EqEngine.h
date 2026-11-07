@@ -45,6 +45,10 @@ public:
     // delay entirely, keeping the output bit-identical.
     void setDelayMs(float delayMs);
     float delayMs() const noexcept { return delayMs_; }
+    // Polarity flip: when true, process() inverts the signal after the band
+    // chain and delay (phase flip). Message thread, like setDelayMs.
+    void setPhaseFlip(bool phaseFlip) noexcept;
+    bool phaseFlip() const noexcept { return phaseFlip_; }
     void process(float* L, float* R, int n) noexcept;
     void reset() noexcept;
 
@@ -78,6 +82,7 @@ private:
     std::vector<float> delayR_;
     int delayCapacity_ = 0;
     int delayWrite_ = 0;
+    bool phaseFlip_ = false;           // polarity invert after the chain
     float delayMs_ = 0.0f;             // requested, after clamping
     float delaySamples_ = 0.0f;        // requested, in samples at sampleRate_
     float delayCurrentSamples_ = 0.0f; // smoothed read distance

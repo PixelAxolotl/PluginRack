@@ -9,13 +9,17 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "DeEsserWindow.h"
 #include "DynamicsWindow.h"
 #include "EQWindow.h"
+#include "LimiterWindow.h"
+#include "MultibandWindow.h"
 #include "InsertHost.h"
 #include "InsertMiniView.h"
 #include "LevelMeter.h"
 #include "NativeThumbnail.h"
 #include "PluginKnobWatcher.h"
+#include "StripDialog.h"
 #include "Theme.h"
 #include "TouchSlideBar.h"
 #include "ValueEditSlider.h"
@@ -37,6 +41,7 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
 
     void setSelectedChannel(int channelId, bool isOutput);
+    juce::Component* getFocusedDiagnosticsEffect() { return focusedEffectWindow; }
 
     // Releases the docked plugin editor before the engine destroys the
     // strip that owns its plugin instance (scene restore). The editor's
@@ -68,6 +73,8 @@ public:
     int chainDropIndexAt(juce::Point<int> parentPoint) override;
     void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
     void activateBuiltIn(pluginrack::ChainItem item) override;
+    void insertBuiltIn(pluginrack::ChainItem item, int chainIndex) override;
+    void eraseBuiltIn(pluginrack::ChainItem item) override;
     bool insertActivated(AudioEngine::InsertSlot* insert) override;
 
 private:
@@ -115,6 +122,10 @@ private:
     void applyInputMapping();
     void focusEq();
     void closeEqWindow();
+    void focusMultiband();
+    void closeEffectWindows();
+    void focusDeEsser();
+    void focusLimiter();
     void focusDynamics(pluginrack::DynamicsEffectType type);
     void closeDynamicsWindow();
     void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
@@ -129,6 +140,7 @@ private:
     void timerCallback() override;
     void startMiniTimer();
     AudioEngine::AnalyzerTap* currentTap();
+    AudioEngine::AnalyzerTap* currentPluginTap(pluginrack::ChainItemType type);
     void releaseMiniTap();
     void applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail);
 
@@ -185,6 +197,10 @@ private:
     EqButton compressorButton{"COMP"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
+    MultibandWindow* multibandWindow = nullptr;
+    DeEsserWindow* deEsserWindow = nullptr;
+    LimiterWindow* limiterWindow = nullptr;
+    juce::Component* focusedEffectWindow = nullptr;
     bool eqFocused = false;
     bool dynamicsFocused = false;
     juce::Viewport slotViewport;
@@ -193,6 +209,13 @@ private:
     // Cards that carry a mini view, so the timer can feed them without walking
     // the list. Cleared at the top of refreshSlots(), which rebuilds every row.
     InsertSlotComponent* eqCard = nullptr;
+    InsertSlotComponent* multibandCard = nullptr;
+    InsertSlotComponent* deEsserCard = nullptr;
+    MiniSpectrum multibandSpectrum;
+    MiniSpectrum deEsserSpectrum;
+    float multibandMeterLevelDb = -60.0f;
+    float deEsserReductionDb = 0.0f;
+    float deEsserDetS1L = 0.0f, deEsserDetS2L = 0.0f, deEsserDetS1R = 0.0f, deEsserDetS2R = 0.0f;
     // Compressor card: the merged Dynamics card when the gate is there too.
     InsertSlotComponent* dynamicsCard = nullptr;
     bool dynamicsCardPaired = false;
@@ -229,13 +252,15 @@ private:
     // because a row carries two strings.
     class SourceRowList final : public juce::Component {
     public:
-        void setRows(juce::StringArray channelNames, juce::StringArray deviceNames);
+        void setRows(juce::StringArray channelNames, juce::StringArray deviceNames,
+                     const std::vector<float>& channelHues);
         void paint(juce::Graphics& g) override;
 
     private:
         static constexpr int kRowH = 34;
         juce::StringArray names;
         juce::StringArray devices;
+        std::vector<float> hues;
     };
     SourceRowList sourceList;
     // Paces the Inputs refresh: sends and device names only move on user

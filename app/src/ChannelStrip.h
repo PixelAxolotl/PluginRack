@@ -9,9 +9,13 @@
 #include "DeviceMenu.h"
 #include "EQWindow.h"
 #include "DynamicsWindow.h"
+#include "MultibandWindow.h"
+#include "DeEsserWindow.h"
+#include "LimiterWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
+#include "StripDialog.h"
 #include "Theme.h"
 #include "ValueEditSlider.h"
 
@@ -31,6 +35,9 @@ public:
     void refreshEqButton();
     void openDynamicsWindow(pluginrack::DynamicsEffectType type);
     void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
+    void openMultibandWindow();
+    void openDeEsserWindow();
+    void openLimiterWindow();
     void refreshDynamicsButtons();
 
     // IInsertHost
@@ -45,6 +52,8 @@ public:
     int chainDropIndexAt(juce::Point<int> parentPoint) override;
     void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
     void activateBuiltIn(pluginrack::ChainItem item) override;
+    void insertBuiltIn(pluginrack::ChainItem item, int chainIndex) override;
+    void eraseBuiltIn(pluginrack::ChainItem item) override;
 
 public:
     std::function<void()> onRemoveRequested;
@@ -116,6 +125,9 @@ private:
     EqButton compressorButton{"COMP"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
+    MultibandWindow* multibandWindow = nullptr;
+    DeEsserWindow* deEsserWindow = nullptr;
+    LimiterWindow* limiterWindow = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStrip)
 };

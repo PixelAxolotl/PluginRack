@@ -114,6 +114,11 @@ public:
     std::function<void(float delayMs)> applyDelayMs;
     void setDelayMs(float delayMs);
 
+    // Phase-flip wiring: the owner seeds with setPhaseFlip() and persists
+    // edits through applyPhaseFlip, same contract as the delay knob.
+    std::function<void(bool flipped)> applyPhaseFlip;
+    void setPhaseFlip(bool flipped);
+
     // RTA display offset wiring: each +/- step calls this with the new offset,
     // in the same units the label shows (0 == the default view). The owner
     // stores it, so the analyzer looks the same in every EQ surface.
@@ -143,6 +148,7 @@ private:
 
     MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
     MiniButton soloButton{"Solo"};        // selected band solo toggle
+    MiniButton flipButton{"FLIP"};        // whole-EQ polarity flip
     // Selected point's mode: bell ("BAND") or shelf ("SHELF"). The two filter
     // points are driven by the HPF/LPF switches instead, so this one disables
     // itself while either of them is selected.

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "MultibandCurveComponent.h"
 #include "NativeThumbnail.h"
 
 namespace {
@@ -276,6 +277,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
 RackView::~RackView() {
     stopTimer();
     releaseMiniTap();
+    closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
     // Stop the capture worker before the editor it captures goes away.
@@ -289,6 +291,7 @@ std::uint32_t RackView::selectedChainId() const {
 
 void RackView::setSelectedChannel(int channelId, bool isOutput) {
     if (channelId == selectedId && isOutput == selectedIsOutput && channelId >= 0) return;
+    closeEffectWindows();
     closeEqWindow();
     // The dynamics panel is bound to the strip it was opened on; leaving it up
     // would push its edits into whatever strip becomes selected next.
@@ -384,6 +387,13 @@ void RackView::rebuildChannelCombo() {
 void RackView::refreshHeader() {
     auto* ch = currentChannel();
     auto* out = currentOutput();
+
+    // Fader in the selected chain's own identity colour.
+    const float hue = ch != nullptr ? ch->colourHue
+                                  : (out != nullptr ? out->colourHue : 0.0f);
+    const auto accent = theme::stripColour(hue);
+    gainSlider.setColour(juce::Slider::trackColourId, accent);
+    gainSlider.setColour(juce::Slider::thumbColourId, accent);
 
     meter.reset();
     if (ch != nullptr) {
@@ -558,6 +568,8 @@ const pluginrack::DynamicsEffect* RackView::effectOfType(pluginrack::DynamicsEff
 void RackView::refreshSlots() {
     slots.clear();
     eqCard = nullptr;
+    multibandCard = nullptr;
+    deEsserCard = nullptr;
     dynamicsCard = nullptr;
     dynamicsCardPaired = false;
     vstCards.clear();
@@ -671,6 +683,52 @@ void RackView::refreshSlots() {
             slot->setMiniView(std::move(mini));
             slot->setSelected(eqFocused);
             eqCard = slot;
+        } else if (item.type == pluginrack::ChainItemType::Multiband || item.type == pluginrack::ChainItemType::DeEsser || item.type == pluginrack::ChainItemType::Limiter) {
+            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : "Limiter";
+            bool bp = false;
+            if (auto* ch = currentChannel()) {
+                if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : ch->multibandEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : ch->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : ch->limiterEffects) if (e.id==item.id) bp=e.bypassed;
+            } else if (auto* out = currentOutput()) {
+                if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : out->multibandEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : out->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : out->limiterEffects) if (e.id==item.id) bp=e.bypassed;
+            }
+            slot->setBuiltIn(item, name, bp);
+            if (item.type == pluginrack::ChainItemType::Multiband) {
+                auto mini = std::make_unique<InsertMiniView>();
+                const auto* selectedEffect = [&] {
+                    if (selectedChannel != nullptr) {
+                        for (const auto& e : selectedChannel->multibandEffects)
+                            if (e.id == item.id) return &e;
+                    } else if (selectedOutput != nullptr) {
+                        for (const auto& e : selectedOutput->multibandEffects)
+                            if (e.id == item.id) return &e;
+                    }
+                    return static_cast<const pluginrack::MultibandEffect*>(nullptr);
+                }();
+                if (selectedEffect != nullptr) mini->showMultiband(*selectedEffect, liveRateHz);
+                slot->setMiniView(std::move(mini));
+                slot->setSelected(multibandWindow != nullptr);
+                multibandCard = slot;
+            } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+                auto mini = std::make_unique<InsertMiniView>();
+                const auto* selectedEffect = [&] {
+                    if (selectedChannel != nullptr) {
+                        for (const auto& e : selectedChannel->deEsserEffects)
+                            if (e.id == item.id) return &e;
+                    } else if (selectedOutput != nullptr) {
+                        for (const auto& e : selectedOutput->deEsserEffects)
+                            if (e.id == item.id) return &e;
+                    }
+                    return static_cast<const pluginrack::DeEsserEffect*>(nullptr);
+                }();
+                if (selectedEffect != nullptr) mini->showDeEsser(*selectedEffect, liveRateHz);
+                slot->setMiniView(std::move(mini));
+                slot->setSelected(deEsserWindow != nullptr);
+                deEsserCard = slot;
+            }
         } else {
             // A chain missing its partner leaves one dynamics effect on a row
             // of its own.
@@ -731,8 +789,37 @@ void RackView::visibilityChanged() {
 }
 
 AudioEngine::AnalyzerTap* RackView::currentTap() {
+    // Mini previews read the strip-end legacy tap; each card's *editor*
+    // reads that plugin's own per-plugin tap (eqTap/multibandTap/...).
     if (auto* channel = currentChannel()) return &channel->analyzerTap;
     if (auto* output = currentOutput()) return &output->analyzerTap;
+    return nullptr;
+}
+
+AudioEngine::AnalyzerTap* RackView::currentPluginTap(pluginrack::ChainItemType type) {
+    // Each built-in's independent RTA: the Multiband preview reads what
+    // leaves the Multiband, the EQ preview reads what leaves the EQ, etc.
+    // A later plugin in the chain can no longer tint an earlier RTA.
+    if (auto* channel = currentChannel()) {
+        switch (type) {
+            case pluginrack::ChainItemType::Eq: return &channel->eqTap;
+            case pluginrack::ChainItemType::Multiband: return &channel->multibandTap;
+            case pluginrack::ChainItemType::DeEsser: return &channel->deEsserTap;
+            case pluginrack::ChainItemType::Limiter: return &channel->limiterTap;
+            case pluginrack::ChainItemType::Dynamics: return &channel->dynamicsTap;
+            default: return &channel->analyzerTap;
+        }
+    }
+    if (auto* output = currentOutput()) {
+        switch (type) {
+            case pluginrack::ChainItemType::Eq: return &output->eqTap;
+            case pluginrack::ChainItemType::Multiband: return &output->multibandTap;
+            case pluginrack::ChainItemType::DeEsser: return &output->deEsserTap;
+            case pluginrack::ChainItemType::Limiter: return &output->limiterTap;
+            case pluginrack::ChainItemType::Dynamics: return &output->dynamicsTap;
+            default: return &output->analyzerTap;
+        }
+    }
     return nullptr;
 }
 
@@ -742,10 +829,24 @@ void RackView::releaseMiniTap() {
     if (tapArmedId == 0) return;
     if (tapArmedIsOutput) {
         for (const auto& output : audioEngine.getOutputs())
-            if (output->id == tapArmedId) output->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            if (output->id == tapArmedId) {
+                output->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                output->eqTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                output->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                output->multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                output->deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                output->limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            }
     } else {
         for (const auto& channel : audioEngine.getChannels())
-            if (channel->id == tapArmedId) channel->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            if (channel->id == tapArmedId) {
+                channel->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                channel->eqTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                channel->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                channel->multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                channel->deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                channel->limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            }
     }
     tapArmedId = 0;
 }
@@ -793,11 +894,16 @@ void RackView::timerCallback() {
         lastSourceRefreshMs = 0;
     }
 
-    // Built-in thumbnails read the strip's analyzer tap. It is re-armed every
-    // tick because closing another view's panel switches the same tap off.
-    auto* tap = (eqCard != nullptr || dynamicsCard != nullptr)
+    // Built-in thumbnails each read their own plugin's tap, so the EQ
+    // card can't show the Multiband's output and vice versa. Re-armed
+    // every tick because closing another view's panel switches taps off.
+    auto* tap = (eqCard != nullptr || multibandCard != nullptr || deEsserCard != nullptr
+                 || dynamicsCard != nullptr)
                     ? currentTap()
                     : nullptr;
+    auto* eqTap = eqCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::Eq) : nullptr;
+    auto* mbTap = multibandCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::Multiband) : nullptr;
+    auto* dsTap = deEsserCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::DeEsser) : nullptr;
     if (tap != nullptr) {
         // Selecting another strip would otherwise leave the previous one
         // copying every block into its rings for the rest of the session.
@@ -806,6 +912,9 @@ void RackView::timerCallback() {
             releaseMiniTap();
         }
         tap->setMode(AudioEngine::AnalyzerTap::kPost);
+        if (eqTap != nullptr) eqTap->setMode(AudioEngine::AnalyzerTap::kPost);
+        if (mbTap != nullptr) mbTap->setMode(AudioEngine::AnalyzerTap::kPost);
+        if (dsTap != nullptr) dsTap->setMode(AudioEngine::AnalyzerTap::kPost);
         tapArmedId = selectedChainId();
         tapArmedIsOutput = selectedIsOutput;
     }
@@ -834,10 +943,77 @@ void RackView::timerCallback() {
     }
 
     if (tap != nullptr && eqCard != nullptr) {
-        tap->snapshot(true, tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize);
+        (eqTap != nullptr ? eqTap : tap)->snapshot(true, tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize);
         miniSpectrum.refresh(tapLeft.data(), tapRight.data());
         if (auto* mini = eqCard->miniView())
             mini->setSpectrum(miniSpectrum.magnitudes(), miniSpectrum.numBins());
+    }
+
+    if (tap != nullptr && (multibandCard != nullptr || deEsserCard != nullptr)) {
+        // Each card snapshots its own plugin's tap, so the Multiband and
+        // De-esser RTAs can differ as soon as their settings differ.
+        if (mbTap != nullptr) mbTap->snapshot(true, tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize);
+        else if (tap != nullptr) tap->snapshot(true, tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize);
+        float peak = 0.0f;
+        for (int i = 0; i < MiniSpectrum::kFftSize; ++i)
+            peak = std::max(peak, std::max(std::abs(tapLeft[static_cast<std::size_t>(i)]),
+                                           std::abs(tapRight[static_cast<std::size_t>(i)])));
+        const float levelDb = 20.0f * std::log10(std::max(peak, 1.0e-6f));
+        if (multibandCard != nullptr) {
+            multibandSpectrum.refresh(tapLeft.data(), tapRight.data());
+            const auto* effect = [&] {
+                if (auto* channel = currentChannel()) {
+                    for (const auto& e : channel->multibandEffects)
+                        if (!e.bypassed) return &e;
+                } else if (auto* output = currentOutput()) {
+                    for (const auto& e : output->multibandEffects)
+                        if (!e.bypassed) return &e;
+                }
+                return static_cast<const pluginrack::MultibandEffect*>(nullptr);
+            }();
+            if (auto* mini = multibandCard->miniView()) {
+                mini->setSpectrum(multibandSpectrum.magnitudes(), multibandSpectrum.numBins());
+                if (effect != nullptr) {
+                    mini->setMultiband(*effect, liveRateHz);
+                    std::vector<float> reductions;
+                    reductions.reserve(effect->bands.size());
+                    for (const auto& band : effect->bands)
+                        reductions.push_back(std::max(0.0f, -MultibandCurveComponent::compressionGainDb(
+                            levelDb, band)));
+                    mini->setGainReduction(reductions);
+                }
+            }
+        }
+        if (deEsserCard != nullptr) {
+            if (dsTap != nullptr) dsTap->snapshot(true, tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize);
+            deEsserSpectrum.refresh(tapLeft.data(), tapRight.data());
+            const auto* effect = [&] {
+                if (auto* channel = currentChannel()) {
+                    for (const auto& e : channel->deEsserEffects)
+                        if (!e.bypassed) return &e;
+                } else if (auto* output = currentOutput()) {
+                    for (const auto& e : output->deEsserEffects)
+                        if (!e.bypassed) return &e;
+                }
+                return static_cast<const pluginrack::DeEsserEffect*>(nullptr);
+            }();
+            if (auto* mini = deEsserCard->miniView()) {
+                mini->setSpectrum(deEsserSpectrum.magnitudes(), deEsserSpectrum.numBins());
+                if (effect != nullptr) {
+                    mini->setDeEsser(*effect, liveRateHz);
+                    // Sibilance-band level — the same signal the audio
+                    // processor reduces. Broadband peak (levelDb, shared
+                    // with the Multiband card) hid quiet sibilance under a
+                    // loud 440 Hz voice, so the red bar sat at zero.
+                    const float bandLevelDb = deEsserBandLevelDb(
+                        tapLeft.data(), tapRight.data(), MiniSpectrum::kFftSize,
+                        *effect, liveRateHz > 0.0 ? liveRateHz : 48000.0,
+                        deEsserDetS1L, deEsserDetS2L, deEsserDetS1R, deEsserDetS2R);
+                    deEsserReductionDb = std::abs(deEsserStaticGainDb(bandLevelDb, *effect));
+                    mini->setDeEsserGainReduction(deEsserReductionDb);
+                }
+            }
+        }
     }
 
     if (tap != nullptr && dynamicsCard != nullptr) {
@@ -1216,7 +1392,7 @@ void RackView::hideDockedEditor() {
 
 // Brings the insert editor back once no panel owns the bay any more.
 void RackView::showDockedEditor() {
-    if (dockedEditor == nullptr || eqFocused || dynamicsFocused) return;
+    if (dockedEditor == nullptr || eqFocused || dynamicsFocused || focusedEffectWindow != nullptr) return;
     if (dockedEditor->getParentComponent() != &editorHolder) return;
     dockedEditor->setVisible(true);
     resized();
@@ -1269,14 +1445,13 @@ void RackView::focusEq() {
         };
         window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
             if (safe == nullptr) return;
-            // resolve channel
             if (auto* c = safe->currentChannel())
-                c->analyzerTap.snapshot(postEq, destL, destR, EQWindow::kAnalyzerFftSize);
+                c->eqTap.snapshot(postEq, destL, destR, EQWindow::kAnalyzerFftSize);
         };
         window->setAnalyzerTapMode = [safe](int mode) {
             if (safe == nullptr) return;
             if (auto* c = safe->currentChannel())
-                c->analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+                c->eqTap.setMode(static_cast<std::uint32_t>(mode));
         };
         window->setAnalyzerMode(EQWindow::kAnalyzerPost);
         // Delay knob: seed from the channel and persist through the engine,
@@ -1341,12 +1516,12 @@ void RackView::focusEq() {
         window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
             if (safe == nullptr) return;
             if (auto* o = safe->currentOutput())
-                o->analyzerTap.snapshot(postEq, destL, destR, EQWindow::kAnalyzerFftSize);
+                o->eqTap.snapshot(postEq, destL, destR, EQWindow::kAnalyzerFftSize);
         };
         window->setAnalyzerTapMode = [safe](int mode) {
             if (safe == nullptr) return;
             if (auto* o = safe->currentOutput())
-                o->analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+                o->eqTap.setMode(static_cast<std::uint32_t>(mode));
         };
         window->setAnalyzerMode(EQWindow::kAnalyzerPost);
         // Delay knob, same contract as the channel branch above.
@@ -1384,7 +1559,164 @@ void RackView::closeEqWindow() {
     editorHolder.removeChildComponent(doomed);
     delete doomed;
     refreshEqButton();
+    if (focusedEffectWindow == nullptr) showDockedEditor();
+}
+
+void RackView::closeEffectWindows() {
+    if (focusedEffectWindow == nullptr) return;
+    auto* doomed = focusedEffectWindow;
+    focusedEffectWindow = nullptr;
+    multibandWindow = nullptr;
+    deEsserWindow = nullptr;
+    limiterWindow = nullptr;
+    eqFocused = false;
+    dynamicsFocused = false;
+    editorHolder.removeChildComponent(doomed);
+    delete doomed;
     showDockedEditor();
+}
+
+void RackView::focusMultiband() {
+    closeEffectWindows();
+    closeEqWindow();
+    closeDynamicsWindow();
+    auto* channel = currentChannel();
+    if (channel == nullptr) return;
+
+    juce::Component::SafePointer<RackView> safe(this);
+    if (channel->multibandEffects.empty()) {
+        auto effects = channel->multibandEffects;
+        effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
+        audioEngine.setChannelMultiband(channel->id, effects);
+        channel->chain.push_back({pluginrack::ChainItemType::Multiband, 1});
+        audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::Multiband, 1});
+    }
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    auto* window = new MultibandWindow(
+        "Multiband Compressor - " + channel->name, channel->multibandEffects.front(),
+        [safe](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto* currentChannel = safe->currentChannel();
+            if (currentChannel == nullptr) return;
+            auto effects = currentChannel->multibandEffects;
+            for (auto& e : effects) if (e.id == effect.id) {
+                const bool bp = e.bypassed; e = effect;
+                if (!bypassChanged) e.bypassed = bp;
+            }
+            safe->audioEngine.setChannelMultiband(currentChannel->id, effects);
+        }, channel->multibandRtaOffsetDb, channel->multibandRtaWeighting, liveRateHz);
+    window->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->audioEngine.setChannelMultibandRtaOffset(safe->currentChannel()->id, offsetDb);
+    };
+    window->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->audioEngine.setChannelMultibandRtaWeighting(safe->currentChannel()->id, weighting);
+    };
+    channel->multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe](float* l, float* r, int n) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->currentChannel()->multibandTap.snapshot(true, l, r, n);
+    };
+    window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
+    multibandWindow = window;
+    focusedEffectWindow = window;
+    hideDockedEditor();
+    editorHolder.addAndMakeVisible(window);
+    rebuild();
+    resized();
+}
+
+void RackView::focusDeEsser() {
+    closeEffectWindows();
+    closeEqWindow();
+    closeDynamicsWindow();
+    auto* channel = currentChannel();
+    if (channel == nullptr) return;
+
+    juce::Component::SafePointer<RackView> safe(this);
+    if (channel->deEsserEffects.empty()) {
+        auto effects = channel->deEsserEffects;
+        effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
+        audioEngine.setChannelDeEssers(channel->id, effects);
+        channel->chain.push_back({pluginrack::ChainItemType::DeEsser, 1});
+        audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::DeEsser, 1});
+    }
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    auto* window = new DeEsserWindow(
+        "De-esser - " + channel->name, channel->deEsserEffects.front(),
+        [safe](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto* currentChannel = safe->currentChannel();
+            if (currentChannel == nullptr) return;
+            auto effects = currentChannel->deEsserEffects;
+            for (auto& e : effects) if (e.id == effect.id) {
+                const bool bp = e.bypassed; e = effect;
+                if (!bypassChanged) e.bypassed = bp;
+            }
+            safe->audioEngine.setChannelDeEssers(currentChannel->id, effects);
+        }, channel->deEsserRtaOffsetDb, channel->deEsserRtaWeighting, liveRateHz);
+    window->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->audioEngine.setChannelDeEsserRtaOffset(safe->currentChannel()->id, offsetDb);
+    };
+    window->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->audioEngine.setChannelDeEsserRtaWeighting(safe->currentChannel()->id, weighting);
+    };
+    channel->deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe](float* l, float* r, int n) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->currentChannel()->deEsserTap.snapshot(true, l, r, n);
+    };
+    window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
+    deEsserWindow = window;
+    focusedEffectWindow = window;
+    hideDockedEditor();
+    editorHolder.addAndMakeVisible(window);
+    rebuild();
+    resized();
+}
+
+void RackView::focusLimiter() {
+    closeEffectWindows();
+    closeEqWindow();
+    closeDynamicsWindow();
+    auto* channel = currentChannel();
+    if (channel == nullptr) return;
+
+    juce::Component::SafePointer<RackView> safe(this);
+    if (channel->limiterEffects.empty()) {
+        auto effects = channel->limiterEffects;
+        effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
+        audioEngine.setChannelLimiters(channel->id, effects);
+        channel->chain.push_back({pluginrack::ChainItemType::Limiter, 1});
+        audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::Limiter, 1});
+    }
+    auto* window = new LimiterWindow(
+        "Limiter - " + channel->name, channel->limiterEffects.front(),
+        [safe](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto* currentChannel = safe->currentChannel();
+            if (currentChannel == nullptr) return;
+            auto effects = currentChannel->limiterEffects;
+            for (auto& e : effects) if (e.id == effect.id) {
+                const bool bp = e.bypassed; e = effect;
+                if (!bypassChanged) e.bypassed = bp;
+            }
+            safe->audioEngine.setChannelLimiters(currentChannel->id, effects);
+        });
+    channel->limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe](bool /*postEq*/, float* l, float* r, int n) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->currentChannel()->limiterTap.snapshot(true, l, r, n);
+    };
+    window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
+    limiterWindow = window;
+    focusedEffectWindow = window;
+    hideDockedEditor();
+    editorHolder.addAndMakeVisible(window);
+    resized();
 }
 
 void RackView::refreshEqButton() {
@@ -1476,16 +1808,16 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
                 }
             },
             gateIt != ch->effects.end() ? &*gateIt : nullptr);
+        // The Dynamics RTA reads the compressor/gate output (dynamicsTap),
+        // so it shows the dynamics' own signal, not the strip input.
         window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
             if (safe == nullptr) return;
             if (auto* channel = safe->currentChannel()) {
-                // Re-arm every tick: the tap is shared, so closing an EQ or a
-                // panel in another view can switch it off under us.
-                channel->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
-                channel->analyzerTap.snapshot(false, left, right, frames);
+                channel->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+                channel->dynamicsTap.snapshot(true, left, right, frames);
             }
         };
-        ch->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+        ch->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
         dynamicsWindow = window;
     } else if (auto* out = currentOutput()) {
         auto it = findEffect(out->effects);
@@ -1511,11 +1843,11 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
             if (safe == nullptr) return;
             if (auto* output = safe->currentOutput()) {
-                output->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
-                output->analyzerTap.snapshot(false, left, right, frames);
+                output->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+                output->dynamicsTap.snapshot(true, left, right, frames);
             }
         };
-        out->analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+        out->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
         dynamicsWindow = window;
     } else {
         return;
@@ -1535,9 +1867,9 @@ void RackView::closeDynamicsWindow() {
     dynamicsWindow = nullptr;
     dynamicsFocused = false;
     if (auto* ch = currentChannel()) {
-        ch->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        ch->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
     } else if (auto* out = currentOutput()) {
-        out->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        out->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
     }
     editorHolder.removeChildComponent(doomed);
     delete doomed;
@@ -1598,10 +1930,12 @@ void RackView::refreshDynamicsButtons() {
 }
 
 void RackView::SourceRowList::setRows(juce::StringArray channelNames,
-                                      juce::StringArray deviceNames) {
-    if (names == channelNames && devices == deviceNames) return;
+                                      juce::StringArray deviceNames,
+                                      const std::vector<float>& channelHues) {
+    if (names == channelNames && devices == deviceNames && hues == channelHues) return;
     names = std::move(channelNames);
     devices = std::move(deviceNames);
+    hues = channelHues;
     repaint();
 }
 
@@ -1617,14 +1951,16 @@ void RackView::SourceRowList::paint(juce::Graphics& g) {
     auto area = getLocalBounds();
     for (int i = 0; i < names.size() && area.getHeight() > 0; ++i) {
         auto row = area.removeFromTop(kRowH);
-        g.setColour(theme::control().withAlpha(0.6f));
+        const float hue = (i < (int)hues.size()) ? hues[static_cast<std::size_t>(i)] : 0.0f;
+        const auto accent = theme::stripColour(hue);
+        g.setColour(accent);
         g.fillRoundedRectangle(row.toFloat().reduced(0.0f, 1.0f), 3.0f);
 
         auto text = row.reduced(6, 3);
-        g.setColour(theme::text());
+        g.setColour(theme::bg());
         g.setFont(theme::ui::bodyBoldFont());
         g.drawFittedText(names[i], text.removeFromTop(15), juce::Justification::centredLeft, 1);
-        g.setColour(theme::dim());
+        g.setColour(theme::bg().withAlpha(0.75f));
         g.setFont(theme::ui::captionFont());
         g.drawFittedText(devices[i], text, juce::Justification::centredLeft, 1);
         area.removeFromTop(2);
@@ -1634,15 +1970,18 @@ void RackView::SourceRowList::paint(juce::Graphics& g) {
 void RackView::refreshSourceList() {
     juce::StringArray sourceNames;
     juce::StringArray sourceDevices;
+    std::vector<float> sourceHues;
     if (const auto* out = currentOutput()) {
         for (const auto& channel : audioEngine.getChannels()) {
             if (audioEngine.getSendGain(channel->id, out->id) <= -30.0f) continue;
             sourceNames.add(channel->name);
+            sourceHues.push_back(channel->colourHue);
             const auto device = audioEngine.getChannelDeviceState(channel->id).deviceName;
             sourceDevices.add(device.isNotEmpty() ? device : juce::String("No input device"));
         }
     }
-    sourceList.setRows(std::move(sourceNames), std::move(sourceDevices));
+    sourceList.setRows(std::move(sourceNames), std::move(sourceDevices),
+                       std::move(sourceHues));
 }
 
 void RackView::refreshOutputButtons() {
@@ -1658,12 +1997,15 @@ void RackView::refreshOutputButtons() {
     outputHeader.setText(out != nullptr ? "Inputs" : "Output", juce::dontSendNotification);
 
     for (size_t i = 0; i < outputs.size(); ++i) {
-        auto* btn = outputButtons.add(new juce::TextButton(juce::String((int)i + 1)));
+        auto* btn = outputButtons.add(new juce::TextButton(outputs[i]->name));
         btn->setClickingTogglesState(true);
         btn->setTooltip(outputs[i]->name);
         btn->setColour(juce::TextButton::buttonColourId, theme::control());
-        btn->setColour(juce::TextButton::buttonOnColourId, theme::amber());
+        // Active send lights in the output's own identity colour.
+        btn->setColour(juce::TextButton::buttonOnColourId,
+                       theme::stripColour(outputs[i]->colourHue));
         btn->setColour(juce::TextButton::textColourOffId, theme::text());
+        btn->setColour(juce::TextButton::textColourOnId, theme::bg());
         const std::uint32_t outId = outputs[i]->id;
         // initial state
         bool on = false;
@@ -1868,13 +2210,24 @@ void RackView::resized() {
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
-    if (dockedEditor != nullptr) {
+    if (focusedEffectWindow != nullptr) {
+        // Fill the rack editor bay edge to edge, like the EQ/Dynamics
+        // panels: the graph and knobs stretch to the whole width instead
+        // of sitting in a fixed 860px holder with dead space on the right
+        // (was the "Multiband/De-esser/Limiter not full width" report).
+        // Height keeps the windows' compact 560px; only the width stretches.
+        editorHolder.setSize(juce::jmax(vw, 860), 560);
+        focusedEffectWindow->setBounds(editorHolder.getLocalBounds());
+        noEditorLabel.setVisible(false);
+        noEditorBypass.setVisible(false);
+    }
+    if (dockedEditor != nullptr && focusedEffectWindow == nullptr) {
         // The bay is the allocation: keep the holder at the visible size; the
         // layout scales the plugin to fit that whole area.
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
         layoutDockedEditor();
         noEditorLabel.setBounds(editorHolder.getLocalBounds());
-    } else {
+    } else if (focusedEffectWindow == nullptr) {
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
         auto noArea = editorHolder.getLocalBounds();
         if (noEditorBypass.isVisible()) {
@@ -1928,6 +2281,16 @@ void RackView::paint(juce::Graphics& g) {
     drawPanel(pluginArea, theme::panel(), theme::border());
     drawPanel(centerArea, theme::bg().darker(0.16f), theme::line().withAlpha(0.8f));
     drawPanel(rightArea, theme::panel().darker(0.08f), theme::border());
+
+    // Channel identity colour: the left strip panel carries the selected
+    // channel/output's accent along its bottom edge, like the mixer strips.
+    // Bounds (not raw width/height) so the bar lands on the panel's own
+    // edge instead of the view's — the old version drew from x=0 and
+    // overlapped the button row.
+    if (const auto* ch = currentChannel())
+        theme::drawStripAccent(g, leftArea, ch->colourHue);
+    else if (const auto* out = currentOutput())
+        theme::drawStripAccent(g, leftArea, out->colourHue);
     // The touch strip paints its own panel; this keeps the column framed if it
     // is ever hidden (no chain selected).
     drawPanel(touchArea, theme::panel().darker(0.08f), theme::border());
@@ -1954,28 +2317,37 @@ void RackView::mouseDown(const juce::MouseEvent& e) {
 
 void RackView::renameSelectedChain() {
     juce::String currentName;
-    if (auto* ch = currentChannel()) currentName = ch->name;
-    else if (auto* out = currentOutput()) currentName = out->name;
-
-    auto* aw = new juce::AlertWindow("Rename", "Enter new name:", juce::MessageBoxIconType::NoIcon);
-    aw->addTextEditor("name", currentName, "Name:");
-    aw->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    aw->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    float currentHue = 0.0f;
+    const int selected = selectedId;
+    const bool isOut = selectedIsOutput;
+    if (auto* ch = currentChannel()) {
+        currentName = ch->name;
+        currentHue = ch->colourHue;
+    } else if (auto* out = currentOutput()) {
+        currentName = out->name;
+        currentHue = out->colourHue;
+    }
 
     juce::Component::SafePointer<RackView> safe(this);
-    aw->enterModalState(true, juce::ModalCallbackFunction::create([safe, aw](int result) {
-        if (result == 1 && safe != nullptr) {
-            const auto newName = aw->getTextEditorContents("name").trim();
-            if (newName.isNotEmpty()) {
-                if (auto* c = safe->currentChannel())
-                    safe->audioEngine.setChannelName(c->id, newName);
-                else if (auto* o = safe->currentOutput())
-                    safe->audioEngine.setOutputName(o->id, newName);
-                safe->rebuild();
+    StripDialog::show("Rename", currentName, currentHue,
+                      [safe, selected, isOut](const juce::String& newName, float newHue) {
+        if (safe == nullptr || newName.trim().isEmpty()) return;
+        if (!isOut) {
+            safe->audioEngine.setChannelName(static_cast<std::uint32_t>(selected), newName);
+            safe->audioEngine.setChannelColourHue(static_cast<std::uint32_t>(selected), newHue);
+        } else {
+            safe->audioEngine.setOutputName(static_cast<std::uint32_t>(selected), newName);
+            const auto& outs = safe->audioEngine.getOutputs();
+            for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+                if (outs[static_cast<std::size_t>(i)]->id
+                    == static_cast<std::uint32_t>(selected)) {
+                    safe->audioEngine.setOutputColourHue(i, newHue);
+                    break;
+                }
             }
         }
-        delete aw;
-    }), true);
+        safe->rebuild();
+    });
 }
 
 juce::String RackView::insertPlugin(const juce::File& file, int pluginUniqueId) {
@@ -2135,6 +2507,45 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         } else {
             audioEngine.setChannelEqBypassed(static_cast<std::uint32_t>(selectedId), bypassed);
         }
+    } else if (item.type == pluginrack::ChainItemType::Multiband) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->multibandEffects;
+                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                audioEngine.setOutputMultiband(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->multibandEffects;
+            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            audioEngine.setChannelMultiband(channel->id, effects);
+        }
+        if (multibandWindow != nullptr) multibandWindow->setBypassed(bypassed);
+    } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->deEsserEffects;
+                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                audioEngine.setOutputDeEssers(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->deEsserEffects;
+            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            audioEngine.setChannelDeEssers(channel->id, effects);
+        }
+        if (deEsserWindow != nullptr) deEsserWindow->setBypassed(bypassed);
+    } else if (item.type == pluginrack::ChainItemType::Limiter) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->limiterEffects;
+                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                audioEngine.setOutputLimiters(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->limiterEffects;
+            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            audioEngine.setChannelLimiters(channel->id, effects);
+        }
+        if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
     } else {
         // Resolve like the card does: a scene keeps the effect ids it was
         // saved with, which can differ from the chain row's id.
@@ -2175,9 +2586,97 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
 
 void RackView::activateBuiltIn(pluginrack::ChainItem item) {
     if (item.type == pluginrack::ChainItemType::Eq) focusEq();
-    // Both dynamics rows open the combined panel: it is the only page that
-    // carries the gate row and its curve.
-    else focusDynamics(pluginrack::DynamicsEffectType::Compressor);
+    else if (item.type == pluginrack::ChainItemType::Dynamics) focusDynamics(pluginrack::DynamicsEffectType::Compressor);
+    else if (item.type == pluginrack::ChainItemType::Multiband) focusMultiband();
+    else if (item.type == pluginrack::ChainItemType::DeEsser) focusDeEsser();
+    else if (item.type == pluginrack::ChainItemType::Limiter) focusLimiter();
+}
+
+void RackView::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
+    if (selectedIsOutput) {
+        if (auto* output = currentOutput()) audioEngine.ensureOutputChainItem(output->id, item);
+    } else if (auto* channel = currentChannel()) {
+        audioEngine.ensureChannelChainItem(channel->id, item);
+    }
+    if (selectedIsOutput) {
+        if (auto* output = currentOutput()) {
+            if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(output->multibandEffects.begin(), output->multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->multibandEffects; fx.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setOutputMultiband(output->id, fx); }
+            if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(output->deEsserEffects.begin(), output->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setOutputDeEssers(output->id, fx); }
+            if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(output->limiterEffects.begin(), output->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setOutputLimiters(output->id, fx); }
+        }
+    } else if (auto* channel = currentChannel()) {
+        if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(channel->multibandEffects.begin(), channel->multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->multibandEffects; fx.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setChannelMultiband(channel->id, fx); }
+        if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(channel->deEsserEffects.begin(), channel->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setChannelDeEssers(channel->id, fx); }
+        if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(channel->limiterEffects.begin(), channel->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setChannelLimiters(channel->id, fx); }
+    }
+    if (item.type == pluginrack::ChainItemType::Dynamics) {
+        if (const auto* effects = currentEffects()) {
+            for (const auto& effect : *effects)
+                if (effect.id != item.id) {
+                    if (selectedIsOutput) {
+                        if (auto* output = currentOutput())
+                            audioEngine.ensureOutputChainItem(
+                                output->id, {pluginrack::ChainItemType::Dynamics, effect.id});
+                    } else if (auto* channel = currentChannel()) {
+                        audioEngine.ensureChannelChainItem(
+                            channel->id, {pluginrack::ChainItemType::Dynamics, effect.id});
+                    }
+                }
+        }
+    }
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    if (const auto* chain = currentChain()) {
+        if (const auto* effects = currentEffects()) {
+            for (const auto& row : pluginrack::buildChainRows(*chain, *effects)) {
+                const bool holdsItem =
+                    std::any_of(row.begin(), row.end(), [&](int index) {
+                        return (*chain)[static_cast<std::size_t>(index)] == item;
+                    });
+                if (!holdsItem) continue;
+                if (row.size() > 1) {
+                    cardItems.clear();
+                    for (const int index : row)
+                        cardItems.push_back((*chain)[static_cast<std::size_t>(index)]);
+                }
+                break;
+            }
+        }
+    }
+    moveChainCard(cardItems, chainIndex);
+    setBuiltInBypass(item, false);
+    refreshAfterInsertChange();
+}
+
+void RackView::eraseBuiltIn(pluginrack::ChainItem item) {
+    // The Dynamics card is one node: removing it takes both effects, so
+    // expand to the full pair like the move path does.
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    if (const auto* chain = currentChain()) {
+        if (const auto* effects = currentEffects()) {
+            for (const auto& row : pluginrack::buildChainRows(*chain, *effects)) {
+                const bool holdsItem =
+                    std::any_of(row.begin(), row.end(), [&](int index) {
+                        return (*chain)[static_cast<std::size_t>(index)] == item;
+                    });
+                if (!holdsItem) continue;
+                if (row.size() > 1) {
+                    cardItems.clear();
+                    for (const int index : row)
+                        cardItems.push_back((*chain)[static_cast<std::size_t>(index)]);
+                }
+                break;
+            }
+        }
+    }
+    for (const auto& entry : cardItems) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput())
+                audioEngine.removeOutputChainItem(output->id, entry);
+        } else if (auto* channel = currentChannel()) {
+            audioEngine.removeChannelChainItem(channel->id, entry);
+        }
+    }
+    refreshAfterInsertChange();
 }
 
 void RackView::refreshAfterInsertChange() {

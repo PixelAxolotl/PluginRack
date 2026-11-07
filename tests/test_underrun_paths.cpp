@@ -660,6 +660,33 @@ TEST_CASE("save names reject Windows device names and excessive lengths", "[app]
     CHECK(contains(bridge, "startsWith(\"lpt\")"));
 }
 
+TEST_CASE("fetched dependencies are pinned to commit hashes", "[app][security]") {
+    // PR-04: a moving Git tag can silently change the build. Fetched deps pin
+    // to an exact 40-char SHA instead.
+    for (const char* path : {"core/CMakeLists.txt", "tests/CMakeLists.txt"}) {
+        const auto text = readSource(path);
+        CHECK_FALSE(contains(text, "GIT_TAG v"));
+        bool hasSha = false;
+        for (auto pos = text.find("GIT_TAG "); pos != std::string::npos;
+             pos = text.find("GIT_TAG ", pos + 1)) {
+            const auto shaStart = pos + 8;
+            if (shaStart + 40 <= text.size()) {
+                const auto sha = text.substr(shaStart, 40);
+                bool hex = true;
+                for (const char c : sha) {
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                        hex = false;
+                    }
+                }
+                if (hex) {
+                    hasSha = true;
+                }
+            }
+        }
+        CHECK(hasSha);
+    }
+}
+
 TEST_CASE("plugin discovery and child scanning are bounded", "[plugin][security]") {
     const auto library = readSource("app/src/PluginLibrary.cpp");
     CHECK(contains(library, "kMaxScanBundles"));
@@ -671,6 +698,13 @@ TEST_CASE("plugin discovery and child scanning are bounded", "[plugin][security]
     CHECK(contains(scan, "StringArray"));
     CHECK_FALSE(contains(scan, "getFullPathName().quoted()"));
     CHECK(contains(scan, "Network plugin paths are not supported"));
+    // PR-02: the child scanner must be bounded in time and output, and must
+    // fail closed (never fall back to scanning in the main app).
+    CHECK(contains(scan, "kScanTimeoutMs"));
+    CHECK(contains(scan, "kMaxScanOutputBytes"));
+    CHECK(contains(scan, "child.kill()"));
+    CHECK(contains(scan, "waitForProcessToFinish"));
+    CHECK_FALSE(contains(scan, "scanFileInProcess(file, error)"));
 }
 
 TEST_CASE("the picked class inside a bundle reaches the loader", "[plugin][ui]") {

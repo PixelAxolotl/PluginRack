@@ -16,6 +16,9 @@
 #include <pluginrack/LatencyProfile.h>
 #include <pluginrack/Meters.h>
 #include <pluginrack/Scene.h>
+#include <pluginrack/MultibandEffect.h>
+#include <pluginrack/DeEsserEffect.h>
+#include <pluginrack/LimiterEffect.h>
 
 #include "PluginHost.h"
 #include "DeviceStream.h"
@@ -102,15 +105,43 @@ public:
         // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
         // like eqBands, mirrored into eq via setDelayMs under stateLock.
         float eqDelayMs = 0.0f;
+        // Strip identity hue (degrees); 0 = unassigned, UI assigns on load.
+        float colourHue = 0.0f;
+        // EQ polarity flip; mirrored into eq via setPhaseFlip under stateLock.
+        juce::Atomic<bool> eqPhaseFlip{false};
         // RTA display offset in dB (0 == the default view). Display only;
         // message-thread state saved with the scene like eqBands.
         float eqRtaOffsetDb = 0.0f;
         // Analyzer weighting: 0 = Z, 1 = A, 2 = C. Display only.
         int eqRtaWeighting = 0;
+        float multibandRtaOffsetDb = 0.0f;
+        int multibandRtaWeighting = 0;
+        float deEsserRtaOffsetDb = 0.0f;
+        int deEsserRtaWeighting = 0;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
+        std::vector<pluginrack::MultibandEffect> multibandEffects;
+        std::vector<pluginrack::MultibandProcessor> multibandProcessors;
+        std::vector<pluginrack::DeEsserEffect> deEsserEffects;
+        std::vector<pluginrack::DeEsserProcessor> deEsserProcessors;
+        std::vector<pluginrack::LimiterEffect> limiterEffects;
+        std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
+        // One tap per built-in, each written at its own point in the chain:
+        // eqTap after the EQ, dynamicsTap after Comp/Gate, multibandTap
+        // after Multiband, deEsserTap after De-esser, limiterTap after
+        // Limiter. That's what makes each RTA *independent* — the Multiband
+        // RTA shows what leaves the Multiband, not what leaves the EQ
+        // (before it in the chain) or the strip end. The shared
+        // displayRtaLevelDb()/spectrumLevelAtDb() math stays shared; only
+        // the data feeding it is per-plugin now. analyzerTap is kept as
+        // the strip-end (post-everything) legacy feed for the mini cards.
+        AnalyzerTap eqTap;
+        AnalyzerTap dynamicsTap;
+        AnalyzerTap multibandTap;
+        AnalyzerTap deEsserTap;
+        AnalyzerTap limiterTap;
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         // Guarded by stateLock; read them through getChannelDeviceState().
         juce::String inputDeviceName;
@@ -150,12 +181,30 @@ public:
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultEqBands()};
         float eqDelayMs = 0.0f; // post-EQ delay, same rules as Channel
+        float colourHue = 0.0f; // strip identity hue, same rules as Channel
+        juce::Atomic<bool> eqPhaseFlip{false}; // EQ polarity flip, same as Channel
         float eqRtaOffsetDb = 0.0f; // RTA display offset, same rules as Channel
         int eqRtaWeighting = 0;     // analyzer weighting, same rules as Channel
+        float multibandRtaOffsetDb = 0.0f;
+        int multibandRtaWeighting = 0;
+        float deEsserRtaOffsetDb = 0.0f;
+        int deEsserRtaWeighting = 0;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
+        std::vector<pluginrack::MultibandEffect> multibandEffects;
+        std::vector<pluginrack::MultibandProcessor> multibandProcessors;
+        std::vector<pluginrack::DeEsserEffect> deEsserEffects;
+        std::vector<pluginrack::DeEsserProcessor> deEsserProcessors;
+        std::vector<pluginrack::LimiterEffect> limiterEffects;
+        std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         juce::Atomic<bool> eqBypassed{true};
         juce::Atomic<bool> eqDirty{false};
+        // One tap per built-in, same rule as Channel.
+        AnalyzerTap eqTap;
+        AnalyzerTap dynamicsTap;
+        AnalyzerTap multibandTap;
+        AnalyzerTap deEsserTap;
+        AnalyzerTap limiterTap;
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         // Guarded by stateLock; read them through getOutputDeviceState().
         juce::String outputDeviceName;
@@ -412,6 +461,11 @@ public:
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
     void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
+    // Removes a chain entry (a built-in effect). Picking the same effect from
+    // the plugin menu appends it back; the scene save keeps whatever chain is
+    // current, so a saved scene restores the removed state as-is.
+    void removeChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item);
+    void removeOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item);
     // Replaces a strip's chain order wholesale: "Reset to Defaults" needs to
     // put the built-in rows back, which no move can express.
     void setChannelChain(std::uint32_t channelId, const std::vector<pluginrack::ChainItem>& chain);
@@ -425,6 +479,10 @@ public:
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
     void moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item, int targetIndex);
+    // Appends a built-in effect not currently in the strip's chain, so picking
+    // a removed built-in from the plugin menu restores it. No-op if present.
+    void ensureChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item);
+    void ensureOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item);
 
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);
@@ -457,17 +515,41 @@ public:
     void setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands);
     void setChannelEqBypassed(std::uint32_t channelId, bool bypassed);
     void setChannelEqDelay(std::uint32_t channelId, float delayMs);
+    void setChannelEqPhaseFlip(std::uint32_t channelId, bool flipped);
+    void setChannelColourHue(std::uint32_t channelId, float hueDegrees);
     void setChannelEqRtaOffset(std::uint32_t channelId, float offsetDb);
     void setChannelEqRtaWeighting(std::uint32_t channelId, int weighting);
+    void setChannelMultibandRtaOffset(std::uint32_t channelId, float offsetDb);
+    void setChannelMultibandRtaWeighting(std::uint32_t channelId, int weighting);
+    void setChannelDeEsserRtaOffset(std::uint32_t channelId, float offsetDb);
+    void setChannelDeEsserRtaWeighting(std::uint32_t channelId, int weighting);
     void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(int outIdx, bool bypassed);
     void setOutputEqDelay(int outIdx, float delayMs);
+    void setOutputEqPhaseFlip(int outIdx, bool flipped);
+    void setOutputColourHue(int outIdx, float hueDegrees);
     void setOutputEqRtaOffset(int outIdx, float offsetDb);
     void setOutputEqRtaWeighting(int outIdx, int weighting);
+    void setOutputMultibandRtaOffset(int outIdx, float offsetDb);
+    void setOutputMultibandRtaWeighting(int outIdx, int weighting);
+    void setOutputDeEsserRtaOffset(int outIdx, float offsetDb);
+    void setOutputDeEsserRtaWeighting(int outIdx, int weighting);
     void setChannelEffects(std::uint32_t channelId,
                            const std::vector<pluginrack::DynamicsEffect>& effects);
     void setOutputEffects(std::uint32_t outputId,
                           const std::vector<pluginrack::DynamicsEffect>& effects);
+    void setChannelMultiband(std::uint32_t channelId,
+                             const std::vector<pluginrack::MultibandEffect>& effects);
+    void setOutputMultiband(std::uint32_t outputId,
+                            const std::vector<pluginrack::MultibandEffect>& effects);
+    void setChannelDeEssers(std::uint32_t channelId,
+                            const std::vector<pluginrack::DeEsserEffect>& effects);
+    void setOutputDeEssers(std::uint32_t outputId,
+                           const std::vector<pluginrack::DeEsserEffect>& effects);
+    void setChannelLimiters(std::uint32_t channelId,
+                            const std::vector<pluginrack::LimiterEffect>& effects);
+    void setOutputLimiters(std::uint32_t outputId,
+                           const std::vector<pluginrack::LimiterEffect>& effects);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

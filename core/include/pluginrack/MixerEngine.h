@@ -11,6 +11,9 @@
 #include "pluginrack/AudioBlock.h"
 #include "pluginrack/EqEngine.h"
 #include "pluginrack/DynamicsEffect.h"
+#include "pluginrack/MultibandEffect.h"
+#include "pluginrack/DeEsserEffect.h"
+#include "pluginrack/LimiterEffect.h"
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
@@ -78,6 +81,21 @@ private:
         std::vector<char> channelEqEnabled;
         std::vector<char> outputEqEnabled;
         std::vector<std::vector<DynamicsProcessor>> channelEffects;
+        std::vector<std::vector<MultibandProcessor>> channelMultiband;
+        std::vector<std::vector<DeEsserProcessor>> channelDeEssers;
+        std::vector<std::vector<LimiterProcessor>> channelLimiters;
+        std::vector<std::vector<MultibandProcessor>> outputMultiband;
+        std::vector<std::vector<DeEsserProcessor>> outputDeEssers;
+        std::vector<std::vector<LimiterProcessor>> outputLimiters;
+        std::vector<std::vector<MultibandEffect>> channelMultibandFx;
+        std::vector<std::vector<DeEsserEffect>> channelDeEsserFx;
+        std::vector<std::vector<LimiterEffect>> channelLimiterFx;
+        std::vector<std::vector<MultibandEffect>> outputMultibandFx;
+        std::vector<std::vector<DeEsserEffect>> outputDeEsserFx;
+        std::vector<std::vector<LimiterEffect>> outputLimiterFx;
+        std::vector<char> channelChainMode;
+        std::vector<std::vector<ChainItem>> channelChains;
+        std::vector<std::vector<ChainItem>> outputChains;
         std::vector<std::vector<DynamicsProcessor>> outputEffects;
     };
 

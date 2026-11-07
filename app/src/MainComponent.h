@@ -8,13 +8,14 @@
 #include "AudioEngine.h"
 #include "IoView.h"
 #include "MixerComponent.h"
+#include "PatchesView.h"
 #include "RackView.h"
 #include "RoutingMatrixComponent.h"
 #include "SavesView.h"
 #include "SettingsView.h"
 #include "Theme.h"
 
-enum class AppView { Rack = 0, Mixer, Routing, IO, Saves, Settings };
+enum class AppView { Rack = 0, Mixer, Routing, IO, Saves, Settings, Patches };
 
 // Persistent 56 px header: wordmark, view navigation, snapshot placeholder,
 // audio status, error affordance, scene buttons. Paints the same bar the
@@ -45,6 +46,7 @@ private:
 
     juce::TextButton racksButton{"Racks"};
     juce::TextButton mixerButton{"Mixer"};
+    juce::TextButton patchesButton{"Patches"};
     juce::TextButton routingButton{"Routing"};
     juce::TextButton ioButton{"I/O"};
     juce::TextButton settingsButton{"Settings"};
@@ -111,6 +113,7 @@ private:
     MixerComponent& mixerView;
     RackView rackView;
     RoutingMatrixComponent routingView;
+    PatchesView patchesView;
     IoView ioView;
     SavesView savesView;
     SettingsView settingsView;
@@ -127,6 +130,11 @@ public:
     void resized() override;
     void paint(juce::Graphics& g) override;
     void selectView(AppView view);
+    // Visual-diagnostics support for --screenshot; production UI does not
+    // expose these helpers to users.
+    const std::vector<std::unique_ptr<AudioEngine::Channel>>& getChannelsForDiagnostics();
+    juce::Component* focusDiagnosticsEffect(pluginrack::ChainItemType type);
+    void feedDiagnosticsSignal(int numBins, double sampleRateHz);
     void saveSceneOnExit();
     void initialiseAudio();
     SettingsView& settings() { return router.getSettingsView(); }

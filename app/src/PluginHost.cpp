@@ -1,5 +1,7 @@
 #include "PluginHost.h"
 
+#include "RestrictedHost.h"
+
 #include <algorithm>
 #include <climits>
 #include <cstring>
@@ -345,6 +347,12 @@ constexpr const char* kScanResultPrefix = "PLUGINDESC ";
 constexpr const char* kScanErrorPrefix = "PLUGINSCANERROR ";
 constexpr int kMaxPluginStateBase64Chars = 1 * 1024 * 1024;
 
+// Scanner bounds (PR-02): a hung plugin must not hold the scan worker
+// forever, and a chatty one must not grow the captured output without end.
+// 30 s is far above the slowest known good scan (~3 s for big libraries).
+constexpr int kScanTimeoutMs = 30000;
+constexpr int kMaxScanOutputBytes = 1 * 1024 * 1024;
+
 bool isRemotePath(const juce::File& file) {
     return file.getFullPathName().startsWith("\\\\");
 }
@@ -378,12 +386,44 @@ juce::Array<juce::PluginDescription> PluginHost::scanFile(const juce::File& file
                                         file.getFullPathName() };
     if (!executable.existsAsFile()
         || !child.start(arguments, juce::ChildProcess::wantStdOut)) {
-        juce::Logger::writeToLog("plugin: scan process unavailable, scanning in-process");
-        return scanFileInProcess(file, error);
+        // Fail closed: scanning runs plugin code, and running it in the main
+        // app would give a plugin the app's privileges. Refuse instead.
+        juce::Logger::writeToLog("plugin: scan process unavailable, refusing in-process scan");
+        error = "Plugin scanning is unavailable right now. The plugin was not loaded.";
+        return descriptions;
     }
 
     const auto scanStart = juce::Time::getMillisecondCounterHiRes();
-    const auto output = child.readAllProcessOutput();
+    juce::String output;
+    bool scanTimedOut = false;
+    bool outputCapped = false;
+    while (child.isRunning()) {
+        char chunk[4096];
+        const int read = child.readProcessOutput(chunk, sizeof(chunk));
+        if (read > 0) {
+            output += juce::String::fromUTF8(chunk, read);
+            if (output.length() >= kMaxScanOutputBytes) {
+                outputCapped = true;
+                break;
+            }
+        }
+        if (juce::Time::getMillisecondCounterHiRes() - scanStart > kScanTimeoutMs) {
+            scanTimedOut = true;
+            break;
+        }
+        juce::Thread::sleep(25);
+    }
+    if (scanTimedOut || outputCapped || child.isRunning()) {
+        // Stuck or flooding child: kill it and reap it so the worker frees up.
+        child.kill();
+        child.waitForProcessToFinish(5000);
+        juce::Logger::writeToLog("plugin: scan aborted "
+                                 + juce::String(scanTimedOut ? "timeout" : "output limit"));
+        error = scanTimedOut ? "The plugin took too long to scan. It was not loaded."
+                             : "The plugin produced too much scan output. It was not loaded.";
+        return descriptions;
+    }
+    output += child.readAllProcessOutput();
     juce::Logger::writeToLog("plugin: scan "
                              + juce::String(
                                    juce::Time::getMillisecondCounterHiRes() - scanStart, 1)
@@ -571,6 +611,29 @@ PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double
     return instantiate(descriptions.getReference(0), file, sampleRate, bufferSize, stateBase64);
 }
 
+void PluginHost::startHostLocked(const juce::File& file, juce::String& error) {
+    stopHostLocked();
+    host = std::make_unique<RestrictedHost>();
+    hostReady = false;
+    if (!host->launch(file, error)) {
+        host.reset();
+        return;
+    }
+    hostReady = host->isAlive();
+    if (!hostReady) {
+        error = "The restricted plugin host is not responding. No plugin was loaded.";
+    }
+}
+
+void PluginHost::stopHostLocked() {
+    if (host != nullptr) {
+        host->killAndReap();
+        host.reset();
+    }
+    hostReady = false;
+    hostSequence = 0;
+}
+
 void PluginHost::adopt(const LoadedPlugin& loaded) {
     if (loaded.instance == nullptr) return;
     // prepareToPlay runs plugin code, so keep the load guard pointing at it.
@@ -582,8 +645,14 @@ void PluginHost::adopt(const LoadedPlugin& loaded) {
     pluginPath = loaded.path;
     pluginName = loaded.name;
     plugin = loaded.instance;
-    // prepareToPlay runs here, on the message thread: some plugins synchronise
-    // with it (see AudioEngine's device-open comment).
+    // The plugin runs in the restricted host process (PR-01). The in-process
+    // instance in `plugin` is a metadata-only handle; audio goes through the
+    // host's shared-memory block.
+    juce::String hostError;
+    startHostLocked(juce::File(loaded.path), hostError);
+    if (host != nullptr && !hostError.isEmpty()) {
+        juce::Logger::writeToLog("plugin: restricted host: " + hostError);
+    }
     const auto prepareStart = juce::Time::getMillisecondCounterHiRes();
     plugin->prepareToPlay(currentSampleRate, currentBufferSize);
     prepared = true;
@@ -591,7 +660,8 @@ void PluginHost::adopt(const LoadedPlugin& loaded) {
     juce::Logger::writeToLog("plugin: prepare "
                              + juce::String(
                                    juce::Time::getMillisecondCounterHiRes() - prepareStart, 1)
-                             + " ms");
+                             + " ms"
+                             + (hostReady ? " (restricted host)" : " (host unavailable)"));
 }
 
 void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
@@ -629,8 +699,22 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
         return;
     }
 
+    // Audio goes through the restricted host's shared-memory block. The
+    // in-process instance is never asked to render: that would run plugin
+    // code in this app. If the host is down the block passes through dry.
+    if (host != nullptr && hostReady && host->isAlive()) {
+        if (host->submitAudioBlock(buffer, currentSampleRate, currentBufferSize)) {
+            ++hostSequence;
+            host->fetchAudioBlock(buffer, hostSequence);
+            return;
+        }
+    }
+
     midiBuffer.clear();
-    plugin->processBlock(buffer, midiBuffer);
+    // Fallback: host unavailable room tone. Do NOT call plugin->processBlock
+    // here — that is plugin code in this process (PR-01). Render silence so
+    // the slot is audible as "host down" in the meters instead.
+    buffer.clear(0, buffer.getNumSamples());
 }
 
 juce::String PluginHost::getPluginPath() const {

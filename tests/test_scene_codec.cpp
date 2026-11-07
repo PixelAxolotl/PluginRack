@@ -21,6 +21,8 @@ TEST_CASE("scene survives a JSON round trip") {
     ch1.pan = 0.0f;
     ch1.muted = false;
     ch1.soloed = false;
+    ch1.colourHue = 190.0f;
+    ch1.eqPhaseFlip = true;
 
     pluginrack::Channel ch2;
     ch2.id = 2;
@@ -57,6 +59,8 @@ TEST_CASE("scene survives a JSON round trip") {
     out2.name = "stream";
     out2.kind = pluginrack::OutputKind::VirtualOutput;
     out2.deviceId = "virt-1";
+    out2.colourHue = 270.0f;
+    out2.eqPhaseFlip = true;
 
     original.outputs.push_back(out1);
     original.outputs.push_back(out2);

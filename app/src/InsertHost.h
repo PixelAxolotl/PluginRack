@@ -48,6 +48,11 @@ class IInsertHost;
 // to the clicked slot, then insertPlugin with its immediate error surfaced.
 void openPluginPicker(IInsertHost& host, juce::Component& anchor);
 
+// Same picker with the Built-In effects submenu. `chainIndex` is the slot row
+// the picker was opened from, so moving a built-in there lands where the user
+// clicked instead of wherever the effect happened to sit.
+void openPluginPicker(IInsertHost& host, juce::Component& anchor, int chainIndex);
+
 class IInsertHost {
 public:
     virtual ~IInsertHost() = default;
@@ -69,9 +74,15 @@ public:
     virtual int chainDropIndexAt(juce::Point<int> /*parentPoint*/) { return -1; }
     virtual void setBuiltInBypass(pluginrack::ChainItem /*item*/, bool /*bypassed*/) {}
     virtual void activateBuiltIn(pluginrack::ChainItem /*item*/) {}
+    // Removes a built-in effect from the chain (like erasePlugin for VSTs).
+    // Picking it again from the plugin menu appends it back.
+    virtual void eraseBuiltIn(pluginrack::ChainItem /*item*/) {}
     // Channel view overrides this to focus the clicked slot inline (returns
     // true, skipping the floating editor). Default false keeps showEditor().
     virtual bool insertActivated(AudioEngine::InsertSlot* /*insert*/) { return false; }
+    // Moves a built-in effect into the slot `chainIndex` and unbypasses it.
+    // Default no-op keeps unit-test hosts buildable; real hosts override.
+    virtual void insertBuiltIn(pluginrack::ChainItem /*item*/, int /*chainIndex*/) {}
 };
 
 inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
@@ -88,6 +99,28 @@ inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
                                                    "PluginRack", error);
         }
     });
+}
+
+inline void openPluginPicker(IInsertHost& host, juce::Component& anchor, int chainIndex) {
+    juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
+    PluginMenu::showAddPluginMenu(
+        anchor,
+        [safeHost](const juce::File& file, int pluginUniqueId) {
+            if (safeHost == nullptr) return;
+            auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
+            if (target == nullptr) return;
+            const auto error = target->insertPlugin(file, pluginUniqueId);
+            if (error.isNotEmpty()) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "PluginRack", error);
+            }
+        },
+        [safeHost, chainIndex](pluginrack::ChainItem item) {
+            if (safeHost == nullptr) return;
+            auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
+            if (target == nullptr) return;
+            target->insertBuiltIn(item, chainIndex);
+        });
 }
 
 class InsertSlotComponent final : public juce::Component, public juce::SettableTooltipClient {
@@ -126,6 +159,22 @@ public:
         addAndMakeVisible(bypassButton);
 
         removeButton.setClickAction([this] {
+            if (builtIn) {
+                // The Dynamics card is one node: removing it takes both the
+                // compressor and the gate. eraseBuiltIn expands to the pair.
+                const auto doomed = chainItem;
+                host.eraseBuiltIn(doomed);
+                if (hostComponent != nullptr) {
+                    juce::Component::SafePointer<juce::Component> safe(hostComponent);
+                    juce::MessageManager::callAsync([safe] {
+                        if (auto* comp = safe.getComponent()) {
+                            if (auto* h = dynamic_cast<IInsertHost*>(comp))
+                                h->refreshAfterInsertChange();
+                        }
+                    });
+                }
+                return;
+            }
             if (insert == nullptr) return;
             const std::uint32_t doomedId = insert->id;
             // Drop the freed pointer before the synchronous erase below:
@@ -246,7 +295,8 @@ public:
         nameLabel.setTooltip(title);
         bypassButton.setToggleState(bypassed);
         bypassButton.setEnabledState(true);
-        removeButton.setVisible(false);
+        removeButton.setVisible(true);
+        removeButton.setEnabledState(true);
         setTooltip("Drag the dots to reorder - click to open effect settings");
         repaint();
     }
@@ -267,7 +317,8 @@ public:
 
     // One card for two built-in effects: both chain rows are shown as a single
     // unit with a bypass switch each, because the two effects share one editor.
-    // bodyItem is what a plain click on the row opens.
+    // bodyItem is what a plain click on the row opens. The card is one node:
+    // the remove button takes both effects at once.
     void setBuiltInPair(const juce::String& title, pluginrack::ChainItem bodyItem,
                         const CardSwitch& first, const CardSwitch& second) {
         insert = nullptr;
@@ -285,7 +336,8 @@ public:
         nameLabel.setColour(juce::Label::textColourId, theme::text());
         nameLabel.setTooltip(title);
         bypassButton.setVisible(false);
-        removeButton.setVisible(false);
+        removeButton.setVisible(true);
+        removeButton.setEnabledState(true);
         pairFirstButton.setVisible(true);
         pairSecondButton.setVisible(true);
         setPairBypassed(first.bypassed, second.bypassed);
@@ -339,6 +391,8 @@ public:
             // Square switches: both the rack card (36 px header) and the
             // compact mixer row give them one side, centred vertically.
             const int side = juce::jlimit(12, 24, area.getHeight());
+            removeButton.setBounds(area.removeFromRight(18));
+            area.removeFromRight(2);
             auto buttons = area.removeFromRight(2 * side + 3)
                                .withSizeKeepingCentre(2 * side + 3, side);
             pairSecondButton.setBounds(buttons.removeFromRight(side));
@@ -412,8 +466,8 @@ public:
         dragging = inHandle(e);
         dragOffset = e.y;
         repaint();
-        if (insert == nullptr && !builtIn) {
-            host.openPicker(*this);
+        if (addSlot) {
+            openPluginPicker(host, *this, slotIndex);
         } else if (builtIn && !dragging) {
             host.activateBuiltIn(chainItem);
         } else if (!dragging && !host.insertActivated(insert)) {

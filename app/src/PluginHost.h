@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 
 #include <atomic>
+#include <cstdint>
 
 // Tracks the plugin file currently inside plugin code so a crash can be blamed
 // on it, and remembers plugins that crashed the app while loading. A plugin
@@ -117,6 +118,16 @@ private:
     std::atomic<int> cachedLatencySamples_{0};
 
     juce::DocumentWindow* editorWindow = nullptr;
+
+    // PR-01: the plugin runs in a restricted host process, not in this app.
+    // `host` is null when the host could not start; in that case the slot
+    // stays empty (fail closed) instead of hosting the plugin in-process.
+    std::unique_ptr<class RestrictedHost> host;
+    std::uint64_t hostSequence = 0;
+    bool hostReady = false;
+
+    void startHostLocked(const juce::File& file, juce::String& error);
+    void stopHostLocked();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHost)
 };

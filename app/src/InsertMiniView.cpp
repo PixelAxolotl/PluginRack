@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "DynamicsCurveComponent.h"
+#include "MultibandCurveComponent.h"
 
 namespace {
 constexpr int kGaugeWidth = 10;
@@ -13,13 +14,18 @@ constexpr float kMaxReductionDb = 24.0f;
 // dynamics panel's own axes cover.
 constexpr float kMinTransferDb = -60.0f;
 constexpr int kCurveSegments = 32;
+
+// Full-width previews: every default plugin's mini graph draws edge to edge
+// of the card. Axis labels live *inside* the graph rect (drawn over it), and
+// the only inset is the 2px card border — no stacked margins from callers.
+constexpr float kFullWidthFrame = 2.0f;
 } // namespace
 
 InsertMiniView::InsertMiniView() {
     setInterceptsMouseClicks(false, false);
 }
 
-void InsertMiniView::showEq(const std::vector<pluginrack::EqBand>& bands, double sampleRateHz) {
+void InsertMiniView::showEq(const std::vector<pluginrack::EqBand>& bands, double initialRateHz) {
     kind = Kind::Eq;
     if (eqCurve == nullptr) {
         eqCurve = std::make_unique<EQCurveComponent>();
@@ -27,7 +33,7 @@ void InsertMiniView::showEq(const std::vector<pluginrack::EqBand>& bands, double
         eqCurve->setInterceptsMouseClicks(false, false);
         addAndMakeVisible(*eqCurve);
     }
-    eqCurve->setSampleRateHz(sampleRateHz);
+    eqCurve->setSampleRateHz(initialRateHz);
     eqCurve->setBands(bands);
     // The saved offset arrives on the next tick; this is the default view, so
     // the first frame already has the fill lifted off the floor.
@@ -54,10 +60,80 @@ void InsertMiniView::showDynamicsPair(const pluginrack::DynamicsEffect& compress
     repaint();
 }
 
+void InsertMiniView::showMultiband(const pluginrack::MultibandEffect& effect, double initialRateHz) {
+    kind = Kind::Multiband;
+    multiband = effect;
+    sampleRateHz = initialRateHz > 0.0 ? initialRateHz : 48000.0;
+    spectrumOffsetDb = 0.0f;
+    updateTraceVectors();
+    resized();
+    repaint();
+}
+
+void InsertMiniView::showDeEsser(const pluginrack::DeEsserEffect& effect, double initialRateHz) {
+    kind = Kind::DeEsser;
+    deEsser = effect;
+    sampleRateHz = initialRateHz > 0.0 ? initialRateHz : 48000.0;
+    spectrumOffsetDb = 0.0f;
+    updateTraceVectors();
+    resized();
+    repaint();
+}
+
 void InsertMiniView::showVst() {
     kind = Kind::Vst;
     resized();
     repaint();
+}
+
+void InsertMiniView::setMultiband(const pluginrack::MultibandEffect& effect, double rateHz) {
+    if (kind != Kind::Multiband) return;
+    const bool changed = multiband != effect
+        || !juce::approximatelyEqual(sampleRateHz, rateHz > 0.0 ? rateHz : sampleRateHz);
+    if (!changed) return;
+    multiband = effect;
+    sampleRateHz = rateHz > 0.0 ? rateHz : sampleRateHz;
+    updateTraceVectors();
+    repaint();
+}
+
+void InsertMiniView::setDeEsser(const pluginrack::DeEsserEffect& effect, double rateHz) {
+    if (kind != Kind::DeEsser) return;
+    const bool changed = deEsser != effect
+        || !juce::approximatelyEqual(sampleRateHz, rateHz > 0.0 ? rateHz : sampleRateHz);
+    if (!changed) return;
+    deEsser = effect;
+    sampleRateHz = rateHz > 0.0 ? rateHz : sampleRateHz;
+    updateTraceVectors();
+    repaint();
+}
+
+void InsertMiniView::setGainReduction(const std::vector<float>& newReductionsDb) {
+    if (kind != Kind::Multiband) return;
+    reductionsDb = newReductionsDb;
+    updateTraceVectors();
+    repaint();
+}
+
+void InsertMiniView::setDeEsserGainReduction(float reductionDb) {
+    if (kind != Kind::DeEsser) return;
+    const float clamped = juce::jlimit(0.0f, 24.0f, reductionDb);
+    if (juce::approximatelyEqual(clamped, deEsserGainReductionDb)) return;
+    deEsserGainReductionDb = clamped;
+    updateTraceVectors();
+    repaint();
+}
+
+void InsertMiniView::updateTraceVectors() {
+    if (kind == Kind::Multiband) {
+        MultibandCurveComponent::normaliseEffect(multiband);
+        multibandTarget = pluginrack::makeMultibandTargetTrace(multiband, 128);
+        multibandGainChange = pluginrack::makeMultibandGainChangeTrace(
+            multiband, reductionsDb, multibandTarget.size());
+    } else if (kind == Kind::DeEsser) {
+        deEsserGainChange = pluginrack::makeDeEsserGainReductionTrace(
+            deEsser, deEsserGainReductionDb, 128);
+    }
 }
 
 void InsertMiniView::setVstSnapshot(const juce::Image& snapshot) {
@@ -67,33 +143,42 @@ void InsertMiniView::setVstSnapshot(const juce::Image& snapshot) {
 }
 
 void InsertMiniView::setSpectrum(const float* magnitudesDb, int numBins) {
-    if (eqCurve == nullptr) return;
-    eqCurve->setSpectrum(magnitudesDb, numBins);
+    if (kind == Kind::Eq) {
+        if (eqCurve == nullptr) return;
+        eqCurve->setSpectrum(magnitudesDb, numBins);
+        return;
+    }
+    if (kind != Kind::Multiband && kind != Kind::DeEsser) return;
+    if (magnitudesDb == nullptr || numBins <= 0) spectrum.clear();
+    else spectrum.assign(magnitudesDb, magnitudesDb + numBins);
+    repaint();
 }
 
-void InsertMiniView::setEqBands(const std::vector<pluginrack::EqBand>& bands, double sampleRateHz) {
+void InsertMiniView::setEqBands(const std::vector<pluginrack::EqBand>& bands, double initialRateHz) {
     if (eqCurve == nullptr) return;
     // Comparing first keeps a still EQ from repainting on every tick.
-    if (eqCurve->getBands() == bands && juce::approximatelyEqual(eqCurve->getSampleRateHz(), sampleRateHz))
+    if (eqCurve->getBands() == bands && juce::approximatelyEqual(eqCurve->getSampleRateHz(), initialRateHz))
         return;
-    eqCurve->setSampleRateHz(sampleRateHz);
+    eqCurve->setSampleRateHz(initialRateHz);
     eqCurve->setBands(bands);
 }
 
 void InsertMiniView::setSpectrumOffsetDb(float storedDb) {
-    if (eqCurve == nullptr) return;
     const float clamped = juce::jlimit(-60.0f, 60.0f, storedDb);
     if (juce::approximatelyEqual(clamped, spectrumOffsetDb)) return;
     spectrumOffsetDb = clamped;
-    eqCurve->setSpectrumOffsetDb(EQCurveComponent::kDefaultSpectrumOffsetDb + clamped);
+    if (eqCurve != nullptr && kind == Kind::Eq)
+        eqCurve->setSpectrumOffsetDb(EQCurveComponent::kDefaultSpectrumOffsetDb + clamped);
+    repaint();
 }
 
 void InsertMiniView::setWeighting(int index) {
-    if (eqCurve == nullptr) return;
     const int clamped = juce::jlimit(0, 2, index);
     if (clamped == weightingIndex) return;
     weightingIndex = clamped;
-    eqCurve->setWeighting(EQCurveComponent::weightingFromIndex(clamped));
+    if (eqCurve != nullptr && kind == Kind::Eq)
+        eqCurve->setWeighting(EQCurveComponent::weightingFromIndex(clamped));
+    repaint();
 }
 
 void InsertMiniView::setDynamics(const pluginrack::DynamicsEffect& effect) {
@@ -126,7 +211,13 @@ void InsertMiniView::setLiveGain(float newInputDb, float newGainDb) {
 }
 
 void InsertMiniView::resized() {
-    auto area = getLocalBounds().reduced(2);
+    // EQ's embedded curve fills the whole card (was reduced(2) — fine —
+    // but the *painted* grid inside it drew labels at x=7..41 and
+    // edge-biased the outer frequency labels inward, so a 20Hz/20kHz
+    // tick sat 20px from the edge and looked clipped). resized() now
+    // gives the curve the full bounds and EQCurveComponent draws its
+    // axis labels flush to the edges.
+    auto area = getLocalBounds().reduced(static_cast<int>(kFullWidthFrame));
     if (eqCurve != nullptr) eqCurve->setBounds(kind == Kind::Eq ? area : juce::Rectangle<int>());
 }
 
@@ -140,6 +231,8 @@ void InsertMiniView::paint(juce::Graphics& g) {
     switch (kind) {
         case Kind::Vst: paintVst(g); break;
         case Kind::Dynamics: paintDynamics(g); break;
+        case Kind::Multiband: paintMultiband(g); break;
+        case Kind::DeEsser: paintDeEsser(g); break;
         case Kind::Eq: break; // the embedded curve paints itself
         case Kind::None: break;
     }
@@ -158,11 +251,81 @@ void InsertMiniView::paintVst(juce::Graphics& g) {
     g.drawImage(vstSnapshot, area.toFloat(), juce::RectanglePlacement::centred, false);
 }
 
-void InsertMiniView::paintDynamics(juce::Graphics& g) {
-    auto area = getLocalBounds().reduced(4);
+void InsertMiniView::paintMultiband(juce::Graphics& g) {
+    const auto graph = TraceGraphComponent::miniGraphBounds(getLocalBounds());
+    g.setColour(theme::bg());
+    g.fillRoundedRectangle(graph, 2.0f);
+    TraceGraphComponent::drawMiniTrace(g, graph, multibandTarget, theme::cyan(), true);
+    TraceGraphComponent::drawSpectrum(g, graph, spectrum, sampleRateHz,
+                                      kTraceRtaDefaultOffsetDb + spectrumOffsetDb,
+                                      weightingFromIndex(weightingIndex));
+    TraceGraphComponent::drawMiniTrace(g, graph, multibandGainChange, theme::green(), false);
+    const auto freqToX = [graph](double hz) {
+        const double pos = std::log(juce::jlimit(20.0, 20000.0, hz) / 20.0) / std::log(1000.0);
+        return graph.getX() + static_cast<float>(pos) * graph.getWidth();
+    };
+    for (std::size_t i = 0; i < multiband.crossovers.size(); ++i) {
+        const float x = freqToX(multiband.crossovers[i]);
+        g.setColour(theme::text().withAlpha(0.75f));
+        g.drawVerticalLine(juce::roundToInt(x), graph.getY(), graph.getBottom());
+    }
+    g.setColour(theme::dim());
+    g.setFont(juce::Font(juce::FontOptions(7.0f)));
+    for (double f : {20.0, 100.0, 1000.0, 10000.0, 20000.0}) {
+        const auto x = freqToX(f);
+        const int labelX = juce::jlimit(juce::roundToInt(graph.getX()),
+                                        juce::jmax(juce::roundToInt(graph.getX()),
+                                                   juce::roundToInt(graph.getRight()) - 36),
+                                        juce::roundToInt(x - 18.0f));
+        g.drawText(f >= 1000.0 ? juce::String(f / 1000.0, 0) + "k" : juce::String(f, 0),
+                   labelX, juce::roundToInt(graph.getBottom() + 1.0f),
+                   36, 10, juce::Justification::centred);
+    }
+}
+
+void InsertMiniView::paintDeEsser(juce::Graphics& g) {
+    // Full width: the gauge overlays the right edge instead of stealing
+    // 14px from the graph. The GR bar sits on top of the trace's right end.
+    auto area = getLocalBounds().reduced(static_cast<int>(kFullWidthFrame));
     auto gauge = area.removeFromRight(kGaugeWidth);
     const auto gaugeCaption = gauge.removeFromBottom(kGaugeCaptionHeight);
-    area.removeFromRight(4);
+    area.removeFromRight(2);
+    const auto graph = TraceGraphComponent::miniGraphBounds(area);
+    g.setColour(theme::bg());
+    g.fillRoundedRectangle(graph, 2.0f);
+    TraceGraphComponent::drawSpectrum(g, graph, spectrum, sampleRateHz,
+                                      kTraceRtaDefaultOffsetDb + spectrumOffsetDb,
+                                      weightingFromIndex(weightingIndex));
+    TraceGraphComponent::drawMiniTrace(g, graph, deEsserGainChange, theme::red(), false);
+    const float freqX = graph.getX() + static_cast<float>(
+        std::log(juce::jlimit(20.0, 20000.0, static_cast<double>(deEsser.freqHz)) / 20.0)
+        / std::log(1000.0)) * graph.getWidth();
+    g.setColour(theme::text().withAlpha(0.8f));
+    g.drawVerticalLine(juce::roundToInt(freqX), graph.getY(), graph.getBottom());
+    const float thresholdY = TraceGraphComponent::miniTraceDb(deEsser.thresholdDb, graph);
+    g.setColour(theme::cyan().withAlpha(0.65f));
+    g.drawHorizontalLine(juce::roundToInt(thresholdY), graph.getX(), graph.getRight());
+    g.setColour(theme::bg().darker(0.3f));
+    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
+    const float fill = juce::jlimit(0.0f, 1.0f, deEsserGainReductionDb / kMaxReductionDb);
+    if (fill > 0.0f) {
+        auto filled = gauge.toFloat();
+        filled.setHeight(filled.getHeight() * fill);
+        g.setColour(theme::red());
+        g.fillRoundedRectangle(filled, 2.0f);
+    }
+    g.setColour(theme::dim());
+    g.setFont(juce::Font(juce::FontOptions(8.0f)));
+    g.drawText("GR", gaugeCaption, juce::Justification::centred, false);
+}
+
+void InsertMiniView::paintDynamics(juce::Graphics& g) {
+    // Full width: same overlay-gauge treatment as De-esser — the transfer
+    // curve runs to the card's right edge, gauge floats over it.
+    auto area = getLocalBounds().reduced(static_cast<int>(kFullWidthFrame));
+    auto gauge = area.removeFromRight(kGaugeWidth);
+    const auto gaugeCaption = gauge.removeFromBottom(kGaugeCaptionHeight);
+    area.removeFromRight(2);
 
     const float w = static_cast<float>(area.getWidth());
     const float h = static_cast<float>(area.getHeight());

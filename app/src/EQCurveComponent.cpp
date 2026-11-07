@@ -17,32 +17,6 @@ constexpr double kCoreMinFreqHz = 10.0;
 constexpr double kCoreMinQ = 0.1;
 constexpr double kCoreMaxQ = 20.0;
 constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
-// RTA display compressor: above the knee the analyzer follows the dB grid
-// 1:1 (a -6 dBFS tone sits on the -6 line); below it a 2:1 slope lifts
-// valleys into the +/-15 dB view instead of crushing them on the floor.
-constexpr double kRtaKneeDb = -6.0;
-constexpr double kRtaCompSlope = 0.5;
-// The analyzer floors silence here (EQWindow's FFT writes jmax(-100, ...)).
-// It means "nothing on this band", not "quiet audio".
-constexpr double kSilenceFloorDb = -99.5;
-
-// IEC 61672 A and C weighting in dB, evaluated at the bin's own frequency.
-// Z is flat, so it returns 0 and the spectrum is drawn as measured.
-double weightingDb(EQCurveComponent::Weighting weighting, double hz) {
-    if (weighting == EQCurveComponent::Weighting::Z || hz <= 0.0) return 0.0;
-    const double f2 = hz * hz;
-    constexpr double kF1 = 20.598997 * 20.598997;   // 20.6 Hz corner
-    constexpr double kF2 = 107.65265 * 107.65265;   // 107.7 Hz
-    constexpr double kF3 = 737.86223 * 737.86223;   // 737.9 Hz
-    constexpr double kF4 = 12194.217 * 12194.217;   // 12.2 kHz corner
-    if (weighting == EQCurveComponent::Weighting::A) {
-        const double response = (kF4 * f2 * f2)
-                                / ((f2 + kF1) * std::sqrt((f2 + kF2) * (f2 + kF3)) * (f2 + kF4));
-        return 20.0 * std::log10(response) + 2.00;
-    }
-    const double response = (kF4 * f2) / ((f2 + kF1) * (f2 + kF4));
-    return 20.0 * std::log10(response) + 0.06;
-}
 
 // Grid vertical lines: 1-2-5(ish) per decade over the 20 Hz - 20 kHz span.
 constexpr double kGridFreqs[] = {
@@ -118,8 +92,11 @@ juce::Point<float> EQCurveComponent::nodePosition(const pluginrack::EqBand& band
     const float x = static_cast<float>(juce::jlimit(0.0, 1.0, t) * width);
     const double gain = isGainlessBand(band)
                             ? 0.0
-                            : juce::jlimit(-kMaxGainDb, kMaxGainDb, static_cast<double>(band.gainDb));
-    const float y = static_cast<float>(height * 0.5 - gain / kMaxGainDb * height * 0.5);
+                            : juce::jlimit(static_cast<double>(kMinDisplayDb), static_cast<double>(kMaxDisplayDb), static_cast<double>(band.gainDb));
+    const float y = static_cast<float>(height
+                                       * (1.0 - (gain - static_cast<double>(kMinDisplayDb))
+                                              / (static_cast<double>(kMaxDisplayDb)
+                                                 - static_cast<double>(kMinDisplayDb))));
     return {x, y};
 }
 
@@ -267,35 +244,25 @@ float EQCurveComponent::freqToX(double hz) const {
 
 double EQCurveComponent::yToGain(float y) const {
     const double h = static_cast<double>(juce::jmax(1, getHeight()));
-    return juce::jlimit(-kMaxGainDb, kMaxGainDb, (h * 0.5 - static_cast<double>(y)) / (h * 0.5) * kMaxGainDb);
+    return juce::jlimit(static_cast<double>(kMinDisplayDb), static_cast<double>(kMaxDisplayDb),
+                        (1.0 - static_cast<double>(y) / h)
+                            * (static_cast<double>(kMaxDisplayDb) - static_cast<double>(kMinDisplayDb))
+                        + static_cast<double>(kMinDisplayDb));
 }
 
 float EQCurveComponent::gainToY(double gainDb) const {
-    const double h = getHeight();
-    return static_cast<float>(h * 0.5 - gainDb / kMaxGainDb * h * 0.5);
+    const double h = static_cast<double>(getHeight());
+    const double displayDb = juce::jlimit(static_cast<double>(kMinDisplayDb),
+                                          static_cast<double>(kMaxDisplayDb), gainDb);
+    return static_cast<float>(h * (1.0 - (displayDb - static_cast<double>(kMinDisplayDb))
+                                       / (static_cast<double>(kMaxDisplayDb)
+                                          - static_cast<double>(kMinDisplayDb))));
 }
 
 float EQCurveComponent::spectrumY(double hz) const {
-    // Bin centres are linear from 0 Hz to nyquist of the reference rate.
-    const double nyquist = sampleRateHz * 0.5;
-    const double last = static_cast<double>(spectrumDb.size() - 1);
-    const double pos = juce::jlimit(0.0, last, hz / nyquist * last);
-    const std::size_t low = static_cast<std::size_t>(pos);
-    const std::size_t high = juce::jmin(low + 1, spectrumDb.size() - 1);
-    const double frac = pos - static_cast<double>(low);
-    const double measured = static_cast<double>(spectrumDb[low]) * (1.0 - frac)
-                            + static_cast<double>(spectrumDb[high]) * frac;
-    // The silence floor stays on the floor whatever the display offset is: the
-    // offset exists to lift quiet audio, and lifting "nothing" instead paints
-    // a solid slab across the whole graph at large offsets.
-    if (measured <= kSilenceFloorDb) return gainToY(-kMaxGainDb);
-    double db = measured + static_cast<double>(spectrumOffsetDb)
-                + weightingDb(weighting, hz);
-    // Display-range compression: truthful above the knee, 2:1 below it so
-    // quiet valleys lift into view instead of hugging the floor. The EQ
-    // curves themselves never pass through here.
-    if (db < kRtaKneeDb) db = kRtaKneeDb + (db - kRtaKneeDb) * kRtaCompSlope;
-    return gainToY(juce::jlimit(-kMaxGainDb, kMaxGainDb, db));
+    return gainToY(displayRtaLevelDb(
+        TraceGraphComponent::spectrumLevelAtDb(spectrumDb, hz, sampleRateHz),
+        spectrumOffsetDb, weighting, hz));
 }
 
 void EQCurveComponent::paint(juce::Graphics& g) {
@@ -316,11 +283,14 @@ void EQCurveComponent::paint(juce::Graphics& g) {
     for (const int f : kLabelFreqs) {
         const float x = freqToX(static_cast<double>(f));
         g.setColour(theme::dim().withAlpha(0.8f));
-        const int edgeBias = (f <= kMinFreqHz) ? 20 : (f >= kMaxFreqHz ? -20 : 0);
-        g.drawText(freqLabel(f), juce::Rectangle<int>(static_cast<int>(x) - 20 + edgeBias, h - 13, 40, 12),
+        // Keep the label boxes fully inside the card: the outer labels were
+        // centred on their gridline, so left-half and right-half of "20" /
+        // "20k" were half-clipped by the card border.
+        const int labelX = juce::jlimit(0, juce::jmax(0, w - 40), static_cast<int>(x) - 20);
+        g.drawText(freqLabel(f), juce::Rectangle<int>(labelX, h - 13, 40, 12),
                    juce::Justification::centred, false);
     }
-    for (int db = -12; db <= 12; db += 3) {
+    for (int db = -60; db <= 12; db += 12) {
         const float y = gainToY(static_cast<double>(db));
         g.setColour(db == 0 ? theme::line().withAlpha(0.8f) : theme::border().withAlpha(0.4f));
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
@@ -331,25 +301,19 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         // half-drawn outside the curve's bounds.
         const int labelY = juce::jlimit(0, juce::jmax(0, h - 12), static_cast<int>(y) - 6);
         g.drawText((db > 0 ? "+" : "") + juce::String(db) + " dB",
-                   juce::Rectangle<int>(7, labelY, 34, 12),
+                   juce::Rectangle<int>(2, labelY, 34, 12),
                    juce::Justification::left, false);
     }
 
-    // --- analyzer spectrum (Task 6): grey fill behind the curves, Pro-Q
-    // look. Bin magnitudes arrive from EQWindow's UI-timer FFT; below the
-    // view's -15 dB floor the fill simply rests on the bottom edge.
+    // --- analyzer spectrum: the shared TraceGraphComponent RTA renderer
+    // (same path as Multiband/De-esser) — one RTA implementation for all
+    // three frequency graphs, so style, offset, weighting and the silence
+    // floor can never diverge again.
     if (!spectrumDb.empty()) {
-        juce::Path spectrum;
-        for (int x = 0; x <= w; x += kCurveStepPx) {
-            const float y = spectrumY(xToFreq(static_cast<float>(x)));
-            if (x == 0) spectrum.startNewSubPath(0.0f, y);
-            else spectrum.lineTo(static_cast<float>(x), y);
-        }
-        spectrum.lineTo(static_cast<float>(w), static_cast<float>(h));
-        spectrum.lineTo(0.0f, static_cast<float>(h));
-        spectrum.closeSubPath();
-        g.setColour(juce::Colours::grey.withAlpha(0.35f));
-        g.fillPath(spectrum);
+        const juce::Rectangle<float> spectrumGraph(0.0f, 0.0f,
+                                                   static_cast<float>(w), static_cast<float>(h));
+        TraceGraphComponent::drawSpectrum(g, spectrumGraph, spectrumDb, sampleRateHz,
+                                          spectrumOffsetDb, weighting);
     }
 
     // --- combined magnitude (yellow): dB sum of the active bands' responses,
@@ -361,14 +325,14 @@ void EQCurveComponent::paint(juce::Graphics& g) {
             const double totalDb = (index >= 0)
                 ? bandShapeDb(bands[static_cast<std::size_t>(index)], sampleRateHz, f)
                 : magnitudeDbAt(f);
-            const float y = gainToY(juce::jlimit(-kMaxGainDb * 1.4, kMaxGainDb * 1.4, totalDb));
+            const float y = gainToY(totalDb);
             if (x == 0) curve.startNewSubPath(static_cast<float>(x), y);
             else curve.lineTo(static_cast<float>(x), y);
         }
         if (fill) {
             juce::Path filled = curve;
-            filled.lineTo(static_cast<float>(w), h * 0.5f);
-            filled.lineTo(0.0f, h * 0.5f);
+            filled.lineTo(static_cast<float>(w), gainToY(0.0));
+            filled.lineTo(0.0f, gainToY(0.0));
             filled.closeSubPath();
             g.setColour(colour.withAlpha(0.14f));
             g.fillPath(filled);

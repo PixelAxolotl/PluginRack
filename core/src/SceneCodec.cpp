@@ -111,6 +111,105 @@ void from_json(const nlohmann::json& j, EqBand& band) {
     band.solo = j.value("solo", false);
 }
 
+void to_json(nlohmann::json& j, MultibandMode mode) {
+    switch (mode) {
+        case MultibandMode::Compress: j = "Compress"; break;
+        case MultibandMode::Expand: j = "Expand"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, MultibandMode& mode) {
+    const auto name = j.get<std::string>();
+    if (name == "Compress") mode = MultibandMode::Compress;
+    else if (name == "Expand") mode = MultibandMode::Expand;
+    else throw nlohmann::json::other_error::create(502, "unknown MultibandMode '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const MultibandBand& band) {
+    j = nlohmann::json{{"bypassed", band.bypassed}, {"soloed", band.soloed}, {"enabled", band.enabled},
+                       {"mode", band.mode}, {"thresholdDb", band.thresholdDb}, {"ratio", band.ratio},
+                       {"attackMs", band.attackMs}, {"releaseMs", band.releaseMs}, {"makeupDb", band.makeupDb},
+                       {"inputGainDb", band.inputGainDb}, {"kneeDb", band.kneeDb}};
+}
+
+void from_json(const nlohmann::json& j, MultibandBand& band) {
+    band = MultibandBand{};
+    band.bypassed = j.value("bypassed", false);
+    band.soloed = j.value("soloed", false);
+    band.enabled = j.value("enabled", true);
+    if (j.contains("mode")) j.at("mode").get_to(band.mode);
+    band.thresholdDb = j.value("thresholdDb", band.thresholdDb);
+    band.ratio = j.value("ratio", band.ratio);
+    band.attackMs = j.value("attackMs", band.attackMs);
+    band.releaseMs = j.value("releaseMs", band.releaseMs);
+    band.makeupDb = j.value("makeupDb", band.makeupDb);
+    band.inputGainDb = j.value("inputGainDb", band.inputGainDb);
+    band.kneeDb = j.value("kneeDb", band.kneeDb);
+}
+
+void to_json(nlohmann::json& j, const MultibandEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed}, {"autoMakeup", effect.autoMakeup},
+                       {"bands", effect.bands}, {"crossovers", effect.crossovers}};
+}
+
+void from_json(const nlohmann::json& j, MultibandEffect& effect) {
+    effect = MultibandEffect{};
+    effect.id = j.value("id", 1u);
+    effect.bypassed = j.value("bypassed", false);
+    effect.autoMakeup = j.value("autoMakeup", false);
+    if (j.contains("bands")) j.at("bands").get_to(effect.bands);
+    if (j.contains("crossovers")) j.at("crossovers").get_to(effect.crossovers);
+}
+
+void to_json(nlohmann::json& j, DeEsserMode mode) {
+    switch (mode) {
+        case DeEsserMode::Split: j = "Split"; break;
+        case DeEsserMode::Wideband: j = "Wideband"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, DeEsserMode& mode) {
+    const auto name = j.get<std::string>();
+    if (name == "Split") mode = DeEsserMode::Split;
+    else if (name == "Wideband") mode = DeEsserMode::Wideband;
+    else throw nlohmann::json::other_error::create(502, "unknown DeEsserMode '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const DeEsserEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed}, {"mode", effect.mode},
+                       {"freqHz", effect.freqHz}, {"q", effect.q}, {"thresholdDb", effect.thresholdDb},
+                       {"rangeDb", effect.rangeDb}, {"attackMs", effect.attackMs}, {"releaseMs", effect.releaseMs}};
+}
+
+void from_json(const nlohmann::json& j, DeEsserEffect& effect) {
+    effect = DeEsserEffect{};
+    effect.id = j.value("id", 1u);
+    effect.bypassed = j.value("bypassed", false);
+    if (j.contains("mode")) j.at("mode").get_to(effect.mode);
+    effect.freqHz = j.value("freqHz", effect.freqHz);
+    effect.q = j.value("q", effect.q);
+    effect.thresholdDb = j.value("thresholdDb", effect.thresholdDb);
+    effect.rangeDb = j.value("rangeDb", effect.rangeDb);
+    effect.attackMs = j.value("attackMs", effect.attackMs);
+    effect.releaseMs = j.value("releaseMs", effect.releaseMs);
+}
+
+void to_json(nlohmann::json& j, const LimiterEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed},
+                       {"inputGainDb", effect.inputGainDb}, {"ceilingDb", effect.ceilingDb},
+                       {"lookaheadMs", effect.lookaheadMs}, {"releaseMs", effect.releaseMs}};
+}
+
+void from_json(const nlohmann::json& j, LimiterEffect& effect) {
+    effect = LimiterEffect{};
+    effect.id = j.value("id", 1u);
+    effect.bypassed = j.value("bypassed", false);
+    effect.inputGainDb = j.value("inputGainDb", effect.inputGainDb);
+    effect.ceilingDb = j.value("ceilingDb", effect.ceilingDb);
+    effect.lookaheadMs = j.value("lookaheadMs", effect.lookaheadMs);
+    effect.releaseMs = j.value("releaseMs", effect.releaseMs);
+}
+
 void to_json(nlohmann::json& j, DynamicsEffectType type) {
     switch (type) {
         case DynamicsEffectType::Compressor: j = "Compressor"; break;
@@ -181,6 +280,9 @@ void to_json(nlohmann::json& j, ChainItemType type) {
         case ChainItemType::Eq: j = "Eq"; break;
         case ChainItemType::Dynamics: j = "Dynamics"; break;
         case ChainItemType::Insert: j = "Insert"; break;
+        case ChainItemType::Multiband: j = "Multiband"; break;
+        case ChainItemType::DeEsser: j = "DeEsser"; break;
+        case ChainItemType::Limiter: j = "Limiter"; break;
     }
 }
 
@@ -189,6 +291,9 @@ void from_json(const nlohmann::json& j, ChainItemType& type) {
     if (name == "Eq") type = ChainItemType::Eq;
     else if (name == "Dynamics") type = ChainItemType::Dynamics;
     else if (name == "Insert") type = ChainItemType::Insert;
+    else if (name == "Multiband") type = ChainItemType::Multiband;
+    else if (name == "DeEsser") type = ChainItemType::DeEsser;
+    else if (name == "Limiter") type = ChainItemType::Limiter;
     else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
 }
 
@@ -217,10 +322,19 @@ void to_json(nlohmann::json& j, const Channel& channel) {
         {"soloed", channel.soloed},
         {"inserts", channel.inserts},
         {"effects", channel.effects},
+        {"multibandEffects", channel.multibandEffects},
+        {"deEsserEffects", channel.deEsserEffects},
+        {"limiterEffects", channel.limiterEffects},
+        {"multibandRtaOffsetDb", channel.multibandRtaOffsetDb},
+        {"multibandRtaWeighting", channel.multibandRtaWeighting},
+        {"deEsserRtaOffsetDb", channel.deEsserRtaOffsetDb},
+        {"deEsserRtaWeighting", channel.deEsserRtaWeighting},
         {"chain", channel.chain},
         {"eqEnabled", channel.eqEnabled},
         {"eqBands", channel.eqBands},
         {"eqDelayMs", channel.eqDelayMs},
+        {"eqPhaseFlip", channel.eqPhaseFlip},
+        {"colourHue", channel.colourHue},
         {"eqRtaOffsetDb", channel.eqRtaOffsetDb},
         {"eqRtaWeighting", channel.eqRtaWeighting},
     };
@@ -266,8 +380,17 @@ void from_json(const nlohmann::json& j, Channel& channel) {
     // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
     // the flat defaultEqBands() from Channel{} above, and v3 files written
     // before the delay knob have no eqDelayMs (0 ms).
+    if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(channel.multibandEffects);
+    if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(channel.deEsserEffects);
+    if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(channel.limiterEffects);
+    channel.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
+    channel.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
+    channel.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
+    channel.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
     channel.eqEnabled = j.value("eqEnabled", false);
     channel.eqDelayMs = j.value("eqDelayMs", 0.0f);
+    channel.eqPhaseFlip = j.value("eqPhaseFlip", false);
+    channel.colourHue = j.value("colourHue", 0.0f);
     // Absent before the offset was saved: 0 is the default view.
     channel.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
     channel.eqRtaWeighting = j.value("eqRtaWeighting", 0);
@@ -288,10 +411,19 @@ void to_json(nlohmann::json& j, const Output& output) {
         {"muted", output.muted},
         {"inserts", output.inserts},
         {"effects", output.effects},
+        {"multibandEffects", output.multibandEffects},
+        {"deEsserEffects", output.deEsserEffects},
+        {"limiterEffects", output.limiterEffects},
+        {"multibandRtaOffsetDb", output.multibandRtaOffsetDb},
+        {"multibandRtaWeighting", output.multibandRtaWeighting},
+        {"deEsserRtaOffsetDb", output.deEsserRtaOffsetDb},
+        {"deEsserRtaWeighting", output.deEsserRtaWeighting},
         {"chain", output.chain},
         {"eqEnabled", output.eqEnabled},
         {"eqBands", output.eqBands},
         {"eqDelayMs", output.eqDelayMs},
+        {"eqPhaseFlip", output.eqPhaseFlip},
+        {"colourHue", output.colourHue},
         {"eqRtaOffsetDb", output.eqRtaOffsetDb},
         {"eqRtaWeighting", output.eqRtaWeighting},
     };
@@ -325,8 +457,17 @@ void from_json(const nlohmann::json& j, Output& output) {
     // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
     // the flat defaultEqBands() from Output{} above, and v3 files written
     // before the delay knob have no eqDelayMs (0 ms).
+    if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(output.multibandEffects);
+    if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(output.deEsserEffects);
+    if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(output.limiterEffects);
+    output.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
+    output.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
+    output.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
+    output.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
     output.eqEnabled = j.value("eqEnabled", false);
     output.eqDelayMs = j.value("eqDelayMs", 0.0f);
+    output.eqPhaseFlip = j.value("eqPhaseFlip", false);
+    output.colourHue = j.value("colourHue", 0.0f);
     output.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
     output.eqRtaWeighting = j.value("eqRtaWeighting", 0);
     // Scenes written before the stream-output class was retired still carry

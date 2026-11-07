@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "limits.h"
+
 #include "pluginrack/DeviceRegistry.h"
 #include "pluginrack/OfflineRenderer.h"
 #include "pluginrack/SceneAvailability.h"
@@ -106,6 +108,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::error_code sizeEc;
+    const std::uintmax_t sceneSize = std::filesystem::file_size(scenePath, sizeEc);
+    if (sizeEc || !render_limits::sceneWithinLimit(static_cast<std::int64_t>(sceneSize))) {
+        std::cerr << "error: scene file '" << scenePath
+                  << "' is too large (limit "
+                  << render_limits::kMaxSceneFileBytes / (1024 * 1024) << " MiB)\n";
+        return 1;
+    }
+
     std::ifstream sceneFile(scenePath, std::ios::binary);
     if (!sceneFile) {
         std::cerr << "error: cannot open '" << scenePath << "'\n";
@@ -133,11 +144,15 @@ int main(int argc, char** argv) {
     const AllDevicesPresent registry;
     const pluginrack::SceneAvailability availability =
         pluginrack::resolveAvailability(scene, registry);
+    if (!render_limits::secondsWithinLimit(seconds, scene.sampleRate)) {
+        std::cerr << "error: --seconds must be between 0 and "
+                  << render_limits::kMaxSeconds << " and fit in the frame count\n";
+        return 1;
+    }
     const double frameCount = seconds * scene.sampleRate;
-    if (!std::isfinite(frameCount) || frameCount < 1.0 ||
-        frameCount > static_cast<double>(std::numeric_limits<int>::max())) {
-        std::cerr << "error: --seconds must produce between 1 and "
-                  << std::numeric_limits<int>::max() << " frames\n";
+    if (!render_limits::outputWithinLimit(frameCount,
+                                           static_cast<std::int64_t>(scene.outputs.size()))) {
+        std::cerr << "error: render is too large (output sample budget exceeded)\n";
         return 1;
     }
     const int numFrames = static_cast<int>(frameCount);

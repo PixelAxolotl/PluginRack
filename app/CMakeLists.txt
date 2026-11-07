@@ -51,6 +51,9 @@ target_sources(pluginrack_app PRIVATE
     src/NativeThumbnail.h
     src/PluginHost.cpp
     src/PluginHost.h
+    src/PluginHostIpc.h
+    src/RestrictedHost.cpp
+    src/RestrictedHost.h
     src/PluginLibrary.cpp
     src/PluginLibrary.h
     src/PluginMenu.cpp
@@ -61,6 +64,10 @@ target_sources(pluginrack_app PRIVATE
     src/RackView.h
     src/RoutingMatrixComponent.cpp
     src/RoutingMatrixComponent.h
+    src/PatchesView.cpp
+    src/PatchesView.h
+    src/StripDialog.cpp
+    src/StripDialog.h
     src/SavesView.cpp
     src/SavesView.h
     src/SceneBridge.cpp
@@ -71,6 +78,16 @@ target_sources(pluginrack_app PRIVATE
     src/SliderTouch.h
     src/TouchSlideBar.cpp
     src/TouchSlideBar.h
+    src/MultibandWindow.cpp
+    src/MultibandWindow.h
+    src/MultibandCurveComponent.cpp
+    src/MultibandCurveComponent.h
+    src/TraceGraphComponent.cpp
+    src/TraceGraphComponent.h
+    src/DeEsserWindow.cpp
+    src/DeEsserWindow.h
+    src/LimiterWindow.cpp
+    src/LimiterWindow.h
     src/ValueEditSlider.cpp
     src/ValueEditSlider.h
     src/WrappedLabel.h)
@@ -109,6 +126,11 @@ target_link_libraries(pluginrack_app PRIVATE
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+# AppContainer profile API (RestrictedHost.cpp) lives in userenv.lib.
+if(MSVC)
+    target_link_libraries(pluginrack_app PRIVATE userenv)
+endif()
 
 if(MSVC)
     target_compile_options(pluginrack_app PRIVATE /W4 /WX)

@@ -7,6 +7,9 @@
 
 #include "pluginrack/EqEngine.h"
 #include "pluginrack/DynamicsEffect.h"
+#include "pluginrack/MultibandEffect.h"
+#include "pluginrack/DeEsserEffect.h"
+#include "pluginrack/LimiterEffect.h"
 #include "pluginrack/Types.h"
 
 namespace pluginrack {
@@ -31,7 +34,7 @@ struct InsertSlot {
     bool operator==(const InsertSlot&) const = default;
 };
 
-enum class ChainItemType { Eq, Dynamics, Insert };
+enum class ChainItemType { Eq, Dynamics, Insert, Multiband, DeEsser, Limiter };
 
 struct ChainItem {
     ChainItemType type = ChainItemType::Insert;
@@ -54,12 +57,24 @@ struct Channel {
     bool soloed = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
+    std::vector<MultibandEffect> multibandEffects;
+    std::vector<DeEsserEffect> deEsserEffects;
+    std::vector<LimiterEffect> limiterEffects;
+    float multibandRtaOffsetDb = 0.0f;
+    int multibandRtaWeighting = 0;
+    float deEsserRtaOffsetDb = 0.0f;
+    int deEsserRtaWeighting = 0;
     std::vector<ChainItem> chain;
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultEqBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
     // chain undelayed. Like the bands it only runs while eqEnabled.
     float eqDelayMs = 0.0f;
+    // Strip identity hue in degrees; 0 means "assign on load" so old scenes
+    // still get a colour.
+    float colourHue = 0.0f;
+    // Polarity flip applied after the EQ runs (inverts phase).
+    bool eqPhaseFlip = false;
     // RTA display offset in dB, shown relative to the default view (0 ==
     // default). Display only: it never touches the audio path, but it is
     // saved so the analyzer looks the same when the scene comes back.
@@ -81,12 +96,23 @@ struct Output {
     bool muted = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
+    std::vector<MultibandEffect> multibandEffects;
+    std::vector<DeEsserEffect> deEsserEffects;
+    std::vector<LimiterEffect> limiterEffects;
+    float multibandRtaOffsetDb = 0.0f;
+    int multibandRtaWeighting = 0;
+    float deEsserRtaOffsetDb = 0.0f;
+    int deEsserRtaWeighting = 0;
     std::vector<ChainItem> chain;
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultEqBands();
     // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
     // chain undelayed. Like the bands it only runs while eqEnabled.
     float eqDelayMs = 0.0f;
+    // Strip identity hue in degrees; 0 means "assign on load".
+    float colourHue = 0.0f;
+    // Polarity flip applied after the EQ runs (inverts phase).
+    bool eqPhaseFlip = false;
     // RTA display offset in dB, shown relative to the default view (0 ==
     // default). Display only: it never touches the audio path.
     float eqRtaOffsetDb = 0.0f;

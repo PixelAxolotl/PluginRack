@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 
 #include "DeviceBackend.h"
+#include "Theme.h"
 
 #include <pluginrack/AsioDeviceMatch.h>
 #include <pluginrack/InputBufferPolicy.h>
@@ -46,9 +47,23 @@ juce::String shortDeviceTypeTag(const juce::String& type) {
     return deviceBackendTag(type);
 }
 
-// Scenes saved before the built-in dynamics rows existed can carry effects
-// with no matching chain entry. Run those too, otherwise the panel and graph
-// work while the audio passes through untouched.
+// Effects whose chain entry is missing run here. That covers scenes saved
+// before per-strip ordering existed. Removal sets the effect's bypassed flag,
+// so a removed effect stays silent through this path until picked again,
+// which unbypasses it.
+template <typename Effect, typename Processor>
+void processNewMissing(const std::vector<pluginrack::ChainItem>& chain,
+    const std::vector<Effect>& effects, std::vector<Processor>& processors,
+    pluginrack::ChainItemType type, float* left, float* right, int frames) noexcept {
+    const std::size_t count = std::min(effects.size(), processors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const pluginrack::ChainItem item{type, effects[i].id};
+        if (effects[i].bypassed) continue;
+        if (std::find(chain.begin(), chain.end(), item) == chain.end())
+            processors[i].process(left, right, frames);
+    }
+}
+
 void processEffectsMissingFromChain(
     const std::vector<pluginrack::ChainItem>& chain,
     const std::vector<pluginrack::DynamicsEffect>& effects,
@@ -57,8 +72,25 @@ void processEffectsMissingFromChain(
     const std::size_t count = std::min(effects.size(), processors.size());
     for (std::size_t i = 0; i < count; ++i) {
         const pluginrack::ChainItem item{pluginrack::ChainItemType::Dynamics, effects[i].id};
+        if (effects[i].bypassed) continue;
         if (std::find(chain.begin(), chain.end(), item) == chain.end())
             processors[i].process(left, right, frames);
+    }
+}
+
+
+// Per-built-in output taps: one mode gate per tap, set by the owning
+// window (and cleared on close). setPluginTap() below flips the whole set.
+enum class PluginTapKind { Eq, Dynamics, Multiband, DeEsser, Limiter };
+
+template <typename Strip>
+void setPluginTap(Strip& strip, PluginTapKind kind, std::uint32_t mode) noexcept {
+    switch (kind) {
+        case PluginTapKind::Eq: strip.eqTap.setMode(mode); break;
+        case PluginTapKind::Dynamics: strip.dynamicsTap.setMode(mode); break;
+        case PluginTapKind::Multiband: strip.multibandTap.setMode(mode); break;
+        case PluginTapKind::DeEsser: strip.deEsserTap.setMode(mode); break;
+        case PluginTapKind::Limiter: strip.limiterTap.setMode(mode); break;
     }
 }
 
@@ -104,9 +136,9 @@ struct BriefTryLock {
 }
 
 std::vector<pluginrack::ChainItem> AudioEngine::defaultChain() {
-    return {{pluginrack::ChainItemType::Eq, 0},
-            {pluginrack::ChainItemType::Dynamics, 1},
-            {pluginrack::ChainItemType::Dynamics, 2}};
+    // Channels load with no effects: the built-ins are added by picking them
+    // from the plugin menu, which is also how a removed one comes back.
+    return {};
 }
 
 AudioEngine::AudioEngine() {
@@ -361,13 +393,12 @@ void AudioEngine::render(int frames) {
 
     for (auto& channel : channels) {
         juce::AudioBuffer<float> block(channel->buffer.getArrayOfWritePointers(), 2, 0, frames);
-        // EQ-before-inserts (pre-fader), matching core's channel tap order.
-        // stateLock (held since render entry) serializes this against the EQ
-        // setters, mirroring core's EqState mutex; bypassed strips skip
-        // process() entirely so output stays bit-identical to the pre-EQ
-        // engine. No allocation: the EQ runs through the block view.
-        // Analyzer tap wraps the call so Pre and Post exist even when the
-        // EQ is bypassed (both rings then carry the identical input block).
+        // One tap per built-in, written right after that plugin runs, so each
+        // RTA sees *that plugin's* output — not the strip end, and not a
+        // later plugin's effect. The order below only decides WHERE each
+        // snapshot falls; the chain loop decides the signal flow.
+        // Which built-ins are actually in the chain (and in what order) is
+        // still the chainItems walk below — the taps just follow it.
         const float trim = decibelsToGain(channel->trimDb.get());
         channel->buffer.applyGain(0, 0, frames, trim);
         channel->buffer.applyGain(1, 0, frames, trim);
@@ -376,6 +407,7 @@ void AudioEngine::render(int frames) {
             if (item.type == pluginrack::ChainItemType::Eq) {
                 if (!channel->eqBypassed.get())
                     channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+                channel->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
             } else if (item.type == pluginrack::ChainItemType::Dynamics) {
                 auto effect = std::find_if(channel->effects.begin(), channel->effects.end(),
                                            [id = item.id](const auto& value) { return value.id == id; });
@@ -385,6 +417,19 @@ void AudioEngine::render(int frames) {
                         channel->effectProcessors[index].process(
                             block.getWritePointer(0), block.getWritePointer(1), frames);
                 }
+                channel->dynamicsTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Multiband) {
+                auto f = std::find_if(channel->multibandEffects.begin(), channel->multibandEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != channel->multibandEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->multibandEffects.begin()); if (i < channel->multibandProcessors.size()) channel->multibandProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                channel->multibandTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+                auto f = std::find_if(channel->deEsserEffects.begin(), channel->deEsserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != channel->deEsserEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->deEsserEffects.begin()); if (i < channel->deEsserProcessors.size()) channel->deEsserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                channel->deEsserTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Limiter) {
+                auto f = std::find_if(channel->limiterEffects.begin(), channel->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != channel->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->limiterEffects.begin()); if (i < channel->limiterProcessors.size()) channel->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                channel->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
             } else {
                 auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                            [id = item.id](const auto& value) { return value->id == id; });
@@ -397,6 +442,9 @@ void AudioEngine::render(int frames) {
         processEffectsMissingFromChain(channel->chain, channel->effects,
                                        channel->effectProcessors,
                                        block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(channel->chain, channel->multibandEffects, channel->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(channel->chain, channel->deEsserEffects, channel->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), frames);
         channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
 
         const bool silent = channel->muted.get() || (anySolo && !channel->soloed.get());
@@ -441,14 +489,15 @@ void AudioEngine::render(int frames) {
 
     for (auto& output : outputs) {
         juce::AudioBuffer<float> block(output->buffer.getArrayOfWritePointers(), 2, 0, frames);
-        // Output EQ before the output inserts (pre-master-write), mirroring
-        // core's output tap and the channel tap above. Same lock rules; the
-        // analyzer tap wraps the call exactly like the channel loop does.
+        // Same per-plugin taps as Channel: each built-in's RTA reads its
+        // own output, so the EQ's curve never leaks into a later plugin's
+        // RTA and each preview is the plugin's own signal.
         output->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), frames);
         for (const auto& item : output->chain) {
             if (item.type == pluginrack::ChainItemType::Eq) {
                 if (!output->eqBypassed.get())
                     output->eq.process(block.getWritePointer(0), block.getWritePointer(1), frames);
+                output->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
             } else if (item.type == pluginrack::ChainItemType::Dynamics) {
                 auto effect = std::find_if(output->effects.begin(), output->effects.end(),
                                            [id = item.id](const auto& value) { return value.id == id; });
@@ -458,6 +507,19 @@ void AudioEngine::render(int frames) {
                         output->effectProcessors[index].process(
                             block.getWritePointer(0), block.getWritePointer(1), frames);
                 }
+                output->dynamicsTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Multiband) {
+                auto f = std::find_if(output->multibandEffects.begin(), output->multibandEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != output->multibandEffects.end()) { const auto i = static_cast<std::size_t>(f-output->multibandEffects.begin()); if (i < output->multibandProcessors.size()) output->multibandProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                output->multibandTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+                auto f = std::find_if(output->deEsserEffects.begin(), output->deEsserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != output->deEsserEffects.end()) { const auto i = static_cast<std::size_t>(f-output->deEsserEffects.begin()); if (i < output->deEsserProcessors.size()) output->deEsserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                output->deEsserTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
+            } else if (item.type == pluginrack::ChainItemType::Limiter) {
+                auto f = std::find_if(output->limiterEffects.begin(), output->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                if (f != output->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-output->limiterEffects.begin()); if (i < output->limiterProcessors.size()) output->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), frames); }
+                output->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
             } else {
                 auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                            [id = item.id](const auto& value) { return value->id == id; });
@@ -469,6 +531,9 @@ void AudioEngine::render(int frames) {
         processEffectsMissingFromChain(output->chain, output->effects,
                                        output->effectProcessors,
                                        block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(output->chain, output->multibandEffects, output->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(output->chain, output->deEsserEffects, output->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), frames);
+        processNewMissing(output->chain, output->limiterEffects, output->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), frames);
         output->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), frames);
         if (output->flipped.get()) {
             for (int i = 0; i < frames; ++i) {
@@ -798,6 +863,13 @@ void AudioEngine::addChannel() {
     channel->layout = pluginrack::ChannelLayout::Stereo;
     channel->inputChannels = {0, 1};
     channel->chain = defaultChain();
+    // Identity colour: a random hue from the curated palette so every strip
+    // is distinguishable from birth; editable later from the rename dialog.
+    {
+        juce::Random rng(juce::Time::currentTimeMillis()
+                         ^ static_cast<juce::int64>(channel->id * 2654435761u));
+        channel->colourHue = theme::randomStripHue(rng);
+    }
     channel->buffer.setSize(2, currentBufferSize);
     channel->buffer.clear();
     // Preallocate the EQ so internal bands match the member mirror: a strip
@@ -813,6 +885,9 @@ void AudioEngine::addChannel() {
         channel->effectProcessors.push_back(std::move(processor));
     }
     meters.observeChannel(channel->id, 0.0f);
+    for (const auto& e : channel->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->multibandProcessors.push_back(std::move(pr)); }
+    for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
+    for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
     for (const auto& output : outputs) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -835,6 +910,11 @@ void AudioEngine::addOutput() {
     else output->name = "Output " + juce::String(output->id);
     output->buffer.setSize(2, currentBufferSize);
     output->buffer.clear();
+    {
+        juce::Random rng(juce::Time::currentTimeMillis()
+                         ^ static_cast<juce::int64>(output->id * 40503u));
+        output->colourHue = theme::randomStripHue(rng);
+    }
     output->chain = defaultChain();
     output->eq.prepare(currentSampleRate, currentBufferSize);
     output->eq.setBands(output->eqBands);
@@ -847,6 +927,9 @@ void AudioEngine::addOutput() {
         output->effectProcessors.push_back(std::move(processor));
     }
     meters.observeOutput(output->id, 0.0f);
+    for (const auto& e : output->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->multibandProcessors.push_back(std::move(pr)); }
+    for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
+    for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
     for (const auto& channel : channels) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -1024,6 +1107,64 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
             return;
         }
 
+    }
+}
+
+void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    channel->chain.erase(std::remove(channel->chain.begin(), channel->chain.end(), item),
+                         channel->chain.end());
+    // A removed effect must stay silent through processEffectsMissingFromChain
+    // until the user picks it again (which unbypasses it).
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        channel->eqBypassed = true;
+    } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+        for (auto& effect : channel->effects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->effects.size()
+                                && i < channel->effectProcessors.size();
+             ++i)
+            if (channel->effects[i].id == item.id)
+                channel->effectProcessors[i].setEffect(channel->effects[i]);
+    }
+}
+
+void AudioEngine::ensureChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    if (std::none_of(channel->chain.begin(), channel->chain.end(),
+                     [&item](const pluginrack::ChainItem& entry) { return entry == item; }))
+        channel->chain.push_back(item);
+}
+
+void AudioEngine::ensureOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    if (std::none_of(output->chain.begin(), output->chain.end(),
+                     [&item](const pluginrack::ChainItem& entry) { return entry == item; }))
+        output->chain.push_back(item);
+}
+
+void AudioEngine::removeOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    output->chain.erase(std::remove(output->chain.begin(), output->chain.end(), item),
+                        output->chain.end());
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        output->eqBypassed = true;
+    } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+        for (auto& effect : output->effects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->effects.size()
+                                && i < output->effectProcessors.size();
+             ++i)
+            if (output->effects[i].id == item.id)
+                output->effectProcessors[i].setEffect(output->effects[i]);
     }
 }
 
@@ -1365,6 +1506,19 @@ void AudioEngine::setChannelEqDelay(std::uint32_t channelId, float delayMs) {
     }
 }
 
+void AudioEngine::setChannelEqPhaseFlip(std::uint32_t channelId, bool flipped) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) {
+        channel->eqPhaseFlip = flipped;
+        channel->eq.setPhaseFlip(flipped);
+    }
+}
+
+void AudioEngine::setChannelColourHue(std::uint32_t channelId, float hueDegrees) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) channel->colourHue = hueDegrees;
+}
+
 void AudioEngine::setChannelEqRtaOffset(std::uint32_t channelId, float offsetDb) {
     // Display only, but it is saved with the scene, so it follows the same
     // message-thread lock rule as the bands.
@@ -1376,6 +1530,28 @@ void AudioEngine::setChannelEqRtaWeighting(std::uint32_t channelId, int weightin
     const juce::ScopedLock lock(stateLock);
     if (auto* channel = findChannel(channelId))
         channel->eqRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
+void AudioEngine::setChannelMultibandRtaOffset(std::uint32_t channelId, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) channel->multibandRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setChannelMultibandRtaWeighting(std::uint32_t channelId, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId))
+        channel->multibandRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
+void AudioEngine::setChannelDeEsserRtaOffset(std::uint32_t channelId, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) channel->deEsserRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setChannelDeEsserRtaWeighting(std::uint32_t channelId, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId))
+        channel->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
 void AudioEngine::setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands) {
@@ -1414,6 +1590,24 @@ void AudioEngine::setOutputEqDelay(int outIdx, float delayMs) {
     output->eq.setDelayMs(delayMs);
 }
 
+void AudioEngine::setOutputEqPhaseFlip(int outIdx, bool flipped) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
+    output->eqPhaseFlip = flipped;
+    output->eq.setPhaseFlip(flipped);
+}
+
+void AudioEngine::setOutputColourHue(int outIdx, float hueDegrees) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    outputs[static_cast<std::size_t>(outIdx)]->colourHue = hueDegrees;
+}
+
 void AudioEngine::setOutputEqRtaOffset(int outIdx, float offsetDb) {
     const juce::ScopedLock lock(stateLock);
     if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
@@ -1428,6 +1622,38 @@ void AudioEngine::setOutputEqRtaWeighting(int outIdx, int weighting) {
         return;
     }
     outputs[static_cast<std::size_t>(outIdx)]->eqRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
+void AudioEngine::setOutputMultibandRtaOffset(int outIdx, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    outputs[static_cast<std::size_t>(outIdx)]->multibandRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setOutputMultibandRtaWeighting(int outIdx, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    outputs[static_cast<std::size_t>(outIdx)]->multibandRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
+void AudioEngine::setOutputDeEsserRtaOffset(int outIdx, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    outputs[static_cast<std::size_t>(outIdx)]->deEsserRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setOutputDeEsserRtaWeighting(int outIdx, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
+        return;
+    }
+    outputs[static_cast<std::size_t>(outIdx)]->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
 void AudioEngine::setChannelEffects(
@@ -1472,6 +1698,63 @@ void AudioEngine::setOutputEffects(
         processor.setEffect(effect);
         output->effectProcessors.push_back(std::move(processor));
     }
+}
+
+template <typename Effect, typename Processor, typename Strip>
+void syncNewEffects(Strip* strip, const std::vector<Effect>& effects,
+                    std::vector<Effect>& stored, std::vector<Processor>& processors,
+                    double rate) {
+    stored = effects;
+    if (processors.size() == effects.size()) {
+        for (std::size_t i = 0; i < effects.size(); ++i) processors[i].setEffect(effects[i]);
+        return;
+    }
+    processors.clear();
+    processors.reserve(effects.size());
+    for (const auto& effect : effects) {
+        Processor processor;
+        processor.prepare(rate);
+        processor.setEffect(effect);
+        processors.push_back(std::move(processor));
+    }
+    (void)strip;
+}
+
+void AudioEngine::setChannelMultiband(std::uint32_t channelId, const std::vector<pluginrack::MultibandEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    syncNewEffects(channel, effects, channel->multibandEffects, channel->multibandProcessors, currentSampleRate);
+}
+void AudioEngine::setOutputMultiband(std::uint32_t outputId, const std::vector<pluginrack::MultibandEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    syncNewEffects(output, effects, output->multibandEffects, output->multibandProcessors, currentSampleRate);
+}
+void AudioEngine::setChannelDeEssers(std::uint32_t channelId, const std::vector<pluginrack::DeEsserEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    syncNewEffects(channel, effects, channel->deEsserEffects, channel->deEsserProcessors, currentSampleRate);
+}
+void AudioEngine::setOutputDeEssers(std::uint32_t outputId, const std::vector<pluginrack::DeEsserEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    syncNewEffects(output, effects, output->deEsserEffects, output->deEsserProcessors, currentSampleRate);
+}
+void AudioEngine::setChannelLimiters(std::uint32_t channelId, const std::vector<pluginrack::LimiterEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    syncNewEffects(channel, effects, channel->limiterEffects, channel->limiterProcessors, currentSampleRate);
+}
+void AudioEngine::setOutputLimiters(std::uint32_t outputId, const std::vector<pluginrack::LimiterEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    syncNewEffects(output, effects, output->limiterEffects, output->limiterProcessors, currentSampleRate);
 }
 
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
@@ -1544,9 +1827,18 @@ pluginrack::Scene AudioEngine::makeScene() const {
             savedChannel.eqEnabled = !channel->eqBypassed.get();
             savedChannel.eqBands = channel->eqBands;
             savedChannel.eqDelayMs = channel->eqDelayMs;
+            savedChannel.eqPhaseFlip = channel->eqPhaseFlip.get();
+            savedChannel.colourHue = channel->colourHue;
             savedChannel.eqRtaOffsetDb = channel->eqRtaOffsetDb;
             savedChannel.eqRtaWeighting = channel->eqRtaWeighting;
+            savedChannel.multibandRtaOffsetDb = channel->multibandRtaOffsetDb;
+            savedChannel.multibandRtaWeighting = channel->multibandRtaWeighting;
+            savedChannel.deEsserRtaOffsetDb = channel->deEsserRtaOffsetDb;
+            savedChannel.deEsserRtaWeighting = channel->deEsserRtaWeighting;
             savedChannel.effects = channel->effects;
+            savedChannel.multibandEffects = channel->multibandEffects;
+            savedChannel.deEsserEffects = channel->deEsserEffects;
+            savedChannel.limiterEffects = channel->limiterEffects;
             savedChannel.chain = channel->chain;
             std::vector<const PluginHost*> hosts;
             hosts.reserve(channel->inserts.size());
@@ -1575,9 +1867,18 @@ pluginrack::Scene AudioEngine::makeScene() const {
             savedOutput.eqEnabled = !output->eqBypassed.get();
             savedOutput.eqBands = output->eqBands;
             savedOutput.eqDelayMs = output->eqDelayMs;
+            savedOutput.eqPhaseFlip = output->eqPhaseFlip.get();
+            savedOutput.colourHue = output->colourHue;
             savedOutput.eqRtaOffsetDb = output->eqRtaOffsetDb;
             savedOutput.eqRtaWeighting = output->eqRtaWeighting;
+            savedOutput.multibandRtaOffsetDb = output->multibandRtaOffsetDb;
+            savedOutput.multibandRtaWeighting = output->multibandRtaWeighting;
+            savedOutput.deEsserRtaOffsetDb = output->deEsserRtaOffsetDb;
+            savedOutput.deEsserRtaWeighting = output->deEsserRtaWeighting;
             savedOutput.effects = output->effects;
+            savedOutput.multibandEffects = output->multibandEffects;
+            savedOutput.deEsserEffects = output->deEsserEffects;
+            savedOutput.limiterEffects = output->limiterEffects;
             savedOutput.chain = output->chain;
             std::vector<const PluginHost*> hosts;
             hosts.reserve(output->inserts.size());
@@ -1715,16 +2016,40 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         // is sized here for the same reason.
         channel->eqBands = savedChannel.eqBands;
         channel->eqDelayMs = savedChannel.eqDelayMs;
+        // Old scenes carry no hue: assign one now so every strip has colour.
+        if (savedChannel.colourHue > 0.0f) {
+            channel->colourHue = savedChannel.colourHue;
+        } else {
+            juce::Random rng(juce::Time::currentTimeMillis()
+                             ^ static_cast<juce::int64>(channel->id * 747796405u));
+            channel->colourHue = theme::randomStripHue(rng);
+        }
+        channel->eqPhaseFlip = savedChannel.eqPhaseFlip;
         channel->eqRtaOffsetDb = savedChannel.eqRtaOffsetDb;
         channel->eqRtaWeighting = savedChannel.eqRtaWeighting;
+        channel->multibandRtaOffsetDb = savedChannel.multibandRtaOffsetDb;
+        channel->multibandRtaWeighting = savedChannel.multibandRtaWeighting;
+        channel->deEsserRtaOffsetDb = savedChannel.deEsserRtaOffsetDb;
+        channel->deEsserRtaWeighting = savedChannel.deEsserRtaWeighting;
         channel->eqBypassed = !savedChannel.eqEnabled;
         channel->eq.prepare(sampleRate, bufferSize);
         channel->eqDirty = true;
         channel->eq.setBands(channel->eqBands);
         channel->eqDirty = false;
         channel->eq.setDelayMs(channel->eqDelayMs);
+        channel->eq.setPhaseFlip(channel->eqPhaseFlip.get());
         channel->effects = savedChannel.effects;
-        channel->chain = savedChannel.chain.empty() ? defaultChain() : savedChannel.chain;
+        channel->multibandEffects = savedChannel.multibandEffects;
+        channel->deEsserEffects = savedChannel.deEsserEffects;
+        channel->limiterEffects = savedChannel.limiterEffects;
+        for (const auto& e : channel->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->multibandProcessors.push_back(std::move(pr)); }
+        for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
+        for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
+        // An empty saved chain is a real empty state (no effects loaded).
+        // Scenes without per-strip ordering predate this field; their effects
+        // still run via processEffectsMissingFromChain, so a missing chain
+        // degrades to the same audible behaviour without synthesising rows.
+        channel->chain = savedChannel.chain;
         channel->effectProcessors.clear();
         channel->effectProcessors.reserve(channel->effects.size());
         for (const auto& effect : channel->effects) {
@@ -1778,16 +2103,35 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         output->buffer.clear();
         output->eqBands = savedOutput.eqBands;
         output->eqDelayMs = savedOutput.eqDelayMs;
+        if (savedOutput.colourHue > 0.0f) {
+            output->colourHue = savedOutput.colourHue;
+        } else {
+            juce::Random rng(juce::Time::currentTimeMillis()
+                             ^ static_cast<juce::int64>(output->id * 2891336453u));
+            output->colourHue = theme::randomStripHue(rng);
+        }
+        output->eqPhaseFlip = savedOutput.eqPhaseFlip;
         output->eqRtaOffsetDb = savedOutput.eqRtaOffsetDb;
         output->eqRtaWeighting = savedOutput.eqRtaWeighting;
+        output->multibandRtaOffsetDb = savedOutput.multibandRtaOffsetDb;
+        output->multibandRtaWeighting = savedOutput.multibandRtaWeighting;
+        output->deEsserRtaOffsetDb = savedOutput.deEsserRtaOffsetDb;
+        output->deEsserRtaWeighting = savedOutput.deEsserRtaWeighting;
         output->eqBypassed = !savedOutput.eqEnabled;
         output->eq.prepare(sampleRate, bufferSize);
         output->eqDirty = true;
         output->eq.setBands(output->eqBands);
         output->eqDirty = false;
         output->eq.setDelayMs(output->eqDelayMs);
+        output->eq.setPhaseFlip(output->eqPhaseFlip.get());
         output->effects = savedOutput.effects;
-        output->chain = savedOutput.chain.empty() ? defaultChain() : savedOutput.chain;
+        output->multibandEffects = savedOutput.multibandEffects;
+        output->deEsserEffects = savedOutput.deEsserEffects;
+        output->limiterEffects = savedOutput.limiterEffects;
+        for (const auto& e : output->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->multibandProcessors.push_back(std::move(pr)); }
+        for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
+        for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
+        output->chain = savedOutput.chain;
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());
         for (const auto& effect : output->effects) {

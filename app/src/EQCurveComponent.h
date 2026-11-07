@@ -7,6 +7,8 @@
 
 #include <pluginrack/EqEngine.h>
 
+#include "TraceGraphComponent.h"
+
 // Pro-Q-style curve editor (Task 5) for the fixed seven-band EQ. Paints a
 // log-frequency grid (20 Hz - 20 kHz, +/-15 dB), one draggable node per band
 // in its band colour, and the combined magnitude response in yellow computed
@@ -19,26 +21,26 @@ class EQCurveComponent final : public juce::Component {
 public:
     static constexpr double kMinFreqHz = 20.0;      // X axis range (UI binding)
     static constexpr double kMaxFreqHz = 20000.0;
-    static constexpr double kMaxGainDb = 15.0;      // Y axis range is +/-15 dB
+    static constexpr float kMinDisplayDb = -60.0f;
+    static constexpr float kMaxDisplayDb = 12.0f;
+    static constexpr double kMaxGainDb = 12.0;
     static constexpr double kMinQ = 0.1;            // matches SceneValidator
     static constexpr double kMaxQ = 20.0;
 
     EQCurveComponent();
 
-    // View offset the analyzer fill starts with, before the user shifts it.
-    // Bins arrive in dBFS while the curve view spans +/-15 dB, so without a
-    // lift the fill would sit clamped on the floor. Every RTA surface adds
-    // this to the saved offset, so the editor and the rack thumbnail agree.
-    static constexpr float kDefaultSpectrumOffsetDb = 24.0f;
+    // Shared with the Multiband/De-esser RTA (kTraceRtaDefaultOffsetDb):
+    // a single default so all three frequency graphs lift identically.
+    static constexpr float kDefaultSpectrumOffsetDb = kTraceRtaDefaultOffsetDb;
 
     // Analyzer weighting (IEC 61672), display only: it shapes the spectrum the
     // way a sound level meter would, and never touches the EQ response.
-    enum class Weighting { Z = 0, A = 1, C = 2 };
+    using Weighting = SpectrumWeighting;
     void setWeighting(Weighting newWeighting);
     Weighting getWeighting() const { return weighting; }
     // Index order matches the RTA menu and the saved scene value.
     static Weighting weightingFromIndex(int index) {
-        return static_cast<Weighting>(juce::jlimit(0, 2, index));
+        return ::weightingFromIndex(index);
     }
 
     void setBands(const std::vector<pluginrack::EqBand>& newBands);

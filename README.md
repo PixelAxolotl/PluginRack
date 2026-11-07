@@ -11,6 +11,12 @@ built-in effects.
 > Status: early development, Windows x64 only. Interfaces and the scene format
 > can still change.
 
+> **Plugin trust warning:** plugins now run in a restricted host process
+> (reduced rights, no network or file write access, killed and restarted if
+> it hangs or crashes). Treating a plugin as untrusted is still right: never
+> open an untrusted VST3 from the internet or an email, and note that a few
+> plugins that must live in the app process cannot be hosted yet.
+
 ## What you can do with it
 
 - **Channel strips** with trim, gain, pan, mute/solo, peak metering, and mono or
@@ -292,8 +298,14 @@ Everything below is for building and working on PluginRack.
 | CMake ≥ 3.28 | `CMakePresets.json` uses the Ninja generator. |
 | Ninja | Install and make sure `ninja` is on `PATH`, or use another CMake generator. |
 | MSVC (C++20) | Visual Studio 2022+ or Build Tools. Run commands from a Developer Command Prompt / after `vcvars64.bat`. |
-| JUCE source tree | With CMake support (tested against a local JUCE checkout). |
-| VST3 SDK | The SDK is only used for hosting; no VST3s are bundled. |
+| JUCE source tree | With CMake support. Tested against JUCE 9.0.4 (commit 454fe891acc8204f99f4ef1e3a28c84b1a4da145). |
+| VST3 SDK | The SDK is only used for hosting; no VST3s are bundled. Tested against VST3 SDK 3.8.1 (commit 3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96). |
+
+Fetched dependencies are pinned to exact commit hashes so the build does not
+silently change: nlohmann/json 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03
+(tag v3.11.3) and Catch2 9827c148c397289df17d3967692619a198032a24 (tag
+v3.7.1). Other JUCE/VST3 versions may build but are not supported by the
+recorded values in the root `CMakeLists.txt`.
 | ASIO (optional) | If `JUCE_DIR/modules/juce_audio_devices/native/asio/iasiodrv.h` exists, the build enables ASIO and the device menus expose ASIO devices. |
 
 ### Build

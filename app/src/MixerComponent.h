@@ -13,6 +13,7 @@
 #include "DeviceMenu.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
+#include "StripDialog.h"
 #include "Theme.h"
 #include "ValueEditSlider.h"
 
@@ -77,6 +78,8 @@ private:
         int chainDropIndexAt(juce::Point<int> parentPoint) override;
         void setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) override;
         void activateBuiltIn(pluginrack::ChainItem item) override;
+        void insertBuiltIn(pluginrack::ChainItem item, int chainIndex) override;
+        void eraseBuiltIn(pluginrack::ChainItem item) override;
 
         std::function<void()> onRemoveRequested;
         std::function<void()> onRenamed;

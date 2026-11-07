@@ -50,20 +50,16 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
         });
     });
     deviceControl.setOnRename([this] {
-        auto* w = new juce::AlertWindow("Rename output", "Enter new name:", juce::MessageBoxIconType::NoIcon);
-        w->addTextEditor("name", output.name);
-        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
-        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
         juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
-        w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w](int result) {
-            if (result == 1 && safe != nullptr) {
-                const auto newName = w->getTextEditorContents("name");
-                safe->audioEngine.setOutputName(safe->output.id, newName);
-                safe->deviceControl.setTitle(newName);
-                if (safe->onRenamed) safe->onRenamed();
-            }
-            delete w;
-        }), true);
+        StripDialog::show("Rename output", output.name, output.colourHue,
+                          [safe](const juce::String& newName, float newHue) {
+            if (safe == nullptr) return;
+            safe->audioEngine.setOutputName(safe->output.id, newName);
+            safe->audioEngine.setOutputColourHue(safe->outputIndex, newHue);
+            safe->deviceControl.setTitle(newName);
+            safe->repaint();
+            if (safe->onRenamed) safe->onRenamed();
+        });
     });
     addAndMakeVisible(deviceControl);
 
@@ -105,9 +101,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     gainSlider.onValueChange = [this] {
         audioEngine.setOutputGain(output.id, static_cast<float>(gainSlider.getValue()));
     };
-    gainSlider.setColour(juce::Slider::trackColourId, theme::deepGreen());
+    const auto outputAccent = theme::stripColour(output.colourHue);
+    gainSlider.setColour(juce::Slider::trackColourId, outputAccent);
     gainSlider.setColour(juce::Slider::backgroundColourId, theme::strip());
-    gainSlider.setColour(juce::Slider::thumbColourId, theme::green());
+    gainSlider.setColour(juce::Slider::thumbColourId, outputAccent);
     gainSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     gainSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     gainSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
@@ -204,7 +201,7 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
         gateIt != output.effects.end() ? &*gateIt : nullptr);
     dynamicsWindow->onClose = [safe] {
         if (safe != nullptr && safe->dynamicsWindow != nullptr) {
-            safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            safe->output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
             auto* window = safe->dynamicsWindow;
             safe->dynamicsWindow = nullptr;
             delete window;
@@ -212,11 +209,11 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
     };
     dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
         if (safe != nullptr) {
-            safe->output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
-            safe->output.analyzerTap.snapshot(false, left, right, frames);
+            safe->output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+            safe->output.dynamicsTap.snapshot(true, left, right, frames);
         }
     };
-    output.analyzerTap.setMode(AudioEngine::AnalyzerTap::kPre);
+    output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
     dynamicsWindow->setVisible(true);
 }
 
@@ -268,16 +265,16 @@ void MixerComponent::OutputStrip::openEqWindow() {
             }
         }
     };
-    // Analyzer wiring (Task 6), same contract as ChannelStrip's hunks: pull
-    // copies this output's tap ring, setMode gates the render-side write.
+    // Analyzer wiring: the EQ reads its own post-EQ tap (eqTap), so its
+    // RTA shows what leaves the EQ — a later plugin can't tint it.
     window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
         if (safe == nullptr) return;
-        safe->output.analyzerTap.snapshot(postEq, destL, destR,
-                                          EQWindow::kAnalyzerFftSize);
+        safe->output.eqTap.snapshot(postEq, destL, destR,
+                                    EQWindow::kAnalyzerFftSize);
     };
     window->setAnalyzerTapMode = [safe](int mode) {
         if (safe == nullptr) return;
-        safe->output.analyzerTap.setMode(static_cast<std::uint32_t>(mode));
+        safe->output.eqTap.setMode(static_cast<std::uint32_t>(mode));
     };
     // Same ordering fix as ChannelStrip: start Post-EQ analysis after the
     // tap callbacks are wired, otherwise the mode call addresses no one.
@@ -292,6 +289,20 @@ void MixerComponent::OutputStrip::openEqWindow() {
             if (outs[static_cast<std::size_t>(i)]->id == outputId) {
                 safe->audioEngine.setOutputEqBypassed(i, false);
                 safe->audioEngine.setOutputEqDelay(i, delayMs);
+                break;
+            }
+        }
+        safe->refreshEqButton();
+    };
+    // Phase flip, same contract as the channel strip.
+    window->setPhaseFlip(output.eqPhaseFlip.get());
+    window->applyPhaseFlip = [safe, outputId](bool flipped) {
+        if (safe == nullptr) return;
+        const auto& outs = safe->audioEngine.getOutputs();
+        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
+                safe->audioEngine.setOutputEqBypassed(i, false);
+                safe->audioEngine.setOutputEqPhaseFlip(i, flipped);
                 break;
             }
         }
@@ -421,9 +432,9 @@ void MixerComponent::OutputStrip::resized() {
 }
 
 void MixerComponent::OutputStrip::paint(juce::Graphics& g) {
-    g.fillAll(theme::strip());
-    g.setColour(theme::border());
-    g.drawRect(getLocalBounds(), 1);
+    theme::drawStripFace(g, getLocalBounds());
+    // Identity colour: bottom accent bar in the strip's own hue.
+    theme::drawStripAccent(g, getLocalBounds(), output.colourHue);
     paintDragHandle(g);
     if (chainDropTarget >= 0) {
         g.setColour(theme::cyan());
@@ -537,6 +548,15 @@ void MixerComponent::OutputStrip::refreshInserts() {
             slots[r]->setInsert(it == output.inserts.end() ? nullptr : it->get());
         } else if (item.type == pluginrack::ChainItemType::Eq) {
             slots[r]->setBuiltIn(item, "EQ", output.eqBypassed.get());
+        } else if (item.type == pluginrack::ChainItemType::Multiband ||
+                   item.type == pluginrack::ChainItemType::DeEsser ||
+                   item.type == pluginrack::ChainItemType::Limiter) {
+            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : "Limiter";
+            bool bp = false;
+            if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : output.multibandEffects) if (e.id==item.id) bp=e.bypassed;
+            if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : output.deEsserEffects) if (e.id==item.id) bp=e.bypassed;
+            if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : output.limiterEffects) if (e.id==item.id) bp=e.bypassed;
+            slots[r]->setBuiltIn(item, name, bp);
         } else {
             const auto it = std::find_if(output.effects.begin(), output.effects.end(),
                                          [id = item.id](const auto& effect) { return effect.id == id; });
@@ -660,6 +680,24 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
         audioEngine.setOutputEqBypassed(outputIndex, bypassed);
         return;
     }
+    if (item.type == pluginrack::ChainItemType::Multiband) {
+        auto effects = output.multibandEffects;
+        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        audioEngine.setOutputMultiband(output.id, effects);
+        return;
+    }
+    if (item.type == pluginrack::ChainItemType::DeEsser) {
+        auto effects = output.deEsserEffects;
+        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        audioEngine.setOutputDeEssers(output.id, effects);
+        return;
+    }
+    if (item.type == pluginrack::ChainItemType::Limiter) {
+        auto effects = output.limiterEffects;
+        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        audioEngine.setOutputLimiters(output.id, effects);
+        return;
+    }
     auto effects = output.effects;
     for (auto& effect : effects)
         if (effect.id == item.id) effect.bypassed = bypassed;
@@ -671,9 +709,65 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
 void MixerComponent::OutputStrip::activateBuiltIn(pluginrack::ChainItem item) {
     if (item.type == pluginrack::ChainItemType::Eq)
         openEqWindow();
+    else if (item.type != pluginrack::ChainItemType::Dynamics)
+        return; // new built-ins open from their own strip cards
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
+}
+
+void MixerComponent::OutputStrip::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
+    audioEngine.ensureOutputChainItem(output.id, item);
+    if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(output.multibandEffects.begin(), output.multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.multibandEffects; effects.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setOutputMultiband(output.id, effects); }
+    if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(output.deEsserEffects.begin(), output.deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.deEsserEffects; effects.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setOutputDeEssers(output.id, effects); }
+    if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(output.limiterEffects.begin(), output.limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.limiterEffects; effects.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setOutputLimiters(output.id, effects); }
+    if (item.type == pluginrack::ChainItemType::Dynamics) {
+        for (const auto& effect : output.effects)
+            if (effect.id != item.id)
+                audioEngine.ensureOutputChainItem(output.id,
+                                                  {pluginrack::ChainItemType::Dynamics, effect.id});
+    }
+    const auto rows = pluginrack::buildChainRows(output.chain, output.effects);
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    for (const auto& row : rows) {
+        const bool holdsItem = std::any_of(row.begin(), row.end(), [this, &item](int index) {
+            return output.chain[static_cast<std::size_t>(index)] == item;
+        });
+        if (!holdsItem) continue;
+        if (row.size() > 1) {
+            cardItems.clear();
+            for (const int index : row)
+                cardItems.push_back(output.chain[static_cast<std::size_t>(index)]);
+        }
+        break;
+    }
+    const auto moves =
+        pluginrack::planChainCardMoves(output.chain, rows, chainIndex, cardItems);
+    for (const auto& move : moves)
+        audioEngine.moveOutputChainItem(output.id, move.item, move.targetIndex);
+    setBuiltInBypass(item, false);
+    refreshAfterInsertChange();
+}
+
+void MixerComponent::OutputStrip::eraseBuiltIn(pluginrack::ChainItem item) {
+    std::vector<pluginrack::ChainItem> cardItems{ item };
+    if (item.type == pluginrack::ChainItemType::Dynamics) {
+        const auto rows = pluginrack::buildChainRows(output.chain, output.effects);
+        for (const auto& row : rows) {
+            const bool holdsItem =
+                std::any_of(row.begin(), row.end(), [this, &item](int index) {
+                    return output.chain[static_cast<std::size_t>(index)] == item;
+                });
+            if (!holdsItem || row.size() <= 1) continue;
+            cardItems.clear();
+            for (const int index : row)
+                cardItems.push_back(output.chain[static_cast<std::size_t>(index)]);
+            break;
+        }
+    }
+    for (const auto& entry : cardItems)
+        audioEngine.removeOutputChainItem(output.id, entry);
+    refreshAfterInsertChange();
 }
 
 void MixerComponent::OutputStrip::refreshAfterInsertChange() {
@@ -750,7 +844,7 @@ void MixerComponent::resized() {
     area.removeFromTop(4);
 
     if (showInputs && showOutputs) {
-        const int masterW = juce::jlimit(0, area.getWidth(), 3 * (120 + 4) + 24);
+        const int masterW = juce::jlimit(0, area.getWidth(), 3 * (148 + 6) + 24);
         masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
         area.removeFromRight(6);
         inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
@@ -783,8 +877,9 @@ void MixerComponent::layoutChannelStrips(juce::Rectangle<int> viewportBounds) {
 void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
     masterHeader.setBounds(panelBounds.removeFromTop(theme::ui::kSectionH));
     masterViewport.setBounds(panelBounds);
-    const int outW = 120;
-    const int outGap = 4;
+    // Same width as the input strips: both sides read as one console.
+    const int outW = 148;
+    const int outGap = 6;
     const int contentW = (int)outputStrips.size() * (outW + outGap) + 8;
     int masterH = masterViewport.getHeight();
     if (contentW > masterViewport.getWidth()) {
@@ -885,12 +980,12 @@ void MixerComponent::finishChannelDrag(std::uint32_t channelId, int sourceIndex)
 void MixerComponent::updateOutputDrag(juce::Point<int> screenPosition) {
     const int count = outputStrips.size();
     if (count <= 0) return;
-    constexpr int outWidth = 120 + 4; // strip + gutter, as layoutOutputStrips
+    constexpr int outWidth = 148 + 6; // strip + gutter, as layoutOutputStrips
     constexpr int outInset = 4;
     const auto local = masterContent.getLocalPoint(nullptr, screenPosition);
     const int index = juce::jlimit(0, count, (local.x - outInset + outWidth / 2) / outWidth);
     outputInsertIndex = index;
-    masterContent.dropMarkerX = insertionBarX(index, outInset, outWidth, outWidth - 120);
+    masterContent.dropMarkerX = insertionBarX(index, outInset, outWidth, outWidth - 148);
     masterContent.repaint();
 }
 

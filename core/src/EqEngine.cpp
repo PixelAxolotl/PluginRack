@@ -256,6 +256,8 @@ void EqEngine::applyChannel(float* buf, int n, Biquad& f, float& s1, float& s2) 
     }
 }
 
+void EqEngine::setPhaseFlip(bool flip) noexcept { phaseFlip_ = flip; }
+
 void EqEngine::process(float* L, float* R, int n) noexcept {
     if (n <= 0) {
         return;
@@ -265,16 +267,23 @@ void EqEngine::process(float* L, float* R, int n) noexcept {
     if (delayActive()) {
         applyDelay(L, R, n);
     }
-    if (activeMask_ == 0) {
-        return;
-    }
-    for (int i = 0; i < kNumBands; ++i) {
-        if ((activeMask_ & (1 << i)) == 0) {
-            continue;
+    if (activeMask_ != 0) {
+        for (int i = 0; i < kNumBands; ++i) {
+            if ((activeMask_ & (1 << i)) == 0) {
+                continue;
+            }
+            Biquad& f = filters_[i];
+            applyChannel(L, n, f, f.s1L, f.s2L);
+            applyChannel(R, n, f, f.s1R, f.s2R);
         }
-        Biquad& f = filters_[i];
-        applyChannel(L, n, f, f.s1L, f.s2L);
-        applyChannel(R, n, f, f.s1R, f.s2R);
+    }
+    // Polarity flip: invert phase after the chain, even on a flat EQ so the
+    // flip stays live when no band is active.
+    if (phaseFlip_) {
+        for (int i = 0; i < n; ++i) {
+            L[i] = -L[i];
+            R[i] = -R[i];
+        }
     }
 }
 

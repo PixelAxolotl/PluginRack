@@ -186,6 +186,38 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         eqState_->outputEffects.push_back(std::move(processors));
     }
 
+    // New built-ins run in chain order when a chain is present; otherwise
+    // they append after the Dynamics effects, mirroring the live engine.
+    const auto buildNew = [&](const std::vector<MultibandEffect>& mbs, const std::vector<DeEsserEffect>& des, const std::vector<LimiterEffect>& lims, const std::vector<ChainItem>& chain, auto& mbOut, auto& deOut, auto& liOut, auto& mbFxOut, auto& deFxOut, auto& liFxOut) {
+        mbOut.reserve(mbs.size()); deOut.reserve(des.size()); liOut.reserve(lims.size());
+        for (const auto& e2 : mbs) { MultibandProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); mbOut.push_back(std::move(pr)); mbFxOut.push_back(e2); }
+        for (const auto& e2 : des) { DeEsserProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); deOut.push_back(std::move(pr)); deFxOut.push_back(e2); }
+        for (const auto& e2 : lims) { LimiterProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); liOut.push_back(std::move(pr)); liFxOut.push_back(e2); }
+        (void)chain;
+    };
+    eqState_->channelMultiband.clear(); eqState_->channelDeEssers.clear(); eqState_->channelLimiters.clear();
+    eqState_->outputMultiband.clear(); eqState_->outputDeEssers.clear(); eqState_->outputLimiters.clear();
+    eqState_->channelMultibandFx.clear(); eqState_->channelDeEsserFx.clear(); eqState_->channelLimiterFx.clear();
+    eqState_->outputMultibandFx.clear(); eqState_->outputDeEsserFx.clear(); eqState_->outputLimiterFx.clear();
+    eqState_->channelChains.clear(); eqState_->outputChains.clear();
+    for (const Channel& channel : scene.channels) {
+        std::vector<MultibandProcessor> m; std::vector<DeEsserProcessor> d; std::vector<LimiterProcessor> l;
+        std::vector<MultibandEffect> mf; std::vector<DeEsserEffect> df; std::vector<LimiterEffect> lf;
+        buildNew(channel.multibandEffects, channel.deEsserEffects, channel.limiterEffects, channel.chain, m, d, l, mf, df, lf);
+        eqState_->channelMultiband.push_back(std::move(m)); eqState_->channelDeEssers.push_back(std::move(d)); eqState_->channelLimiters.push_back(std::move(l));
+        eqState_->channelMultibandFx.push_back(std::move(mf)); eqState_->channelDeEsserFx.push_back(std::move(df)); eqState_->channelLimiterFx.push_back(std::move(lf));
+        eqState_->channelChains.push_back(channel.chain);
+        eqState_->channelChainMode.push_back(channel.chain.empty() ? 0 : 1);
+    }
+    for (const Output& output : scene.outputs) {
+        std::vector<MultibandProcessor> m; std::vector<DeEsserProcessor> d; std::vector<LimiterProcessor> l;
+        std::vector<MultibandEffect> mf; std::vector<DeEsserEffect> df; std::vector<LimiterEffect> lf;
+        buildNew(output.multibandEffects, output.deEsserEffects, output.limiterEffects, output.chain, m, d, l, mf, df, lf);
+        eqState_->outputMultiband.push_back(std::move(m)); eqState_->outputDeEssers.push_back(std::move(d)); eqState_->outputLimiters.push_back(std::move(l));
+        eqState_->outputMultibandFx.push_back(std::move(mf)); eqState_->outputDeEsserFx.push_back(std::move(df)); eqState_->outputLimiterFx.push_back(std::move(lf));
+        eqState_->outputChains.push_back(output.chain);
+    }
+
     stoppedChannels_.assign(channels_.size(), 0);
     disabledOutputs_.assign(outputCount_, 0);
 
@@ -356,6 +388,9 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 for (auto& effect : eqState_->channelEffects[c])
                     effect.process(scratchLeft, scratchRight, frames);
             }
+            if (c < eqState_->channelMultiband.size()) { for (auto& e : eqState_->channelMultiband[c]) e.process(scratchLeft, scratchRight, frames); }
+            if (c < eqState_->channelDeEssers.size()) { for (auto& e : eqState_->channelDeEssers[c]) e.process(scratchLeft, scratchRight, frames); }
+            if (c < eqState_->channelLimiters.size()) { for (auto& e : eqState_->channelLimiters[c]) e.process(scratchLeft, scratchRight, frames); }
         }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
@@ -433,6 +468,9 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 for (auto& effect : eqState_->outputEffects[o])
                     effect.process(accLeft, accRight, frames);
             }
+            if (o < eqState_->outputMultiband.size()) { for (auto& e : eqState_->outputMultiband[o]) e.process(accLeft, accRight, frames); }
+            if (o < eqState_->outputDeEssers.size()) { for (auto& e : eqState_->outputDeEssers[o]) e.process(accLeft, accRight, frames); }
+            if (o < eqState_->outputLimiters.size()) { for (auto& e : eqState_->outputLimiters[o]) e.process(accLeft, accRight, frames); }
         }
     }
 

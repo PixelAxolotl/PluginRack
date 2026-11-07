@@ -7,11 +7,15 @@
 #include <memory>
 #include <vector>
 
+#include <pluginrack/DeEsserEffect.h>
 #include <pluginrack/DynamicsEffect.h>
 #include <pluginrack/EqEngine.h>
+#include <pluginrack/MultibandEffect.h>
+#include <pluginrack/TraceData.h>
 
 #include "EQCurveComponent.h"
 #include "Theme.h"
+#include "TraceGraphComponent.h"
 
 // Read-only thumbnail of one rack insert, drawn inside its card: the built-in
 // EQ shows its curve plus the live spectrum, Compressor and Gate show their
@@ -20,9 +24,9 @@
 // that edits a plugin.
 class InsertMiniView final : public juce::Component {
 public:
-    static constexpr int kHeight = 80;
+    static constexpr int kHeight = 120;
 
-    enum class Kind { None, Eq, Dynamics, Vst };
+    enum class Kind { None, Eq, Dynamics, Multiband, DeEsser, Vst };
 
     InsertMiniView();
 
@@ -32,9 +36,15 @@ public:
     // compressor's transfer curve and the gate's.
     void showDynamicsPair(const pluginrack::DynamicsEffect& compressor,
                           const pluginrack::DynamicsEffect& gate);
+    void showMultiband(const pluginrack::MultibandEffect& effect, double sampleRateHz);
+    void showDeEsser(const pluginrack::DeEsserEffect& effect, double sampleRateHz);
     void showVst();
 
     Kind getKind() const { return kind; }
+    void setMultiband(const pluginrack::MultibandEffect& effect, double sampleRateHz);
+    void setDeEsser(const pluginrack::DeEsserEffect& effect, double sampleRateHz);
+    void setGainReduction(const std::vector<float>& reductionsDb);
+    void setDeEsserGainReduction(float reductionDb);
     void setVstSnapshot(const juce::Image& snapshot);
     void setSpectrum(const float* magnitudesDb, int numBins);
     // Live state, pushed every tick: the panel edits the engine while the card
@@ -59,11 +69,16 @@ public:
 private:
     void paintVst(juce::Graphics& g);
     void paintDynamics(juce::Graphics& g);
+    void paintMultiband(juce::Graphics& g);
+    void paintDeEsser(juce::Graphics& g);
+    void updateTraceVectors();
 
     Kind kind = Kind::None;
     std::unique_ptr<EQCurveComponent> eqCurve;
     pluginrack::DynamicsEffect dynamics;
     pluginrack::DynamicsEffect gateEffect;
+    pluginrack::MultibandEffect multiband;
+    pluginrack::DeEsserEffect deEsser;
     bool hasGate = false;
     juce::Image vstSnapshot;
     float inputDb = -60.0f;
@@ -71,6 +86,13 @@ private:
     bool hasLive = false;
     float spectrumOffsetDb = 0.0f;
     int weightingIndex = 0;
+    std::vector<float> spectrum;
+    std::vector<float> reductionsDb;
+    std::vector<float> multibandTarget;
+    std::vector<float> multibandGainChange;
+    std::vector<float> deEsserGainChange;
+    float deEsserGainReductionDb = 0.0f;
+    double sampleRateHz = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InsertMiniView)
 };

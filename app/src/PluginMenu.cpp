@@ -227,6 +227,39 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
     addActionRows(menu, anchor, onChoose);
 }
 
+void buildAddPluginMenu(juce::PopupMenu& menu,
+                        juce::Component::SafePointer<juce::Component> anchor,
+                        const ChooseCallback& onChoose,
+                        const PluginMenu::BuiltInCallback& onBuiltIn) {
+    menu.addSectionHeader("ADD PLUGIN");
+
+    // Built-in effects sit above the VST branches so the singleton move is
+    // discoverable without leaving the picker. Dynamics id 1 is the
+    // compressor and id 2 the gate (the original chain order).
+    juce::PopupMenu builtInMenu;
+    builtInMenu.addItem("EQ", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::Eq, 0});
+    });
+    // Compressor and gate are one object (the Dynamics card): one entry
+    // restores or moves both rows together, each still switched on its own.
+    builtInMenu.addItem("Comp/Gate", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::Dynamics, 1});
+    });
+    builtInMenu.addItem("Multiband Comp", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::Multiband, 1});
+    });
+    builtInMenu.addItem("De-esser", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::DeEsser, 1});
+    });
+    builtInMenu.addItem("Limiter", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::Limiter, 1});
+    });
+    menu.addSubMenu("Built-In effects", builtInMenu);
+
+    addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);
+    addActionRows(menu, anchor, onChoose);
+}
+
 } // namespace
 
 namespace PluginMenu {
@@ -241,6 +274,21 @@ void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::F
 
     juce::PopupMenu menu;
     buildAddPluginMenu(menu, safeAnchor, onChoose);
+
+    menu.showMenuAsync(juce::PopupMenu::Options()
+                           .withTargetComponent(anchor)
+                           .withMinimumWidth(260));
+}
+
+void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::File&, int)> onChoose,
+                       BuiltInCallback onBuiltIn) {
+    auto& library = PluginLibrary::getInstance();
+    if (!library.hasScanned() && !library.isScanning()) library.beginBackgroundScan();
+
+    const juce::Component::SafePointer<juce::Component> safeAnchor(&anchor);
+
+    juce::PopupMenu menu;
+    buildAddPluginMenu(menu, safeAnchor, onChoose, onBuiltIn);
 
     menu.showMenuAsync(juce::PopupMenu::Options()
                            .withTargetComponent(anchor)

@@ -1,4 +1,7 @@
 #include "pluginrack/SceneValidator.h"
+#include "pluginrack/MultibandEffect.h"
+#include "pluginrack/DeEsserEffect.h"
+#include "pluginrack/LimiterEffect.h"
 
 #include <cmath>
 #include <cstddef>
@@ -103,6 +106,31 @@ void validateEffects(const char* kind, std::uint32_t id,
     }
 }
 
+void validateMultiband(const char* kind, std::uint32_t id, const std::vector<MultibandEffect>& effects, std::vector<SceneError>& errors) {
+    if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multibandEffects too many"});
+    for (const auto& e : effects) {
+        if (e.bands.empty() || e.bands.size() > 6) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband band count out of range [1,6]"});
+        if (!e.crossovers.empty() && e.crossovers.size() + 1 != e.bands.size()) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossover count mismatch"});
+        for (std::size_t i = 1; i < e.crossovers.size(); ++i) if (!(e.crossovers[i] > e.crossovers[i-1])) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossovers not ascending"});
+        for (float f : e.crossovers) if (!std::isfinite(f) || f < 20.0f || f > 20000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossover out of range"});
+        for (const auto& b : e.bands) {
+            if (!std::isfinite(b.thresholdDb) || b.thresholdDb < -60.0f || b.thresholdDb > 0.0f || !std::isfinite(b.ratio) || b.ratio < 1.0f || b.ratio > 80.0f || !std::isfinite(b.attackMs) || b.attackMs <= 0.0f || b.attackMs > 200.0f || !std::isfinite(b.releaseMs) || b.releaseMs <= 0.0f || b.releaseMs > 1000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid multiband band parameters"});
+        }
+    }
+}
+void validateDeEssers(const char* kind, std::uint32_t id, const std::vector<DeEsserEffect>& effects, std::vector<SceneError>& errors) {
+    if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " deEsserEffects too many"});
+    for (const auto& e : effects) {
+        if (!std::isfinite(e.freqHz) || e.freqHz < 100.0f || e.freqHz > 16000.0f || !std::isfinite(e.q) || e.q < 0.1f || e.q > 20.0f || !std::isfinite(e.thresholdDb) || e.thresholdDb < -60.0f || e.thresholdDb > 0.0f || !std::isfinite(e.rangeDb) || e.rangeDb < 0.0f || e.rangeDb > 36.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid deesser parameters"});
+    }
+}
+void validateLimiters(const char* kind, std::uint32_t id, const std::vector<LimiterEffect>& effects, std::vector<SceneError>& errors) {
+    if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " limiterEffects too many"});
+    for (const auto& e : effects) {
+        if (!std::isfinite(e.inputGainDb) || e.inputGainDb < -48.0f || e.inputGainDb > 48.0f || !std::isfinite(e.ceilingDb) || e.ceilingDb < -12.0f || e.ceilingDb > 0.0f || !std::isfinite(e.lookaheadMs) || e.lookaheadMs < 0.0f || e.lookaheadMs > 10.0f || !std::isfinite(e.releaseMs) || e.releaseMs < 1.0f || e.releaseMs > 2000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid limiter parameters"});
+    }
+}
+
 void validateInserts(const char* kind, std::uint32_t id,
                      const std::vector<InsertSlot>& inserts,
                      std::vector<SceneError>& errors) {
@@ -161,6 +189,9 @@ void validateChain(const char* kind, std::uint32_t id, const std::vector<ChainIt
                 }
                 break;
             case ChainItemType::Dynamics:
+            case ChainItemType::Multiband:
+            case ChainItemType::DeEsser:
+            case ChainItemType::Limiter:
                 // Deliberately not checked against the strip's effects: scenes
                 // written by earlier builds carry rows such as a stale
                 // `Dynamics 2` next to effects 1 and 3, and the mixer tolerates
@@ -190,6 +221,24 @@ void validateRtaSettings(const char* kind, std::uint32_t id, float offsetDb, int
         errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                           std::string(kind) + " " + std::to_string(id) +
                               " eqRtaWeighting must be 0 (Z), 1 (A) or 2 (C)"});
+    }
+}
+
+void validateEffectRtaSettings(const char* kind,
+                               std::uint32_t id,
+                               const char* label,
+                               float offsetDb,
+                               int weighting,
+                               std::vector<SceneError>& errors) {
+    if (!std::isfinite(offsetDb) || offsetDb < kMinEqRtaOffsetDb || offsetDb > kMaxEqRtaOffsetDb) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                          std::string(kind) + " " + std::to_string(id) + " " +
+                              label + "RtaOffsetDb out of range [-60, 60]"});
+    }
+    if (weighting < 0 || weighting > kMaxEqRtaWeighting) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                          std::string(kind) + " " + std::to_string(id) + " " +
+                              label + "RtaWeighting must be 0 (Z), 1 (A) or 2 (C)"});
     }
 }
 
@@ -328,9 +377,18 @@ std::vector<SceneError> validate(const Scene& scene) {
         validateEqBands("channel", channel.id, channel.eqBands, errors);
         validateEqDelay("channel", channel.id, channel.eqDelayMs, errors);
         validateEffects("channel", channel.id, channel.effects, errors);
+        validateMultiband("channel", channel.id, channel.multibandEffects, errors);
+        validateDeEssers("channel", channel.id, channel.deEsserEffects, errors);
+        validateLimiters("channel", channel.id, channel.limiterEffects, errors);
         validateChain("channel", channel.id, channel.chain, channel.inserts, errors);
         validateRtaSettings("channel", channel.id, channel.eqRtaOffsetDb, channel.eqRtaWeighting,
                             errors);
+        validateEffectRtaSettings("channel", channel.id, "multiband",
+                                  channel.multibandRtaOffsetDb, channel.multibandRtaWeighting,
+                                  errors);
+        validateEffectRtaSettings("channel", channel.id, "deEsser",
+                                  channel.deEsserRtaOffsetDb, channel.deEsserRtaWeighting,
+                                  errors);
     }
 
     std::unordered_set<std::uint32_t> outputIds;
@@ -354,9 +412,18 @@ std::vector<SceneError> validate(const Scene& scene) {
         validateEqBands("output", output.id, output.eqBands, errors);
         validateEqDelay("output", output.id, output.eqDelayMs, errors);
         validateEffects("output", output.id, output.effects, errors);
+        validateMultiband("output", output.id, output.multibandEffects, errors);
+        validateDeEssers("output", output.id, output.deEsserEffects, errors);
+        validateLimiters("output", output.id, output.limiterEffects, errors);
         validateChain("output", output.id, output.chain, output.inserts, errors);
         validateRtaSettings("output", output.id, output.eqRtaOffsetDb, output.eqRtaWeighting,
                             errors);
+        validateEffectRtaSettings("output", output.id, "multiband",
+                                  output.multibandRtaOffsetDb, output.multibandRtaWeighting,
+                                  errors);
+        validateEffectRtaSettings("output", output.id, "deEsser",
+                                  output.deEsserRtaOffsetDb, output.deEsserRtaWeighting,
+                                  errors);
     }
 
     std::unordered_set<std::uint64_t> routePairs;
