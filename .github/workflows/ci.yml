@@ -23,7 +23,7 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build/ci --output-on-failure
       - name: Dependency advisory scan (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.24.0
         with:
           scan-type: fs
           ignore-unfixed: true
