@@ -80,6 +80,26 @@ void InsertMiniView::showDeEsser(const pluginrack::DeEsserEffect& effect, double
     repaint();
 }
 
+void InsertMiniView::showLimiter(const pluginrack::LimiterEffect& effect) {
+    kind = Kind::Limiter;
+    limiter = effect;
+    hasLive = false;
+    resized();
+    repaint();
+}
+
+void InsertMiniView::setLimiter(const pluginrack::LimiterEffect& effect) {
+    if (kind != Kind::Limiter) return;
+    if (limiter == effect) return;
+    limiter = effect;
+    repaint();
+}
+
+void InsertMiniView::setLimiterGain(float newInputDb, float newGainDb) {
+    if (kind != Kind::Limiter) return;
+    setLiveGain(newInputDb, newGainDb);
+}
+
 void InsertMiniView::showVst() {
     kind = Kind::Vst;
     resized();
@@ -233,6 +253,7 @@ void InsertMiniView::paint(juce::Graphics& g) {
         case Kind::Dynamics: paintDynamics(g); break;
         case Kind::Multiband: paintMultiband(g); break;
         case Kind::DeEsser: paintDeEsser(g); break;
+        case Kind::Limiter: paintLimiter(g); break;
         case Kind::Eq: break; // the embedded curve paints itself
         case Kind::None: break;
     }
@@ -308,6 +329,39 @@ void InsertMiniView::paintDeEsser(juce::Graphics& g) {
     g.setColour(theme::bg().darker(0.3f));
     g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
     const float fill = juce::jlimit(0.0f, 1.0f, deEsserGainReductionDb / kMaxReductionDb);
+    if (fill > 0.0f) {
+        auto filled = gauge.toFloat();
+        filled.setHeight(filled.getHeight() * fill);
+        g.setColour(theme::red());
+        g.fillRoundedRectangle(filled, 2.0f);
+    }
+    g.setColour(theme::dim());
+    g.setFont(juce::Font(juce::FontOptions(8.0f)));
+    g.drawText("GR", gaugeCaption, juce::Justification::centred, false);
+}
+
+void InsertMiniView::paintLimiter(juce::Graphics& g) {
+    // Ceiling line plus live input peak and red GR bar, matching the
+    // De-esser card's gauge treatment.
+    auto area = getLocalBounds().reduced(static_cast<int>(kFullWidthFrame));
+    auto gauge = area.removeFromRight(kGaugeWidth);
+    const auto gaugeCaption = gauge.removeFromBottom(kGaugeCaptionHeight);
+    area.removeFromRight(2);
+    const auto graph = TraceGraphComponent::miniGraphBounds(area);
+    g.setColour(theme::bg());
+    g.fillRoundedRectangle(graph, 2.0f);
+    const float ceilingY = TraceGraphComponent::miniTraceDb(limiter.ceilingDb, graph);
+    g.setColour(theme::cyan().withAlpha(0.65f));
+    g.drawHorizontalLine(juce::roundToInt(ceilingY), graph.getX(), graph.getRight());
+    if (hasLive) {
+        const float x = graph.getRight() - 4.0f;
+        const float y = TraceGraphComponent::miniTraceDb(inputDb, graph);
+        g.setColour(theme::text());
+        g.fillEllipse(x - 2.0f, y - 2.0f, 4.0f, 4.0f);
+    }
+    g.setColour(theme::bg().darker(0.3f));
+    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
+    const float fill = juce::jlimit(0.0f, 1.0f, -gainDb / kMaxReductionDb);
     if (fill > 0.0f) {
         auto filled = gauge.toFloat();
         filled.setHeight(filled.getHeight() * fill);

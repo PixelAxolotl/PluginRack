@@ -189,12 +189,9 @@ private:
     juce::TextButton soloButton{"Solo"};
     juce::TextButton mixerButton{"Mixer"};
 
-    // Plugin column
-    juce::Label fxHeader;
+    // Plugin column: all built-in state now lives in the insert cards, so
+    // there are no standalone EQ/Comp/Gate buttons left to keep.
     juce::Label insertsHeader;
-    EqButton gateButton{"GATE"};
-    EqButton eqButton{"EQ"};
-    EqButton compressorButton{"COMP"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
     MultibandWindow* multibandWindow = nullptr;
@@ -211,6 +208,7 @@ private:
     InsertSlotComponent* eqCard = nullptr;
     InsertSlotComponent* multibandCard = nullptr;
     InsertSlotComponent* deEsserCard = nullptr;
+    InsertSlotComponent* limiterCard = nullptr;
     MiniSpectrum multibandSpectrum;
     MiniSpectrum deEsserSpectrum;
     float multibandMeterLevelDb = -60.0f;

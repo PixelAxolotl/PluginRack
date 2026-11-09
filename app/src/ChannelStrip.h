@@ -32,6 +32,7 @@ public:
     void refreshInput();
     void openEqWindow();
     void closeEqWindow();
+    void closeAllEffectWindows();
     void refreshEqButton();
     void openDynamicsWindow(pluginrack::DynamicsEffectType type);
     void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
@@ -120,9 +121,6 @@ private:
 
     juce::TextButton muteButton{"Mute"};
     juce::TextButton soloButton{"Solo"};
-    EqButton gateButton{"GATE"};
-    EqButton eqButton{"EQ"};
-    EqButton compressorButton{"COMP"};
     EQWindow* eqWindow = nullptr;
     DynamicsWindow* dynamicsWindow = nullptr;
     MultibandWindow* multibandWindow = nullptr;

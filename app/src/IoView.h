@@ -30,6 +30,10 @@ public:
 
     // A strip added, removed or renamed here changes every other view.
     std::function<void()> onStructureChanged;
+    // Forwarded from both boards so double-click in I/O jumps to the Rack
+    // like it does in the Mixer.
+    std::function<void(int channelId, bool isOutput)> onSelectionChanged;
+    std::function<void(int channelId, bool isOutput)> onDoubleClicked;
 
 private:
     void timerCallback() override;

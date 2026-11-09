@@ -37,6 +37,13 @@ constexpr double kLatencyMeasureMaxSeconds = 5.0;
 // for a larger negotiated clock block so outputs and inputs can be opened in
 // parallel without making startup wait for a second, serialized probe.
 constexpr int kProbeRenderBlockFrames = 4096;
+// A single-client ASIO driver (M-Audio M-Track) refuses a second client for a
+// moment after the previous stream is closed, reporting the bare "No such
+// device" from loadDriver(). The clock is retried this many times (total four
+// attempts) with a short pause, which is the same recovery as pressing Force
+// ASIO by hand.
+constexpr int kClockOpenAttempts = 4;
+constexpr int kClockRetryDelayMs = 350;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
 
@@ -1014,8 +1021,9 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
             done("The channel no longer exists.");
             return;
         }
-        if (channel->inserts.size() >= 5) {
-            done("Each strip holds 3 built-in effects and at most 5 VST inserts.");
+        if (channel->inserts.size() >= kMaxInserts) {
+            done("This strip already holds " + juce::String(kMaxInserts)
+                 + " VST inserts.");
             return;
         }
     }
@@ -1070,8 +1078,9 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                     auto* channel = findChannel(channelId);
                     if (channel == nullptr) {
                         error = "The channel no longer exists.";
-                    } else if (channel->inserts.size() >= 5) {
-                        error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                    } else if (channel->inserts.size() >= kMaxInserts) {
+                        error = "This strip already holds " + juce::String(kMaxInserts)
+                                + " VST inserts.";
                     } else {
                         insert->id = nextInsertId++;
                         const auto insertId = insert->id;
@@ -1211,8 +1220,9 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
             done("The output no longer exists.");
             return;
         }
-        if (output->inserts.size() >= 5) {
-            done("Each strip holds 3 built-in effects and at most 5 VST inserts.");
+        if (output->inserts.size() >= kMaxInserts) {
+            done("This strip already holds " + juce::String(kMaxInserts)
+                 + " VST inserts.");
             return;
         }
     }
@@ -1263,8 +1273,9 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                     auto* output = findOutput(outputId);
                     if (output == nullptr) {
                         error = "The output no longer exists.";
-                    } else if (output->inserts.size() >= 5) {
-                        error = "Each strip holds 3 built-in effects and at most 5 VST inserts.";
+                    } else if (output->inserts.size() >= kMaxInserts) {
+                        error = "This strip already holds " + juce::String(kMaxInserts)
+                                + " VST inserts.";
                     } else {
                         insert->id = nextInsertId++;
                         const auto insertId = insert->id;
@@ -2761,6 +2772,14 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         }
     }
 
+    // ASIO is single-client: reopening the same endpoint while the prior
+    // playback still holds it makes the driver refuse the second open
+    // ("No such device" / "(the previous stream is still running)"). Release
+    // it first. In duplex mode nothing is queued, so closing costs no drain;
+    // otherwise the push-silence fallback keeps other outputs fed.
+    if (prevOutput != nullptr) {
+        prevOutput->close();
+    }
     auto openErr = newPlayback->open(openName, engineRate, err, requestedOutputBufferSize_,
                                      targetBlocks, primeBlocks, preferExclusive,
                                      renderBlockFrames,
@@ -2799,12 +2818,10 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         // the saved scene still say which device is missing, instead of
         // dropping back to "Choose device" with only an error line.
         if (out->output == nullptr) out->outputDeviceName = deviceName;
-        // Some drivers refuse a second client for an endpoint, so reopening an
-        // already-open output fails while the old stream keeps playing. Say
-        // that instead of reporting the strip as dead.
+        // The prior playback was closed above, so its name no longer applies;
+        // openErr itself is the reason (and a reopened candidate may already
+        // have failed above for a different endpoint).
         auto message = openErr;
-        if (out->output != nullptr)
-            message += " (the previous stream is still running)";
         out->outputError = message;
         return message;
     }
@@ -3813,6 +3830,14 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     deviceOpenTotal_.store((int) (outputsWanted.size() + inputsWanted.size()));
     juce::String errors;
 
+    // Open the clock (first output) first, on its own. ASIO is single-client:
+    // an input probe that grabs the endpoint first makes the clock fail with
+    // "No such device" while Force ASIO (which opens the clock synchronously
+    // first) works. Releasing any separate capture on the clock device before
+    // the clock reopens is what lets Apply do in one pass what Force ASIO did.
+    if (!outputsWanted.empty())
+        releaseDeviceInputsForClock(outputsWanted.front().name);
+
     // Device probes are the expensive part of startup. Keep each probe on its
     // own COM thread and let output and input probes overlap. Every stream is
     // attempted exactly once: a refusal is reported against its strip and the
@@ -3869,11 +3894,68 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     outputHelpers.reserve(outputsWanted.size());
     inputHelpers.reserve(inputsWanted.size());
 
+    // Open the clock first, then the inputs: joining outputs before launching
+    // inputs is what makes Apply race-free on a single-client ASIO driver.
+    // (Previously outputs and inputs launched in parallel; whichever thread
+    // grabbed the endpoint first won and the other reported "No such device"
+    // while Force ASIO — which opens the clock synchronously first — worked.)
     if (!shouldExit()) {
         launchOutputs(openRate, outputResults, outputHelpers);
-        launchInputs(openRate, forceInputs, inputResults, inputHelpers);
     }
     for (auto& helper : outputHelpers) helper.join();
+
+    // retryClockOpen: a single-client ASIO driver (M-Audio M-Track) keeps
+    // refusing CoCreateInstance for a moment after the previous stream is
+    // closed — JUCE only releases the driver when the old device object is
+    // destroyed — and reports the bare "No such device" from loadDriver().
+    // Retry the clock a bounded number of times before any input opens, which
+    // is exactly the recovery pressing Force ASIO performs by hand.
+    if (!shouldExit() && !outputResults.empty() && !outputsWanted.empty()) {
+        const auto firstError = outputResults.front();
+        for (int attempt = 2;
+             attempt <= kClockOpenAttempts && outputResults.front().isNotEmpty();
+             ++attempt) {
+            // Only a driver-busy refusal is worth retrying; a rejected buffer
+            // size or a missing endpoint would fail the same way again.
+            if (outputResults.front().indexOf("No such device") < 0) break;
+            juce::Thread::sleep(kClockRetryDelayMs);
+            const auto status = "output \"" + outputsWanted.front().label + "\" - "
+                              + outputsWanted.front().name + " (retry "
+                              + juce::String(attempt) + ")";
+            beginDeviceOpen(status);
+            const auto retryError = setOutputDeviceImpl(outputsWanted.front().id,
+                                                        outputsWanted.front().name, openRate);
+            endDeviceOpen(status);
+            deviceOpenProgress_.fetch_add(1);
+            juce::Logger::writeToLog("audio: clock retry " + juce::String(attempt)
+                                     + (retryError.isEmpty() ? juce::String(" ok")
+                                                             : " failed: " + retryError));
+            if (retryError.isEmpty()) outputResults.front().clear();
+        }
+
+        // A single-client ASIO driver can keep refusing while the open runs on
+        // this worker thread's throwaway COM apartment — retrying forever makes
+        // no difference. Force ASIO succeeds because it opens from the message
+        // thread, so a clock that is still refused is reopened there, which is
+        // the same call on the same thread the user's workaround uses.
+        if (outputResults.front().isNotEmpty()
+            && outputResults.front().indexOf("No such device") >= 0
+            && !juce::MessageManager::existsAndIsCurrentThread()) {
+            juce::MessageManager::callSync([this, &outputResults, &outputsWanted, openRate] {
+                outputResults.front() = setOutputDeviceImpl(outputsWanted.front().id,
+                                                            outputsWanted.front().name, openRate);
+            });
+            juce::Logger::writeToLog("audio: clock reopened on the message thread: "
+                                     + (outputResults.front().isEmpty()
+                                            ? juce::String("ok")
+                                            : outputResults.front()));
+        }
+        if (outputResults.front().isNotEmpty()) outputResults.front() = firstError;
+    }
+
+    if (!shouldExit()) {
+        launchInputs(openRate, forceInputs, inputResults, inputHelpers);
+    }
     for (auto& helper : inputHelpers) helper.join();
 
     // Every stream was attempted exactly once. Report each refusal against the
@@ -3895,4 +3977,19 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     }
 
     return errors;
+}
+
+void AudioEngine::releaseDeviceInputsForClock(const juce::String& deviceName) {
+    if (deviceName.isEmpty() || deviceName == "None - silent") return;
+    std::shared_ptr<InputCapture> previous;
+    {
+        const juce::ScopedLock lock(stateLock);
+        const auto it = inputCaptures_.find(deviceName);
+        if (it != inputCaptures_.end()) previous = it->second.capture;
+        for (auto& c : channels) {
+            if (c->inputDeviceName == deviceName) c->input.reset();
+        }
+        if (it != inputCaptures_.end()) inputCaptures_.erase(it);
+    }
+    if (previous != nullptr) previous->close();
 }

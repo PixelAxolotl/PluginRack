@@ -166,10 +166,17 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     }
 
     juce::AudioDeviceManager::AudioDeviceSetup setup;
-    if (wantInput)
+    if (duplexInputChannels > 0) {
+        // Duplex: ASIO uses one device name for both directions, so name it
+        // as the output as well (a missing output name opens the device with
+        // no output channels and the clock goes silently deaf).
         setup.inputDeviceName = selectedDeviceName;
-    else
         setup.outputDeviceName = selectedDeviceName;
+    } else if (wantInput) {
+        setup.inputDeviceName = selectedDeviceName;
+    } else {
+        setup.outputDeviceName = selectedDeviceName;
+    }
     if (requestedBufferSize >= 0) {
         setup.sampleRate = engineSampleRate; // 0 = driver default
         // Auto asks for the size this endpoint accepted last time; 0 on a first
@@ -179,10 +186,14 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     }
     juce::XmlElement typeSetup("DEVICESETUP");
     typeSetup.setAttribute("deviceType", chosenTypeName);
-    if (wantInput)
+    if (duplexInputChannels > 0) {
         typeSetup.setAttribute("audioInputDeviceName", selectedDeviceName);
-    else
         typeSetup.setAttribute("audioOutputDeviceName", selectedDeviceName);
+    } else if (wantInput) {
+        typeSetup.setAttribute("audioInputDeviceName", selectedDeviceName);
+    } else {
+        typeSetup.setAttribute("audioOutputDeviceName", selectedDeviceName);
+    }
     auto err = manager.initialise(numInputChannels, numOutputChannels, &typeSetup, false,
                                   selectedDeviceName, &setup);
     auto* device = err.isEmpty() ? manager.getCurrentAudioDevice() : nullptr;
@@ -209,10 +220,22 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
             rememberBufferFor(selectedDeviceName, device->getCurrentBufferSizeSamples());
         }
     }
-    if (err.isEmpty() && requestedBufferSize > 0
-        && device->getCurrentBufferSizeSamples() != requestedBufferSize) {
-        err = "The device does not support a " + juce::String(requestedBufferSize)
-            + "-sample buffer.";
+    if (err.isEmpty() && requestedBufferSize > 0) {
+        const int actual = device->getCurrentBufferSizeSamples();
+        // Drivers (M-Audio Duo) negotiate their preferred block (480) even when
+        // 32 was asked. Accept it when the negotiated size is one the driver
+        // actually supports; only a size the driver never advertised is an error.
+        const auto available = device->getAvailableBufferSizes();
+        bool supported = false;
+        for (const int size : available) if (size == actual) { supported = true; break; }
+        if (actual != requestedBufferSize && !supported && !available.isEmpty()) {
+            err = "The device does not support a " + juce::String(requestedBufferSize)
+                + "-sample buffer.";
+        } else if (actual != requestedBufferSize) {
+            // Negotiated a supported size different from the ask: keep it.
+            if (device != nullptr)
+                rememberBufferFor(selectedDeviceName, actual);
+        }
     }
     if (err.isNotEmpty()) {
         manager.closeAudioDevice();

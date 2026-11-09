@@ -66,7 +66,10 @@ public:
                                      int bufferSize, const juce::String& stateBase64 = {},
                                      int pluginUniqueId = 0);
     // Message thread: takes over the instance and prepares it to play.
-    void adopt(const LoadedPlugin& loaded);
+    // UniqueId and state are forwarded to the restricted host so saved
+    // settings and multi-class bundles resolve there.
+    void adopt(const LoadedPlugin& loaded, const juce::String& stateBase64 = {},
+               int pluginUniqueId = 0);
 
     // stateBase64 is an opaque blob previously returned by getStateAsBase64;
     // when non-empty it is applied before the plugin is prepared to play, so
@@ -119,14 +122,21 @@ private:
 
     juce::DocumentWindow* editorWindow = nullptr;
 
-    // PR-01: the plugin runs in a restricted host process, not in this app.
-    // `host` is null when the host could not start; in that case the slot
-    // stays empty (fail closed) instead of hosting the plugin in-process.
+    // PR-01: audio renders in a restricted host process when it starts.
+    // If the host cannot start, processBlock falls back to the in-process
+    // instance so the slot still sounds (degraded sandbox, not silence).
     std::unique_ptr<class RestrictedHost> host;
     std::uint64_t hostSequence = 0;
     bool hostReady = false;
+    // Seamless-add scratch: the live output block is never handed to the
+    // host IPC directly. Submit copies the range here; fetch writes the
+    // host's answer here; only on a clean ack do we copy it back into the
+    // live buffer. A fallback render then finds the live buffer untouched.
+    juce::AudioBuffer<float> hostScratch;
+    int hostScratchCapacity = 0;
 
-    void startHostLocked(const juce::File& file, juce::String& error);
+    void startHostLocked(const juce::File& file, int uniqueId, const juce::String& stateBase64,
+                         juce::String& error);
     void stopHostLocked();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHost)

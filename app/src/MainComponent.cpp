@@ -3,10 +3,29 @@
 #include <cmath>
 #include <vector>
 
+#include "AppLogos.h"
 #include "PluginLibrary.h"
 #include "SceneBridge.h"
 
+namespace {
+// The toolbar logo: the mint-on-dark app icon, decoded once and shared by
+// every ToolbarComponent. Binary data keeps it inside the exe, so the header
+// never depends on a loose file next to it.
+juce::Image appLogoImage() {
+    static juce::Image cached;
+    if (cached.isNull()) {
+        int size = 0;
+        if (const auto* data = AppLogos::logo_dark_png; data != nullptr) {
+            size = AppLogos::logo_dark_pngSize;
+            cached = juce::ImageFileFormat::loadFrom(data, static_cast<size_t>(size));
+        }
+    }
+    return cached;
+}
+} // namespace
+
 ToolbarComponent::ToolbarComponent() {
+    logoImage = appLogoImage();
     for (auto* b : { &racksButton, &mixerButton, &patchesButton, &routingButton, &ioButton,
                      &savesButton, &settingsButton }) {
         b->setClickingTogglesState(true);
@@ -25,7 +44,7 @@ ToolbarComponent::ToolbarComponent() {
     mixerButton.setTooltip("Mixer view: faders, meters, inline routing");
     patchesButton.setTooltip("Patches view: inputs to outputs map");
     routingButton.setTooltip("Routing view: full channel/output matrix");
-    ioButton.setTooltip("I/O view: input and output devices, round-trip measurement");
+    ioButton.setTooltip("I/O view: input and output devices");
     savesButton.setTooltip("Saves view: saved scenes");
     settingsButton.setTooltip("Settings view: buffer, latency tuning, diagnostics");
 
@@ -51,8 +70,9 @@ ToolbarComponent::ToolbarComponent() {
     addAndMakeVisible(racksButton);
     addAndMakeVisible(mixerButton);
     addAndMakeVisible(patchesButton);
-    addAndMakeVisible(routingButton);
     addAndMakeVisible(ioButton);
+    addAndMakeVisible(routingButton);
+    addAndMakeVisible(savesButton);
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(snapshotButton);
     addAndMakeVisible(latencyLabel);
@@ -107,10 +127,20 @@ void ToolbarComponent::paint(juce::Graphics& g) {
     g.setColour(theme::border());
     g.drawHorizontalLine(getHeight() - 1, 0.0f, (float)getWidth());
 
+    // App logo left of the wordmark: the mint-on-dark icon at 32 px, centred
+    // in the 190 px wordmark lane the layout reserves below.
+    if (!logoImage.isNull()) {
+        constexpr int kLogoSize = 32;
+        const int logoY = (getHeight() - kLogoSize) / 2;
+        g.drawImageWithin(logoImage, 8, logoY, kLogoSize, kLogoSize,
+                          juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize,
+                          false);
+    }
+
     // wordmark
     g.setColour(theme::green());
     g.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
-    g.drawText("PluginRack", 20, 0, 182, getHeight(), juce::Justification::centredLeft);
+    g.drawText("PluginRack", 46, 0, 152, getHeight(), juce::Justification::centredLeft);
 
     // clock info (single line, clipped - same as the old header paint)
     g.setColour(clockColour);
@@ -140,8 +170,9 @@ void ToolbarComponent::resized() {
     area.removeFromRight(8);
     saveButton.setBounds(area.removeFromRight(50));
     area.removeFromRight(8);
-    snapshotButton.setBounds(area.removeFromRight(76));
-    area.removeFromRight(8);
+    // Snapshot stays hidden until the A/B feature lands: a dead button that
+    // pops a modal steals 84 px from the clock readout.
+    snapshotButton.setVisible(false);
     if (errorButton.isVisible()) {
         errorButton.setBounds(area.removeFromRight(28));
         area.removeFromRight(8);
@@ -189,7 +220,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     , ioView(audioEngine)
     , savesView([this](const pluginrack::Scene& scene) {
           return onRestoreRequested ? onRestoreRequested(scene) : juce::String();
-      })
+      },
+                [this](const juce::String& name) {
+                    if (onSaveLoaded) onSaveLoaded(name);
+                })
     , settingsView(audioEngine) {
     rackView.onJumpToMixer = [this] {
         setView(AppView::Mixer);
@@ -207,6 +241,13 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     ioView.onStructureChanged = [this] {
         // Strips added, removed or renamed on the I/O page change every view.
         if (onStructureChanged) onStructureChanged();
+    };
+    ioView.onSelectionChanged = [this](int id, bool isOutput) {
+        rackView.setSelectedChannel(id, isOutput);
+    };
+    ioView.onDoubleClicked = [this](int id, bool isOutput) {
+        rackView.setSelectedChannel(id, isOutput);
+        setView(AppView::Rack);
     };
     mixerView.onSelectionChanged = [this](int id, bool isOutput) {
         rackView.setSelectedChannel(id, isOutput);
@@ -283,14 +324,17 @@ MainComponent::MainComponent()
     router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
     router.onStructureChanged = [this] { refreshViews(); };
     router.onRestoreRequested = [this](const pluginrack::Scene& scene) { return applyScene(scene); };
+    router.onSaveLoaded = [this](const juce::String& name) { activeSaveName_ = name; };
     toolbar.onSave = [this] {
-        auto names = SceneBridge::getSaveNames();
-        int n = 1;
-        while (names.contains("Save " + juce::String(n))) ++n;
-        const auto error = SceneBridge::saveNamed(audioEngine.makeScene(), "Save " + juce::String(n));
-        if (error.isNotEmpty()) showError(error);
-        selectView(AppView::Saves);
-        router.refreshViews();
+        // Stay where the user is: overwrite the active save, or ask for a
+        // name when nothing is active yet. No teleport to the Saves tab.
+        if (activeSaveName_.isNotEmpty()) {
+            const auto error = SceneBridge::saveNamed(audioEngine.makeScene(), activeSaveName_);
+            if (error.isNotEmpty()) showError(error);
+            else router.refreshViews();
+        } else {
+            saveSceneAs();
+        }
     };
     toolbar.onMenu = [this] { showMenu(); };
     toolbar.onSnapshot = [this] { showSnapshotPlaceholder(); };
@@ -671,7 +715,12 @@ void MainComponent::saveSceneAs() {
             const auto name = w->getTextEditorContents("name");
             const auto error = SceneBridge::saveNamed(safe->audioEngine.makeScene(), name);
             if (error.isNotEmpty()) safe->showError(error);
-            else safe->refreshViews();
+            else {
+                // The Save button now overwrites this name until another
+                // scene is loaded or saved.
+                safe->activeSaveName_ = name;
+                safe->refreshViews();
+            }
         }
         delete w;
     }), true);
@@ -693,6 +742,8 @@ void MainComponent::showSavesMenu() {
                 const auto pluginErrors = applyScene(*saved);
                 if (pluginErrors.isNotEmpty())
                     showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+                else
+                    activeSaveName_ = name;
             });
         }
         menu.addSubMenu("Load Save", loadMenu);
@@ -776,6 +827,11 @@ void MainComponent::loadScene(bool showMissingMessage) {
     const auto pluginErrors = applyScene(*saved);
     if (pluginErrors.isNotEmpty())
         showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+    else {
+        // The startup scene becomes the active save, so Save overwrites it.
+        const auto defaultName = SceneBridge::getDefaultSaveName();
+        if (defaultName.isNotEmpty()) activeSaveName_ = defaultName;
+    }
 }
 
 juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool openDevicesNow) {

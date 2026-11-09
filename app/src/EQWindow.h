@@ -81,8 +81,8 @@ private:
 // fps once (spec: overload slows the analyzer, never the audio).
 class EQWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
-    static constexpr int kWidth = 560;
-    static constexpr int kHeight = 440;
+    static constexpr int kWidth = 860;
+    static constexpr int kHeight = 560;
 
     // Analyzer mode codes: the setAnalyzerTapMode callback forwards these to
     // AudioEngine::AnalyzerTap::setMode (kOff/kPre/kPost mirror).
@@ -143,6 +143,9 @@ private:
     void syncControls();      // reflect the selected band into knobs/buttons
 
     EQCurveComponent curve;
+    juce::Label titleLabel{"EQ", "EQ"};
+    juce::TextButton enableButton{"Enable"};
+    juce::ComboBox presetCombo; // Band shape presets; same header slot as other windows
     std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands;
     bool embedded = false;
 

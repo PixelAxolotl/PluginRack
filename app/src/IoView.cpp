@@ -23,12 +23,17 @@ IoView::IoView(AudioEngine& engine)
 
     inputsBoard.setSections(MixerComponent::Sections::InputsOnly);
     outputsBoard.setSections(MixerComponent::Sections::OutputsOnly);
-    inputsBoard.onStructureChanged = [this] {
-        if (onStructureChanged) onStructureChanged();
-    };
-    outputsBoard.onStructureChanged = [this] {
-        if (onStructureChanged) onStructureChanged();
-    };
+    for (auto* board : { &inputsBoard, &outputsBoard }) {
+        board->onStructureChanged = [this] {
+            if (onStructureChanged) onStructureChanged();
+        };
+        board->onSelectionChanged = [this](int id, bool isOut) {
+            if (onSelectionChanged) onSelectionChanged(id, isOut);
+        };
+        board->onDoubleClicked = [this](int id, bool isOut) {
+            if (onDoubleClicked) onDoubleClicked(id, isOut);
+        };
+    }
     addAndMakeVisible(inputsBoard);
     addAndMakeVisible(outputsBoard);
     selectTab(true);

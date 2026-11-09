@@ -43,7 +43,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     removeChannelButton.setTooltip("Remove this channel");
     addAndMakeVisible(removeChannelButton);
 
-    splitButton.setFontSize(8.0f);
+    splitButton.setFontSize(9.5f);
     splitButton.setClickAction([this] { splitIntoMonoChannels(); });
     splitButton.setTooltip("Split into mono channels - one strip per physical input");
     addAndMakeVisible(splitButton);
@@ -189,38 +189,8 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
         audioEngine.setChannelSoloed(channel.id, soloButton.getToggleState());
     };
 
-    eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
-    eqButton.onClick = [this] {
-        // Left-click toggles the EQ engine on/off (Voicemeeter-style).
-        const bool bypassed = channel.eqBypassed.get();
-        audioEngine.setChannelEqBypassed(channel.id, !bypassed);
-        refreshEqButton();
-    };
-    eqButton.onRightClick = [this] {
-        // Right-click opens the editor (fronts it if already open).
-        openEqWindow();
-    };
-    addAndMakeVisible(eqButton);
-    refreshEqButton();
-    const auto setupDynamicsButton = [this](EqButton& button,
-                                             pluginrack::DynamicsEffectType type,
-                                             const juce::String& tooltip) {
-        button.setColour(juce::TextButton::buttonColourId, theme::control());
-        button.setColour(juce::TextButton::textColourOffId, theme::text());
-        button.setTooltip(tooltip);
-        button.onClick = [this, type] { toggleDynamicsBypass(type); };
-        button.onRightClick = [this, type] { openDynamicsWindow(type); };
-        addAndMakeVisible(button);
-    };
-    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
-                        "Click: compressor on/off. Right-click: open settings");
-    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
-                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
-    // The gate lives in the compressor panel now, so both right-clicks land there.
-    gateButton.onRightClick = [this] { openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor); };
-    refreshDynamicsButtons();
+    // All built-in state lives in the insert cards now; no standalone
+    // EQ/Comp/Gate buttons remain on the strip.
 
     refreshInserts();
     refreshRouting();
@@ -228,23 +198,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 }
 
 ChannelStrip::~ChannelStrip() {
-    closeEqWindow();
-    if (dynamicsWindow != nullptr) {
-        delete dynamicsWindow;
-        dynamicsWindow = nullptr;
-    }
-    if (multibandWindow != nullptr) {
-        delete multibandWindow;
-        multibandWindow = nullptr;
-    }
-    if (deEsserWindow != nullptr) {
-        delete deEsserWindow;
-        deEsserWindow = nullptr;
-    }
-    if (limiterWindow != nullptr) {
-        delete limiterWindow;
-        limiterWindow = nullptr;
-    }
+    closeAllEffectWindows();
 }
 // openers appended below
 void ChannelStrip::openMultibandWindow() {
@@ -464,24 +418,32 @@ void ChannelStrip::closeEqWindow() {
     refreshEqButton();
 }
 
-void ChannelStrip::refreshEqButton() {
-    bool active = false;
-    if (!channel.eqBypassed.get()) {
-        // A delay-only EQ still does audible work, so it lights the button.
-        active = channel.eqDelayMs > 0.0f;
-        for (const auto& band : channel.eqBands) {
-            if (band.enabled) {
-                active = true;
-                break;
-            }
-        }
+void ChannelStrip::closeAllEffectWindows() {
+    closeEqWindow();
+    if (dynamicsWindow != nullptr) {
+        auto* doomed = dynamicsWindow;
+        dynamicsWindow = nullptr;
+        delete doomed;
     }
-    const bool open = (eqWindow != nullptr);
-    eqButton.setColour(juce::TextButton::buttonColourId,
-                       active ? theme::amber() : theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId,
-                       active ? theme::bg() : theme::text());
-    eqButton.setRingVisible(open);
+    if (multibandWindow != nullptr) {
+        auto* doomed = multibandWindow;
+        multibandWindow = nullptr;
+        delete doomed;
+    }
+    if (deEsserWindow != nullptr) {
+        auto* doomed = deEsserWindow;
+        deEsserWindow = nullptr;
+        delete doomed;
+    }
+    if (limiterWindow != nullptr) {
+        auto* doomed = limiterWindow;
+        limiterWindow = nullptr;
+        delete doomed;
+    }
+}
+
+void ChannelStrip::refreshEqButton() {
+    // No standalone button left: the insert cards carry the bypass state.
 }
 
 void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
@@ -495,28 +457,20 @@ void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
 }
 
 void ChannelStrip::refreshDynamicsButtons() {
-    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
-        const auto found = std::find_if(channel.effects.begin(), channel.effects.end(),
-                                        [type](const auto& effect) { return effect.type == type; });
-        const bool active = found != channel.effects.end() && !found->bypassed;
-        if (found != channel.effects.end() && dynamicsWindow != nullptr &&
-            dynamicsWindow->getType() == type) {
-            dynamicsWindow->setBypassed(found->bypassed);
-            if (type == pluginrack::DynamicsEffectType::Compressor) {
-                const auto gateIt = std::find_if(
-                    channel.effects.begin(), channel.effects.end(), [](const auto& effect) {
-                        return effect.type == pluginrack::DynamicsEffectType::Gate;
-                    });
-                if (gateIt != channel.effects.end()) dynamicsWindow->setGate(*gateIt);
-            }
-        }
-        button.setColour(juce::TextButton::buttonColourId,
-                         active ? theme::amber() : theme::control());
-        button.setColour(juce::TextButton::textColourOffId,
-                         active ? theme::bg() : theme::text());
-    };
-    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
-    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+    // No standalone buttons left: still syncs an open Dynamics window.
+    if (dynamicsWindow == nullptr) return;
+    const auto type = dynamicsWindow->getType();
+    const auto found = std::find_if(channel.effects.begin(), channel.effects.end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == channel.effects.end()) return;
+    dynamicsWindow->setBypassed(found->bypassed);
+    if (type == pluginrack::DynamicsEffectType::Compressor) {
+        const auto gateIt = std::find_if(
+            channel.effects.begin(), channel.effects.end(), [](const auto& effect) {
+                return effect.type == pluginrack::DynamicsEffectType::Gate;
+            });
+        if (gateIt != channel.effects.end()) dynamicsWindow->setGate(*gateIt);
+    }
 }
 
 void ChannelStrip::resized() {
@@ -554,10 +508,6 @@ void ChannelStrip::resized() {
     }
     area.removeFromTop(2);
 
-    gateButton.setVisible(false);
-    eqButton.setVisible(false);
-    compressorButton.setVisible(false);
-
     // Trim and Pan share one row, above the chain: the first two things a
     // channel is reached for sit where the eye lands, not below eight slots.
     auto gainRow = area.removeFromTop(74);
@@ -571,7 +521,7 @@ void ChannelStrip::resized() {
     panKnob.setBounds(panCell.reduced(2));
     area.removeFromTop(4);
 
-    // Unified built-in and VST chain: 3 built-ins + 5 VST slots, always.
+    // Unified built-in and VST chain: 3 built-ins + the live inserts.
     // The rows give height back before they squeeze the fader out of the strip.
     vstHeader.setBounds(area.removeFromTop(14));
     const int routingRows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
@@ -620,7 +570,9 @@ void ChannelStrip::refreshInserts() {
     // one-to-one map of the chain any more.
     const auto rows = pluginrack::buildChainRows(channel.chain, channel.effects);
     chainRowCount = static_cast<int>(rows.size());
-    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    const bool canAddVst =
+        static_cast<int>(channel.inserts.size()) < kChainVstSlots;
+    const int totalRows = canAddVst ? chainRowCount + 1 : chainRowCount;
     while (slots.size() < totalRows) {
         auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
         addAndMakeVisible(*slot);
@@ -800,14 +752,19 @@ void ChannelStrip::splitIntoMonoChannels() {
             if (result == 0 || safe == nullptr) return;
             auto& engine = safe->audioEngine;
             const std::uint32_t firstId = safe->channel.id;
+            // Keep a custom name: "Shure SM7B" becomes "Shure SM7B 1", while
+            // the default "Ch 1" still becomes "Input 1".
+            const juce::String baseName = safe->channel.name.startsWith("Ch ")
+                                              ? "Input"
+                                              : safe->channel.name;
             engine.setChannelMapping(firstId, pluginrack::ChannelLayout::Mono, {0});
-            engine.setChannelName(firstId, "Input 1");
+            engine.setChannelName(firstId, baseName + " 1");
             for (int i = 1; i < inputs; ++i) {
                 engine.addChannel();
                 const auto& chans = engine.getChannels();
                 if (chans.empty()) break;
                 const std::uint32_t newId = chans.back()->id;
-                engine.setChannelName(newId, "Input " + juce::String(i + 1));
+                engine.setChannelName(newId, baseName + " " + juce::String(i + 1));
                 engine.setChannelMapping(newId, pluginrack::ChannelLayout::Mono, {i});
                 const auto err = engine.setChannelInputDevice(newId, device);
                 if (err.isNotEmpty()) {

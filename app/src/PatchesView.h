@@ -31,12 +31,30 @@ private:
     struct Node {
         juce::String name;
         float hue = 0.0f;
-        juce::Point<int> port; // socket centre in local coords
+        juce::Point<int> port; // socket centre in canvas coords
         juce::Rectangle<int> box;
     };
 
+    // Scrollable canvas: the header stays fixed while rows scroll.
+    class PatchCanvas final : public juce::Component {
+    public:
+        explicit PatchCanvas(PatchesView& ownerIn) : owner(ownerIn) {}
+        void paint(juce::Graphics& g) override { owner.paintCanvas(g); }
+        void mouseDown(const juce::MouseEvent& e) override { owner.canvasMouseDown(e); }
+
+    private:
+        PatchesView& owner;
+    };
+
+    void paintCanvas(juce::Graphics& g);
+    void canvasMouseDown(const juce::MouseEvent& e);
+    void updateStatusText();
+    void updateLayout();
+
     AudioEngine& audioEngine;
     PageHeader header{"Patches"};
+    juce::Viewport canvasViewport;
+    PatchCanvas canvasContent{*this};
     std::vector<Node> inputs;
     std::vector<Node> outputs;
     struct Cable {

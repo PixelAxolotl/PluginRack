@@ -61,11 +61,13 @@ StripDialog::Body::Body(const juce::String& currentName, float currentHue,
     hexEditor.setMultiLine(false);
     hexEditor.setTooltip("Hex colour, e.g. #ff6ec7");
     hexEditor.onReturnKey = [this] { applyHexField(hexEditor.getText()); };
+    hexEditor.onFocusLost = [this] { applyHexField(hexEditor.getText()); };
     addAndMakeVisible(hexEditor);
 
     okButton.onClick = [this] { applyAndClose(); };
     cancelButton.onClick = [this] { closeWindow(); };
     theme::ui::styleButton(okButton);
+    theme::ui::styleButton(cancelButton);
     addAndMakeVisible(okButton);
     addAndMakeVisible(cancelButton);
 }
@@ -77,6 +79,9 @@ void StripDialog::Body::closeWindow() {
 }
 
 void StripDialog::Body::applyAndClose() {
+    // Commit a typed hex colour first: clicking OK without pressing Enter
+    // in the hex field must not silently drop it.
+    applyHexField(hexEditor.getText());
     const auto newName = nameEditor.getText();
     if (onApply) onApply(newName, pickedHue);
     closeWindow();

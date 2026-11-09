@@ -162,6 +162,59 @@ inline void drawPanel(juce::Graphics& g, juce::Rectangle<int> bounds,
     g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), 3.0f, 1.0f);
 }
 
+// Built-in window top bar: the same encased bar in every plugin window.
+// Panel fill + hairline, plus a 4 px cyan accent on the left so the bar
+// reads as a unit that holds the title, Enable, and preset.
+inline void drawWindowHeader(juce::Graphics& g, juce::Rectangle<int> bounds) {
+    drawPanel(g, bounds);
+    const auto strip = juce::Rectangle<float>(static_cast<float>(bounds.getX()) + 6.0f,
+                                              static_cast<float>(bounds.getY()) + 6.0f,
+                                              4.0f,
+                                              static_cast<float>(bounds.getHeight() - 12));
+    g.setColour(cyan());
+    g.fillRoundedRectangle(strip, 2.0f);
+}
+
+// Built-in window title: 15 px bold cyan, left-aligned, truncated with an
+// ellipsis so a long title never overlaps the Enable button.
+inline void styleTitleLabel(juce::Label& label) {
+    label.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
+    label.setColour(juce::Label::textColourId, cyan());
+    label.setJustificationType(juce::Justification::centredLeft);
+    label.setMinimumHorizontalScale(0.7f);
+}
+
+// One rotary-knob vocabulary for every built-in window, from the EQ knob
+// look: per-knob fill colour, border outline, and a 72 px value box in 20 px
+// with the same text colours. ValueEditSlider is declared in ValueEditSlider.h
+// and styleSlider in each window, so the declaration is here and each window
+// calls it with its own colours.
+inline void styleWindowKnob(juce::Slider& slider, double min, double max, double step,
+                            const juce::String& suffix, double resetValue,
+                            juce::Colour fill) {
+    slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 20);
+    slider.setRange(min, max, step);
+    slider.setTextValueSuffix(suffix);
+    slider.setDoubleClickReturnValue(true, resetValue);
+    slider.setColour(juce::Slider::rotarySliderFillColourId, fill);
+    slider.setColour(juce::Slider::rotarySliderOutlineColourId, border());
+    slider.setColour(juce::Slider::textBoxTextColourId, text());
+    slider.setColour(juce::Slider::textBoxBackgroundColourId, control());
+    slider.setColour(juce::Slider::textBoxOutlineColourId, line());
+}
+
+// Place one label + knob pair into a cell of a knob row. The label is 14 px
+// tall (not 16) and the knob keeps a 6 px trim at the bottom, matching the
+// EQ knob row, so every window's knob row reads at the same height.
+inline void placeWindowKnob(juce::Rectangle<int> slot, juce::Label& label, juce::Slider& knob) {
+    label.setBounds(slot.removeFromTop(14));
+    auto knobArea = slot.withTrimmedBottom(6);
+    const int knobWidth = juce::jmin(knobArea.getWidth(),
+                                     juce::jmax(66, juce::roundToInt(knobArea.getWidth() * 0.8f)));
+    knob.setBounds(knobArea.withSizeKeepingCentre(knobWidth, knobArea.getHeight()));
+}
+
 // Uppercase caption that names a panel section (INPUTS, INSERTS, ROUND-TRIP).
 inline void drawSectionCaption(juce::Graphics& g, juce::Rectangle<int> bounds,
                                const juce::String& text) {

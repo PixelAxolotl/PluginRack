@@ -42,6 +42,9 @@ SettingsView::SettingsView(AudioEngine& engine)
     staged_ = audioEngine.getDeviceSettings();
 
     addAndMakeVisible(header);
+    addAndMakeVisible(pendingLabel);
+    addAndMakeVisible(applyButton);
+    addAndMakeVisible(revertButton);
     viewport.setViewedComponent(&body, false);
     viewport.setScrollBarsShown(true, false);
     addAndMakeVisible(viewport);
@@ -110,14 +113,15 @@ SettingsView::SettingsView(AudioEngine& engine)
     add(inputBufferSizeCombo);
     add(outputBufferSizeCombo);
 
+    // Staged-changes bar: pinned in the page header so it stays visible
+    // while the Buffer Size and Latency Tuning sections scroll. The combos
+    // above and the toggles below share this one Apply step.
     pendingLabel.setFont(theme::ui::captionFont());
     pendingLabel.setColour(juce::Label::textColourId, theme::dim());
     pendingLabel.setJustificationType(juce::Justification::centredRight);
-    add(pendingLabel);
 
     for (auto* button : { &applyButton, &revertButton }) {
         theme::ui::styleButton(*button);
-        add(*button);
     }
     applyButton.onClick = [this] { applyPending(); };
     revertButton.onClick = [this] { revertPending(); };
@@ -759,7 +763,16 @@ void SettingsView::timerCallback() {
 
 void SettingsView::resized() {
     auto area = getLocalBounds().reduced(theme::ui::kPagePad);
-    header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
+    auto headerRow = area.removeFromTop(theme::ui::kHeaderH);
+    // Staged bar lives in the header: pending text takes the middle, Apply
+    // and Revert pin to the right, so they stay on screen while the body
+    // scrolls through Buffer Size and Latency Tuning.
+    applyButton.setBounds(headerRow.removeFromRight(90));
+    headerRow.removeFromRight(theme::ui::kRowGap);
+    revertButton.setBounds(headerRow.removeFromRight(90));
+    headerRow.removeFromRight(theme::ui::kSectionGap);
+    pendingLabel.setBounds(headerRow.removeFromRight(juce::jmax(0, headerRow.getWidth() / 2)));
+    header.setBounds(headerRow);
     area.removeFromTop(theme::ui::kHeaderGap);
     viewport.setBounds(area);
     layoutBodyToFit();
@@ -843,7 +856,10 @@ int SettingsView::layoutBody(int width) {
         endSection(panel);
     }
 
-    // BUFFER SIZE
+    // BUFFER SIZE: only the two buffer combos live here now. The staged
+    // Apply/Revert bar moved into the page header, so the row never crushes
+    // the "Unapplied changes" label and the Latency Tuning toggles below
+    // share the same Apply step.
     {
         const int panelTop = startSection(bufferCaption, nullptr);
         const int panelH = pad + theme::ui::kControlH + pad;
@@ -856,13 +872,6 @@ int SettingsView::layoutBody(int width) {
         row.removeFromLeft(18);
         outputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         outputBufferSizeCombo.setBounds(row.removeFromLeft(150));
-
-        // Apply closes the row: the hand leaves the fields and lands on it.
-        applyButton.setBounds(row.removeFromRight(90));
-        row.removeFromRight(theme::ui::kRowGap);
-        revertButton.setBounds(row.removeFromRight(90));
-        row.removeFromRight(theme::ui::kSectionGap);
-        pendingLabel.setBounds(row);
         endSection(panel);
     }
 

@@ -30,15 +30,20 @@ constexpr float kMinEqDelayMs = 0.0f;
 constexpr float kMaxEqDelayMs = 1000.0f;
 constexpr std::size_t kMaxEqBands = 7;
 constexpr std::size_t kMaxEffects = 4;
-constexpr std::size_t kMaxInserts = 5;
+// VST inserts are deliberately unbounded per strip; the engine owns the real
+// cap so a scene validator can never disagree with a live strip about how
+// many inserts it holds.
+constexpr std::size_t kMaxInserts = 64;
 constexpr std::size_t kMaxChainItems = 16;
 constexpr std::size_t kMaxChannels = 64;
 constexpr std::size_t kMaxOutputs = 32;
 constexpr std::size_t kMaxRoutes = 1024;
 constexpr std::size_t kMaxWatchedDevices = 64;
 // Buffer sizes the device layer negotiates; anything outside this is a sign of
-// a hand-edited or foreign file, not a real session.
-constexpr int kMinBufferFrames = 64;
+// a hand-edited or foreign file, not a real session. 32 is the lowest block an
+// ASIO interface offers (M-Audio M-Track), so a session can legitimately save
+// and restore at that size.
+constexpr int kMinBufferFrames = 32;
 constexpr int kMaxBufferFrames = 8192;
 constexpr float kMinDynamicsMakeupDb = -24.0f;
 constexpr float kMaxDynamicsMakeupDb = 24.0f;
@@ -137,7 +142,8 @@ void validateInserts(const char* kind, std::uint32_t id,
     if (inserts.size() > kMaxInserts) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                           std::string(kind) + " " + std::to_string(id) + " has " +
-                              std::to_string(inserts.size()) + " inserts, expected at most 5"});
+                              std::to_string(inserts.size()) + " inserts, expected at most " +
+                              std::to_string(kMaxInserts)});
     }
     std::unordered_set<std::uint32_t> insertIds;
     insertIds.reserve(inserts.size() * 2 + 1);
@@ -327,7 +333,7 @@ std::vector<SceneError> validate(const Scene& scene) {
     if (scene.bufferFrames < kMinBufferFrames || scene.bufferFrames > kMaxBufferFrames) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
                           "bufferFrames " + std::to_string(scene.bufferFrames) +
-                              " is not within [64, 8192]"});
+                              " is not within [32, 8192]"});
     }
 
     std::unordered_set<std::uint32_t> channelIds;

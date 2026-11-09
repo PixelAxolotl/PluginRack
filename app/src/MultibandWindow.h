@@ -42,7 +42,7 @@ private:
     juce::Component content;
     MultibandCurveComponent curve;
     juce::TextButton enableButton{"Enable"};
-    juce::Label modeLabel{"", "MULTIBAND COMPRESSOR"};
+    juce::Label modeLabel{"MULTIBAND", "MULTIBAND"};
     juce::ComboBox presetCombo;
     juce::Label bandLabel{"", "Band"};
     ValueEditSlider threshold, ratio, attack, release, knee, makeup, inputGain;

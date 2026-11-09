@@ -27,12 +27,12 @@ inline std::function<void()>& pluginRemovingHook() {
     return hook;
 }
 
-// Every strip renders the same 8-slot chain: 3 built-in effects followed by
-// 5 VST slots. Unfilled VST slots are the add button rather than a separate
-// control, so the list keeps a constant length while plugins are added.
+// Every strip renders the same chain: 3 built-in effects followed by the
+// strips' VST inserts. The VST count is global (AudioEngine::kMaxInserts)
+// and the add button is the last row, so the list grows with the insert
+// count instead of sharing a fixed slot count.
 inline constexpr int kChainBuiltInSlots = 3;
-inline constexpr int kChainVstSlots = 5;
-inline constexpr int kChainSlotCount = kChainBuiltInSlots + kChainVstSlots;
+inline constexpr int kChainVstSlots = AudioEngine::kMaxInserts;
 
 // One built-in effect as a card switch.
 struct CardSwitch {

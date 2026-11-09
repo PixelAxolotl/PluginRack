@@ -20,9 +20,10 @@ public:
     using ApplyCallback = std::function<void(const pluginrack::DynamicsEffect&, bool bypassChanged)>;
 
     // Below these the knob rows collide with the graph, so the bay gives the
-    // panel at least this much room (the EQ page does the same).
-    static constexpr int kMinWidth = 820;
-    static constexpr int kMinHeight = 520;
+    // panel at least this much room (the EQ page does the same). Every
+    // built-in window is 860x560; the gate row shares this height.
+    static constexpr int kMinWidth = 860;
+    static constexpr int kMinHeight = 560;
 
     DynamicsWindow(const juce::String& title,
                    const pluginrack::DynamicsEffect& initialEffect,
@@ -101,7 +102,7 @@ private:
     juce::Component content;
     DynamicsCurveComponent curve;
     GainReductionGauge gauge;
-    juce::Label modeLabel{"", ""};
+    juce::Label modeLabel{"DYNAMICS", "DYNAMICS"};
     juce::Label thresholdLabel{"", "Threshold"};
     juce::Label ratioLabel{"", "Ratio"};
     juce::Label attackLabel{"", "Attack"};

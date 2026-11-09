@@ -72,6 +72,16 @@ juce::Image captureWindow(void* windowHandle, int targetWidth) {
     auto* window = static_cast<HWND>(windowHandle);
     if (window == nullptr || IsWindow(window) == FALSE) return {};
 
+    // Never capture a window on the thread that owns it. PrintWindow asks
+    // the owning thread to repaint, so calling it from the message thread
+    // that owns the window's host component deadlocks a host that waits for
+    // the repaint that only its own thread can perform.
+    if (GetWindowThreadProcessId(window, nullptr) == ::GetCurrentThreadId())
+        return {};
+
+    // A hidden window can never repaint anything meaningful.
+    if (::IsWindowVisible(window) == FALSE) return {};
+
     RECT client{};
     if (GetClientRect(window, &client) == FALSE) return {};
     const int width = client.right - client.left;

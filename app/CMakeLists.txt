@@ -4,9 +4,18 @@ juce_set_vst3_sdk_path("${VST3_SDK_DIR}")
 juce_add_gui_app(pluginrack_app
     PRODUCT_NAME "PluginRack"
     BUNDLE_ID com.pluginrack.app
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_dark_256.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_dark_32.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
     NEEDS_WEB_BROWSER FALSE
     NEEDS_CURL FALSE)
+
+juce_add_binary_data(pluginrack_logo
+    NAMESPACE AppLogos
+    HEADER_NAME AppLogos.h
+    SOURCES
+        assets/logo_dark.png
+        assets/logo_light.png)
 
 juce_generate_juce_header(pluginrack_app)
 
@@ -111,6 +120,7 @@ if(EXISTS "${JUCE_DIR}/modules/juce_audio_devices/native/asio/iasiodrv.h")
 endif()
 
 target_link_libraries(pluginrack_app PRIVATE
+    pluginrack_logo
     pluginrack_core
     juce::juce_audio_basics
     juce::juce_audio_devices

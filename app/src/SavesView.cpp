@@ -81,8 +81,9 @@ void SavesView::SaveRowComponent::mouseUp(const juce::MouseEvent& event) {
     if (event.mouseWasClicked() && onSelect) onSelect();
 }
 
-SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestoreIn)
-    : onRestore(std::move(onRestoreIn)) {
+SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestoreIn,
+                   std::function<void(const juce::String&)> onLoadedIn)
+    : onRestore(std::move(onRestoreIn)), onLoaded(std::move(onLoadedIn)) {
     titleLabel.setText("Saves", juce::dontSendNotification);
     titleLabel.setFont(theme::ui::titleFont());
     titleLabel.setColour(juce::Label::textColourId, theme::text());
@@ -182,6 +183,8 @@ void SavesView::loadSave(const juce::String& name) {
     if (pluginErrors.isNotEmpty())
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack",
             "The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+    else if (onLoaded)
+        onLoaded(name);
 }
 
 void SavesView::promptRename(const juce::String& oldName) {

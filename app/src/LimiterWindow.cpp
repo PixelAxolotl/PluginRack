@@ -9,8 +9,8 @@ LimiterWindow::LimiterWindow(const juce::String& title, const LimiterEffect& ini
       historyInput(240, -60.0f), historyReduction(240, 0.0f), historyOutput(240, -60.0f) {
     setResizable(false, false); setContentOwned(&content, false); setUsingNativeTitleBar(true);
     centreWithSize(kWidth, kHeight);
-    modeLabel.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
-    modeLabel.setColour(juce::Label::textColourId, theme::cyan());
+    modeLabel.setText("LIMITER", juce::dontSendNotification);
+    theme::ui::styleTitleLabel(modeLabel);
     content.addAndMakeVisible(modeLabel); content.addAndMakeVisible(graph); content.addAndMakeVisible(enableButton);
     enableButton.setClickingTogglesState(true); enableButton.setToggleState(!effect.bypassed, juce::dontSendNotification);
     // Match the Multiband header-button treatment: themed face and text.
@@ -114,8 +114,8 @@ void LimiterWindow::resized() {
     if (installedContent == nullptr) return;
     installedContent->setBounds(getLocalBounds());
     auto area = installedContent->getLocalBounds().reduced(8);
-    auto header = area.removeFromTop(28);
-    modeLabel.setBounds(header.removeFromLeft(250));
+    auto header = area.removeFromTop(36);
+    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
     presetCombo.setBounds(header.removeFromRight(120));
     header.removeFromRight(6);
     enableButton.setBounds(header.removeFromRight(72));
@@ -126,8 +126,7 @@ void LimiterWindow::resized() {
     const int knobWidth = juce::jmax(70, controls.getWidth() / 4);
     auto placeKnob = [&](ValueEditSlider& slider, juce::Label& label) {
         auto slot = controls.removeFromLeft(knobWidth);
-        label.setBounds(slot.removeFromTop(16));
-        slider.setBounds(slot.reduced(2, 0));
+        theme::ui::placeWindowKnob(slot, label, slider);
     };
     placeKnob(inputGain, inputGainLabel);
     placeKnob(ceiling, ceilingLabel);

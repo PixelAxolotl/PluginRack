@@ -16,7 +16,10 @@ public:
     // host: SavesView never touches the engine itself, because restoreScene
     // instantiates plugins and destroys JUCE components that must not be
     // mutated off that thread.
-    explicit SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestore);
+    // onLoaded tells the host which save is now active, so the toolbar Save
+    // button overwrites it instead of asking for a new name.
+    explicit SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestore,
+                       std::function<void(const juce::String&)> onLoaded = {});
     ~SavesView() override;
 
     void rebuild();
@@ -64,6 +67,7 @@ private:
     void confirmDelete(const juce::String& name);
 
     std::function<juce::String(const pluginrack::Scene&)> onRestore;
+    std::function<void(const juce::String&)> onLoaded;
 
     juce::Label titleLabel;
     juce::Label statusLabel;

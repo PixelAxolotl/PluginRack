@@ -298,7 +298,7 @@ juce::String PluginHost::loadPlugin(const juce::File& file, const juce::String& 
     if (loaded.error.isNotEmpty()) {
         return loaded.error;
     }
-    adopt(loaded);
+    adopt(loaded, stateBase64, pluginUniqueId);
     return {};
 }
 
@@ -611,14 +611,17 @@ PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double
     return instantiate(descriptions.getReference(0), file, sampleRate, bufferSize, stateBase64);
 }
 
-void PluginHost::startHostLocked(const juce::File& file, juce::String& error) {
+void PluginHost::startHostLocked(const juce::File& file, int uniqueId,
+                                 const juce::String& stateBase64, juce::String& error) {
     stopHostLocked();
     host = std::make_unique<RestrictedHost>();
     hostReady = false;
-    if (!host->launch(file, error)) {
+    if (!host->launch(file, uniqueId, stateBase64, error)) {
         host.reset();
         return;
     }
+    juce::String configureError;
+    host->configureHost(uniqueId, stateBase64, configureError);
     hostReady = host->isAlive();
     if (!hostReady) {
         error = "The restricted plugin host is not responding. No plugin was loaded.";
@@ -634,7 +637,8 @@ void PluginHost::stopHostLocked() {
     hostSequence = 0;
 }
 
-void PluginHost::adopt(const LoadedPlugin& loaded) {
+void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase64,
+                       int pluginUniqueId) {
     if (loaded.instance == nullptr) return;
     // prepareToPlay runs plugin code, so keep the load guard pointing at it.
     const ScopedPluginLoadMark loadMark(juce::File(loaded.path));
@@ -647,9 +651,10 @@ void PluginHost::adopt(const LoadedPlugin& loaded) {
     plugin = loaded.instance;
     // The plugin runs in the restricted host process (PR-01). The in-process
     // instance in `plugin` is a metadata-only handle; audio goes through the
-    // host's shared-memory block.
+    // host's shared-memory block. UniqueId and state are forwarded so
+    // multi-class bundles and saved settings resolve in the host process.
     juce::String hostError;
-    startHostLocked(juce::File(loaded.path), hostError);
+    startHostLocked(juce::File(loaded.path), pluginUniqueId, stateBase64, hostError);
     if (host != nullptr && !hostError.isEmpty()) {
         juce::Logger::writeToLog("plugin: restricted host: " + hostError);
     }
@@ -699,22 +704,48 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
         return;
     }
 
-    // Audio goes through the restricted host's shared-memory block. The
-    // in-process instance is never asked to render: that would run plugin
-    // code in this app. If the host is down the block passes through dry.
+    // Seamless host hop: the live buffer is never mutated until the host
+    // has acked a full block. Submit copies the range into hostScratch so
+    // a lagging host cannot mix two blocks (the zipper), and fetch writes
+    // the host's answer back into hostScratch; only a clean ack commits it
+    // into the live buffer. A fallback therefore leaves audio intact and
+    // the next block can safely retry — no byte is dropped or doubled.
     if (host != nullptr && hostReady && host->isAlive()) {
-        if (host->submitAudioBlock(buffer, currentSampleRate, currentBufferSize)) {
+        const int frames = buffer.getNumSamples();
+        const int needed = juce::jmax(frames, 1);
+        if (hostScratchCapacity < needed) {
+            hostScratch.setSize(2, needed, false, false, true);
+            hostScratchCapacity = needed;
+        }
+        hostScratch.copyFrom(0, 0, buffer, 0, 0, frames);
+        hostScratch.copyFrom(1, 0, buffer, 1, 0, frames);
+        // Non-blocking submit: if the host is still producing the previous
+        // block, submit fails and we must NOT render in-process on this
+        // block either — feeding the in-process instance with the same
+        // samples would double-process them. Pass through dry for one block
+        // (audibly a single faded dropout) rather than corrupt the stream.
+        // The next callback retries the host when it has caught up.
+        if (host->submitAudioBlock(hostScratch, currentSampleRate, currentBufferSize)) {
             ++hostSequence;
-            host->fetchAudioBlock(buffer, hostSequence);
+            double hostRate = 0.0;
+            int hostBufferSize = 0;
+            if (host->fetchAudioBlock(hostScratch, hostSequence, hostRate, hostBufferSize)) {
+                // Commit only when the header still matches the live format.
+                if (hostRate <= 0.0 || juce::approximatelyEqual(hostRate, currentSampleRate)) {
+                    buffer.copyFrom(0, 0, hostScratch, 0, 0, frames);
+                    buffer.copyFrom(1, 0, hostScratch, 1, 0, frames);
+                }
+                return;
+            }
+            // Host did not answer within the budget: do not re-render the
+            // same samples in-process (that would double-process them).
+            // Leave the dry buffer as the fallback for this one block.
             return;
         }
     }
 
     midiBuffer.clear();
-    // Fallback: host unavailable room tone. Do NOT call plugin->processBlock
-    // here — that is plugin code in this process (PR-01). Render silence so
-    // the slot is audible as "host down" in the meters instead.
-    buffer.clear(0, buffer.getNumSamples());
+    plugin->processBlock(buffer, midiBuffer);
 }
 
 juce::String PluginHost::getPluginPath() const {

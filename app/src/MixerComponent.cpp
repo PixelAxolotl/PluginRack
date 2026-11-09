@@ -2,6 +2,10 @@
 
 #include <algorithm>
 
+#include "DeEsserWindow.h"
+#include "LimiterWindow.h"
+#include "MultibandWindow.h"
+
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
                                                  AudioEngine& engine)
     : output(outputState), outputIndex(outputIdx), audioEngine(engine),
@@ -123,48 +127,171 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
     };
     addAndMakeVisible(muteButton);
 
-    eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
-    eqButton.onClick = [this] {
-        // Left-click toggles the EQ engine on/off (Voicemeeter-style).
-        const bool bypassed = output.eqBypassed.get();
-        audioEngine.setOutputEqBypassed(outputIndex, !bypassed);
-        refreshEqButton();
-    };
-    eqButton.onRightClick = [this] {
-        // Right-click opens the editor (fronts it if already open).
-        openEqWindow();
-    };
-    addAndMakeVisible(eqButton);
-    refreshEqButton();
-    const auto setupDynamicsButton = [this](EqButton& button,
-                                             pluginrack::DynamicsEffectType type,
-                                             const juce::String& tooltip) {
-        button.setColour(juce::TextButton::buttonColourId, theme::control());
-        button.setColour(juce::TextButton::textColourOffId, theme::text());
-        button.setTooltip(tooltip);
-        button.onClick = [this, type] { toggleDynamicsBypass(type); };
-        button.onRightClick = [this, type] { openDynamicsWindow(type); };
-        addAndMakeVisible(button);
-    };
-    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
-                        "Click: compressor on/off. Right-click: open settings");
-    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
-                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
-    // The gate lives in the compressor panel now, so both right-clicks land there.
-    gateButton.onRightClick = [this] { openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor); };
-    refreshDynamicsButtons();
+    // All built-in state lives in the insert cards now; no standalone
+    // EQ/Comp/Gate buttons remain on the strip.
 
     refreshInserts();
 }
 
 MixerComponent::OutputStrip::~OutputStrip() {
+    closeAllEffectWindows();
+}
+
+void MixerComponent::OutputStrip::closeAllEffectWindows() {
     closeEqWindow();
     if (dynamicsWindow != nullptr) {
-        delete dynamicsWindow;
+        auto* doomed = dynamicsWindow;
         dynamicsWindow = nullptr;
+        delete doomed;
     }
+    if (multibandWindow != nullptr) {
+        auto* doomed = multibandWindow;
+        multibandWindow = nullptr;
+        delete doomed;
+    }
+    if (deEsserWindow != nullptr) {
+        auto* doomed = deEsserWindow;
+        deEsserWindow = nullptr;
+        delete doomed;
+    }
+    if (limiterWindow != nullptr) {
+        auto* doomed = limiterWindow;
+        limiterWindow = nullptr;
+        delete doomed;
+    }
+}
+
+void MixerComponent::OutputStrip::openMultibandWindow() {
+    if (multibandWindow != nullptr) {
+        multibandWindow->toFront(true);
+        return;
+    }
+    if (output.multibandEffects.empty()) {
+        auto effects = output.multibandEffects;
+        effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
+        audioEngine.setOutputMultiband(output.id, effects);
+        audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::Multiband, 1});
+    }
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    multibandWindow = new MultibandWindow(
+        "Multiband Compressor - " + output.name, output.multibandEffects.front(),
+        [safe](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->output.multibandEffects;
+            for (auto& e : effects)
+                if (e.id == effect.id) {
+                    const bool bp = e.bypassed;
+                    e = effect;
+                    if (!bypassChanged) e.bypassed = bp;
+                }
+            safe->audioEngine.setOutputMultiband(safe->output.id, effects);
+            safe->refreshInserts();
+        },
+        output.multibandRtaOffsetDb, output.multibandRtaWeighting, liveRateHz);
+    multibandWindow->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr) safe->audioEngine.setOutputMultibandRtaOffset(safe->output.id, offsetDb);
+    };
+    multibandWindow->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr) safe->audioEngine.setOutputMultibandRtaWeighting(safe->output.id, weighting);
+    };
+    multibandWindow->onClose = [safe] {
+        if (safe != nullptr && safe->multibandWindow != nullptr) {
+            auto* w = safe->multibandWindow;
+            safe->multibandWindow = nullptr;
+            delete w;
+        }
+    };
+    multibandWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.multibandTap.snapshot(true, l, r, n);
+    };
+    output.multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
+}
+
+void MixerComponent::OutputStrip::openDeEsserWindow() {
+    if (deEsserWindow != nullptr) {
+        deEsserWindow->toFront(true);
+        return;
+    }
+    if (output.deEsserEffects.empty()) {
+        auto effects = output.deEsserEffects;
+        effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
+        audioEngine.setOutputDeEssers(output.id, effects);
+        audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::DeEsser, 1});
+    }
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    deEsserWindow = new DeEsserWindow(
+        "De-esser - " + output.name, output.deEsserEffects.front(),
+        [safe](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->output.deEsserEffects;
+            for (auto& e : effects)
+                if (e.id == effect.id) {
+                    const bool bp = e.bypassed;
+                    e = effect;
+                    if (!bypassChanged) e.bypassed = bp;
+                }
+            safe->audioEngine.setOutputDeEssers(safe->output.id, effects);
+            safe->refreshInserts();
+        },
+        output.deEsserRtaOffsetDb, output.deEsserRtaWeighting, liveRateHz);
+    deEsserWindow->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr) safe->audioEngine.setOutputDeEsserRtaOffset(safe->output.id, offsetDb);
+    };
+    deEsserWindow->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr) safe->audioEngine.setOutputDeEsserRtaWeighting(safe->output.id, weighting);
+    };
+    deEsserWindow->onClose = [safe] {
+        if (safe != nullptr && safe->deEsserWindow != nullptr) {
+            auto* w = safe->deEsserWindow;
+            safe->deEsserWindow = nullptr;
+            delete w;
+        }
+    };
+    deEsserWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.deEsserTap.snapshot(true, l, r, n);
+    };
+    output.deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
+}
+
+void MixerComponent::OutputStrip::openLimiterWindow() {
+    if (limiterWindow != nullptr) {
+        limiterWindow->toFront(true);
+        return;
+    }
+    if (output.limiterEffects.empty()) {
+        auto effects = output.limiterEffects;
+        effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
+        audioEngine.setOutputLimiters(output.id, effects);
+        audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::Limiter, 1});
+    }
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    limiterWindow = new LimiterWindow(
+        "Limiter - " + output.name, output.limiterEffects.front(),
+        [safe](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->output.limiterEffects;
+            for (auto& e : effects)
+                if (e.id == effect.id) {
+                    const bool bp = e.bypassed;
+                    e = effect;
+                    if (!bypassChanged) e.bypassed = bp;
+                }
+            safe->audioEngine.setOutputLimiters(safe->output.id, effects);
+            safe->refreshInserts();
+        });
+    limiterWindow->onClose = [safe] {
+        if (safe != nullptr && safe->limiterWindow != nullptr) {
+            auto* w = safe->limiterWindow;
+            safe->limiterWindow = nullptr;
+            delete w;
+        }
+    };
+    limiterWindow->pullAnalyzerTap = [safe](bool /*postEq*/, float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.limiterTap.snapshot(true, l, r, n);
+    };
+    output.limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 
 void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
@@ -325,23 +452,7 @@ void MixerComponent::OutputStrip::closeEqWindow() {
 }
 
 void MixerComponent::OutputStrip::refreshEqButton() {
-    bool active = false;
-    if (!output.eqBypassed.get()) {
-        // A delay-only EQ still does audible work, so it lights the button.
-        active = output.eqDelayMs > 0.0f;
-        for (const auto& band : output.eqBands) {
-            if (band.enabled) {
-                active = true;
-                break;
-            }
-        }
-    }
-    const bool open = (eqWindow != nullptr);
-    eqButton.setColour(juce::TextButton::buttonColourId,
-                       active ? theme::amber() : theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId,
-                       active ? theme::bg() : theme::text());
-    eqButton.setRingVisible(open);
+    // No standalone button left: the insert cards carry the bypass state.
 }
 
 void MixerComponent::OutputStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
@@ -355,28 +466,20 @@ void MixerComponent::OutputStrip::toggleDynamicsBypass(pluginrack::DynamicsEffec
 }
 
 void MixerComponent::OutputStrip::refreshDynamicsButtons() {
-    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
-        const auto found = std::find_if(output.effects.begin(), output.effects.end(),
-                                        [type](const auto& effect) { return effect.type == type; });
-        const bool active = found != output.effects.end() && !found->bypassed;
-        if (found != output.effects.end() && dynamicsWindow != nullptr &&
-            dynamicsWindow->getType() == type) {
-            dynamicsWindow->setBypassed(found->bypassed);
-            if (type == pluginrack::DynamicsEffectType::Compressor) {
-                const auto gateIt = std::find_if(
-                    output.effects.begin(), output.effects.end(), [](const auto& effect) {
-                        return effect.type == pluginrack::DynamicsEffectType::Gate;
-                    });
-                if (gateIt != output.effects.end()) dynamicsWindow->setGate(*gateIt);
-            }
-        }
-        button.setColour(juce::TextButton::buttonColourId,
-                         active ? theme::amber() : theme::control());
-        button.setColour(juce::TextButton::textColourOffId,
-                         active ? theme::bg() : theme::text());
-    };
-    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
-    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+    // No standalone buttons left: still syncs an open Dynamics window.
+    if (dynamicsWindow == nullptr) return;
+    const auto type = dynamicsWindow->getType();
+    const auto found = std::find_if(output.effects.begin(), output.effects.end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == output.effects.end()) return;
+    dynamicsWindow->setBypassed(found->bypassed);
+    if (type == pluginrack::DynamicsEffectType::Compressor) {
+        const auto gateIt = std::find_if(
+            output.effects.begin(), output.effects.end(), [](const auto& effect) {
+                return effect.type == pluginrack::DynamicsEffectType::Gate;
+            });
+        if (gateIt != output.effects.end()) dynamicsWindow->setGate(*gateIt);
+    }
 }
 
 void MixerComponent::OutputStrip::resized() {
@@ -400,7 +503,7 @@ void MixerComponent::OutputStrip::resized() {
     modeCombo.setBounds(area.removeFromTop(theme::metrics::kFieldH));
     area.removeFromTop(4);
 
-    // display block: unified 8-slot chain (3 built-in + 5 VST slots).
+    // Display block: unified chain (3 built-in + the live inserts).
     // Rows give height back before they squeeze the fader off the strip.
     vstHeader.setBounds(area.removeFromTop(14));
     const int reservedBelow = 22 + 4 + 110;
@@ -412,9 +515,6 @@ void MixerComponent::OutputStrip::resized() {
         area.removeFromTop(2);
     }
     area.removeFromTop(4);
-    gateButton.setVisible(false);
-    eqButton.setVisible(false);
-    compressorButton.setVisible(false);
     area.removeFromTop(4);
 
     // mute at very bottom, matching the input strip's mute/solo height
@@ -502,7 +602,9 @@ void MixerComponent::OutputStrip::refreshInserts() {
     // one-to-one map of the chain any more.
     const auto rows = pluginrack::buildChainRows(output.chain, output.effects);
     chainRowCount = static_cast<int>(rows.size());
-    const int totalRows = juce::jmax(kChainSlotCount, chainRowCount);
+    const bool canAddVst =
+        static_cast<int>(output.inserts.size()) < kChainVstSlots;
+    const int totalRows = canAddVst ? chainRowCount + 1 : chainRowCount;
     while (slots.size() < totalRows) {
         auto* slot = slots.add(new InsertSlotComponent(*this, slots.size()));
         addAndMakeVisible(*slot);
@@ -709,8 +811,12 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
 void MixerComponent::OutputStrip::activateBuiltIn(pluginrack::ChainItem item) {
     if (item.type == pluginrack::ChainItemType::Eq)
         openEqWindow();
-    else if (item.type != pluginrack::ChainItemType::Dynamics)
-        return; // new built-ins open from their own strip cards
+    else if (item.type == pluginrack::ChainItemType::Multiband)
+        openMultibandWindow();
+    else if (item.type == pluginrack::ChainItemType::DeEsser)
+        openDeEsserWindow();
+    else if (item.type == pluginrack::ChainItemType::Limiter)
+        openLimiterWindow();
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
@@ -894,10 +1000,10 @@ void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
 
 void MixerComponent::closeAllEqWindows() {
     for (auto* s : strips) {
-        if (s != nullptr) s->closeEqWindow();
+        if (s != nullptr) s->closeAllEffectWindows();
     }
     for (auto* s : outputStrips) {
-        if (s != nullptr) s->closeEqWindow();
+        if (s != nullptr) s->closeAllEffectWindows();
     }
 }
 

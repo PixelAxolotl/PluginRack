@@ -56,6 +56,7 @@ private:
     juce::TextButton saveButton{"Save"};
     juce::TextButton savesButton{"Saves"};
     juce::TextButton menuButton{"Menu"};
+    juce::Image logoImage; // logo_dark.png decoded once in the constructor
     juce::String clockText;
     juce::Colour clockColour = theme::dim();
     juce::Rectangle<int> clockBounds;
@@ -82,6 +83,9 @@ public:
 
     std::function<void(AppView)> onViewChanged;
     std::function<void()> onStructureChanged;
+    // Fired when the Saves view loads a save, so the host can mark it as
+    // the active save the toolbar Save button overwrites.
+    std::function<void(const juce::String&)> onSaveLoaded;
     // Wired by MainComponent to its synchronous scene apply. The Saves view
     // parses save files but never touches the engine: restoreScene mutates
     // plugins and JUCE components that belong to the message thread, so the
@@ -162,6 +166,9 @@ private:
     MixerComponent mixer;
     ToolbarComponent toolbar;
     ViewRouter router;
+    // Name of the save the Save button overwrites. Set when a scene is
+    // loaded or saved by name; empty means "untitled, ask for a name".
+    juce::String activeSaveName_;
     double smoothedLatencyMs = -1.0;
     std::atomic<bool> sceneLoading_{false};
     // Counts UI ticks between device-availability checks (see timerCallback).

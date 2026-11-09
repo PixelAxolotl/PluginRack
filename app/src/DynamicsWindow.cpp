@@ -81,11 +81,8 @@ DynamicsWindow::DynamicsWindow(
     // compressor; only the compressor panel shows it.
     hasGate = type == pluginrack::DynamicsEffectType::Compressor && gate != nullptr;
     if (hasGate) gateEffect = *gate;
-    modeLabel.setText(type == pluginrack::DynamicsEffectType::Compressor ? "COMPRESSOR / GATE"
-                                                                        : "GATE",
-                      juce::dontSendNotification);
-    modeLabel.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
-    modeLabel.setColour(juce::Label::textColourId, theme::cyan());
+    modeLabel.setText("DYNAMICS", juce::dontSendNotification);
+    theme::ui::styleTitleLabel(modeLabel);
     content.addAndMakeVisible(modeLabel);
     curve.setEffect(effect);
     curve.setVisible(type == pluginrack::DynamicsEffectType::Compressor);
@@ -153,26 +150,17 @@ DynamicsWindow::DynamicsWindow(
         gatePresetCombo.setSelectedId(kCustomPresetId, juce::dontSendNotification);
     };
     const auto styleSlider = [this](juce::Slider& slider, double min, double max, double value,
-                                    const juce::String& suffix, double resetValue) {
-        slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 18);
-        slider.setRange(min, max, 0.1);
+                                    const juce::String& suffix, double resetValue, juce::Colour fill) {
+        theme::ui::styleWindowKnob(slider, min, max, 0.1, suffix, resetValue, fill);
         slider.setValue(value, juce::dontSendNotification);
-        slider.setTextValueSuffix(suffix);
-        slider.setDoubleClickReturnValue(true, resetValue);
-        slider.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
-        slider.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
-        slider.setColour(juce::Slider::textBoxTextColourId, theme::text());
-        slider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
-        slider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
         content.addAndMakeVisible(slider);
     };
     const auto setup = [this, markCustom, styleSlider](juce::Slider& slider, double min,
                                                        double max, double value,
                                                        const juce::String& suffix,
-                                                       double resetValue,
+                                                       double resetValue, juce::Colour fill,
                                                        std::function<void(float)> changed) {
-        styleSlider(slider, min, max, value, suffix, resetValue);
+        styleSlider(slider, min, max, value, suffix, resetValue, fill);
         auto* target = &slider;
         slider.onValueChange = [target, changed, markCustom] {
             markCustom();
@@ -183,9 +171,9 @@ DynamicsWindow::DynamicsWindow(
     const auto setupGate = [this, markGateCustom, styleSlider](juce::Slider& slider, double min,
                                                                double max, double value,
                                                                const juce::String& suffix,
-                                                               double resetValue,
+                                                               double resetValue, juce::Colour fill,
                                                                std::function<void(float)> changed) {
-        styleSlider(slider, min, max, value, suffix, resetValue);
+        styleSlider(slider, min, max, value, suffix, resetValue, fill);
         auto* target = &slider;
         slider.onValueChange = [target, changed, markGateCustom] {
             markGateCustom();
@@ -196,20 +184,20 @@ DynamicsWindow::DynamicsWindow(
     pluginrack::DynamicsEffect defaults;
     for (const auto& candidate : pluginrack::defaultDynamicsEffects())
         if (candidate.type == type) defaults = candidate;
-    setup(threshold, -60.0, 0.0, effect.thresholdDb, " dB", defaults.thresholdDb,
+    setup(threshold, -60.0, 0.0, effect.thresholdDb, " dB", defaults.thresholdDb, theme::cyan(),
           [this](float value) { effect.thresholdDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
     setup(ratio, 1.0, 20.0, effect.ratio,
-          type == pluginrack::DynamicsEffectType::Gate ? " dB" : ":1", defaults.ratio,
+          type == pluginrack::DynamicsEffectType::Gate ? " dB" : ":1", defaults.ratio, theme::green(),
           [this](float value) { effect.ratio = value; curve.setEffect(effect); if (apply) apply(effect, false); });
-    setup(attack, 0.1, 200.0, effect.attackMs, " ms", defaults.attackMs,
+    setup(attack, 0.1, 200.0, effect.attackMs, " ms", defaults.attackMs, theme::amber(),
           [this](float value) { effect.attackMs = value; if (apply) apply(effect, false); });
-    setup(release, 10.0, 1000.0, effect.releaseMs, " ms", defaults.releaseMs,
+    setup(release, 10.0, 1000.0, effect.releaseMs, " ms", defaults.releaseMs, theme::violet(),
           [this](float value) { effect.releaseMs = value; if (apply) apply(effect, false); });
-    setup(makeup, -24.0, 24.0, effect.makeupDb, " dB", defaults.makeupDb,
+    setup(makeup, -24.0, 24.0, effect.makeupDb, " dB", defaults.makeupDb, theme::green(),
           [this](float value) { effect.makeupDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
-    setup(inputGain, -24.0, 24.0, effect.inputGainDb, " dB", defaults.inputGainDb,
+    setup(inputGain, -24.0, 24.0, effect.inputGainDb, " dB", defaults.inputGainDb, theme::cyan(),
           [this](float value) { effect.inputGainDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
-    setup(knee, 0.0, 24.0, effect.kneeDb, " dB", defaults.kneeDb,
+    setup(knee, 0.0, 24.0, effect.kneeDb, " dB", defaults.kneeDb, theme::violet(),
           [this](float value) { effect.kneeDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
     for (auto* label : {&thresholdLabel, &ratioLabel, &attackLabel, &releaseLabel, &makeupLabel,
                         &inputGainLabel, &kneeLabel}) {
@@ -260,13 +248,13 @@ DynamicsWindow::DynamicsWindow(
             if (apply) apply(gateEffect, false);
         };
         setupGate(gateThreshold, -60.0, 0.0, gateEffect.thresholdDb, " dB",
-                  gateDefaults.thresholdDb,
+                  gateDefaults.thresholdDb, theme::cyan(),
                   [this, gateChanged](float value) { gateEffect.thresholdDb = value; gateChanged(); });
-        setupGate(gateRange, 1.0, 80.0, gateEffect.ratio, " dB", gateDefaults.ratio,
+        setupGate(gateRange, 1.0, 80.0, gateEffect.ratio, " dB", gateDefaults.ratio, theme::green(),
                   [this, gateChanged](float value) { gateEffect.ratio = value; gateChanged(); });
-        setupGate(gateAttack, 0.1, 200.0, gateEffect.attackMs, " ms", gateDefaults.attackMs,
+        setupGate(gateAttack, 0.1, 200.0, gateEffect.attackMs, " ms", gateDefaults.attackMs, theme::amber(),
                   [this, gateChanged](float value) { gateEffect.attackMs = value; gateChanged(); });
-        setupGate(gateRelease, 10.0, 1000.0, gateEffect.releaseMs, " ms", gateDefaults.releaseMs,
+        setupGate(gateRelease, 10.0, 1000.0, gateEffect.releaseMs, " ms", gateDefaults.releaseMs, theme::violet(),
                   [this, gateChanged](float value) { gateEffect.releaseMs = value; gateChanged(); });
         curve.setGate(gateEffect, !gateEffect.bypassed);
     }
@@ -283,8 +271,15 @@ DynamicsWindow::DynamicsWindow(
         knee.setVisible(false);
         kneeLabel.setVisible(false);
     }
-    const bool graphMode = type == pluginrack::DynamicsEffectType::Compressor;
-    setContentComponentSize(graphMode ? 780 : 680, graphMode ? 520 : 250);
+    // Match the other four built-in windows (860x560) so the header, knob row,
+    // and curve are the same size everywhere. The old 780x520 and 680x250 sizes
+    // were smaller than the row math below, so the 132 px knob rows ran past
+    // the bottom edge and only the tops of the knobs showed. The gate row is
+    // laid out inside the same 560 px height: a 132 px compressor row on top
+    // of a 132 px gate row, plus padding, with the curve between them. That
+    // keeps every built-in window the same height, so switching between them
+    // never changes the panel size or leaves a black bar behind.
+    setContentComponentSize(860, 560);
     startTimerHz(static_cast<int>(kTimerHz));
 }
 
@@ -338,7 +333,14 @@ void DynamicsWindow::syncControls() {
 
 void DynamicsWindow::resized() {
     content.setBounds(getLocalBounds());
-    auto area = content.getLocalBounds().reduced(12);
+    auto area = content.getLocalBounds().reduced(8);
+
+    auto header = area.removeFromTop(36);
+    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
+    presetCombo.setBounds(header.removeFromRight(120));
+    header.removeFromRight(6);
+    enableButton.setBounds(header.removeFromRight(72));
+    area.removeFromTop(6);
 
     const std::vector<std::pair<juce::Label*, juce::Slider*>> mainKnobs{
         { &inputGainLabel, &inputGain },
@@ -355,23 +357,24 @@ void DynamicsWindow::resized() {
         { &gateAttackLabel, &gateAttack },
         { &gateReleaseLabel, &gateRelease },
     };
-    const auto placeKnobs = [](juce::Rectangle<int> row,
-                               const std::vector<std::pair<juce::Label*, juce::Slider*>>& slots) {
-        const int slotWidth = row.getWidth() / static_cast<int>(slots.size());
-        for (const auto& [label, slider] : slots) {
-            auto cell = row.removeFromLeft(slotWidth);
-            label->setBounds(cell.removeFromTop(16));
-            slider->setBounds(cell.reduced(2, 0));
-        }
-    };
 
     if (type == pluginrack::DynamicsEffectType::Compressor) {
         if (hasGate) {
             // The gate row needs its own breathing room: a labelled header
             // separated from both the compressor knobs above and its own
             // knobs below, instead of a caption wedged against the combo.
-            placeKnobs(area.removeFromBottom(92), gateKnobs);
-            area.removeFromBottom(10);
+            auto gateRow = area.removeFromBottom(132);
+            {
+                const int gateSlotW = juce::jmax(1, gateRow.getWidth() / 4);
+                for (int i = 0; i < 4; ++i) {
+                    auto slot = juce::Rectangle<int>(gateRow.getX() + i * gateSlotW,
+                                                     gateRow.getY(), gateSlotW,
+                                                     gateRow.getHeight());
+                    theme::ui::placeWindowKnob(slot, *gateKnobs[(std::size_t)i].first,
+                                               *gateKnobs[(std::size_t)i].second);
+                }
+            }
+            area.removeFromBottom(8);
             auto gateHeader = area.removeFromBottom(26);
             gateHeader.removeFromLeft(2);
             gateCaption.setBounds(gateHeader.removeFromLeft(58));
@@ -379,34 +382,40 @@ void DynamicsWindow::resized() {
             gatePresetCombo.setBounds(gateHeader.removeFromLeft(176));
             gateHeader.removeFromLeft(10);
             gateEnableButton.setBounds(gateHeader.removeFromLeft(72).withSizeKeepingCentre(72, 22));
-            area.removeFromBottom(14);
+            area.removeFromBottom(8);
         }
-        auto knobsRow = area.removeFromBottom(96);
+        auto knobsRow = area.removeFromBottom(132);
         area.removeFromBottom(8);
 
-        auto side = area.removeFromLeft(juce::jmin(190, area.getWidth() / 3));
-        modeLabel.setBounds(side.removeFromTop(22));
-        side.removeFromTop(12);
-        presetCombo.setBounds(side.removeFromTop(26).withTrimmedRight(10));
-        side.removeFromTop(10);
-        enableButton.setBounds(side.removeFromTop(24).withTrimmedRight(10));
-
-        // Clear gap between the preset column and the graph panel.
-        area.removeFromLeft(10);
         gauge.setBounds(area.removeFromRight(juce::jmin(260, area.getWidth() / 2)));
         area.removeFromRight(8);
         curve.setBounds(area);
-        placeKnobs(knobsRow, mainKnobs);
+        {
+            const int slotW = juce::jmax(1, knobsRow.getWidth() / 7);
+            for (int i = 0; i < 7; ++i) {
+                auto slot = juce::Rectangle<int>(knobsRow.getX() + i * slotW,
+                                                 knobsRow.getY(), slotW,
+                                                 knobsRow.getHeight());
+                theme::ui::placeWindowKnob(slot, *mainKnobs[(std::size_t)i].first,
+                                           *mainKnobs[(std::size_t)i].second);
+            }
+        }
     } else {
-        modeLabel.setBounds(area.removeFromTop(24));
-        area.removeFromTop(6);
-        presetCombo.setBounds(area.removeFromTop(26).removeFromRight(juce::jmin(180, area.getWidth())));
-        area.removeFromTop(6);
-        enableButton.setBounds(area.removeFromTop(24).removeFromLeft(86));
-        area.removeFromTop(6);
+        auto knobsRow = area.removeFromTop(132);
+        area.removeFromTop(8);
         gauge.setBounds(area.removeFromRight(180));
         area.removeFromRight(8);
-        placeKnobs(area.removeFromTop(92), mainKnobs);
+        {
+            const int slotW = juce::jmax(1, knobsRow.getWidth() / 7);
+            for (int i = 0; i < 7; ++i) {
+                auto slot = juce::Rectangle<int>(knobsRow.getX() + i * slotW,
+                                                 knobsRow.getY(), slotW,
+                                                 knobsRow.getHeight());
+                theme::ui::placeWindowKnob(slot, *mainKnobs[(std::size_t)i].first,
+                                           *mainKnobs[(std::size_t)i].second);
+            }
+        }
+        curve.setBounds(area);
     }
 }
 

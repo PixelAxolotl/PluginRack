@@ -184,47 +184,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     };
     // Two different concepts live in this column: the channel's own processors
     // and the VST inserts, so they get their own headings.
-    styleSectionHeader(fxHeader, "Channel FX");
     styleSectionHeader(insertsHeader, "Inserts");
-
-    eqButton.setColour(juce::TextButton::buttonColourId, theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId, theme::text());
-    eqButton.setTooltip("Click: EQ on/off. Right-click: open editor");
-    eqButton.onClick = [this] {
-        if (auto* ch = currentChannel()) {
-            const bool bypassed = ch->eqBypassed.get();
-            audioEngine.setChannelEqBypassed(ch->id, !bypassed);
-        } else if (auto* out = currentOutput()) {
-            const auto& outs = audioEngine.getOutputs();
-            for (int i = 0; i < (int)outs.size(); ++i) {
-                if (outs[(size_t)i]->id == (std::uint32_t)selectedId) {
-                    audioEngine.setOutputEqBypassed(i, !out->eqBypassed.get());
-                    break;
-                }
-            }
-        }
-        refreshEqButton();
-    };
-    eqButton.onRightClick = [this] { focusEq(); };
-    addAndMakeVisible(eqButton);
-
-    const auto setupDynamicsButton = [this](EqButton& button,
-                                            pluginrack::DynamicsEffectType type,
-                                            const juce::String& tooltip) {
-        button.setColour(juce::TextButton::buttonColourId, theme::control());
-        button.setColour(juce::TextButton::textColourOffId, theme::text());
-        button.setTooltip(tooltip);
-        button.onClick = [this, type] { toggleDynamicsBypass(type); };
-        button.onRightClick = [this, type] { focusDynamics(type); };
-        addAndMakeVisible(button);
-    };
-    setupDynamicsButton(compressorButton, pluginrack::DynamicsEffectType::Compressor,
-                        "Click: compressor on/off. Right-click: open settings");
-    setupDynamicsButton(gateButton, pluginrack::DynamicsEffectType::Gate,
-                        "Click: gate on/off. Right-click: open the compressor panel's gate row");
-    // The gate lives in the compressor panel now, so both right-clicks land there.
-    gateButton.onRightClick = [this] { focusDynamics(pluginrack::DynamicsEffectType::Compressor); };
-    refreshDynamicsButtons();
 
     chainMarker.setColour(juce::Label::backgroundColourId, theme::cyan());
     chainMarker.setInterceptsMouseClicks(false, false);
@@ -570,21 +530,18 @@ void RackView::refreshSlots() {
     eqCard = nullptr;
     multibandCard = nullptr;
     deEsserCard = nullptr;
+    limiterCard = nullptr;
     dynamicsCard = nullptr;
     dynamicsCardPaired = false;
     vstCards.clear();
-    gateButton.setVisible(false);
-    eqButton.setVisible(false);
-    compressorButton.setVisible(false);
     const auto* inserts = currentInserts();
     const auto* chain = selectedIsOutput
                             ? (currentOutput() == nullptr ? nullptr : &currentOutput()->chain)
                             : (currentChannel() == nullptr ? nullptr : &currentChannel()->chain);
-    std::vector<pluginrack::ChainItem> fallback = {
-        {pluginrack::ChainItemType::Eq, 0},
-        {pluginrack::ChainItemType::Dynamics, 1},
-        {pluginrack::ChainItemType::Dynamics, 2}};
-    const auto& items = (chain != nullptr && !chain->empty()) ? *chain : fallback;
+    // Empty chain means no built-ins loaded: draw nothing, not a placeholder
+    // EQ/Dynamics pair. New channels start with defaultChain() == {}.
+    const std::vector<pluginrack::ChainItem> noItems;
+    const auto& items = chain != nullptr ? *chain : noItems;
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
 
     int row = 0;
@@ -728,6 +685,22 @@ void RackView::refreshSlots() {
                 slot->setMiniView(std::move(mini));
                 slot->setSelected(deEsserWindow != nullptr);
                 deEsserCard = slot;
+            } else if (item.type == pluginrack::ChainItemType::Limiter) {
+                auto mini = std::make_unique<InsertMiniView>();
+                const auto* selectedEffect = [&] {
+                    if (selectedChannel != nullptr) {
+                        for (const auto& e : selectedChannel->limiterEffects)
+                            if (e.id == item.id) return &e;
+                    } else if (selectedOutput != nullptr) {
+                        for (const auto& e : selectedOutput->limiterEffects)
+                            if (e.id == item.id) return &e;
+                    }
+                    return static_cast<const pluginrack::LimiterEffect*>(nullptr);
+                }();
+                if (selectedEffect != nullptr) mini->showLimiter(*selectedEffect);
+                slot->setMiniView(std::move(mini));
+                slot->setSelected(limiterWindow != nullptr);
+                limiterCard = slot;
             }
         } else {
             // A chain missing its partner leaves one dynamics effect on a row
@@ -751,14 +724,12 @@ void RackView::refreshSlots() {
     }
     chainRowCount = row;
 
-    // Pad the list out to the fixed 8-slot chain; the spare VST rows are the
-    // add control, so the insert list never changes length while you work. A
-    // chain already holding its five VSTs gets no add row: the engine refuses
-    // a sixth insert, and the merged Dynamics card leaves one row spare here,
-    // so the row would only open a picker that then has to refuse the plugin.
+    // The add row is the last row: whenever there is budget left there is
+    // somewhere to click for the next plugin. At the global budget the add
+    // row disappears so the picker can never open against a refusal.
     const bool canAddVst =
         inserts == nullptr || static_cast<int>(inserts->size()) < kChainVstSlots;
-    const int totalRows = canAddVst ? juce::jmax(kChainSlotCount, chainRowCount) : chainRowCount;
+    const int totalRows = juce::jmax(chainRowCount, canAddVst ? chainRowCount + 1 : 0);
     for (; row < totalRows; ++row) {
         auto* slot = slots.add(new InsertSlotComponent(*this, row));
         slot->setAddSlot(row == chainRowCount);
@@ -898,12 +869,13 @@ void RackView::timerCallback() {
     // card can't show the Multiband's output and vice versa. Re-armed
     // every tick because closing another view's panel switches taps off.
     auto* tap = (eqCard != nullptr || multibandCard != nullptr || deEsserCard != nullptr
-                 || dynamicsCard != nullptr)
+                 || limiterCard != nullptr || dynamicsCard != nullptr)
                     ? currentTap()
                     : nullptr;
     auto* eqTap = eqCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::Eq) : nullptr;
     auto* mbTap = multibandCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::Multiband) : nullptr;
     auto* dsTap = deEsserCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::DeEsser) : nullptr;
+    auto* limTap = limiterCard != nullptr ? currentPluginTap(pluginrack::ChainItemType::Limiter) : nullptr;
     if (tap != nullptr) {
         // Selecting another strip would otherwise leave the previous one
         // copying every block into its rings for the rest of the session.
@@ -915,6 +887,7 @@ void RackView::timerCallback() {
         if (eqTap != nullptr) eqTap->setMode(AudioEngine::AnalyzerTap::kPost);
         if (mbTap != nullptr) mbTap->setMode(AudioEngine::AnalyzerTap::kPost);
         if (dsTap != nullptr) dsTap->setMode(AudioEngine::AnalyzerTap::kPost);
+        if (limTap != nullptr) limTap->setMode(AudioEngine::AnalyzerTap::kPost);
         tapArmedId = selectedChainId();
         tapArmedIsOutput = selectedIsOutput;
     }
@@ -1012,6 +985,37 @@ void RackView::timerCallback() {
                     deEsserReductionDb = std::abs(deEsserStaticGainDb(bandLevelDb, *effect));
                     mini->setDeEsserGainReduction(deEsserReductionDb);
                 }
+            }
+        }
+    }
+
+    if (tap != nullptr && limiterCard != nullptr) {
+        auto* useTap = limTap != nullptr ? limTap : tap;
+        useTap->snapshot(false, tapLeft.data(), tapRight.data(), kLevelFrames);
+        float peak = 0.0f;
+        for (int i = 0; i < kLevelFrames; ++i)
+            peak = std::max(peak, std::max(std::abs(tapLeft[static_cast<std::size_t>(i)]),
+                                           std::abs(tapRight[static_cast<std::size_t>(i)])));
+        const float levelDb = 20.0f * std::log10(std::max(peak, 1.0e-6f));
+        const auto* effect = [&]() -> const pluginrack::LimiterEffect* {
+            if (auto* channel = currentChannel()) {
+                for (const auto& e : channel->limiterEffects)
+                    if (!e.bypassed) return &e;
+            } else if (auto* output = currentOutput()) {
+                for (const auto& e : output->limiterEffects)
+                    if (!e.bypassed) return &e;
+            }
+            return nullptr;
+        }();
+        if (auto* mini = limiterCard->miniView()) {
+            if (effect != nullptr) {
+                mini->setLimiter(*effect);
+                // Brickwall gain: input above the ceiling is reduced by the
+                // overshoot, the same maths the audio processor applies.
+                const float gr = effect->bypassed
+                                     ? 0.0f
+                                     : -std::max(0.0f, levelDb - effect->ceilingDb);
+                mini->setLimiterGain(levelDb, gr);
             }
         }
     }
@@ -1215,10 +1219,13 @@ void RackView::refreshEditor() {
     editorHolder.addAndMakeVisible(dockedEditor);
     knobWatcher.setPlugin(pluginInstance);
     resized();
-    // Some plugins (Native Instruments' Qt editors) create their own native
-    // window at their preferred size and put it back after it has been placed.
-    // Re-apply the bay fit once the plugin has settled instead of fighting it
-    // in a resize loop.
+    // Some plugins create their own native window at their preferred size
+    // and put it back after it has been placed. Re-apply the bay fit once
+    // the plugin has settled instead of fighting it in a resize loop.
+    //
+    // The callbacks run on the message thread and are the only nest a
+    // plugin-initiated resize can still land in: layoutDockedEditor() owns
+    // its own guard, and the bay is only resized by resized() here.
     juce::Component::SafePointer<RackView> safe(this);
     for (const int delayMs : {400, 1200}) {
         juce::Timer::callAfterDelay(delayMs, [safe] {
@@ -1227,8 +1234,8 @@ void RackView::refreshEditor() {
             safe->layoutDockedEditor();
         });
     }
-    // Docking a native plugin UI is the slow part of adding one (NI editors take
-    // ~1-2.5 s to attach), so it is reported in the run log.
+    // Docking a native plugin UI is the slow part of adding one (some editors
+    // take ~1-2.5 s to attach), so it is reported in the run log.
     juce::Logger::writeToLog("rack: editor docked " + dockElapsed() + " ms");
 }
 
@@ -1255,6 +1262,9 @@ void RackView::layoutDockedEditor() {
         if (dockedEditor->getPosition() != fitted.getPosition())
             dockedEditor->setTopLeftPosition(fitted.getPosition());
     } else if (dockedEditor->getBounds() != fitted) {
+        // Writing sizes never deadlocks on its own: the fit itself is
+        // synchronous here, and the pass cap below stops the layout from
+        // re-entering through componentMovedOrResized().
         dockedEditor->setBounds(fitted);
         juce::Logger::writeToLog("rack: editor placed " + fitted.toString() + " in bay "
                                  + bay.toString());
@@ -1304,6 +1314,10 @@ juce::Rectangle<int> RackView::dockedEditorVisualBounds() const {
 }
 
 void RackView::componentMovedOrResized(juce::Component& component, bool, bool wasResized) {
+    // Gated on a changed size: a move-only notification that outlived the
+    // layout that triggered it must not reach a plugin that already called
+    // closeDockedEditor() from its own paint, and a message-thread timer
+    // pumping layout must never be re-entered from the render path.
     if (!wasResized || &component != dockedEditor || layingOutDockedEditor) return;
 
     if (!applyingDockedEditorScale && dockedEditorScale > 0.0f) {
@@ -1324,7 +1338,9 @@ void RackView::componentMovedOrResized(juce::Component& component, bool, bool wa
 
     // A plugin is free to size itself once it is on screen; put it back, fitted
     // and centred in the bay. Two passes settle it without fighting a plugin
-    // that keeps insisting on a size the bay cannot hold.
+    // that keeps insisting on a size the bay cannot hold. A plugin parked in
+    // a layout loop still stops after the cap: no resize reaches render past
+    // this point, so nothing here can hold the message thread.
     if (dockedEditorLayoutPasses >= 2) return;
     ++dockedEditorLayoutPasses;
     juce::Component::SafePointer<RackView> safe(this);
@@ -1720,29 +1736,9 @@ void RackView::focusLimiter() {
 }
 
 void RackView::refreshEqButton() {
-    bool active = false;
-    if (auto* ch = currentChannel()) {
-        if (!ch->eqBypassed.get()) {
-            // A delay-only EQ still does audible work, so it lights the button.
-            active = ch->eqDelayMs > 0.0f;
-            for (const auto& band : ch->eqBands) {
-                if (band.enabled) { active = true; break; }
-            }
-        }
-    } else if (auto* out = currentOutput()) {
-        if (!out->eqBypassed.get()) {
-            active = out->eqDelayMs > 0.0f;
-            for (const auto& band : out->eqBands) {
-                if (band.enabled) { active = true; break; }
-            }
-        }
-    }
-    const bool open = (eqWindow != nullptr);
-    eqButton.setColour(juce::TextButton::buttonColourId,
-                       active ? theme::amber() : theme::control());
-    eqButton.setColour(juce::TextButton::textColourOffId,
-                       active ? theme::bg() : theme::text());
-    eqButton.setRingVisible(open);
+    // No standalone button left: the insert cards carry the bypass state.
+    // Kept so callers do not need to change; the card refresh happens in
+    // refreshSlots() and the timer tick.
 }
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
@@ -1899,34 +1895,24 @@ void RackView::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
 }
 
 void RackView::refreshDynamicsButtons() {
-    const auto apply = [this](EqButton& button, pluginrack::DynamicsEffectType type) {
-        const std::vector<pluginrack::DynamicsEffect>* effects = nullptr;
-        if (auto* ch = currentChannel()) effects = &ch->effects;
-        else if (auto* out = currentOutput()) effects = &out->effects;
-        bool active = false;
-        if (effects != nullptr) {
-            const auto found = std::find_if(effects->begin(), effects->end(),
-                                            [type](const auto& effect) { return effect.type == type; });
-            active = found != effects->end() && !found->bypassed;
-            if (found != effects->end() && dynamicsWindow != nullptr &&
-                dynamicsWindow->getType() == type) {
-                dynamicsWindow->setBypassed(found->bypassed);
-                if (type == pluginrack::DynamicsEffectType::Compressor) {
-                    const auto gateIt = std::find_if(
-                        effects->begin(), effects->end(), [](const auto& effect) {
-                            return effect.type == pluginrack::DynamicsEffectType::Gate;
-                        });
-                    if (gateIt != effects->end()) dynamicsWindow->setGate(*gateIt);
-                }
-            }
-        }
-        button.setColour(juce::TextButton::buttonColourId,
-                         active ? theme::amber() : theme::control());
-        button.setColour(juce::TextButton::textColourOffId,
-                         active ? theme::bg() : theme::text());
-    };
-    apply(compressorButton, pluginrack::DynamicsEffectType::Compressor);
-    apply(gateButton, pluginrack::DynamicsEffectType::Gate);
+    // No standalone buttons left: the Dynamics card carries the bypass
+    // switches. Still syncs an open Dynamics window with the chain state.
+    const std::vector<pluginrack::DynamicsEffect>* effects = nullptr;
+    if (auto* ch = currentChannel()) effects = &ch->effects;
+    else if (auto* out = currentOutput()) effects = &out->effects;
+    if (effects == nullptr || dynamicsWindow == nullptr) return;
+    const auto type = dynamicsWindow->getType();
+    const auto found = std::find_if(effects->begin(), effects->end(),
+                                    [type](const auto& effect) { return effect.type == type; });
+    if (found == effects->end()) return;
+    dynamicsWindow->setBypassed(found->bypassed);
+    if (type == pluginrack::DynamicsEffectType::Compressor) {
+        const auto gateIt = std::find_if(
+            effects->begin(), effects->end(), [](const auto& effect) {
+                return effect.type == pluginrack::DynamicsEffectType::Gate;
+            });
+        if (gateIt != effects->end()) dynamicsWindow->setGate(*gateIt);
+    }
 }
 
 void RackView::SourceRowList::setRows(juce::StringArray channelNames,
@@ -2050,10 +2036,6 @@ void RackView::rebuild() {
     mixerButton.setVisible(hasChain);
     channelCombo.setVisible(true);
     insertsHeader.setVisible(hasChain);
-    fxHeader.setVisible(hasChain);
-    eqButton.setVisible(hasChain);
-    compressorButton.setVisible(hasChain);
-    gateButton.setVisible(hasChain);
     slotViewport.setVisible(hasChain);
     editorViewport.setVisible(hasChain);
     outputHeader.setVisible(hasChain);
@@ -2175,9 +2157,6 @@ void RackView::resized() {
 
     // plugin column
     auto pa = pluginArea.reduced(4);
-    pa.removeFromTop(14); // panel caption band
-    fxHeader.setBounds(pa.removeFromTop(16));
-    pa.removeFromTop(4);
     // Built-in effects and VST inserts share one ordered list in the rack.
     pa.removeFromTop(14);
     insertsHeader.setBounds(pa.removeFromTop(16));
@@ -2192,20 +2171,31 @@ void RackView::resized() {
     editorViewport.setBounds(editorArea);
     const int vw = juce::jmax(0, editorViewport.getWidth());
     const int vh = juce::jmax(0, editorViewport.getHeight());
+    // Every built-in window is the same 860x560 panel. The panel is centred
+    // vertically in the bay (its holder is shifted by the spare space above
+    // and below) instead of top-aligned, so the window never sits against the
+    // top edge with a dead strip below it, and switching between windows never
+    // changes the height or leaves a black bar behind. The gate fits in one
+    // 132 px row below the compressor knobs, so all five windows share the
+    // same panel and the holder never jumps.
+    auto centreInBay = [&](int width, int height) {
+        const int holderW = juce::jmax(vw, width);
+        const int holderH = juce::jmax(vh, height);
+        const int panelW = juce::jmin(width, holderW);
+        const int panelH = juce::jmin(height, holderH);
+        editorHolder.setSize(holderW, holderH);
+        const int x = (holderW - panelW) / 2;
+        const int y = (holderH - panelH) / 2;
+        editorHolder.setTopLeftPosition(x, y);
+    };
     if (eqFocused && eqWindow != nullptr) {
-        // The EQ fills the editor bay, like the dynamics panel does.
-        editorHolder.setSize(juce::jmax(vw, EQWindow::kWidth),
-                             juce::jmax(vh, EQWindow::kHeight));
+        centreInBay(EQWindow::kWidth, EQWindow::kHeight);
         eqWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
     if (dynamicsFocused && dynamicsWindow != nullptr) {
-        // Size the holder to the bay, not to whatever the last docked VST
-        // editor left behind: the panel's knob rows sit at the bottom and
-        // would otherwise fall outside the visible area.
-        editorHolder.setSize(juce::jmax(vw, DynamicsWindow::kMinWidth),
-                             juce::jmax(vh, DynamicsWindow::kMinHeight));
+        centreInBay(DynamicsWindow::kMinWidth, DynamicsWindow::kMinHeight);
         dynamicsWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
@@ -2216,7 +2206,7 @@ void RackView::resized() {
         // of sitting in a fixed 860px holder with dead space on the right
         // (was the "Multiband/De-esser/Limiter not full width" report).
         // Height keeps the windows' compact 560px; only the width stretches.
-        editorHolder.setSize(juce::jmax(vw, 860), 560);
+        centreInBay(860, 560);
         focusedEffectWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
@@ -2705,16 +2695,11 @@ void RackView::refreshAfterInsertChange() {
 
 bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     if (insert == nullptr) return false;
-    eqFocused = false;
-    if (eqWindow != nullptr) {
-        auto* doomed = eqWindow;
-        eqWindow = nullptr;
-        editorHolder.removeChildComponent(doomed);
-        delete doomed;
-        refreshEqButton();
-    }
-    // Clicking a slot opens that insert in the bay, so the compressor panel
-    // has to give it up instead of staying underneath.
+    // Clicking a slot opens that insert in the bay: clear every docked
+    // built-in first, or a stuck Multiband/De-esser/Limiter keeps the bay
+    // and the VST editor never appears.
+    closeEffectWindows();
+    closeEqWindow();
     closeDynamicsWindow();
     focusedInsertId = insert->id;
     refreshEditor();

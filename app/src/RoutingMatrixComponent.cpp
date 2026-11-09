@@ -123,12 +123,21 @@ void RoutingMatrixComponent::rebuild() {
                 const auto channelId = channel->id;
                 const auto outputId = output->id;
                 slider->onValueChange = [this, slider, channelId, outputId, rightSide] {
-                    if (rightSide)
-                        audioEngine.setSendGainR(channelId, outputId,
-                                                 static_cast<float>(slider->getValue()));
-                    else
-                        audioEngine.setSendGainL(channelId, outputId,
-                                                 static_cast<float>(slider->getValue()));
+                    const float v = static_cast<float>(slider->getValue());
+                    // Stereo link: dragging one side moves both, unless Alt
+                    // is held for an independent L/R trim.
+                    if (!juce::ModifierKeys::currentModifiers.isAltDown()) {
+                        audioEngine.setSendGain(channelId, outputId, v);
+                        for (auto* other : sendSliders) {
+                            if (other != nullptr && other != slider
+                                && other->getName() == slider->getName())
+                                other->setValue(v, juce::dontSendNotification);
+                        }
+                    } else if (rightSide) {
+                        audioEngine.setSendGainR(channelId, outputId, v);
+                    } else {
+                        audioEngine.setSendGainL(channelId, outputId, v);
+                    }
                 };
                 gridContent.addAndMakeVisible(*slider);
             };

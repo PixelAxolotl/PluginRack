@@ -60,8 +60,12 @@ private:
         void refresh();
         void openEqWindow();
         void closeEqWindow();
+        void closeAllEffectWindows();
         void refreshEqButton();
         void openDynamicsWindow(pluginrack::DynamicsEffectType type);
+        void openMultibandWindow();
+        void openDeEsserWindow();
+        void openLimiterWindow();
         void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
         void refreshDynamicsButtons();
         int getOutputIndex() const { return outputIndex; }
@@ -123,11 +127,11 @@ private:
         ValueEditSlider gainSlider;
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
-        EqButton gateButton{"GATE"};
-        EqButton eqButton{"EQ"};
-        EqButton compressorButton{"COMP"};
         EQWindow* eqWindow = nullptr;
         DynamicsWindow* dynamicsWindow = nullptr;
+        MultibandWindow* multibandWindow = nullptr;
+        DeEsserWindow* deEsserWindow = nullptr;
+        LimiterWindow* limiterWindow = nullptr;
     };
 
     void rebuildChannelStrips();

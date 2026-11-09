@@ -326,10 +326,10 @@ TEST_CASE("failing devices are silenced and named in the progress text",
           "[underrun][latency]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto pass = functionBody(engine, "juce::String AudioEngine::openAllDevicesPass");
-    // Every endpoint starts at once, so the progress text lists the whole
-    // in-flight set instead of the last worker to start.
-    CHECK(countOccurrences(pass, "beginDeviceOpen(status)") == 2);
-    CHECK(countOccurrences(pass, "endDeviceOpen(status)") == 2);
+    // Each endpoint reports the endpoint it is opening: the output launcher,
+    // the input launcher, and the one clock retry for a single-client driver.
+    CHECK(countOccurrences(pass, "beginDeviceOpen(status)") == 3);
+    CHECK(countOccurrences(pass, "endDeviceOpen(status)") == 3);
     const auto engine2 = readSource("app/src/AudioEngine.cpp");
     const auto status = functionBody(engine2, "juce::String AudioEngine::getDeviceOpenStatus");
     CHECK(contains(status, "endpoints in parallel"));
@@ -401,8 +401,62 @@ TEST_CASE("buffer-size requests must match the device buffer",
           "[underrun][buffer]") {
     const auto source = readSource("app/src/DeviceStream.cpp");
     const auto preferred = functionBody(source, "juce::String openWithPreferredType");
-    CHECK(contains(preferred, "getCurrentBufferSizeSamples() != requestedBufferSize"));
+    CHECK(contains(preferred, "getAvailableBufferSizes()"));
+    CHECK(contains(preferred, "The device does not support"));
     CHECK(contains(preferred, "manager.closeAudioDevice()"));
+    // The old exact-match requirement is gone for drivers that negotiate a
+    // supported size different from the ask (M-Audio Duo 480 vs 32).
+    CHECK_FALSE(contains(preferred,
+                         "device->getCurrentBufferSizeSamples() != requestedBufferSize) {"));
+}
+
+TEST_CASE("applying devices releases a reused ASIO client before reopening", "[latency][duplex]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto pass = functionBody(engine, "juce::String AudioEngine::openAllDevicesPass");
+    // The old behavior: outputs and inputs raced for a single-client ASIO
+    // driver in parallel, so Apply could hit "No such device" while Force
+    // ASIO (which opens the clock synchronously first) worked.
+    // The fix: clock (outputs) open before inputs, and prior playback is
+    // closed before the new open.
+    const auto out = pass.find("launchOutputs(");
+    const auto in = pass.find("launchInputs(");
+    REQUIRE(out != std::string::npos);
+    REQUIRE(in != std::string::npos);
+    CHECK(out < in);
+    // Not just launched in order: the clock's callback must be live before any
+    // input opens, or the input thread can still win the single-client race.
+    const auto clockJoin = pass.find("for (auto& helper : outputHelpers) helper.join()");
+    REQUIRE(clockJoin != std::string::npos);
+    CHECK(clockJoin < in);
+    // Inputs on the clock device must be released too, not left holding the
+    // endpoint while the clock fronts the join.
+    CHECK(contains(pass, "releaseDeviceInputsForClock"));
+    // The prior playback must be closed before the new open or the driver
+    // refuses the second client and Apply reports "No such device".
+    const auto open = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    const auto closeIdx = open.find("prevOutput->close()");
+    const auto openIdx = open.find("newPlayback->open(");
+    REQUIRE(closeIdx != std::string::npos);
+    REQUIRE(openIdx != std::string::npos);
+    CHECK(closeIdx < openIdx);
+    // ASIO's single-client driver keeps refusing CoCreateInstance for a while
+    // after the previous stream closes (JUCE only releases it on destruction).
+    // The clock is therefore retried, bounded, before any input launches — the
+    // recovery Force ASIO performs by hand.
+    const auto retryIdx = pass.find("retryClockOpen");
+    const auto inputIdx = pass.find("launchInputs(");
+    REQUIRE(retryIdx != std::string::npos);
+    REQUIRE(inputIdx != std::string::npos);
+    CHECK(retryIdx < inputIdx);
+    // More than one extra attempt: 150 ms was not enough for the M-Audio Duo.
+    CHECK(contains(pass, "kClockOpenAttempts"));
+    CHECK(contains(pass, "\"No such device\""));
+    CHECK(contains(engine, "constexpr int kClockOpenAttempts = 4"));
+    // A single-client ASIO driver also refuses forever while the open runs on a
+    // throwaway worker apartment. Force ASIO works because it opens on the
+    // message thread, so a still-refused clock is reopened there.
+    CHECK(contains(pass, "existsAndIsCurrentThread"));
+    CHECK(contains(pass, "MessageManager::callSync"));
 }
 
 TEST_CASE("input and output buffer sizes are independently configurable",
@@ -1116,4 +1170,28 @@ TEST_CASE("latency report splits every stage and reports the unexplained part",
     CHECK(contains(view, "Predicted"));
     CHECK(contains(view, "Unexplained"));
     CHECK(contains(view, "report_.unexpectedMs"));
+}
+
+TEST_CASE("a duplex open names the endpoint for output as well as input", "[latency][duplex]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto open = functionBody(source, "juce::String openWithPreferredType");
+    // The duplex branch flips wantInput to true, so an open that names only the
+    // input endpoint silently leaves the ASIO device without output channels
+    // (M-Audio Duo: clock streams but nothing is audible).
+    CHECK(contains(open, "setup.outputDeviceName = selectedDeviceName"));
+    CHECK(contains(open, "typeSetup.setAttribute(\"audioOutputDeviceName\", selectedDeviceName)"));
+}
+
+TEST_CASE("a driver negotiated buffer is accepted when it is supported", "[latency][duplex]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto open = functionBody(source, "juce::String openWithPreferredType");
+    // The M-Audio Duo reports its preferred block (480) even when asked for 32.
+    // Requiring an exact match errored Apply; Force ASIO sidestepped it. Keep
+    // the device when the driver negotiated a supported size instead.
+    CHECK(contains(open, "getAvailableBufferSizes()"));
+    CHECK(contains(open, "The device does not support"));
+    // The old strict check `device->getCurrentBufferSizeSamples() != requestedBufferSize`
+    // must be gone for duplex; the new check supports negotiated sizes.
+    CHECK_FALSE(contains(open,
+                         "device->getCurrentBufferSizeSamples() != requestedBufferSize) {"));
 }

@@ -39,22 +39,25 @@ void drawDashedCubic(juce::Graphics& g, juce::Point<float> from, juce::Point<flo
 
 PatchesView::PatchesView(AudioEngine& engine) : audioEngine(engine) {
     addAndMakeVisible(header);
+    canvasViewport.setViewedComponent(&canvasContent, false);
+    canvasViewport.setScrollBarsShown(true, false);
+    addAndMakeVisible(canvasViewport);
     rebuild();
 }
 
 void PatchesView::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    auto area = getLocalBounds().reduced(theme::ui::kPagePad);
-    header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
-    area.removeFromTop(theme::ui::kHeaderGap);
+}
+
+void PatchesView::paintCanvas(juce::Graphics& g) {
+    g.fillAll(theme::bg());
 
     const int rowCount = juce::jmax(static_cast<int>(inputs.size()),
                                     static_cast<int>(outputs.size()));
-    (void)area;
     if (rowCount == 0) {
         g.setColour(theme::dim());
         g.setFont(theme::ui::bodyFont());
-        g.drawText("No channels or outputs yet.", getLocalBounds(),
+        g.drawText("No channels or outputs yet.", canvasContent.getLocalBounds(),
                    juce::Justification::centred, true);
         return;
     }
@@ -119,7 +122,11 @@ void PatchesView::paint(juce::Graphics& g) {
     }
 }
 
-void PatchesView::mouseDown(const juce::MouseEvent& e) {
+void PatchesView::mouseDown(const juce::MouseEvent&) {
+    // Clicks land on the canvas child; kept for compatibility.
+}
+
+void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
     const auto pos = e.getPosition();
     for (int i = 0; i < (int)inputs.size(); ++i) {
         if (inputs[static_cast<std::size_t>(i)].box.contains(pos)) {
@@ -127,7 +134,8 @@ void PatchesView::mouseDown(const juce::MouseEvent& e) {
                 selection.index = -1; // clicking the selected node again clears it
             else
                 selection = {true, i};
-            repaint();
+            updateStatusText();
+            canvasContent.repaint();
             return;
         }
     }
@@ -137,36 +145,54 @@ void PatchesView::mouseDown(const juce::MouseEvent& e) {
                 selection.index = -1;
             else
                 selection = {false, i};
-            repaint();
+            updateStatusText();
+            canvasContent.repaint();
             return;
         }
     }
     // Clicking empty space clears the selection.
     if (selection.index >= 0) {
         selection.index = -1;
-        repaint();
+        updateStatusText();
+        canvasContent.repaint();
     }
 }
 
-void PatchesView::resized() {
-    const int h = getHeight();
+void PatchesView::updateStatusText() {
+    header.setStatus(juce::String(inputs.size()) + " inputs - "
+                     + juce::String(outputs.size()) + " outputs - "
+                     + juce::String(cables.size()) + " patches"
+                     + (selection.index >= 0 ? " - showing selected" : ""));
+}
+
+void PatchesView::updateLayout() {
     const int rowCount = juce::jmax(static_cast<int>(inputs.size()),
                                     static_cast<int>(outputs.size()));
     const int rowsH = rowCount * kRowH;
-    const int inset = kTopPad + juce::jmax(0, h - kTopPad - rowsH) / 2;
+    const int viewW = juce::jmax(0, canvasViewport.getWidth());
+    const int contentH = juce::jmax(rowsH + 16, canvasViewport.getHeight());
+    canvasContent.setSize(juce::jmax(viewW, 2 * (kSidePad + kLabelW + 20)), contentH);
 
+    const int w = canvasContent.getWidth();
     for (std::size_t i = 0; i < inputs.size(); ++i) {
-        const int y = inset + (int)i * kRowH;
+        const int y = 8 + (int)i * kRowH;
         inputs[i].box = {kSidePad, y, kLabelW, 36};
         inputs[i].port = {kSidePad + kLabelW + 10, y + 18};
     }
-    const int w = getWidth();
     for (std::size_t i = 0; i < outputs.size(); ++i) {
-        const int y = inset + (int)i * kRowH;
+        const int y = 8 + (int)i * kRowH;
         outputs[i].box = {w - kSidePad - kLabelW, y, kLabelW, 36};
         outputs[i].port = {w - kSidePad - kLabelW - 10, y + 18};
     }
-    repaint();
+    canvasContent.repaint();
+}
+
+void PatchesView::resized() {
+    auto area = getLocalBounds().reduced(theme::ui::kPagePad);
+    header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
+    area.removeFromTop(theme::ui::kHeaderGap);
+    canvasViewport.setBounds(area);
+    updateLayout();
 }
 
 void PatchesView::rebuild() {
@@ -194,10 +220,7 @@ void PatchesView::rebuild() {
         }
     }
 
-    header.setStatus(juce::String(inputs.size()) + " inputs - "
-                     + juce::String(outputs.size()) + " outputs - "
-                     + juce::String(cables.size()) + " patches"
-                     + (selection.index >= 0 ? " - showing selected" : ""));
-    resized();
+    updateStatusText();
+    updateLayout();
 }
 

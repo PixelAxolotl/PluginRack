@@ -25,6 +25,12 @@
 
 class AudioEngine {
 public:
+    // Global VST insert budget: every input and output strip shares this one
+    // constant, so the UI's add-row and the engine's refusal can never drift
+    // apart. The ceiling is high enough that normal sessions never hit it;
+    // it exists so a runaway add-loop cannot allocate without bound.
+    static constexpr int kMaxInserts = 64;
+
     struct InsertSlot {
         std::uint32_t id = 0;
         juce::String pluginPath;
@@ -654,6 +660,9 @@ private:
     void clearDeviceOpens();
     void applySettingsValues(const DeviceSettings& settings);
     void stopDeviceOpenThread();
+    // Drops separate captures on the clock device before the clock reopens:
+    // ASIO is single-client, and an input holding the endpoint blocks the clock.
+    void releaseDeviceInputsForClock(const juce::String& deviceName);
     // Audio-thread silence feed: pushes a fade-to-silence block to every
     // published output. Never allocates and never takes stateLock, so it also
     // works on the render-miss path when the message thread holds the lock.

@@ -11,11 +11,12 @@ built-in effects.
 > Status: early development, Windows x64 only. Interfaces and the scene format
 > can still change.
 
-> **Plugin trust warning:** plugins now run in a restricted host process
-> (reduced rights, no network or file write access, killed and restarted if
-> it hangs or crashes). Treating a plugin as untrusted is still right: never
-> open an untrusted VST3 from the internet or an email, and note that a few
-> plugins that must live in the app process cannot be hosted yet.
+> **Plugin trust warning:** plugins render in a separate host process
+> (so a crash or hang does not take the app down), but that process
+> currently runs with your normal user rights — full OS-level sandboxing
+> is not finished yet. Treating a plugin as untrusted is still right:
+> never open an untrusted VST3 from the internet or an email, and only
+> load plugins from publishers you trust.
 
 ## What you can do with it
 
@@ -56,30 +57,35 @@ exempt: they are short-lived children of the running app and keep working.
 
 ### Views
 
-The toolbar switches between six views. `I/O` sits next to `Mixer`.
+The toolbar switches between seven views: Racks, Mixer, Patches, I/O,
+Routing, Saves, Settings.
 
 - **Racks** — per-channel strips: name, trim/gain, pan, fader and meter, mute/solo,
   the insert list, the docked plugin editor, and routing toggles. Every filled
   insert card carries a read-only thumbnail: the EQ its curve and live spectrum,
-  the single Gate/Comp card both transfer curves and their shared
-  gain-reduction bar, a VST a scaled capture of its editor window. Clicking a
+  the Dynamics card both transfer curves and their shared gain-reduction bar,
+  Multiband Comp and De-esser their spectrum traces, Limiter its ceiling line
+  and GR bar, a VST a scaled capture of its editor window. Clicking a
   card puts that insert in the editor bay, which is the only place it can be
   edited. The bay force-fits the plugin's own UI: it is scaled so the tighter of
   width or height exactly fills the bay and the other axis fits, keeping the
   plugin's aspect ratio, so a wide editor such as Ozone's EQ is shrunk to fit
   instead of being cut off. Plugins that do not support host content scaling
-  keep their own size and are centred in the bay. The Gate/Comp card has one
+  keep their own size and are centred in the bay. The Dynamics card has one
   switch per effect (`C` and `G`); both effects are also switched inside the
   editor panel. Drag a card's six-dot grip to reorder the insert chain; the
   cyan bar shows where it will land.
 - **Mixer** — all channel and output strips side by side, with add/remove
   channel/output controls. Each strip's six-dot grip drags it to a new
-  position in the row.
+  position in the row. Double-click a strip to open its Rack page.
+- **Patches** — inputs down the left, outputs down the right, with a cable for
+  every active send. Click a node to isolate its connections.
 - **I/O** — the same strips as the Mixer, split into an **Inputs** tab and an
   **Outputs** tab so a large rack can be patched one side at a time. The strips
-  reorder there too, from the same grip.
+  reorder there too, from the same grip. Double-click a strip to open its Rack
+  page, like in the Mixer.
 - **Routing** — the full channel-to-output matrix with an independent send level
-  per cell, L and R.
+  per cell, L and R linked by default (hold Alt for an independent L/R trim).
 - **Saves** — scene save/load and the autosave/last-session entries.
 - **Settings** — clock summary, buffers, round-trip measurement, latency tuning,
   device reloads, and the Rack thumbnail refresh rate.
@@ -90,9 +96,10 @@ Click an empty insert slot to open the plugin menu. It lists everything found in
 the standard VST3 folders as **VST3 ▸ vendor ▸ plugin**, and ends with **Add
 plugin folder...** (scan another folder of your own), **Rescan plugin folders**
 and **Browse...** (pick a `.vst3` by hand). Left-click a loaded slot to open or
-focus its editor, right-click for bypass/removal options. The EQ and Gate/Comp
-cards are always present; the Gate/Comp card opens the panel that carries both
-effects, and each has its own **Enable** switch there. The gate starts bypassed,
+focus its editor, right-click for bypass/removal options. The built-in cards
+(EQ, Dynamics, Multiband Comp, De-esser, Limiter) open their own editors; the
+Dynamics card opens the panel that carries both compressor and gate, and each
+has its own **Enable** switch there. The gate starts bypassed,
 so its knobs do nothing until it is switched on. Insert state is saved with the
 scene.
 

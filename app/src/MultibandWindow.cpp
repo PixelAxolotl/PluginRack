@@ -32,8 +32,8 @@ MultibandWindow::MultibandWindow(const juce::String& title,
     spectrumDb.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, 0.0f);
     spectrumAvg.assign(static_cast<std::size_t>(kAnalyzerFftSize) / 2 + 1, -100.0f);
 
-    modeLabel.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
-    modeLabel.setColour(juce::Label::textColourId, theme::cyan());
+    modeLabel.setText("MULTIBAND", juce::dontSendNotification);
+    theme::ui::styleTitleLabel(modeLabel);
     content.addAndMakeVisible(modeLabel);
     content.addAndMakeVisible(analyzerLabel);
     content.addAndMakeVisible(rtaMinusButton);
@@ -390,17 +390,15 @@ void MultibandWindow::resized() {
     installedContent->setBounds(getLocalBounds());
     auto area = installedContent->getLocalBounds().reduced(8);
 
-    auto header = area.removeFromTop(28);
-    modeLabel.setBounds(header.removeFromLeft(250));
-    autoMakeupButton.setBounds(header.removeFromRight(112));
-    header.removeFromRight(6);
+    auto header = area.removeFromTop(36);
+    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
     presetCombo.setBounds(header.removeFromRight(120));
     header.removeFromRight(6);
     enableButton.setBounds(header.removeFromRight(72));
 
     auto controls = area.removeFromBottom(132);
     area.removeFromBottom(8);
-    auto analyzerRow = area.removeFromTop(24);
+    auto analyzerRow = area.removeFromTop(28);
     analyzerRow.removeFromBottom(3);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
     analyzerRow.removeFromLeft(4);
@@ -415,7 +413,7 @@ void MultibandWindow::resized() {
             ->setBounds(analyzerRow.removeFromRight(24).reduced(1, 1));
         analyzerRow.removeFromRight(2);
     }
-    area.removeFromTop(6);
+    area.removeFromTop(8);
     curve.setBounds(area);
 
     auto command = controls.removeFromLeft(204);
@@ -432,13 +430,14 @@ void MultibandWindow::resized() {
     command.removeFromTop(4);
     auto removeRow = command.removeFromTop(24);
     removeBandButton.setBounds(removeRow.removeFromLeft(80));
+    command.removeFromTop(4);
+    autoMakeupButton.setBounds(command.removeFromTop(24));
 
     controls.removeFromLeft(8);
     const int knobWidth = juce::jmax(70, controls.getWidth() / 7);
     auto placeKnob = [&](ValueEditSlider& slider, juce::Label& label) {
         auto slot = controls.removeFromLeft(knobWidth);
-        label.setBounds(slot.removeFromTop(16));
-        slider.setBounds(slot.reduced(2, 0));
+        theme::ui::placeWindowKnob(slot, label, slider);
     };
     placeKnob(inputGain, inputGainLabel);
     placeKnob(threshold, thresholdLabel);

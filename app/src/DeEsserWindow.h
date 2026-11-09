@@ -36,7 +36,7 @@ private:
     juce::Component content;
     TraceGraphComponent graph;
     juce::TextButton enableButton{"Enable"};
-    juce::Label modeLabel{"", "DE-ESSER"};
+    juce::Label modeLabel{"DE-ESSER", "DE-ESSER"};
     juce::TextButton modeButton{"Split"};
     juce::ComboBox presetCombo;
     ValueEditSlider freq, q, threshold, range, attack, release;

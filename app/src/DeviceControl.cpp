@@ -24,7 +24,7 @@ void DeviceControl::updateTooltip() {
     juce::String text = title;
     if (deviceName.isNotEmpty()) text += "\n" + deviceName;
     if (error.isNotEmpty()) text += "\n" + error;
-    text += "\nDouble-click to rename";
+    text += "\nRight-click to rename - Click to choose device";
     setTooltip(text);
 }
 
@@ -111,6 +111,17 @@ void DeviceControl::mouseDown(const juce::MouseEvent& e) {
     pressed = true;
     repaint();
     if (e.mods.isRightButtonDown()) {
+        if (onRename) onRename();
+        return;
+    }
+    // Left-click on the title row renames; the device row opens the menu.
+    // The old code opened the menu on every mouseDown, which ate the first
+    // click of a double-click rename.
+    const auto pos = e.getPosition();
+    const bool narrow = getWidth() < 110;
+    auto area = getLocalBounds().reduced(narrow ? 5 : 8, 4);
+    const int titleH = area.getHeight() / 2;
+    if (pos.y < area.getY() + titleH) {
         if (onRename) onRename();
         return;
     }

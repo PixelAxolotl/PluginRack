@@ -340,7 +340,7 @@ TEST_CASE("buffer size is bounded") {
     pluginrack::Scene scene = makeValidScene();
 
     SECTION("below floor") {
-        scene.bufferFrames = 32;
+        scene.bufferFrames = 16;
         const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
         REQUIRE(errors.size() == 1);
         REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
@@ -351,7 +351,9 @@ TEST_CASE("buffer size is bounded") {
         REQUIRE(pluginrack::validate(scene).size() == 1);
     }
     SECTION("both ends of the range are accepted") {
-        scene.bufferFrames = 64;
+        // 32 is a real ASIO block size (M-Audio M-Track), so a scene saved at
+        // 32 samples must validate.
+        scene.bufferFrames = 32;
         REQUIRE(pluginrack::validate(scene).empty());
         scene.bufferFrames = 8192;
         REQUIRE(pluginrack::validate(scene).empty());
@@ -489,14 +491,30 @@ TEST_CASE("output chain is validated the same way") {
 TEST_CASE("collection caps are enforced") {
     pluginrack::Scene scene = makeValidScene();
 
-    SECTION("too many insert slots") {
-        for (std::uint32_t i = 1; i <= 6; ++i)
+    SECTION("many insert slots are allowed") {
+        // VST inserts are unbounded per strip; the floor is only the old
+        // 5-slot UI cap, which a scene from an older build may exceed.
+        for (std::uint32_t i = 1; i <= 8; ++i)
             scene.channels.front().inserts.push_back(
                 pluginrack::InsertSlot{i, "p", "n"});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 1});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 2});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 3});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 4});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 5});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 6});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 7});
+            scene.channels.front().chain.push_back(
+                {pluginrack::ChainItemType::Insert, 8});
         const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
-        REQUIRE(errors.size() == 1);
-        REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
-        REQUIRE(errors[0].message.find("inserts") != std::string::npos);
+        REQUIRE(errors.empty());
     }
     SECTION("too many chain rows") {
         for (std::uint32_t i = 0; i < 17; ++i)

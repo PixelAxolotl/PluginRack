@@ -28,7 +28,7 @@ private:
     juce::Component content;
     TraceGraphComponent graph;
     juce::TextButton enableButton{"Enable"};
-    juce::Label modeLabel{"", "LIMITER"};
+    juce::Label modeLabel{"LIMITER", "LIMITER"};
     juce::ComboBox presetCombo;
     ValueEditSlider inputGain, ceiling, lookahead, release;
     juce::Label inputGainLabel{"", "Input Gain"}, ceilingLabel{"", "Ceiling"},

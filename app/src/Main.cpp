@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 
+#include "AppLogos.h"
 #include "ConsoleLookAndFeel.h"
 #include "DeviceStream.h"
 #include "MainComponent.h"
@@ -90,12 +91,20 @@ class TrayIcon final : public juce::SystemTrayIconComponent {
 public:
     TrayIcon(std::function<void()> onShowWindow, std::function<void()> onQuit)
         : onShowWindow_(std::move(onShowWindow)), onQuit_(std::move(onQuit)) {
-        juce::Image image(juce::Image::ARGB, 32, 32, true);
-        juce::Graphics g(image);
-        g.fillAll(juce::Colours::transparentBlack);
-        g.setColour(juce::Colours::limegreen);
-        g.fillEllipse(4.0f, 4.0f, 24.0f, 24.0f);
-        setIconImage(image, image);
+        // Tray icon: the mint-on-dark logo, scaled to the tray size, so the
+        // notification area shows the app mark instead of a plain dot.
+        auto logo = juce::ImageFileFormat::loadFrom(
+            AppLogos::logo_dark_png, static_cast<size_t>(AppLogos::logo_dark_pngSize));
+        if (logo.isValid())
+            logo = logo.rescaled(32, 32, juce::Graphics::highResamplingQuality);
+        else {
+            logo = juce::Image(juce::Image::ARGB, 32, 32, true);
+            juce::Graphics g(logo);
+            g.fillAll(juce::Colours::transparentBlack);
+            g.setColour(juce::Colours::limegreen);
+            g.fillEllipse(4.0f, 4.0f, 24.0f, 24.0f);
+        }
+        setIconImage(logo, logo);
         setIconTooltip("PluginRack");
     }
 
@@ -135,6 +144,13 @@ public:
         : juce::DocumentWindow("PluginRack", juce::Colours::darkgrey, allButtons)
         , closeToTray_(closeToTray) {
         setUsingNativeTitleBar(true);
+        // Window icon: the mint-on-dark logo, so the taskbar and Alt-Tab show
+        // the app mark instead of the default JUCE icon.
+        if (const auto icon = juce::ImageFileFormat::loadFrom(
+                AppLogos::logo_dark_png,
+                static_cast<size_t>(AppLogos::logo_dark_pngSize));
+            icon.isValid())
+            setIcon(icon);
         auto* content = new MainComponent();
         content->settings().onCloseToTrayChanged = [this, onCloseToTrayChanged](bool enabled) {
             closeToTray_ = enabled;
@@ -204,9 +220,18 @@ public:
 
         // Restricted plugin host (PR-01): a VST3 runs here with reduced
         // rights, never in the main app. Launched only by RestrictedHost.
+        // Optional 3rd arg: pluginUniqueId selects the class in multi-class
+        // bundles; 4th arg: base64 state blob to restore.
         const int hostIndex = args.indexOf("--plugin-host");
         if (hostIndex >= 0 && hostIndex + 1 < args.size()) {
-            const int code = RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()));
+            const int uniqueId = (hostIndex + 2 < args.size())
+                                     ? args[hostIndex + 2].unquoted().getIntValue()
+                                     : 0;
+            const juce::String state = (hostIndex + 3 < args.size())
+                                           ? args[hostIndex + 3].unquoted()
+                                           : juce::String{};
+            const int code =
+                RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId, state);
             ::exit(code);
             return;
         }

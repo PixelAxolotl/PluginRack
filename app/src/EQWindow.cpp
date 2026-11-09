@@ -22,6 +22,22 @@ EQWindow::EQWindow(const juce::String& title,
     // with their 72 px value boxes intact.
     setResizeLimits(480, 320, 10000, 10000);
     setColour(juce::DocumentWindow::backgroundColourId, theme::bg());
+    theme::ui::styleTitleLabel(titleLabel);
+    Component::addAndMakeVisible(titleLabel);
+    titleLabel.setText("EQ", juce::dontSendNotification);
+    // Same header slot as Preset in the other built-in windows, so every
+    // editor reads Title | Preset | Enable in the same order.
+    presetCombo.addItem("Custom", 1);
+    presetCombo.addItem("Flat", 2);
+    presetCombo.addItem("Presence", 3);
+    presetCombo.addItem("Warm", 4);
+    presetCombo.setSelectedId(1, juce::dontSendNotification);
+    theme::ui::styleCombo(presetCombo);
+    Component::addAndMakeVisible(presetCombo);
+    theme::ui::styleButton(enableButton);
+    enableButton.setClickingTogglesState(true);
+    enableButton.setToggleState(true, juce::dontSendNotification);
+    Component::addAndMakeVisible(enableButton);
 
     curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
     // Scenes written before the EQ gained its low-pass point carry six bands;
@@ -475,18 +491,22 @@ void EQWindow::closeButtonPressed() {
 
 void EQWindow::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    auto content = getLocalBounds().reduced(2);
-    g.setColour(theme::panel().darker(0.04f));
-    g.fillRect(content.removeFromTop(24));
+    theme::ui::drawWindowHeader(g, getLocalBounds().reduced(8).removeFromTop(36));
 }
 
 void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
-    auto area = getLocalBounds().reduced(2);
+    auto area = getLocalBounds().reduced(8);
+    auto header = area.removeFromTop(36);
+    titleLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
+    presetCombo.setBounds(header.removeFromRight(120));
+    header.removeFromRight(6);
+    enableButton.setBounds(header.removeFromRight(72));
+    area.removeFromTop(6);
     // Tall enough for a label, the dial and its value box without clipping the
     // box against the window edge.
-    auto controlsRow = area.removeFromBottom(120);
-    auto analyzerRow = area.removeFromTop(24);
+    auto controlsRow = area.removeFromBottom(132);
+    auto analyzerRow = area.removeFromTop(28);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));
     analyzerRow.removeFromLeft(4);
     // (Mode buttons removed: analyzer is fixed to Post. The freed space
@@ -504,7 +524,7 @@ void EQWindow::resized() {
             ->setBounds(analyzerRow.removeFromRight(24).reduced(1, 1));
         analyzerRow.removeFromRight(2);
     }
-    area.removeFromTop(6); // air between the analyzer row and the dB scale
+    area.removeFromTop(8); // air between the analyzer row and the dB scale
     curve.setBounds(area);
 
     auto left = controlsRow.removeFromLeft(84);
@@ -529,6 +549,9 @@ void EQWindow::resized() {
     flipButton.setBounds(right.removeFromTop(22));
 
     // Four label+knob slots across the remaining middle (bands, then delay).
+    // Every knob shares the same size rule as De-esser/Multiband/Limiter/Dynamics
+    // (placeWindowKnob): the knob fills its cell, bounded by the cell width or
+    // the 0.8 cell-width ratio, so it never overlaps the value box below it.
     const int knobW = juce::jmax(1, controlsRow.getWidth() / 4);
     auto slot = [&](int i) {
         return juce::Rectangle<int>(controlsRow.getX() + i * knobW, controlsRow.getY(),
@@ -540,10 +563,6 @@ void EQWindow::resized() {
                              : (i == 1 ? &gainLabel : (i == 2 ? &qLabel : &delayLabel));
         auto* knob = i == 0 ? &freqKnob
                             : (i == 1 ? &gainKnob : (i == 2 ? &qKnob : &delayKnob));
-        label->setBounds(s.removeFromTop(14));
-        auto knobArea = s.withTrimmedBottom(6);
-        const int knobWidth = juce::jmin(knobArea.getWidth(),
-                                         juce::jmax(66, juce::roundToInt(knobArea.getWidth() * 0.8f)));
-        knob->setBounds(knobArea.withSizeKeepingCentre(knobWidth, knobArea.getHeight()));
+        theme::ui::placeWindowKnob(s, *label, *knob);
     }
 }

@@ -10,6 +10,7 @@
 #include <pluginrack/DeEsserEffect.h>
 #include <pluginrack/DynamicsEffect.h>
 #include <pluginrack/EqEngine.h>
+#include <pluginrack/LimiterEffect.h>
 #include <pluginrack/MultibandEffect.h>
 #include <pluginrack/TraceData.h>
 
@@ -26,7 +27,7 @@ class InsertMiniView final : public juce::Component {
 public:
     static constexpr int kHeight = 120;
 
-    enum class Kind { None, Eq, Dynamics, Multiband, DeEsser, Vst };
+    enum class Kind { None, Eq, Dynamics, Multiband, DeEsser, Limiter, Vst };
 
     InsertMiniView();
 
@@ -38,6 +39,7 @@ public:
                           const pluginrack::DynamicsEffect& gate);
     void showMultiband(const pluginrack::MultibandEffect& effect, double sampleRateHz);
     void showDeEsser(const pluginrack::DeEsserEffect& effect, double sampleRateHz);
+    void showLimiter(const pluginrack::LimiterEffect& effect);
     void showVst();
 
     Kind getKind() const { return kind; }
@@ -62,6 +64,9 @@ public:
     // gainDb is the detector's gain (<= 0 dB); the dot and the bar both follow
     // it, so the card reads like the panel it stands for.
     void setLiveGain(float inputDb, float gainDb);
+    // Limiter live state: ceiling line plus the GR bar.
+    void setLimiter(const pluginrack::LimiterEffect& effect);
+    void setLimiterGain(float inputDb, float gainDb);
 
     void resized() override;
     void paint(juce::Graphics& g) override;
@@ -71,6 +76,7 @@ private:
     void paintDynamics(juce::Graphics& g);
     void paintMultiband(juce::Graphics& g);
     void paintDeEsser(juce::Graphics& g);
+    void paintLimiter(juce::Graphics& g);
     void updateTraceVectors();
 
     Kind kind = Kind::None;
@@ -79,6 +85,7 @@ private:
     pluginrack::DynamicsEffect gateEffect;
     pluginrack::MultibandEffect multiband;
     pluginrack::DeEsserEffect deEsser;
+    pluginrack::LimiterEffect limiter;
     bool hasGate = false;
     juce::Image vstSnapshot;
     float inputDb = -60.0f;

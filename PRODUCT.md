@@ -55,10 +55,11 @@ and a DAW does not offer this routing surface.
 Confirmed by the implementation and its design spec:
 
 - Per-strip insert chain of up to six slots, hosted in-process, ordered with built-in effects.
-- Channel processing: six-band EQ with delay, a compressor and a gate. The
-  compressor and the gate share one `Dynamics` editor and are drawn as one
-  `Dynamics` card with a bypass switch each; the EQ keeps its own card. There
-  is no limiter.
+- Channel processing: six-band EQ with delay, a compressor and a gate, plus
+  Multiband Comp, De-esser, and Limiter. The compressor and the gate share one
+  `Dynamics` editor and are drawn as one `Dynamics` card with a bypass switch
+  each; EQ, Multiband, De-esser, and Limiter keep their own cards with live
+  preview thumbnails.
 - Mixer controls: input trim, gain, pan, mute, solo, peak metering.
 - Many-to-many routing matrix; each channel→output cell is a send with its own
   level. Outputs can be added and removed at runtime.
@@ -68,8 +69,8 @@ Confirmed by the implementation and its design spec:
   work must never cost audio. Meter, analyzer and graph meters read from
   lock-free taps.
 
-Terminology in use: `strip`, `insert`, `Channel FX` (EQ plus Compressor/Gate),
-`output`, `scene`, `saves`.
+Terminology in use: `strip`, `insert`, built-in FX (EQ, Dynamics,
+Multiband Comp, De-esser, Limiter), `output`, `scene`, `saves`.
 
 Undecided, and not to be invented:
 
