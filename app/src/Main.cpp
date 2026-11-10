@@ -229,12 +229,16 @@ public:
             const int uniqueId = (hostIndex + 2 < args.size())
                                      ? args[hostIndex + 2].unquoted().getIntValue()
                                      : 0;
-            const juce::String state = (hostIndex + 3 < args.size())
-                                           ? args[hostIndex + 3].unquoted()
-                                           : juce::String{};
-            const juce::String mappingName = (hostIndex + 4 < args.size())
-                                                 ? args[hostIndex + 4].unquoted()
+            // Order: path, uniqueId, mapping name, state. The mapping name is
+            // read positionally and never empty, so a host always finds its
+            // audio channel.
+            const juce::String mappingName = (hostIndex + 3 < args.size())
+                                                 ? args[hostIndex + 3].unquoted()
                                                  : juce::String{};
+            juce::String state = (hostIndex + 4 < args.size())
+                                     ? args[hostIndex + 4].unquoted()
+                                     : juce::String{};
+            if (state == "-") state = {};
             const int code =
                 RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId,
                                         state, mappingName);

@@ -244,6 +244,10 @@ RackView::~RackView() {
     thumbnailWorker.stop();
     clearHiddenPreviews();
     closeDockedEditor();
+    if (previewHostWindow != nullptr) {
+        nativedisplay::destroyHiddenHost(previewHostWindow);
+        previewHostWindow = nullptr;
+    }
 }
 
 std::uint32_t RackView::selectedChainId() const {
@@ -844,6 +848,10 @@ void RackView::startMiniTimer() {
 void RackView::timerCallback() {
     if (!isShowing()) {
         releaseMiniTap();
+        // The preview host is a window of its own; leaving it shown while this
+        // view is hidden puts a black rectangle over the desktop.
+        if (previewHostWindow != nullptr)
+            nativedisplay::destroyHiddenHost(previewHostWindow), previewHostWindow = nullptr;
         return;
     }
     // JUCE re-syncs a plugin's native window whenever the plugin resizes itself;
@@ -1229,8 +1237,14 @@ void RackView::refreshHiddenPreviews(int targetWidth, bool everyStrip) {
         slot.editor->setBounds(parked);
 
     if (auto* pluginWindow = nativedisplay::pluginWindowOf(*slot.editor)) {
-        // Re-assert the z-order every turn: the plugin can raise itself.
-        nativedisplay::sendToBack(pluginWindow);
+        // Keep the plugin's own window out of sight: JUCE makes it a child of
+        // the app window, and a child always paints above its parent's
+        // content. Re-parenting it into a window that sits *below* the app
+        // leaves it invisible while it keeps rendering for the capture.
+        if (previewHostWindow == nullptr) previewHostWindow = nativedisplay::createHiddenHost();
+        nativedisplay::parkBehindApp(pluginWindow,
+                                     getTopLevelComponent()->getWindowHandle(),
+                                     previewHostWindow);
         juce::Component::SafePointer<RackView> safe(this);
         thumbnailWorker.request(pluginWindow, targetWidth,
                                 [safe, insertId](juce::Image thumbnail) {

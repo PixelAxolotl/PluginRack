@@ -338,6 +338,9 @@ private:
     std::set<std::uint32_t> emptyCaptureLogged;
     std::size_t hiddenCursor = 0;
     int hiddenTick = 0;
+    // Top-level window kept below the app window; background plugin windows are
+    // re-parented into it so they render unseen. Created on first use.
+    void* previewHostWindow = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

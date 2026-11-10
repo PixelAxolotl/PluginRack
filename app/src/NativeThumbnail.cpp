@@ -138,16 +138,64 @@ juce::Image captureWindow(void* windowHandle, int targetWidth) {
    #endif
 }
 
-void sendToBack(void* windowHandle) {
+void* createHiddenHost() {
    #if JUCE_WINDOWS
-    auto* window = static_cast<HWND>(windowHandle);
-    if (window == nullptr || IsWindow(window) == FALSE) return;
-    // No activation, no resize, no move: only the z-order changes, so the
-    // window stays where the layout put it (inside the app window's area).
-    ::SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    const auto instance = ::GetModuleHandleW(nullptr);
+    constexpr const wchar_t* className = L"PluginRackPreviewHost";
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ::DefWindowProcW;
+    wc.hInstance = instance;
+    wc.lpszClassName = className;
+    ::RegisterClassExW(&wc); // harmless when it already exists
+    return ::CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, className, L"",
+                             WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1, 1, nullptr, nullptr,
+                             instance, nullptr);
    #else
-    juce::ignoreUnused(windowHandle);
+    return nullptr;
+   #endif
+}
+
+void destroyHiddenHost(void* hostWindow) {
+   #if JUCE_WINDOWS
+    if (auto* window = static_cast<HWND>(hostWindow))
+        ::DestroyWindow(window);
+   #else
+    juce::ignoreUnused(hostWindow);
+   #endif
+}
+
+void parkBehindApp(void* pluginWindow, void* appWindow, void* hostWindow) {
+   #if JUCE_WINDOWS
+    auto* plugin = static_cast<HWND>(pluginWindow);
+    auto* app = static_cast<HWND>(appWindow);
+    auto* host = static_cast<HWND>(hostWindow);
+    if (plugin == nullptr || app == nullptr || host == nullptr) return;
+    if (::IsWindow(plugin) == FALSE || ::IsWindow(app) == FALSE) return;
+
+    // While the app is minimised or hidden there is nothing to hide behind:
+    // a visible host would sit on the desktop as a black rectangle.
+    if (::IsWindowVisible(app) == FALSE || ::IsIconic(app) != FALSE) {
+        ::ShowWindow(host, SW_HIDE);
+        return;
+    }
+
+    RECT appRect{};
+    if (::GetWindowRect(app, &appRect) == FALSE) return;
+
+    if (::GetParent(plugin) != host)
+        ::SetParent(plugin, host);
+
+    // Show first, place second. ShowWindow raises the window, so positioning it
+    // below the app before showing left it on top of the UI.
+    ::ShowWindow(host, SW_SHOWNOACTIVATE);
+    ::SetWindowPos(host, app, appRect.left, appRect.top,
+                   appRect.right - appRect.left, appRect.bottom - appRect.top,
+                   SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    ::SetWindowPos(plugin, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+   #else
+    juce::ignoreUnused(pluginWindow, appWindow, hostWindow);
    #endif
 }
 

@@ -91,9 +91,14 @@ bool RestrictedHost::launch(const juce::File& file, int uniqueId,
     pluginPath = file.getFullPathName();
     pluginUniqueId = uniqueId;
     configured = true;
+    // The mapping name comes before the state, and an empty argument would be
+    // dropped by the command-line split, shifting every later argument by one.
+    // A "-" placeholder keeps the positions fixed.
     const juce::StringArray arguments { executable.getFullPathName(), kHostFlag,
                                         file.getFullPathName(), juce::String(uniqueId),
-                                        stateBase64, sharedName };
+                                        sharedName,
+                                        stateBase64.isEmpty() ? juce::String("-")
+                                                              : stateBase64 };
     child = std::make_unique<juce::ChildProcess>();
     // NOTE: JUCE ChildProcess has no AppContainer launch surface, and
     // CreateAppContainerProfile alone does not change the child token, so
