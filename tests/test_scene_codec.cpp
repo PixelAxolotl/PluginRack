@@ -485,6 +485,7 @@ TEST_CASE("scene audio settings round-trip") {
     audio.minimalClockFifo = true;
     audio.autoReloadDevices = true;
     audio.rackThumbnailFps = 24;
+    audio.rackPreviewMode = pluginrack::RackPreviewMode::Rotate;
     audio.watchedDevices.push_back(pluginrack::WatchedDevice{false, 2});
     audio.watchedDevices.push_back(pluginrack::WatchedDevice{true, 1});
     original.audio = audio;
@@ -521,6 +522,17 @@ TEST_CASE("legacy audio tuning keys do not opt into beta latency modes") {
     CHECK_FALSE(audio.lowLatencyOutputs);
     CHECK_FALSE(audio.minimalClockFifo);
     CHECK_FALSE(audio.fullDuplexInput);
+}
+
+TEST_CASE("a scene without a preview mode keeps selected-only previews") {
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({
+        "schemaVersion": 5,
+        "audio": {"rackThumbnailFps": 15}
+    })");
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->audio.has_value());
+    CHECK(loaded.scene->audio->rackPreviewMode == pluginrack::RackPreviewMode::Selected);
 }
 
 TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {

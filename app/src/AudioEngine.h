@@ -346,6 +346,8 @@ public:
         bool autoReloadDevices = false;
         // Rack insert thumbnail refresh rate (fps); also not a stream option.
         int rackThumbnailFps = 15;
+        // Which inserts keep live previews; also not a stream option.
+        pluginrack::RackPreviewMode rackPreviewMode = pluginrack::RackPreviewMode::Selected;
     };
     DeviceSettings getDeviceSettings() const;
     // Reopens every device with these settings on the background opener. If a
@@ -363,6 +365,8 @@ public:
     // a stream, so it is set straight from Settings instead of being staged.
     void setRackThumbnailFps(int fps);
     int getRackThumbnailFps() const { return rackThumbnailFps_.load(); }
+    void setRackPreviewMode(pluginrack::RackPreviewMode mode);
+    pluginrack::RackPreviewMode getRackPreviewMode() const { return rackPreviewMode_; }
     void setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices);
     std::vector<pluginrack::WatchedDevice> getWatchedDevices() const;
 
@@ -779,6 +783,9 @@ private:
     int duplexInputBufferCount_ = 0;
     std::atomic<bool> autoReloadDevices_{false};
     std::atomic<int> rackThumbnailFps_{15};
+    // Plain enum: only ever touched on the message thread (Settings writes,
+    // RackView reads), so no atomic needed.
+    pluginrack::RackPreviewMode rackPreviewMode_ = pluginrack::RackPreviewMode::Selected;
     juce::CriticalSection watchedDevicesLock_;
     std::vector<pluginrack::WatchedDevice> watchedDevices_;
 

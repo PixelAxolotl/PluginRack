@@ -297,6 +297,22 @@ void from_json(const nlohmann::json& j, ChainItemType& type) {
     else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
 }
 
+void to_json(nlohmann::json& j, RackPreviewMode mode) {
+    switch (mode) {
+        case RackPreviewMode::Selected: j = "Selected"; break;
+        case RackPreviewMode::Rotate: j = "Rotate"; break;
+        case RackPreviewMode::AllLive: j = "AllLive"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, RackPreviewMode& mode) {
+    const auto name = j.get<std::string>();
+    if (name == "Selected") mode = RackPreviewMode::Selected;
+    else if (name == "Rotate") mode = RackPreviewMode::Rotate;
+    else if (name == "AllLive") mode = RackPreviewMode::AllLive;
+    else throw nlohmann::json::other_error::create(503, "unknown RackPreviewMode '" + name + "'", &j);
+}
+
 void to_json(nlohmann::json& j, const ChainItem& item) {
     j = nlohmann::json{{"type", item.type}, {"id", item.id}};
 }
@@ -526,6 +542,7 @@ void to_json(nlohmann::json& j, const AudioSettings& settings) {
         {"autoReloadDevices", settings.autoReloadDevices},
         {"watchedDevices", settings.watchedDevices},
         {"rackThumbnailFps", settings.rackThumbnailFps},
+        {"rackPreviewMode", settings.rackPreviewMode},
     };
 }
 
@@ -546,6 +563,9 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     // Absent in scenes written before rack thumbnails existed: the default
     // rate is what those sessions were already running at.
     settings.rackThumbnailFps = j.value("rackThumbnailFps", 15);
+    if (j.contains("rackPreviewMode")) {
+        j.at("rackPreviewMode").get_to(settings.rackPreviewMode);
+    }
     if (j.contains("watchedDevices")) {
         j.at("watchedDevices").get_to(settings.watchedDevices);
     }

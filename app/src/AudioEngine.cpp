@@ -1933,6 +1933,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
         audio.fullDuplexInput = settings.fullDuplexInput;
         audio.autoReloadDevices = settings.autoReloadDevices;
         audio.rackThumbnailFps = settings.rackThumbnailFps;
+        audio.rackPreviewMode = settings.rackPreviewMode;
         audio.watchedDevices = getWatchedDevices();
         scene.audio = std::move(audio);
     }
@@ -1974,6 +1975,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         settings.fullDuplexInput = scene.audio->fullDuplexInput;
         settings.autoReloadDevices = scene.audio->autoReloadDevices;
         settings.rackThumbnailFps = scene.audio->rackThumbnailFps;
+        settings.rackPreviewMode = scene.audio->rackPreviewMode;
         applySettingsValues(settings);
         setWatchedDevices(scene.audio->watchedDevices);
     }
@@ -3584,6 +3586,7 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     settings.fullDuplexInput = fullDuplexInput_.load();
     settings.autoReloadDevices = autoReloadDevices_.load();
     settings.rackThumbnailFps = rackThumbnailFps_.load();
+    settings.rackPreviewMode = rackPreviewMode_;
     return settings;
 }
 
@@ -3593,6 +3596,10 @@ void AudioEngine::setAutoReloadDevices(bool enabled) {
 
 void AudioEngine::setRackThumbnailFps(int fps) {
     rackThumbnailFps_.store(juce::jlimit(1, 60, fps));
+}
+
+void AudioEngine::setRackPreviewMode(pluginrack::RackPreviewMode mode) {
+    rackPreviewMode_ = mode;
 }
 
 void AudioEngine::setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices) {
@@ -3676,6 +3683,7 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
     fullDuplexInput_.store(settings.latencyTuningOptIn && settings.fullDuplexInput);
     autoReloadDevices_.store(settings.autoReloadDevices);
     if (settings.rackThumbnailFps > 0) rackThumbnailFps_.store(settings.rackThumbnailFps);
+    rackPreviewMode_ = settings.rackPreviewMode;
     // Buffer and stream-mode changes replace every device, so a measurement
     // taken against the old configuration is no longer true.
     resetLatencyMeasurement();

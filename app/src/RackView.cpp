@@ -242,6 +242,8 @@ RackView::~RackView() {
     closeDynamicsWindow();
     // Stop the capture worker before the editor it captures goes away.
     thumbnailWorker.stop();
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     closeDockedEditor();
 }
 
@@ -256,6 +258,8 @@ void RackView::setSelectedChannel(int channelId, bool isOutput) {
     // The dynamics panel is bound to the strip it was opened on; leaving it up
     // would push its edits into whatever strip becomes selected next.
     closeDynamicsWindow();
+    rotateCursor = 0;
+    liveCursor = 0;
     selectedId = channelId;
     selectedIsOutput = isOutput;
     focusedInsertId = 0;
@@ -1072,44 +1076,68 @@ void RackView::timerCallback() {
     const bool wantsThumbnail = dockedEditor != nullptr && focusedInsertId != 0
                                 && !eqFocused && !dynamicsFocused
                                 && dockedEditor->isShowing();
-    if (!wantsThumbnail) {
-        thumbnailWorker.clearRequest();
-        return;
-    }
-
+    const auto previewMode = audioEngine.getRackPreviewMode();
     const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
-    if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
-        // The worker keeps only the newest request, so a slow plugin lowers
-        // the thumbnail rate instead of backing the UI thread up.
-        const auto insertId = focusedInsertId;
-        juce::Component::SafePointer<RackView> safe(this);
-        thumbnailWorker.request(pluginWindow, targetWidth,
-                                [safe, insertId](juce::Image thumbnail) {
-            if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
-        });
-        return;
+    if (wantsThumbnail) {
+        if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
+            // The worker keeps only the newest request, so a slow plugin lowers
+            // the thumbnail rate instead of backing the UI thread up.
+            const auto insertId = focusedInsertId;
+            juce::Component::SafePointer<RackView> safe(this);
+            thumbnailWorker.request(pluginWindow, targetWidth,
+                                    [safe, insertId](juce::Image thumbnail) {
+                if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+            });
+        } else {
+            // A software-drawn editor can only be rendered on the message thread, so
+            // pace it with what the previous snapshot cost.
+            const auto now = juce::Time::getMillisecondCounter();
+            const auto interval = static_cast<juce::uint32>(
+                juce::jmax(1000 / juce::jmax(1, fps), 4 * lastSnapshotCostMs));
+            if (now - lastSnapshotMs >= interval) {
+                lastSnapshotMs = now;
+                const auto started = juce::Time::getMillisecondCounterHiRes();
+                const auto editorBounds = dockedEditor->getLocalBounds();
+                juce::Image thumb;
+                if (!editorBounds.isEmpty()) {
+                    const float scale = juce::jlimit(0.02f, 1.0f,
+                                                     static_cast<float>(targetWidth)
+                                                         / static_cast<float>(editorBounds.getWidth()));
+                    thumb = dockedEditor->createComponentSnapshot(editorBounds, true, scale);
+                }
+                lastSnapshotCostMs =
+                    juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
+                applyVstThumbnail(focusedInsertId, thumb);
+            }
+        }
+    } else {
+        thumbnailWorker.clearRequest();
     }
 
-    // A software-drawn editor can only be rendered on the message thread, so
-    // pace it with what the previous snapshot cost.
-    const auto now = juce::Time::getMillisecondCounter();
-    const auto interval = static_cast<juce::uint32>(
-        juce::jmax(1000 / juce::jmax(1, fps), 4 * lastSnapshotCostMs));
-    if (now - lastSnapshotMs < interval) return;
-    lastSnapshotMs = now;
-
-    const auto started = juce::Time::getMillisecondCounterHiRes();
-    const auto editorBounds = dockedEditor->getLocalBounds();
-    juce::Image thumb;
-    if (!editorBounds.isEmpty()) {
-        const float scale = juce::jlimit(0.02f, 1.0f,
-                                         static_cast<float>(targetWidth)
-                                             / static_cast<float>(editorBounds.getWidth()));
-        thumb = dockedEditor->createComponentSnapshot(editorBounds, true, scale);
+    // Rotate mode: one background card per turn, at a quarter of the focused
+    // rate, so the bay stays responsive while the rest catch up.
+    if (previewMode == pluginrack::RackPreviewMode::Rotate) {
+        if (++rotateTick >= 4) {
+            rotateTick = 0;
+            captureNextBackgroundPreview(targetWidth);
+        }
+    } else {
+        rotateTick = 0;
+        clearBackgroundPreview();
     }
-    lastSnapshotCostMs =
-        juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
-    applyVstThumbnail(focusedInsertId, thumb);
+
+    // All-live mode: every background card keeps its own hidden editor and
+    // refreshes round-robin at a quarter rate. The focused card still comes
+    // from the bay capture above.
+    if (previewMode == pluginrack::RackPreviewMode::AllLive) {
+        if (++liveTick >= 4) {
+            liveTick = 0;
+            updateAllLivePreviews(targetWidth);
+        }
+    } else {
+        liveTick = 0;
+        clearAllLivePreviews();
+    }
 }
 
 void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail) {
@@ -1117,6 +1145,158 @@ void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thum
     vstThumbs[insertId] = thumbnail;
     if (const auto card = vstCards.find(insertId); card != vstCards.end())
         if (auto* mini = card->second->miniView()) mini->setVstSnapshot(thumbnail);
+}
+
+bool RackView::captureNextBackgroundPreview(int targetWidth) {
+    const auto* inserts = currentInserts();
+    if (inserts == nullptr || inserts->empty()) {
+        clearBackgroundPreview();
+        return false;
+    }
+    // Walk the strip round-robin, skipping the focused insert: its card is
+    // fed by the live bay capture above, never by the background editor.
+    for (std::size_t step = 0; step < inserts->size(); ++step) {
+        rotateCursor = (rotateCursor + 1) % inserts->size();
+        const auto& candidate = (*inserts)[rotateCursor];
+        if (candidate->id == focusedInsertId) continue;
+        // The background editor belongs to one insert at a time; a strip or
+        // insert change retires it before a new one is built.
+        if (backgroundEditor != nullptr && backgroundInsertId != candidate->id)
+            clearBackgroundPreview();
+        if (backgroundEditor == nullptr) {
+            backgroundHost = &candidate->pluginHost;
+            backgroundEditor = backgroundHost->createEditorForDock();
+            if (backgroundEditor == nullptr) {
+                backgroundHost = nullptr;
+                continue;
+            }
+            backgroundInsertId = candidate->id;
+            // Offscreen but added to the view: a native window needs a peer
+            // to paint for the capture worker, and a hidden window paints
+            // nothing. Kept at 1x1 in the corner so it never covers the UI.
+            addAndMakeVisible(backgroundEditor);
+            backgroundEditor->setBounds(0, 0, 1, 1);
+            backgroundEditor->setVisible(true);
+        }
+        if (auto* pluginWindow = nativedisplay::pluginWindowOf(*backgroundEditor)) {
+            const auto insertId = backgroundInsertId;
+            juce::Component::SafePointer<RackView> safe(this);
+            thumbnailWorker.request(pluginWindow, targetWidth,
+                                    [safe, insertId](juce::Image thumbnail) {
+                if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+            });
+        } else {
+            const auto editorBounds = backgroundEditor->getLocalBounds();
+            if (!editorBounds.isEmpty()) {
+                const float scale = juce::jlimit(0.02f, 1.0f,
+                                                 static_cast<float>(targetWidth)
+                                                     / static_cast<float>(editorBounds.getWidth()));
+                applyVstThumbnail(backgroundInsertId,
+                                  backgroundEditor->createComponentSnapshot(editorBounds, true,
+                                                                            scale));
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+void RackView::clearBackgroundPreview() {
+    if (backgroundEditor == nullptr) {
+        backgroundHost = nullptr;
+        backgroundInsertId = 0;
+        return;
+    }
+    const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
+    removeChildComponent(backgroundEditor);
+    if (backgroundHost != nullptr) backgroundHost->destroyDockEditor(backgroundEditor);
+    else delete backgroundEditor;
+    backgroundEditor = nullptr;
+    backgroundHost = nullptr;
+    backgroundInsertId = 0;
+}
+
+void RackView::updateAllLivePreviews(int targetWidth) {
+    const auto* inserts = currentInserts();
+    if (inserts == nullptr || inserts->empty()) {
+        clearAllLivePreviews();
+        return;
+    }
+    // Retire editors for inserts that are gone: the engine destroys the
+    // insert (and its processor) on erase, so a stale pointer must never be
+    // touched again.
+    for (auto it = livePreviews.begin(); it != livePreviews.end();) {
+        const auto id = it->first;
+        const bool stillThere = std::any_of(inserts->begin(), inserts->end(),
+                                            [id](const auto& insert) { return insert->id == id; });
+        if (!stillThere) {
+            const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
+            removeChildComponent(it->second.editor);
+            if (it->second.host != nullptr) it->second.host->destroyDockEditor(it->second.editor);
+            else delete it->second.editor;
+            it = livePreviews.erase(it);
+            livePreviewFailed.erase(id);
+        } else {
+            ++it;
+        }
+    }
+    // One card per turn, round-robin: N captures per N ticks, never N at once.
+    for (std::size_t step = 0; step < inserts->size(); ++step) {
+        liveCursor = (liveCursor + 1) % inserts->size();
+        const auto& candidate = (*inserts)[liveCursor];
+        if (candidate->id == focusedInsertId) continue;
+        if (livePreviewFailed.count(candidate->id) != 0) continue;
+        auto& slot = livePreviews[candidate->id];
+        if (slot.editor == nullptr) {
+            slot.host = &candidate->pluginHost;
+            slot.editor = slot.host->createEditorForDock();
+            if (slot.editor == nullptr) {
+                // No GUI, or a plugin that refuses a second editor while the
+                // bay holds one: freeze the card instead of retrying forever.
+                livePreviewFailed.insert(candidate->id);
+                livePreviews.erase(candidate->id);
+                continue;
+            }
+            // Offscreen but added to the view, like the rotate editor: a
+            // native window needs a peer to paint for the capture worker.
+            addAndMakeVisible(slot.editor);
+            slot.editor->setBounds(0, 0, 1, 1);
+            slot.editor->setVisible(true);
+        }
+        if (auto* pluginWindow = nativedisplay::pluginWindowOf(*slot.editor)) {
+            const auto insertId = candidate->id;
+            juce::Component::SafePointer<RackView> safe(this);
+            thumbnailWorker.request(pluginWindow, targetWidth,
+                                    [safe, insertId](juce::Image thumbnail) {
+                if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+            });
+        } else {
+            const auto editorBounds = slot.editor->getLocalBounds();
+            if (!editorBounds.isEmpty()) {
+                const float scale = juce::jlimit(0.02f, 1.0f,
+                                                 static_cast<float>(targetWidth)
+                                                     / static_cast<float>(editorBounds.getWidth()));
+                applyVstThumbnail(candidate->id,
+                                  slot.editor->createComponentSnapshot(editorBounds, true, scale));
+            }
+        }
+        return;
+    }
+}
+
+void RackView::clearAllLivePreviews() {
+    if (livePreviews.empty()) {
+        livePreviewFailed.clear();
+        return;
+    }
+    const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
+    for (auto& [id, slot] : livePreviews) {
+        removeChildComponent(slot.editor);
+        if (slot.host != nullptr) slot.host->destroyDockEditor(slot.editor);
+        else delete slot.editor;
+    }
+    livePreviews.clear();
+    livePreviewFailed.clear();
 }
 
 void RackView::refreshEditor() {
@@ -2019,6 +2199,13 @@ void RackView::refreshOutputButtons() {
 
 void RackView::rebuild() {
     ensureSelection();
+    // Every preview editor is owned by an insert's PluginHost: a scene
+    // restore or an outside-rack erase destroys those hosts before this
+    // rebuild runs, so retire all previews first. Otherwise a stale editor
+    // blocks the fresh one JUCE allows per processor, or its host pointer
+    // dangles into a freed insert.
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     const bool hasChain = selectedId >= 0;
     emptyLabel.setVisible(!hasChain);
     touchBar.setVisible(hasChain);
@@ -2683,6 +2870,10 @@ void RackView::refreshAfterInsertChange() {
     if (!found) {
         focusedInsertId = (inserts != nullptr && !inserts->empty()) ? inserts->back()->id : 0;
     }
+    // Same ownership rule as rebuild(): the insert list changed, so any
+    // preview editor may belong to a removed insert.
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     refreshSlots();
     refreshEditor();
     juce::Component::SafePointer<RackView> safe(this);
@@ -2701,6 +2892,17 @@ bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
+    // The newly focused insert gets the bay's live editor; a background
+    // editor for the same insert would be a second owner, which JUCE forbids.
+    if (backgroundInsertId == insert->id) clearBackgroundPreview();
+    if (const auto live = livePreviews.find(insert->id); live != livePreviews.end()) {
+        const juce::ScopedLock captureGuard(thumbnailWorker.captureLock());
+        removeChildComponent(live->second.editor);
+        if (live->second.host != nullptr) live->second.host->destroyDockEditor(live->second.editor);
+        else delete live->second.editor;
+        livePreviews.erase(live);
+        livePreviewFailed.erase(insert->id);
+    }
     focusedInsertId = insert->id;
     refreshEditor();
     return true;

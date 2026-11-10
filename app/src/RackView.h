@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 #include "AudioEngine.h"
@@ -143,6 +144,14 @@ private:
     AudioEngine::AnalyzerTap* currentPluginTap(pluginrack::ChainItemType type);
     void releaseMiniTap();
     void applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail);
+    // Rotate mode: snapshots one background insert per turn into an offscreen
+    // holder, then destroys it. Returns false when there was nothing to do.
+    bool captureNextBackgroundPreview(int targetWidth);
+    void clearBackgroundPreview();
+    // All-live mode: one hidden editor per insert, refreshed round-robin at a
+    // fraction of the focused rate. Editors that fail to build stay frozen.
+    void updateAllLivePreviews(int targetWidth);
+    void clearAllLivePreviews();
 
     AudioEngine& audioEngine;
     int selectedId = -1;
@@ -299,6 +308,27 @@ private:
     // by what the previous snapshot actually cost.
     juce::uint32 lastSnapshotMs = 0;
     int lastSnapshotCostMs = 0;
+    // Rotate mode: one background editor at a time, held offscreen so its
+    // native window can paint for the capture worker. Never the focused
+    // insert's editor: that one belongs to the bay.
+    juce::AudioProcessorEditor* backgroundEditor = nullptr;
+    PluginHost* backgroundHost = nullptr;
+    std::uint32_t backgroundInsertId = 0;
+    // Round-robin cursor over the current strip's inserts.
+    std::size_t rotateCursor = 0;
+    // Ticks since the last background capture; rotate runs at a fraction of
+    // the focused rate so one slow plugin cannot starve the bay.
+    int rotateTick = 0;
+    // All-live mode: hidden editors keyed by insert id, each with its host.
+    // A failed build is remembered so it is not retried every tick.
+    struct LivePreview {
+        juce::AudioProcessorEditor* editor = nullptr;
+        PluginHost* host = nullptr;
+    };
+    std::map<std::uint32_t, LivePreview> livePreviews;
+    std::set<std::uint32_t> livePreviewFailed;
+    std::size_t liveCursor = 0;
+    int liveTick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

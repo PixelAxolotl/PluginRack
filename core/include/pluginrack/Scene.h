@@ -144,6 +144,12 @@ struct WatchedDevice {
     bool operator==(const WatchedDevice&) const = default;
 };
 
+// How the Rack view keeps insert-card previews fresh for plugins that are
+// not docked in the center bay. Selected keeps today's behavior (only the
+// focused card is live); Rotate cycles background cards one at a time;
+// AllLive keeps a hidden editor per insert and refreshes each at low rate.
+enum class RackPreviewMode { Selected, Rotate, AllLive };
+
 // The audio engine settings a session is tuned with: buffer sizes, the
 // low-latency trade-offs, and whether watched devices reopen themselves after
 // an error. Saved with the scene so a load restores the same running setup.
@@ -168,6 +174,8 @@ struct AudioSettings {
     // second. Not an audio stream option, but it saves and loads with the
     // rest so a session comes back looking the way it was left.
     int rackThumbnailFps = 15;
+    // Which inserts keep live previews. Display only, saved like the rate.
+    RackPreviewMode rackPreviewMode = RackPreviewMode::Selected;
 
     bool operator==(const AudioSettings&) const = default;
 };

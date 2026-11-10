@@ -278,6 +278,30 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     add(rackThumbnailFpsCombo);
 
+    rackPreviewModeLabel.setFont(theme::ui::bodyFont());
+    rackPreviewModeLabel.setColour(juce::Label::textColourId, theme::text());
+    rackPreviewModeLabel.setTooltip(
+        "Which insert cards keep a live preview. Selected only is cheapest; "
+        "rotating refreshes background cards one at a time; all live keeps "
+        "every card moving and costs the most CPU.");
+    add(rackPreviewModeLabel);
+
+    theme::ui::styleCombo(rackPreviewModeCombo);
+    rackPreviewModeCombo.addItem("Selected only", 1);
+    rackPreviewModeCombo.addItem("Rotate background", 2);
+    rackPreviewModeCombo.addItem("All live", 3);
+    rackPreviewModeCombo.setTooltip(
+        "Background preview mode. Rotate and All live cost extra CPU.");
+    rackPreviewModeCombo.setScrollWheelEnabled(false);
+    rackPreviewModeCombo.onChange = [this] {
+        using pluginrack::RackPreviewMode;
+        const int id = rackPreviewModeCombo.getSelectedId();
+        audioEngine.setRackPreviewMode(id == 3 ? RackPreviewMode::AllLive
+                                     : id == 2 ? RackPreviewMode::Rotate
+                                               : RackPreviewMode::Selected);
+    };
+    add(rackPreviewModeCombo);
+
     peakHoldLabel.setFont(theme::ui::bodyFont());
     peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
     peakHoldLabel.setTooltip("How long every level meter keeps its peak line before it falls back.");
@@ -508,6 +532,14 @@ void SettingsView::refresh() {
         if (rackThumbnailFpsCombo.indexOfItemId(thumbFps) < 0)
             rackThumbnailFpsCombo.addItem(juce::String(thumbFps) + " fps", thumbFps);
         rackThumbnailFpsCombo.setSelectedId(thumbFps, juce::dontSendNotification);
+    }
+    if (!rackPreviewModeCombo.isPopupActive()) {
+        using pluginrack::RackPreviewMode;
+        const auto mode = audioEngine.getRackPreviewMode();
+        rackPreviewModeCombo.setSelectedId(mode == RackPreviewMode::AllLive ? 3
+                                            : mode == RackPreviewMode::Rotate ? 2
+                                                                             : 1,
+                                            juce::dontSendNotification);
     }
     if (!peakHoldCombo.isPopupActive())
         peakHoldCombo.setSelectedId(LevelMeter::peakHoldMs(), juce::dontSendNotification);
@@ -983,11 +1015,15 @@ int SettingsView::layoutBody(int width) {
         rackThumbnailsLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         rackThumbnailFpsCombo.setBounds(row.removeFromLeft(90));
         row.removeFromLeft(24);
-        peakHoldLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
-        peakHoldCombo.setBounds(row.removeFromLeft(90));
+        rackPreviewModeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        rackPreviewModeCombo.setBounds(row.removeFromLeft(140));
 
         inner.removeFromTop(6);
-        closeToTrayToggle.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(320));
+        auto row2 = inner.removeFromTop(theme::ui::kControlH);
+        peakHoldLabel.setBounds(row2.removeFromLeft(theme::ui::kLabelW));
+        peakHoldCombo.setBounds(row2.removeFromLeft(90));
+        row2.removeFromLeft(24);
+        closeToTrayToggle.setBounds(row2.removeFromLeft(320));
         endSection(panel);
     }
 
