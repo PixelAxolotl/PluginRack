@@ -93,7 +93,7 @@ bool RestrictedHost::launch(const juce::File& file, int uniqueId,
     configured = true;
     const juce::StringArray arguments { executable.getFullPathName(), kHostFlag,
                                         file.getFullPathName(), juce::String(uniqueId),
-                                        stateBase64 };
+                                        stateBase64, sharedName };
     child = std::make_unique<juce::ChildProcess>();
     // NOTE: JUCE ChildProcess has no AppContainer launch surface, and
     // CreateAppContainerProfile alone does not change the child token, so
@@ -128,6 +128,19 @@ bool RestrictedHost::isAlive() const {
 
 int RestrictedHost::exitCode() const {
     return child != nullptr ? static_cast<int>(child->getExitCode()) : -1;
+}
+
+juce::String RestrictedHost::pendingOutput() {
+    if (child == nullptr) return {};
+    juce::String text;
+    char buffer[512];
+    for (;;) {
+        const int read = child->readProcessOutput(buffer, static_cast<int>(sizeof(buffer)) - 1);
+        if (read <= 0) break;
+        buffer[read] = 0;
+        text += buffer;
+    }
+    return text.trim();
 }
 
 juce::String RestrictedHost::sendControl(const juce::String& jsonLine, int timeoutMs) {
@@ -235,7 +248,8 @@ void RestrictedHost::killAndReap() {
 }
 
 int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
-                            const juce::String& stateBase64) {
+                            const juce::String& stateBase64,
+                            const juce::String& sharedMappingName) {
     // The host only ever loads the plugin in this throwaway process.
     juce::String scanError;
     const auto descriptions = PluginHost::scanFileInProcess(file, scanError);
@@ -244,9 +258,13 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
         juce::Thread::sleep(100);
     }
 
+    // The app hands over the mapping name; only fall back to recomputing it
+    // when an older caller did not pass one.
+    const auto mappingName = sharedMappingName.isNotEmpty()
+                                 ? sharedMappingName
+                                 : pluginHostIpc::sharedNameFor(file.getFullPathName());
     auto* map = ::OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE,
-                                   pluginHostIpc::sharedNameFor(file.getFullPathName())
-                                       .toWideCharPointer());
+                                   mappingName.toWideCharPointer());
     pluginHostIpc::SharedAudioBlock* block = nullptr;
     if (map != nullptr) {
         block = static_cast<pluginHostIpc::SharedAudioBlock*>(
@@ -282,6 +300,9 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
     std::cout.flush();
 
     if (block == nullptr) {
+        std::cout << "HOSTERROR audio channel '" << mappingName.toStdString()
+                  << "' unavailable (err " << ::GetLastError() << ")\n";
+        std::cout.flush();
         return 1;
     }
 

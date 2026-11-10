@@ -19,6 +19,12 @@ void* pluginWindowOf(juce::Component& editor);
 // window cannot be captured or came back as one flat colour.
 juce::Image captureWindow(void* windowHandle, int targetWidth);
 
+// Pushes a native window to the bottom of the z-order, so the app window
+// covers it while it is captured. A plugin window that is off-screen renders
+// nothing to PrintWindow, so background previews park their windows under the
+// app instead of far away from it.
+void sendToBack(void* windowHandle);
+
 // Captures a native window on a worker thread. PrintWindow makes the target
 // window paint its whole UI, and that paint is far too slow to sit inside a
 // message-thread timer at display rates: it starved every other message and

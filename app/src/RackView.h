@@ -334,6 +334,8 @@ private:
     std::map<std::uint32_t, DoomedPreview> doomedPreviews;
     // A plugin that refuses an editor is remembered, so it is not retried.
     std::set<std::uint32_t> hiddenPreviewFailed;
+    // Inserts whose background capture came back empty, logged once each.
+    std::set<std::uint32_t> emptyCaptureLogged;
     std::size_t hiddenCursor = 0;
     int hiddenTick = 0;
 

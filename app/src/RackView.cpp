@@ -1133,9 +1133,6 @@ void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thum
 }
 
 namespace {
-// Far enough outside any monitor that a parked plugin window never shows, and
-// the window is still "visible" so PrintWindow will render it.
-constexpr int kHiddenPreviewX = -20000;
 // How many background editors may exist at once. Each is a live plugin UI on
 // its own thread, so this is a stability budget: a rack that keeps eight UIs
 // alive froze the app, and the plugins here are heavy.
@@ -1222,17 +1219,31 @@ void RackView::refreshHiddenPreviews(int targetWidth, bool everyStrip) {
     }
     // A plugin is free to resize itself; keep it parked out of sight instead
     // of letting it paint over the app.
-    const auto parked = juce::Rectangle<int>(kHiddenPreviewX, kHiddenPreviewX,
+    // Park inside our own area, hidden behind the app window. A window placed
+    // off-screen renders nothing to PrintWindow, which is why background
+    // captures came back empty.
+    const auto parked = juce::Rectangle<int>(0, 0,
                                              slot.naturalSize.getWidth(),
                                              slot.naturalSize.getHeight());
     if (slot.editor->getBounds() != parked)
         slot.editor->setBounds(parked);
 
     if (auto* pluginWindow = nativedisplay::pluginWindowOf(*slot.editor)) {
+        // Re-assert the z-order every turn: the plugin can raise itself.
+        nativedisplay::sendToBack(pluginWindow);
         juce::Component::SafePointer<RackView> safe(this);
         thumbnailWorker.request(pluginWindow, targetWidth,
                                 [safe, insertId](juce::Image thumbnail) {
-            if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+            if (safe == nullptr) return;
+            if (thumbnail.isNull()) {
+                // Report once per insert: an empty capture is why a card would
+                // keep showing "open to capture preview".
+                if (safe->emptyCaptureLogged.insert(insertId).second)
+                    juce::Logger::writeToLog("rack: preview capture empty for insert "
+                                             + juce::String(insertId));
+                return;
+            }
+            safe->applyVstThumbnail(insertId, thumbnail);
         });
     } else {
         const auto bounds = slot.editor->getLocalBounds();

@@ -758,7 +758,8 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
         juce::Logger::writeToLog("plugin: restricted host lost for " + pluginName
                                  + " (exit 0x"
                                  + juce::String::toHexString(host->exitCode())
-                                 + "); rendering in-process");
+                                 + ") " + host->pendingOutput()
+                                 + "; rendering in-process");
     }
 
     midiBuffer.clear();

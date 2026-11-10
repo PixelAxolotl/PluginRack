@@ -187,14 +187,16 @@ public:
     const juce::String getApplicationName() override { return "PluginRack"; }
     const juce::String getApplicationVersion() override { return "0.1.0"; }
 
-    // One session per machine, with one deliberate exception: the plugin scanner
-    // and the reporting switches run this same executable as short-lived child
-    // processes. Blocking those would break scanning the moment the app is open,
-    // so any '--' mode stays outside the single-instance lock and only the GUI
-    // takes it.
+    // One session per machine, with one deliberate exception: the plugin scanner,
+    // the plugin host and the reporting switches run this same executable as
+    // short-lived child processes. Blocking those would break scanning (and
+    // silently turn the plugin host into a second launch that quits) the moment
+    // the app is open, so any '--' mode stays outside the single-instance lock
+    // and only the GUI takes it.
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
-            if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins")
+            if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
+                || arg == "--plugin-host")
                 return true;
         }
         return false;
@@ -230,8 +232,12 @@ public:
             const juce::String state = (hostIndex + 3 < args.size())
                                            ? args[hostIndex + 3].unquoted()
                                            : juce::String{};
+            const juce::String mappingName = (hostIndex + 4 < args.size())
+                                                 ? args[hostIndex + 4].unquoted()
+                                                 : juce::String{};
             const int code =
-                RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId, state);
+                RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId,
+                                        state, mappingName);
             ::exit(code);
             return;
         }

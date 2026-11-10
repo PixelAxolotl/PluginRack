@@ -24,6 +24,9 @@ public:
     // Exit code of the host process, for the crash log. Meaningful once the
     // process has finished; 0xC0000005 is an access violation inside a plugin.
     int exitCode() const;
+    // Whatever the host wrote to stdout (HOSTREADY / HOSTERROR <reason>).
+    // Reads what is buffered; call it once the process has finished.
+    juce::String pendingOutput();
     // Sends one JSON control line and returns the host's one-line reply.
     juce::String sendControl(const juce::String& jsonLine, int timeoutMs = 5000);
 
@@ -43,8 +46,12 @@ public:
 
     // Host-side entry point: main() calls this for --plugin-host. Runs the
     // plugin for the whole process lifetime; never returns.
+    // sharedMappingName comes from the app: recomputing it from the plugin path
+    // on both sides is fragile, and a mismatch made the host bail out with
+    // "block == nullptr" after loading the plugin.
     static int runHost(const juce::File& file, int pluginUniqueId = 0,
-                       const juce::String& stateBase64 = {});
+                       const juce::String& stateBase64 = {},
+                       const juce::String& sharedMappingName = {});
 
 private:
     struct HostScratch {

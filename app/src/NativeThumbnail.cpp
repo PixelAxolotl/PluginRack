@@ -138,6 +138,19 @@ juce::Image captureWindow(void* windowHandle, int targetWidth) {
    #endif
 }
 
+void sendToBack(void* windowHandle) {
+   #if JUCE_WINDOWS
+    auto* window = static_cast<HWND>(windowHandle);
+    if (window == nullptr || IsWindow(window) == FALSE) return;
+    // No activation, no resize, no move: only the z-order changes, so the
+    // window stays where the layout put it (inside the app window's area).
+    ::SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+   #else
+    juce::ignoreUnused(windowHandle);
+   #endif
+}
+
 namespace {
 
 // The plugin paints on its own thread while PrintWindow waits, so the gap
