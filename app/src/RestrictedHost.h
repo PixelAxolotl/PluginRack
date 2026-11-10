@@ -21,6 +21,9 @@ public:
     bool launch(const juce::File& file, int pluginUniqueId, const juce::String& stateBase64,
                 juce::String& error);
     bool isAlive() const;
+    // Exit code of the host process, for the crash log. Meaningful once the
+    // process has finished; 0xC0000005 is an access violation inside a plugin.
+    int exitCode() const;
     // Sends one JSON control line and returns the host's one-line reply.
     juce::String sendControl(const juce::String& jsonLine, int timeoutMs = 5000);
 

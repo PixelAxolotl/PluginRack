@@ -40,18 +40,20 @@ public:
     void clearRequest();
     void stop();
 
-    // Held by the worker while it captures, and by the owner while it
-    // destroys the captured window.
-    juce::CriticalSection& captureLock() { return captureMutex; }
+    // True while the worker is inside PrintWindow. Never block the message
+    // thread waiting for this: PrintWindow asks the window's owning thread
+    // (the message thread) to paint, so a blocking wait deadlocks.
+    bool isCapturing() const { return capturing.get() != 0; }
 
 private:
     void run() override;
 
     juce::CriticalSection requestLock;
-    juce::CriticalSection captureMutex;
     void* pendingHandle = nullptr;
     int pendingWidth = 0;
     std::function<void(juce::Image)> pendingCallback;
+    // Published under requestLock, cleared when the capture finishes.
+    juce::Atomic<int> capturing{ 0 };
     juce::WaitableEvent wake{ false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WindowCaptureWorker)

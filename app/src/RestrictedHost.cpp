@@ -126,6 +126,10 @@ bool RestrictedHost::isAlive() const {
     return launched && child != nullptr && child->isRunning();
 }
 
+int RestrictedHost::exitCode() const {
+    return child != nullptr ? static_cast<int>(child->getExitCode()) : -1;
+}
+
 juce::String RestrictedHost::sendControl(const juce::String& jsonLine, int timeoutMs) {
     (void) jsonLine;
     (void) timeoutMs;

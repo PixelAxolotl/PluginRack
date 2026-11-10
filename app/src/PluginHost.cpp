@@ -177,6 +177,11 @@ bool PluginHost::hasPlugin() const {
     return plugin != nullptr;
 }
 
+bool PluginHost::hostLost() const {
+    const juce::ScopedLock lock(pluginLock);
+    return host != nullptr && hostReady && !host->isAlive();
+}
+
 juce::AudioPluginInstance* PluginHost::getInstance() const {
     const juce::ScopedLock lock(pluginLock);
     return plugin.get();
@@ -616,6 +621,7 @@ void PluginHost::startHostLocked(const juce::File& file, int uniqueId,
     stopHostLocked();
     host = std::make_unique<RestrictedHost>();
     hostReady = false;
+    hostLossLogged = false;
     if (!host->launch(file, uniqueId, stateBase64, error)) {
         host.reset();
         return;
@@ -742,6 +748,17 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
             // Leave the dry buffer as the fallback for this one block.
             return;
         }
+    }
+
+    // The sandbox host is gone. Record why once - a plugin that faults in its
+    // host usually takes the process down with a specific exception code - and
+    // keep the insert audible by rendering the in-process instance.
+    if (host != nullptr && hostReady && !host->isAlive() && !hostLossLogged) {
+        hostLossLogged = true;
+        juce::Logger::writeToLog("plugin: restricted host lost for " + pluginName
+                                 + " (exit 0x"
+                                 + juce::String::toHexString(host->exitCode())
+                                 + "); rendering in-process");
     }
 
     midiBuffer.clear();

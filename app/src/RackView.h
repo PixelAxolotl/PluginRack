@@ -49,6 +49,8 @@ public:
     // destructor calls back into its processor, so the processor must
     // still be alive when it is deleted.
     void closeDockedEditor();
+    // Releases every background preview editor too, for the same reason.
+    void clearHiddenPreviews();
     // Releases the docked editor only when its insert is gone from the engine.
     // A structure change (adding an insert) must not tear a live editor down and
     // rebuild it: that costs a full UI re-create and some plugins hang on the
@@ -144,14 +146,17 @@ private:
     AudioEngine::AnalyzerTap* currentPluginTap(pluginrack::ChainItemType type);
     void releaseMiniTap();
     void applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail);
-    // Rotate mode: snapshots one background insert per turn into an offscreen
-    // holder, then destroys it. Returns false when there was nothing to do.
-    bool captureNextBackgroundPreview(int targetWidth);
-    void clearBackgroundPreview();
-    // All-live mode: one hidden editor per insert, refreshed round-robin at a
-    // fraction of the focused rate. Editors that fail to build stay frozen.
-    void updateAllLivePreviews(int targetWidth);
-    void clearAllLivePreviews();
+    // Background previews: one capture per turn. Rotate keeps the selected
+    // strip's cards fresh; AllLive reaches every strip. Editors stay alive and
+    // parked off-screen instead of being rebuilt, which is what crashed.
+    void refreshHiddenPreviews(int targetWidth, bool everyStrip);
+    void retireHiddenPreview(std::uint32_t insertId);
+    // Deletes a plugin editor once the capture worker is idle. Never blocks:
+    // PrintWindow needs the message thread to pump, so a blocking wait here
+    // would deadlock against the worker.
+    void destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host,
+                               std::uint32_t insertId = 0);
+    bool pluginHostAlive(PluginHost* host) const;
 
     AudioEngine& audioEngine;
     int selectedId = -1;
@@ -308,27 +313,29 @@ private:
     // by what the previous snapshot actually cost.
     juce::uint32 lastSnapshotMs = 0;
     int lastSnapshotCostMs = 0;
-    // Rotate mode: one background editor at a time, held offscreen so its
-    // native window can paint for the capture worker. Never the focused
-    // insert's editor: that one belongs to the bay.
-    juce::AudioProcessorEditor* backgroundEditor = nullptr;
-    PluginHost* backgroundHost = nullptr;
-    std::uint32_t backgroundInsertId = 0;
-    // Round-robin cursor over the current strip's inserts.
-    std::size_t rotateCursor = 0;
-    // Ticks since the last background capture; rotate runs at a fraction of
-    // the focused rate so one slow plugin cannot starve the bay.
-    int rotateTick = 0;
-    // All-live mode: hidden editors keyed by insert id, each with its host.
-    // A failed build is remembered so it is not retried every tick.
-    struct LivePreview {
+    // Background previews: a hidden editor per insert, parked far off-screen
+    // at the plugin's own size. Off-screen (not 1x1) matters: a VST3 editor
+    // re-sizes itself when it becomes visible, and a window sitting under the
+    // UI captures as one flat colour. Editors stay alive so a heavy plugin UI
+    // is not torn down and rebuilt on every turn - that churn crashed.
+    struct HiddenPreview {
+        juce::AudioProcessorEditor* editor = nullptr;
+        PluginHost* host = nullptr;
+        juce::Rectangle<int> naturalSize;
+    };
+    std::map<std::uint32_t, HiddenPreview> hiddenPreviews;
+    // Editors whose delete is waiting for the capture worker. JUCE hands out
+    // one editor per plugin, so the bay must not ask for a new one for this
+    // insert until the old editor is really gone.
+    struct DoomedPreview {
         juce::AudioProcessorEditor* editor = nullptr;
         PluginHost* host = nullptr;
     };
-    std::map<std::uint32_t, LivePreview> livePreviews;
-    std::set<std::uint32_t> livePreviewFailed;
-    std::size_t liveCursor = 0;
-    int liveTick = 0;
+    std::map<std::uint32_t, DoomedPreview> doomedPreviews;
+    // A plugin that refuses an editor is remembered, so it is not retried.
+    std::set<std::uint32_t> hiddenPreviewFailed;
+    std::size_t hiddenCursor = 0;
+    int hiddenTick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

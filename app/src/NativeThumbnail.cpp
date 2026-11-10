@@ -197,6 +197,10 @@ void WindowCaptureWorker::run() {
             callback = std::move(pendingCallback);
             pendingHandle = nullptr;
             pendingCallback = nullptr;
+            // Published under the same lock the message thread uses to clear a
+            // request, so isCapturing() can never read "idle" while a capture
+            // is just starting.
+            capturing.set(handle != nullptr ? 1 : 0);
         }
 
         if (handle == nullptr) {
@@ -205,11 +209,11 @@ void WindowCaptureWorker::run() {
         }
 
         const auto started = juce::Time::getMillisecondCounterHiRes();
-        juce::Image image;
-        {
-            const juce::ScopedLock lock(captureMutex);
-            image = captureWindow(handle, width);
-        }
+        // No lock is held across this call: PrintWindow asks the window's
+        // owning thread to paint, and that thread may be the one that will
+        // later destroy this window.
+        juce::Image image = captureWindow(handle, width);
+        capturing.set(0);
         const auto costMs =
             juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
 

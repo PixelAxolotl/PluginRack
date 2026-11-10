@@ -95,7 +95,12 @@ public:
     // MainComponent calls this before engine strip mutation: the rack's
     // docked plugin editor is backed by a strip's plugin instance, and an
     // editor whose processor dies first is unsafe to delete.
-    void releaseDockedEditor() { rackView.closeDockedEditor(); }
+    void releaseDockedEditor() {
+        rackView.closeDockedEditor();
+        // Hidden preview editors own the same processors: release them before
+        // the engine destroys the insert, or they outlive it.
+        rackView.clearHiddenPreviews();
+    }
     void releaseOrphanedEditor() { rackView.releaseOrphanedDockedEditor(); }
 
 private:

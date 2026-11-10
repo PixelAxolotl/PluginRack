@@ -90,6 +90,9 @@ public:
     int getBufferSize() const;
 
     bool hasPlugin() const;
+    // True when a restricted host was configured for this plugin but has
+    // since died: the insert renders dry and its UI is not worth hosting.
+    bool hostLost() const;
     // The hosted instance (message thread only, may be null). The caller must
     // not keep it across insert removal - the rack's generic parameter panel
     // re-reads it on every refresh for exactly that reason.
@@ -128,6 +131,9 @@ private:
     std::unique_ptr<class RestrictedHost> host;
     std::uint64_t hostSequence = 0;
     bool hostReady = false;
+    // Set once when a configured host is found dead, so the dry-block path
+    // reports it instead of silently muting the insert.
+    bool hostLossLogged = false;
     // Seamless-add scratch: the live output block is never handed to the
     // host IPC directly. Submit copies the range here; fetch writes the
     // host's answer here; only on a clean ack do we copy it back into the
