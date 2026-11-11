@@ -1,5 +1,8 @@
 #include "pluginrack/SceneCodec.h"
 
+#include <cstddef>
+#include <string>
+
 #include <nlohmann/json.hpp>
 
 namespace pluginrack {
@@ -587,8 +590,78 @@ std::string toJson(const Scene& scene) {
 
 SceneLoadResult fromJson(std::string_view text) {
     SceneLoadResult result;
+    // PR-SEC-009: size + depth + key-count guards before the DOM exists.
+    // The SAX pre-pass rejects deep nesting and huge key counts without
+    // building values, so teardown cannot recurse into attacker input.
+    if (text.size() > kMaxSceneJsonBytes) {
+        result.errors.push_back("scene JSON exceeds the size limit");
+        return result;
+    }
     try {
+        // Depth/key counting pass (allocation-free): walk tokens via a
+        // minimal SAX handler instead of building the DOM twice.
+        struct Guard : nlohmann::json::json_sax_t {
+            int depth = 0;
+            int maxDepth = 0;
+            std::size_t keys = 0;
+            bool tooDeep = false;
+            bool tooMany = false;
+            bool null() override { return true; }
+            bool boolean(bool) override { return true; }
+            bool number_integer(number_integer_t) override { return true; }
+            bool number_unsigned(number_unsigned_t) override { return true; }
+            bool number_float(number_float_t, const string_t&) override { return true; }
+            bool string(string_t&) override { return true; }
+            bool binary(binary_t&) override { return true; }
+            bool start_object(std::size_t) override {
+                if (++depth > kMaxSceneJsonDepth) tooDeep = true;
+                maxDepth = depth > maxDepth ? depth : maxDepth;
+                return !tooDeep && !tooMany;
+            }
+            bool end_object() override {
+                --depth;
+                return true;
+            }
+            bool start_array(std::size_t) override {
+                if (++depth > kMaxSceneJsonDepth) tooDeep = true;
+                maxDepth = depth > maxDepth ? depth : maxDepth;
+                return !tooDeep && !tooMany;
+            }
+            bool end_array() override {
+                --depth;
+                return true;
+            }
+            bool key(string_t&) override {
+                if (++keys > kMaxSceneJsonKeys) tooMany = true;
+                return !tooDeep && !tooMany;
+            }
+            bool parse_error(std::size_t, const std::string&,
+                             const nlohmann::detail::exception&) override {
+                return false;
+            }
+        };
+        Guard guard;
+        nlohmann::json::sax_parse(text.begin(), text.end(), &guard);
+        if (guard.tooDeep || guard.maxDepth > kMaxSceneJsonDepth) {
+            result.errors.push_back("scene JSON nesting exceeds the depth limit");
+            return result;
+        }
+        if (guard.tooMany) {
+            result.errors.push_back("scene JSON has too many keys");
+            return result;
+        }
         const nlohmann::json j = nlohmann::json::parse(text);
+        // PR-SEC-009: reject unknown top-level keys early (typo'd or
+        // foreign files fail fast instead of loading half-blind).
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            const auto& key = it.key();
+            if (key != "schemaVersion" && key != "name" && key != "sampleRate"
+                && key != "bufferFrames" && key != "channels" && key != "outputs"
+                && key != "routes" && key != "audio") {
+                result.errors.push_back("unknown top-level key '" + key + "'");
+                return result;
+            }
+        }
         const int schemaVersion = j.value("schemaVersion", 0);
         if (schemaVersion < 1 || schemaVersion > 5) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +

@@ -41,6 +41,19 @@ bool parsePositiveFinite(const std::string& text, double* value) {
     }
 }
 
+bool isReservedStem(const std::string& stem) {
+    // PR-10: share the GUI's reserved-name rule (CON/PRN/AUX/NUL/COM1-9/
+    // LPT1-9) so con.wav cannot resolve to the console device.
+    std::string base = stem.substr(0, stem.find('.'));
+    for (char& ch : base) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (base == "con" || base == "prn" || base == "aux" || base == "nul") return true;
+    if (base.size() == 4 && (base.rfind("com", 0) == 0 || base.rfind("lpt", 0) == 0))
+        return base[3] >= '1' && base[3] <= '9';
+    return false;
+}
+
 std::string outputFileStem(const pluginrack::Output& output) {
     std::string stem = output.name;
     for (char& ch : stem) {
@@ -52,7 +65,7 @@ std::string outputFileStem(const pluginrack::Output& output) {
     while (!stem.empty() && (stem.back() == '.' || stem.back() == ' ')) {
         stem.pop_back();
     }
-    if (stem.empty()) {
+    if (stem.empty() || isReservedStem(stem)) {
         stem = "output-" + std::to_string(output.id);
     }
     return stem;
@@ -185,7 +198,12 @@ int main(int argc, char** argv) {
             }
         }
         // outputFileStem produces one filename component, so this cannot escape outDir.
+        // PR-10: never silently overwrite an existing render.
         const std::string outPath = (std::filesystem::path(outDir) / fileName).string();
+        if (std::filesystem::exists(outPath, ec)) {
+            std::cerr << "error: refusing to overwrite existing '" << outPath << "'\n";
+            return 1;
+        }
         if (o >= buffers.size() ||
             !pluginrack::writeWav(outPath, buffers[o], 2,
                                   static_cast<int>(scene.sampleRate))) {

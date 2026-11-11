@@ -23,7 +23,16 @@ bool collectBundles(const juce::File& folder, juce::Array<juce::File>& bundles, 
         const auto file = entry.getFile();
         if (file.isSymbolicLink()) continue;
         if (file.isDirectory()) {
-            if (!collectBundles(file, bundles, depth + 1)) return false;
+            // A folder ending in .vst3 IS the bundle (VST3 folder layout):
+            // record it and do not descend — the inner binary
+            // (Contents\x86_64-win\*.vst3) is not a separate plugin and
+            // must never be scanned or instantiated on its own.
+            if (file.getFileName().endsWithIgnoreCase(".vst3")) {
+                bundles.addIfNotAlreadyThere(file);
+                if (bundles.size() >= kMaxScanBundles) return false;
+            } else if (!collectBundles(file, bundles, depth + 1)) {
+                return false;
+            }
         } else if (file.hasFileExtension(".vst3")) {
             bundles.addIfNotAlreadyThere(file);
             if (bundles.size() >= kMaxScanBundles) return false;
@@ -34,10 +43,36 @@ bool collectBundles(const juce::File& folder, juce::Array<juce::File>& bundles, 
 
 juce::int64 cachedModTimeFor(const juce::Array<juce::PluginDescription>& plugins,
                              const juce::String& path) {
+    // A bundle can hold several classes (Reaktor 6 + Reaktor 6 FX share one
+    // file): return the NEWEST stamp across its entries so one stale twin
+    // cannot force a rescan after its sibling just verified the bundle.
+    juce::int64 newest = 0;
     for (const auto& description : plugins)
         if (description.fileOrIdentifier == path)
-            return description.lastFileModTime.toMilliseconds();
-    return 0;
+            newest = juce::jmax(newest, description.lastFileModTime.toMilliseconds());
+    return newest;
+}
+
+// True when the on-disk bundle matches the cached description: same file
+// time within filesystem granularity. Centralises the tolerance so the
+// scan skip and the cache filter below can never drift apart again.
+//
+// Two stamp modes share this compare:
+// - file-mtime stamps (old caches): disk-vs-cache within 5 s means
+//   "untouched since the scan that wrote this entry".
+// - scan-time stamps (new caches): the entry holds the time of the scan
+//   that verified it, which always trails the older disk mtime. A bundle
+//   is "unchanged" when its disk mtime is OLDER than the stamp (nothing
+//   modified it since we verified it) within the same tolerance; a disk
+//   mtime NEWER than the stamp means it changed after our scan.
+bool bundleUnchanged(const juce::File& file, juce::int64 cachedMs) {
+    if (cachedMs <= 0) return false;
+    const auto diskMs = file.getLastModificationTime().toMilliseconds();
+    if (diskMs <= 0) return false;
+    // Disk older-or-equal (within tolerance): verified after last change.
+    if (diskMs <= cachedMs + 5000) return true;
+    // Disk newer by more than the tolerance: real modification.
+    return false;
 }
 
 void removeFileEntries(juce::Array<juce::PluginDescription>& plugins, const juce::String& path) {
@@ -130,6 +165,26 @@ juce::String PluginLibrary::displayNameFor(const juce::PluginDescription& descri
     if (descriptive.isNotEmpty()) return descriptive;
     if (description.name.trim().isNotEmpty()) return description.name.trim();
     return juce::File(description.fileOrIdentifier).getFileNameWithoutExtension();
+}
+
+bool PluginLibrary::isTrustedPluginPath(const juce::String& path) {
+    if (path.isEmpty()) return false;
+    const juce::File file(path);
+    // Exact library hit (case-insensitive): the scanned bundle itself.
+    {
+        const auto plugins = getInstance().getPlugins();
+        for (const auto& description : plugins) {
+            if (description.fileOrIdentifier.compareIgnoreCase(path) == 0) return true;
+        }
+    }
+    // Otherwise: under a scan folder (platform defaults + explicit extras).
+    // Anything else (Downloads, a share, a scene-named absolute path) is
+    // untrusted and gets the warn-and-confirm gate in the UI.
+    const auto folders = getInstance().getScanFolders();
+    for (const auto& folder : folders) {
+        if (file.isAChildOf(folder)) return true;
+    }
+    return false;
 }
 
 bool PluginLibrary::isScanning() const {
@@ -227,8 +282,15 @@ void PluginLibrary::ensureCacheLoaded() {
                 underTrustedRoot = true;
                 break;
             }
-        if (!file.isAbsolutePath(file.getFullPathName()) || !underTrustedRoot
-            || !file.existsAsFile() || file.isSymbolicLink())
+        // Bundles are files (.vst3) OR folders (*.vst3): existsAsFile is
+        // false for a folder bundle, so accept either. Without this every
+        // folder bundle is dropped from the cache on load, the trust gate
+        // sees an empty library, and every save load warn-and-confirms
+        // (or bypasses at startup) while the background scan re-does all
+        // 53 bundles.
+        const bool exists = file.existsAsFile() || file.isDirectory();
+        if (!file.isAbsolutePath(file.getFullPathName()) || !underTrustedRoot || !exists
+            || file.isSymbolicLink())
             loadedPlugins.remove(i);
     }
     sortPlugins(loadedPlugins);
@@ -275,6 +337,9 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
 
     progressTotal = bundles.size();
     progressDone = 0;
+    int rescanned = 0;
+    int skipped = 0;
+    juce::StringArray rescannedNames;
 
     for (int index = 0; index < bundles.size(); ++index) {
         if (!alive->load()) return;
@@ -290,8 +355,17 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
         progressDone = index;
 
         // An unchanged bundle keeps the descriptions the cache already holds.
-        const auto modTime = file.getLastModificationTime().toMilliseconds();
-        if (!force && modTime > 0 && cachedModTimeFor(work, path) == modTime) continue;
+        // Tolerance, not exact match: filesystem granularity and copy tools
+        // shift sub-second parts, and an exact compare forces a full rescan
+        // of every bundle on every launch (see bundleUnchanged). The walk
+        // yields bundle roots (never inner binaries), matching the path
+        // the scan reports, so a plain string lookup is correct.
+        if (!force && bundleUnchanged(file, cachedModTimeFor(work, path))) {
+            ++skipped;
+            continue;
+        }
+        ++rescanned;
+        if (rescannedNames.size() < 10) rescannedNames.add(file.getFileName());
 
         if (PluginLoadGuard::isBlocked(file)) {
             juce::Logger::writeToLog("plugin scan: skipped blocked " + file.getFileName());
@@ -310,7 +384,33 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
         }
         for (const auto& description : found) {
             auto entry = description;
-            entry.lastFileModTime = file.getLastModificationTime();
+            // Normalise to the bundle root: the scan reports whatever path
+            // it was handed (inner binary for old walk entries), but the
+            // walk, the cache, the trust gate and the host all speak bundle
+            // roots. Without this one old inner-binary cache entry never
+            // matches its bundle-root walk path and rescans every launch.
+            if (entry.fileOrIdentifier.containsIgnoreCase("Contents\\x86_64-win")) {
+                juce::File f(entry.fileOrIdentifier);
+                auto root = f;
+                for (;;) {
+                    const auto up = root.getParentDirectory();
+                    const auto name = up.getFileName();
+                    if (name.endsWithIgnoreCase(".vst3") && up != root) {
+                        root = up;
+                        break;
+                    }
+                    if (up == root || up.getFullPathName().isEmpty()) break;
+                    root = up;
+                }
+                if (root.getFileName().endsWithIgnoreCase(".vst3"))
+                    entry.fileOrIdentifier = root.getFullPathName();
+            }
+            // Stamp the scan time, not the file's mtime: the skip check
+            // compares disk-vs-cache, and the disk mtime of an untouched
+            // bundle never changes — re-stamping it would be a no-op while
+            // stamping "now" marks this entry verified-this-run. A bundle
+            // whose disk mtime moves past the tolerance is still rescanned.
+            entry.lastFileModTime = juce::Time::getCurrentTime();
             entry.lastInfoUpdateTime = juce::Time::getCurrentTime();
             work.add(entry);
         }
@@ -330,7 +430,15 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
     }
     saveCache();
     scanCompleted = true;
-    juce::Logger::writeToLog("plugin scan: " + juce::String(work.size()) + " description(s)");
+    juce::Logger::writeToLog("plugin scan: " + juce::String(work.size()) + " description(s), "
+                             + juce::String(rescanned) + " rescanned, " + juce::String(skipped)
+                             + " skipped");
+    std::cout << "plugin scan: " << work.size() << " description(s), " << rescanned
+              << " rescanned, " << skipped << " skipped\n";
+    if (rescanned > 0) {
+        std::cout << "rescanned: " << rescannedNames.joinIntoString(", ").toStdString() << "\n";
+    }
+    std::cout.flush();
 }
 
 void PluginLibrary::startScan(const juce::File& onlyFolder, bool clearAll, bool force) {

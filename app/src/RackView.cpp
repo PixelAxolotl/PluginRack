@@ -7,6 +7,16 @@
 #include "MultibandCurveComponent.h"
 #include "NativeThumbnail.h"
 
+#if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
+#endif
+
 namespace {
 constexpr int kSlotGap = 4;
 constexpr int kSlotInset = 4;
@@ -210,6 +220,12 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     editorViewport.setViewedComponent(&editorHolder, false);
     editorViewport.setScrollBarsShown(true, true);
     addAndMakeVisible(editorViewport);
+    // Placeholder for the embedded host window (see the header): hidden
+    // until an editor is assigned, never intercepts clicks itself — the
+    // native window on top takes input.
+    dockedHwndView.setVisible(false);
+    dockedHwndView.setInterceptsMouseClicks(false, false);
+    editorHolder.addChildComponent(&dockedHwndView);
 
     outputHeader.setText("Output", juce::dontSendNotification);
     outputHeader.setJustificationType(juce::Justification::centredLeft);
@@ -242,12 +258,9 @@ RackView::~RackView() {
     closeDynamicsWindow();
     // Stop the capture worker before the editor it captures goes away.
     thumbnailWorker.stop();
-    clearHiddenPreviews();
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     closeDockedEditor();
-    if (previewHostWindow != nullptr) {
-        nativedisplay::destroyHiddenHost(previewHostWindow);
-        previewHostWindow = nullptr;
-    }
 }
 
 std::uint32_t RackView::selectedChainId() const {
@@ -261,7 +274,6 @@ void RackView::setSelectedChannel(int channelId, bool isOutput) {
     // The dynamics panel is bound to the strip it was opened on; leaving it up
     // would push its edits into whatever strip becomes selected next.
     closeDynamicsWindow();
-    hiddenCursor = 0;
     selectedId = channelId;
     selectedIsOutput = isOutput;
     focusedInsertId = 0;
@@ -601,10 +613,12 @@ void RackView::refreshSlots() {
             slot->setInsert(found);
             auto mini = std::make_unique<InsertMiniView>();
             mini->showVst();
-            if (const auto thumb = vstThumbs.find(found->id); thumb != vstThumbs.end())
+            // Reuse the last snapshot so a rebuilt card does not flash back
+            // to "open to capture preview" while the next capture runs.
+            if (auto thumb = vstThumbs.find(found->id); thumb != vstThumbs.end())
                 mini->setVstSnapshot(thumb->second);
             slot->setMiniView(std::move(mini));
-            slot->setSelected(dockedHost != nullptr && focusedInsertId == found->id);
+            slot->setSelected(focusedInsertId == found->id);
             vstCards[found->id] = slot;
             place(slot);
             continue;
@@ -742,7 +756,8 @@ void RackView::refreshSlots() {
         place(slot);
     }
 
-    // A thumbnail outlives the card it was captured for, but not the insert.
+    // Parked thumbnails: vstThumbs is pruned with its cards (see below) so
+    // the native-reparent follow-up can reuse the map as-is.
     for (auto it = vstThumbs.begin(); it != vstThumbs.end();)
         it = vstCards.count(it->first) != 0 ? std::next(it) : vstThumbs.erase(it);
 
@@ -758,10 +773,16 @@ void RackView::refreshSlots() {
 }
 
 void RackView::visibilityChanged() {
-    if (isShowing()) startMiniTimer();
-    else {
+    if (isShowing()) {
+        startMiniTimer();
+        // The embedded host window is parented to the top-level HWND, not
+        // to this view — hiding the Racks tab does not hide it. Re-show it
+        // here (and re-hide it below) so it never lingers over the Mixer.
+        if (dockedHwnd != 0) showDockedEditor();
+    } else {
         stopTimer();
         releaseMiniTap();
+        if (dockedHwnd != 0) hideDockedEditor();
     }
 }
 
@@ -829,7 +850,11 @@ void RackView::releaseMiniTap() {
 }
 
 void RackView::startMiniTimer() {
-    const bool hasMinis = eqCard != nullptr || dynamicsCard != nullptr || !vstCards.empty();
+    // The docked editor needs its every-tick re-fit whether or not any
+    // thumbnail card exists: without the timer the watchdog never polls
+    // and a plugin that resizes itself back is never put back.
+    const bool hasMinis = eqCard != nullptr || dynamicsCard != nullptr || !vstCards.empty()
+                          || dockedHwnd != 0;
     if (!hasMinis) {
         stopTimer();
         releaseMiniTap();
@@ -848,20 +873,28 @@ void RackView::startMiniTimer() {
 void RackView::timerCallback() {
     if (!isShowing()) {
         releaseMiniTap();
-        // The preview host is a window of its own; leaving it shown while this
-        // view is hidden puts a black rectangle over the desktop.
-        if (previewHostWindow != nullptr)
-            nativedisplay::destroyHiddenHost(previewHostWindow), previewHostWindow = nullptr;
+        // The embedded host window is parented to the top-level HWND, so
+        // hiding this view does not hide it — keep it hidden while we are
+        // off-screen so it never paints over the Mixer or other tabs.
+        if (dockedHwnd != 0) hideDockedEditor();
         return;
     }
-    // JUCE re-syncs a plugin's native window whenever the plugin resizes itself;
-    // keep it parked inside the bay.
-    if (dockedEditor != nullptr) layoutDockedEditor();
+    // No in-process editor exists while editors live out-of-process, so no
+    // bay layout work runs here. The native-reparent follow-up reinstates it.
     const int fps = juce::jlimit(1, 60, audioEngine.getRackThumbnailFps());
     if (fps != miniTimerHz) {
         miniTimerHz = fps;
         startTimerHz(fps);
     }
+    // GitHub method: the bay re-fits on every timer tick (JUCE re-syncs a
+    // plugin's native window whenever the plugin resizes itself), so a
+    // plugin that moves itself back is put back without a fight. Cheap:
+    // layoutDockedEditor writes the frame only when it differs and sends
+    // the scale only on a >=1% change. The watchdog below is GitHub's
+    // componentMovedOrResized for a window we cannot listen to: it polls
+    // the live rect and re-baselines when the plugin insists.
+    if (dockedHwnd != 0) layoutDockedEditor();
+    watchdogDockedEditor();
 
     // An output's row list follows live routing and device state; both only
     // move on user action, so a few updates a second is plenty.
@@ -1071,257 +1104,81 @@ void RackView::timerCallback() {
         }
     }
 
-    // The focused VST's card shows what its editor looks like. JUCE hands out
-    // one editor per processor, so a live thumbnail and the bay cannot
-    // coexist; and a hosted VST3 editor paints itself into its own window, so
-    // it is captured from that window when it has one.
-    //
-    // That capture must not run here: PrintWindow makes the plugin repaint its
-    // whole UI, and doing that from a message-thread timer at display rates
-    // starved every other message (the window froze while audio kept running).
-    const bool wantsThumbnail = dockedEditor != nullptr && focusedInsertId != 0
-                                && !eqFocused && !dynamicsFocused
-                                && dockedEditor->isShowing();
-    const auto previewMode = audioEngine.getRackPreviewMode();
-    const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
-    if (wantsThumbnail) {
-        if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
-            // The worker keeps only the newest request, so a slow plugin lowers
-            // the thumbnail rate instead of backing the UI thread up.
-            const auto insertId = focusedInsertId;
-            juce::Component::SafePointer<RackView> safe(this);
-            thumbnailWorker.request(pluginWindow, targetWidth,
-                                    [safe, insertId](juce::Image thumbnail) {
-                if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
-            });
-        } else {
-            // A software-drawn editor can only be rendered on the message thread, so
-            // pace it with what the previous snapshot cost.
-            const auto now = juce::Time::getMillisecondCounter();
-            const auto interval = static_cast<juce::uint32>(
-                juce::jmax(1000 / juce::jmax(1, fps), 4 * lastSnapshotCostMs));
-            if (now - lastSnapshotMs >= interval) {
-                lastSnapshotMs = now;
-                const auto started = juce::Time::getMillisecondCounterHiRes();
-                const auto editorBounds = dockedEditor->getLocalBounds();
-                juce::Image thumb;
-                if (!editorBounds.isEmpty()) {
-                    const float scale = juce::jlimit(0.02f, 1.0f,
-                                                     static_cast<float>(targetWidth)
-                                                         / static_cast<float>(editorBounds.getWidth()));
-                    thumb = dockedEditor->createComponentSnapshot(editorBounds, true, scale);
-                }
-                lastSnapshotCostMs =
-                    juce::roundToInt(juce::Time::getMillisecondCounterHiRes() - started);
-                applyVstThumbnail(focusedInsertId, thumb);
+    // The focused VST's card shows what its editor looks like: capture the
+    // embedded host window (SetParent into the bay above) through the
+    // existing worker, which keeps the slow PrintWindow repaint off the
+    // message thread. A dead host keeps its nameplate plus the badge.
+    // Only the focused card captures: one PrintWindow at a time keeps the
+    // plugin's repaint work bounded.
+    {
+        AudioEngine::InsertSlot* focus = nullptr;
+        if (focusedInsertId != 0) focus = findInsert(focusedInsertId);
+        if (focus == nullptr) {
+            if (const auto* inserts = currentInserts(); inserts != nullptr && !inserts->empty()) {
+                focus = inserts->front().get();
             }
         }
-    } else {
-        thumbnailWorker.clearRequest();
+        void* captureHwnd = nullptr;
+       #if JUCE_WINDOWS
+        if (focus != nullptr && !focus->pluginHost.isHostDown() && dockedHwnd != 0
+            && dockedHost == &focus->pluginHost) {
+            auto* hwnd = static_cast<HWND>(
+                reinterpret_cast<void*>(static_cast<uintptr_t>(dockedHwnd)));
+            if (::IsWindow(hwnd) != FALSE) captureHwnd = hwnd;
+        }
+       #else
+        juce::ignoreUnused(focus);
+       #endif
+        if (captureHwnd != nullptr && focus != nullptr) {
+            const std::uint32_t focusId = focus->id;
+            thumbnailWorker.request(captureHwnd, 220,
+                                    [this, focusId](juce::Image captured) {
+                                        applyVstThumbnail(focusId, captured);
+                                    });
+        } else {
+            thumbnailWorker.clearRequest();
+        }
     }
-
-    // Background previews: one card per turn, at a quarter of the focused
-    // rate, so the bay stays responsive while the rest catch up. Rotate stays
-    // on the selected strip; AllLive also reaches the other strips, so their
-    // cards are already current when you switch to them.
-    if (previewMode == pluginrack::RackPreviewMode::Selected) {
-        hiddenTick = 0;
-        clearHiddenPreviews();
-    } else if (++hiddenTick >= 4) {
-        hiddenTick = 0;
-        refreshHiddenPreviews(targetWidth, previewMode == pluginrack::RackPreviewMode::AllLive);
-    }
+    clearBackgroundPreview();
+    clearAllLivePreviews();
 }
 
 void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail) {
     if (thumbnail.isNull()) return;
     vstThumbs[insertId] = thumbnail;
-    if (const auto card = vstCards.find(insertId); card != vstCards.end())
-        if (auto* mini = card->second->miniView()) mini->setVstSnapshot(thumbnail);
-}
-
-namespace {
-// How many background editors may exist at once. Each is a live plugin UI on
-// its own thread, so this is a stability budget: a rack that keeps eight UIs
-// alive froze the app, and the plugins here are heavy.
-constexpr std::size_t kMaxHiddenPreviews = 4;
-} // namespace
-
-void RackView::refreshHiddenPreviews(int targetWidth, bool everyStrip) {
-    const auto* inserts = currentInserts();
-    if (inserts == nullptr || inserts->empty()) {
-        if (hiddenPreviews.empty()) return;
-        clearHiddenPreviews();
-        return;
-    }
-
-    // A hidden editor is owned by its insert's PluginHost. The engine destroys
-    // those hosts on erase and scene restore, so retire anything that no
-    // longer exists before touching a pointer.
-    const auto stillExists = [this, inserts, everyStrip](std::uint32_t id) {
-        const auto inStrip = std::any_of(inserts->begin(), inserts->end(),
-                                         [id](const auto& insert) { return insert->id == id; });
-        if (inStrip) return true;
-        if (!everyStrip) return false;
-        for (const auto& channel : audioEngine.getChannels())
-            for (const auto& insert : channel->inserts)
-                if (insert->id == id) return true;
-        for (const auto& output : audioEngine.getOutputs())
-            for (const auto& insert : output->inserts)
-                if (insert->id == id) return true;
-        return false;
-    };
-    for (auto it = hiddenPreviews.begin(); it != hiddenPreviews.end();) {
-        if (stillExists(it->first)) {
-            ++it;
-        } else {
-            retireHiddenPreview(it->first);
-            it = hiddenPreviews.begin();
-        }
-    }
-
-    // One capture per turn, round-robin over the eligible inserts.
-    std::vector<std::pair<std::uint32_t, PluginHost*>> candidates;
-    const auto consider = [&](AudioEngine::InsertSlot& insert) {
-        if (insert.id == focusedInsertId) return;
-        if (hiddenPreviewFailed.count(insert.id) != 0) return;
-        candidates.emplace_back(insert.id, &insert.pluginHost);
-    };
-    for (const auto& insert : *inserts) consider(*insert);
-    if (everyStrip) {
-        for (const auto& channel : audioEngine.getChannels())
-            for (const auto& insert : channel->inserts) consider(*insert);
-        for (const auto& output : audioEngine.getOutputs())
-            for (const auto& insert : output->inserts) consider(*insert);
-    }
-    if (candidates.empty()) return;
-
-    hiddenCursor = (hiddenCursor + 1) % candidates.size();
-    const auto [insertId, host] = candidates[hiddenCursor];
-
-    auto& slot = hiddenPreviews[insertId];
-    if (slot.editor == nullptr) {
-        // The cap counts editors that already exist; this turn's new one has
-        // to fit too, or a big rack would spawn one UI per insert.
-        if (hiddenPreviews.size() > kMaxHiddenPreviews) {
-            hiddenPreviews.erase(insertId);
-            return;
-        }
-        slot.host = host;
-        slot.editor = host->createEditorForDock();
-        if (slot.editor == nullptr) {
-            // No GUI, or the plugin refuses a second editor. Freeze the card
-            // rather than retrying this insert on every turn.
-            hiddenPreviewFailed.insert(insertId);
-            hiddenPreviews.erase(insertId);
-            return;
-        }
-        addAndMakeVisible(slot.editor);
-        slot.editor->setVisible(true);
-        // Read the plugin's own size after it has attached, then park it out
-        // of sight at that size. A visible VST3 re-sizes itself here, so the
-        // parked bounds must be applied after the visibility change.
-        slot.naturalSize = slot.editor->getLocalBounds();
-        if (slot.naturalSize.getWidth() < 32 || slot.naturalSize.getHeight() < 32)
-            slot.naturalSize = { 0, 0, 640, 400 };
-    }
-    // A plugin is free to resize itself; keep it parked out of sight instead
-    // of letting it paint over the app.
-    // Park inside our own area, hidden behind the app window. A window placed
-    // off-screen renders nothing to PrintWindow, which is why background
-    // captures came back empty.
-    const auto parked = juce::Rectangle<int>(0, 0,
-                                             slot.naturalSize.getWidth(),
-                                             slot.naturalSize.getHeight());
-    if (slot.editor->getBounds() != parked)
-        slot.editor->setBounds(parked);
-
-    if (auto* pluginWindow = nativedisplay::pluginWindowOf(*slot.editor)) {
-        // Keep the plugin's own window out of sight: JUCE makes it a child of
-        // the app window, and a child always paints above its parent's
-        // content. Re-parenting it into a window that sits *below* the app
-        // leaves it invisible while it keeps rendering for the capture.
-        if (previewHostWindow == nullptr) previewHostWindow = nativedisplay::createHiddenHost();
-        nativedisplay::parkBehindApp(pluginWindow,
-                                     getTopLevelComponent()->getWindowHandle(),
-                                     previewHostWindow);
-        juce::Component::SafePointer<RackView> safe(this);
-        thumbnailWorker.request(pluginWindow, targetWidth,
-                                [safe, insertId](juce::Image thumbnail) {
-            if (safe == nullptr) return;
-            if (thumbnail.isNull()) {
-                // Report once per insert: an empty capture is why a card would
-                // keep showing "open to capture preview".
-                if (safe->emptyCaptureLogged.insert(insertId).second)
-                    juce::Logger::writeToLog("rack: preview capture empty for insert "
-                                             + juce::String(insertId));
-                return;
-            }
-            safe->applyVstThumbnail(insertId, thumbnail);
-        });
-    } else {
-        const auto bounds = slot.editor->getLocalBounds();
-        if (!bounds.isEmpty()) {
-            const float scale = juce::jlimit(0.02f, 1.0f,
-                                             static_cast<float>(targetWidth)
-                                                 / static_cast<float>(bounds.getWidth()));
-            applyVstThumbnail(insertId,
-                              slot.editor->createComponentSnapshot(bounds, true, scale));
-        }
+    if (auto it = vstCards.find(insertId); it != vstCards.end()) {
+        if (auto* mini = it->second->miniView()) mini->setVstSnapshot(thumbnail);
     }
 }
 
-void RackView::retireHiddenPreview(std::uint32_t insertId) {
-    const auto it = hiddenPreviews.find(insertId);
-    if (it == hiddenPreviews.end()) return;
-    auto* editor = it->second.editor;
-    auto* host = it->second.host;
-    hiddenPreviews.erase(it);
-    hiddenPreviewFailed.erase(insertId);
-    if (editor == nullptr) return;
-    // Stop new captures of this window, then delete it once the worker is
-    // idle. Blocking here would deadlock: PrintWindow asks this thread to
-    // paint.
-    thumbnailWorker.clearRequest();
-    doomedPreviews[insertId] = { editor, host };
-    destroyEditorWhenIdle(editor, host, insertId);
+bool RackView::captureNextBackgroundPreview(int targetWidth) {
+    // Out-of-process editors cannot be constructed in-process: background
+    // previews stay parked until the bay embeds the host's native window.
+    juce::ignoreUnused(targetWidth);
+    clearBackgroundPreview();
+    return false;
 }
 
-void RackView::clearHiddenPreviews() {
-    hiddenPreviewFailed.clear();
-    if (hiddenPreviews.empty()) return;
-    thumbnailWorker.clearRequest();
-    for (auto& [id, slot] : hiddenPreviews) {
-        doomedPreviews[id] = { slot.editor, slot.host };
-        destroyEditorWhenIdle(slot.editor, slot.host, id);
-    }
-    hiddenPreviews.clear();
+void RackView::clearBackgroundPreview() {
+    // Parked: background editors are always null while editors live
+    // out-of-process. Reset the bookkeeping in case an old pointer lingers.
+    backgroundEditor = nullptr;
+    backgroundHost = nullptr;
+    backgroundInsertId = 0;
 }
 
-void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host,
-                                     std::uint32_t insertId) {
-    if (editor == nullptr) return;
-    juce::Component::SafePointer<juce::AudioProcessorEditor> safe(editor);
-    juce::Component::SafePointer<RackView> self(this);
-    juce::Timer::callAfterDelay(80, [self, safe, host, insertId] {
-        if (self == nullptr || safe == nullptr) return;
-        if (self->thumbnailWorker.isCapturing()) {
-            // Still printing this window; try again on a later turn.
-            self->destroyEditorWhenIdle(safe.getComponent(), host, insertId);
-            return;
-        }
-        auto* component = safe.getComponent();
-        self->removeChildComponent(component);
-        // The host may have died with its insert; never touch it then.
-        if (host != nullptr && self->pluginHostAlive(host))
-            host->destroyDockEditor(component);
-        else
-            delete component;
-        if (insertId != 0 && self->doomedPreviews.erase(insertId) != 0) {
-            // The processor is free again: the bay can dock its editor now.
-            self->refreshEditor();
-        }
-    });
+void RackView::updateAllLivePreviews(int targetWidth) {
+    // Out-of-process editors cannot be constructed in-process: all-live
+    // previews stay parked until the bay embeds the host's native window.
+    juce::ignoreUnused(targetWidth);
+    clearAllLivePreviews();
+}
+
+void RackView::clearAllLivePreviews() {
+    // Parked: live previews are always empty while editors live
+    // out-of-process. Reset the bookkeeping in case old entries linger.
+    livePreviews.clear();
+    livePreviewFailed.clear();
 }
 
 void RackView::refreshEditor() {
@@ -1362,83 +1219,108 @@ void RackView::refreshEditor() {
             focusedInsertId = focus->id;
         }
     }
-    // JUCE hands out one editor per plugin: while this insert's preview editor
-    // is still being deleted, asking for another would fail with "no editor".
-    // destroyEditorWhenIdle() calls back here once the delete is done.
-    if (focus != nullptr && doomedPreviews.count(focus->id) != 0) {
-        noEditorLabel.setVisible(false);
-        noEditorBypass.setVisible(false);
-        return;
-    }
     if (focus == nullptr) {
         closeDockedEditor();
         noEditorLabel.setText("No plugins - click + Add VST3 above", juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(false);
-        dockedEditor = nullptr;
-        dockedHost = nullptr;
         resized();
         return;
     }
 
-    // Knobs turned inside the plugin's own window become the touch strip's
-    // target (the plugin reports the parameter change; the click itself never
-    // reaches JUCE). Re-armed below after any closeDockedEditor() call.
-    auto* pluginInstance = focus->pluginHost.getInstance();
-
-    // Already docked for this insert: reuse the live editor (it may only be
-    // hidden behind an EQ/dynamics panel) instead of rebuilding the VST UI.
-    if (dockedEditor != nullptr && dockedHost == &focus->pluginHost) {
-        noEditorLabel.setVisible(false);
-        noEditorBypass.setVisible(false);
-        if (dockedEditor->getParentComponent() != &editorHolder)
-            editorHolder.addAndMakeVisible(dockedEditor);
-        dockedEditor->setVisible(true);
-        knobWatcher.setPlugin(pluginInstance);
-        resized();
-        return;
-    }
+    // Out-of-process editors live in the sandboxed host; the bay embeds
+    // the host's native window (SetParent) when the host is alive, and
+    // shows a status line otherwise. The touch strip stays inert: no
+    // in-process instance exists to observe.
+    knobWatcher.clear();
     closeDockedEditor();
 
     dockedHost = &focus->pluginHost;
-    dockedHost->closeFloatingEditor();
-    dockedEditor = dockedHost->createEditorForDock();
-    if (dockedEditor == nullptr) {
+    if (dockedHost->isHostDown()) {
+        // Headless diagnostics (and a host that died between launch and
+        // focus): say which. The screenshot path has no hosts at all, so
+        // its shot proves the fail-closed line, not a false "not running".
+        const bool neverLaunched = !dockedHost->wasEverReady() && !dockedHost->hasHost();
         dockedHost = nullptr;
-        // No GUI: there is nothing to dock or touch (the card still shows the
-        // plugin's name and its bypass switch).
-        noEditorLabel.setText("This plugin has no editor", juce::dontSendNotification);
+        noEditorLabel.setText(neverLaunched ? "No sandboxed host in this session - start the app to embed editors"
+                                            : "Sandboxed host is not running - slot is silent",
+                              juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(true);
         noEditorBypass.setToggleState(focus->bypassed.get(), juce::dontSendNotification);
-        knobWatcher.setPlugin(pluginInstance);
         resized();
         return;
     }
-
-    // The plugin's own size at 100%: the fit is measured from this, so no
-    // layout pass ever feeds back into the size it scales from.
-    dockedEditorNaturalSize = dockedEditor->getBounds();
-    dockedEditorScale = 1.0f;
-
+    // Ask the host for its editor window and embed it. A 0 HWND means the
+    // plugin has no editor (or it failed): keep the status line, fail
+    // closed, audio untouched.
+    int editorW = 0;
+    int editorH = 0;
+    const auto hwnd = dockedHost->requestEditorWindow(editorW, editorH);
+    // The host reports "fixed-size" when the plugin cannot stretch: the
+    // bay centres it at its real size instead of scaling (GH rescaled
+    // check, cross-process).
+    const bool fixedSize = dockedHost->lastEditorFailReason() == "fixed-size";
+    juce::Logger::writeToLog("plugin: editor window for " + focus->pluginName + ": hwnd="
+                             + juce::String(hwnd) + " size=" + juce::String(editorW) + "x"
+                             + juce::String(editorH)
+                             + (fixedSize ? " fixed-size"
+                                          : (hwnd == 0 ? " reason="
+                                                             + dockedHost->lastEditorFailReason()
+                                                       : juce::String())));
+    if (hwnd == 0) {
+        dockedHost = nullptr;
+        noEditorLabel.setText("This plugin has no editor window",
+                              juce::dontSendNotification);
+        noEditorLabel.setVisible(true);
+        noEditorBypass.setVisible(true);
+        noEditorBypass.setToggleState(focus->bypassed.get(), juce::dontSendNotification);
+        resized();
+        return;
+    }
+    embedDockedHwnd(hwnd, editorW, editorH, fixedSize);
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
-    const auto dockStart = juce::Time::getMillisecondCounterHiRes();
-    auto dockElapsed = [dockStart] {
-        return juce::String(juce::Time::getMillisecondCounterHiRes() - dockStart, 1);
-    };
-    dockedEditorLayoutPasses = 0;
-    dockedEditor->addComponentListener(this);
-    editorHolder.addAndMakeVisible(dockedEditor);
-    knobWatcher.setPlugin(pluginInstance);
     resized();
-    // Some plugins create their own native window at their preferred size
-    // and put it back after it has been placed. Re-apply the bay fit once
-    // the plugin has settled instead of fighting it in a resize loop.
-    //
-    // The callbacks run on the message thread and are the only nest a
-    // plugin-initiated resize can still land in: layoutDockedEditor() owns
-    // its own guard, and the bay is only resized by resized() here.
+    return;
+}
+
+void RackView::embedDockedHwnd(unsigned long long hwndValue, int width, int height) {
+    embedDockedHwnd(hwndValue, width, height, false);
+}
+
+void RackView::embedDockedHwnd(unsigned long long hwndValue, int width, int height,
+                               bool fixedSize) {
+   #if JUCE_WINDOWS
+    auto* hwnd = static_cast<HWND>(reinterpret_cast<void*>(static_cast<uintptr_t>(hwndValue)));
+    if (hwnd == nullptr || ::IsWindow(hwnd) == FALSE) return;
+    // Hand the host window to the JUCE holder: it reparents (WS_CHILD),
+    // moves/resizes the HWND to follow the holder (DPI included), hides it
+    // with the Racks tab, and clips it to the bay like the GH editor.
+    dockedHwndView.setHWND(hwnd);
+    ::ShowWindow(hwnd, SW_SHOW);
+    dockedHwnd = hwndValue;
+    // The plugin's own size at 100%: the fit is measured from this, so no
+    // layout pass ever feeds back into the size it scales from (GH bay).
+    dockedHwndWidth = width > 0 ? width : 400;
+    dockedHwndHeight = height > 0 ? height : 300;
+    dockedEditorScale = 1.0f;
+    // Fixed-size plugin (GH rescaled check): no content scale is in
+    // effect, so centre it at its real size instead of scaling.
+    dockedEditorFixedSize = fixedSize;
+    dockedHwndView.setVisible(true);
+    dockedHwndView.toFront(false);
+    dockedEditorLayoutPasses = 0;
+    dockedEditorSettled = false;
+    // The fit loop lives on the timer: make sure it is running even when
+    // no thumbnail card exists, or the frame above is never re-asserted.
+    startMiniTimer();
+    layoutDockedEditor();
+    // The host applies the fit scale on its message thread after this
+    // returns, and a JUCE setScaleFactor repositions the native window
+    // behind our back — so the frame above rarely survives first contact.
+    // Re-assert it once the plugin has settled instead of fighting it in
+    // a resize loop (GH bay's 400/1200 ms delays).
     juce::Component::SafePointer<RackView> safe(this);
     for (const int delayMs : {400, 1200}) {
         juce::Timer::callAfterDelay(delayMs, [safe] {
@@ -1447,120 +1329,225 @@ void RackView::refreshEditor() {
             safe->layoutDockedEditor();
         });
     }
-    // Docking a native plugin UI is the slow part of adding one (some editors
-    // take ~1-2.5 s to attach), so it is reported in the run log.
-    juce::Logger::writeToLog("rack: editor docked " + dockElapsed() + " ms");
+   #else
+    juce::ignoreUnused(hwndValue, width, height);
+   #endif
+}
+
+void RackView::releaseDockedHwnd() {
+   #if JUCE_WINDOWS
+    if (dockedHwnd == 0) return;
+    // Return the window to the host's hidden parent: tell the host first
+    // so it re-hides the window, then release the holder (which detaches
+    // defensively in case the host is already gone). The window stays
+    // alive in the host process — never destroyed here.
+    if (dockedHost != nullptr) dockedHost->releaseEditorWindow();
+    dockedHwndView.setHWND(nullptr);
+    dockedHwndView.setVisible(false);
+    dockedHwnd = 0;
+    dockedHwndWidth = 0;
+    dockedHwndHeight = 0;
+   #else
+    dockedHwndView.setVisible(false);
+   #endif
 }
 
 void RackView::layoutDockedEditor() {
-    if (dockedEditor == nullptr || layingOutDockedEditor) return;
+    // GH method, cross-process edition. Same steps as the GH bay, in
+    // holder-local space: fit the natural size into the bay (tighter axis
+    // wins, aspect kept), send the scale to the host (which applies it with
+    // setScaleFactor exactly like the GH bay does), then centre the scaled
+    // visual and clamp it to the bay. The placeholder (dockedHwndView) is
+    // positioned like the GH bay positions its editor; positionDockedHwnd
+    // moves the native window to cover it with the peer's own area math
+    // (DPI included). Sends the scale only on a >=1% change, so the
+    // every-tick call from timerCallback stays cheap.
+    if (dockedHwnd == 0 || layingOutDockedEditor) return;
     const juce::ScopedValueSetter<bool> guard(layingOutDockedEditor, true);
     const auto bay = editorHolder.getLocalBounds();
     if (bay.isEmpty()) return;
-
-    applyDockedEditorFit(bay);
-
-    // What the editor paints now: a VST3 re-sizes itself when its content scale
-    // changes, while a software-drawn editor keeps its own size and is scaled
-    // by its transform instead. Either way the result is centred in the bay and
-    // never leaves it.
-    const auto visual = dockedEditorVisualBounds();
+    const int natW = dockedHwndWidth > 0 ? dockedHwndWidth : bay.getWidth();
+    const int natH = dockedHwndHeight > 0 ? dockedHwndHeight : bay.getHeight();
+    if (dockedEditorNaturalSize.getWidth() != natW
+        || dockedEditorNaturalSize.getHeight() != natH) {
+        dockedEditorNaturalSize = {natW, natH};
+        dockedEditorAppliedSize = {};
+    }
+    // Whichever of width/height is the tighter constraint decides the
+    // scale, so one axis fills the bay and the plugin keeps its aspect.
+    // Fixed-size plugins skip the scale entirely (GH rescaled check): the
+    // frame is the natural size, centred.
+    const float fit = dockedEditorFixedSize
+                          ? 1.0f
+                          : juce::jmin((float) bay.getWidth() / (float) natW,
+                                       (float) bay.getHeight() / (float) natH);
+    // What the editor paints now: the host applied our scale to the
+    // plugin's natural size (a plugin without content-scale support comes
+    // back at its unscaled size — see the host's rescaled check).
+    const int scaledW = juce::jmax(1, (int) std::round(natW * dockedEditorScale));
+    const int scaledH = juce::jmax(1, (int) std::round(natH * dockedEditorScale));
     const auto fitted = bay.withSizeKeepingCentre(
-        juce::jmax(1, juce::jmin(visual.getWidth(), bay.getWidth())),
-        juce::jmax(1, juce::jmin(visual.getHeight(), bay.getHeight())));
-
-    if (!dockedEditor->getTransform().isIdentity()) {
-        // The transform scales away from the component's top-left, so the
-        // position is what puts the scaled drawing in the middle.
-        if (dockedEditor->getPosition() != fitted.getPosition())
-            dockedEditor->setTopLeftPosition(fitted.getPosition());
-    } else if (dockedEditor->getBounds() != fitted) {
-        // Writing sizes never deadlocks on its own: the fit itself is
-        // synchronous here, and the pass cap below stops the layout from
-        // re-entering through componentMovedOrResized().
-        dockedEditor->setBounds(fitted);
-        juce::Logger::writeToLog("rack: editor placed " + fitted.toString() + " in bay "
+        juce::jmax(1, juce::jmin(scaledW, bay.getWidth())),
+        juce::jmax(1, juce::jmin(scaledH, bay.getHeight())));
+    // A new bay size re-arms the settle so the plugin can fill the new bay
+    // instead of staying small.
+    if (dockedBayW != bay.getWidth() || dockedBayH != bay.getHeight()) {
+        dockedBayW = bay.getWidth();
+        dockedBayH = bay.getHeight();
+        dockedEditorSettled = false;
+    }
+    const bool wantChanged = (dockedEditorWant != fitted);
+    dockedEditorWant = fitted;
+    // Ignore sub-percent moves: dragging the window would otherwise re-lay
+    // out the plugin UI on every pixel.
+    if (fit > 0.0f && std::abs(fit - dockedEditorScale) >= 0.01f) {
+        // The scale request is ours: the host's resize echo must not be
+        // read as the plugin choosing a size of its own (see the
+        // watchdog). Mirrors the GH bay's echo guard around setScaleFactor.
+        // The guard must outlive this call: the host applies the scale on
+        // its own message thread, so the echo arrives ticks later.
+        applyingDockedEditorScale = true;
+        dockedEditorScale = fit;
+        dockedEditorAppliedSize = {fitted.getWidth(), fitted.getHeight()};
+        if (dockedHost != nullptr) dockedHost->sendEditorScale(fit);
+        juce::Logger::writeToLog("plugin: editor fit: natural=" + juce::String(natW) + "x"
+                                 + juce::String(natH) + " bay=" + juce::String(bay.getWidth())
+                                 + "x" + juce::String(bay.getHeight()) + " scale="
+                                 + juce::String(fit, 2) + " frame=" + fitted.toString());
+    } else if (wantChanged) {
+        juce::Logger::writeToLog("plugin: editor frame: " + fitted.toString() + " in bay "
                                  + bay.toString());
     }
+    // Position the placeholder like the GH bay positions its editor;
+    // the native window follows it (see positionDockedHwnd).
+    if (dockedHwndView.getBounds() != fitted) dockedHwndView.setBounds(fitted);
+    positionDockedHwnd();
+}
+
+void RackView::positionDockedHwnd() {
+    // The HWND holder moves the native window to follow itself; re-assert
+    // the bounds so a host-side resize behind our back is put back.
+   #if JUCE_WINDOWS
+    if (dockedHwnd == 0) return;
+    dockedHwndView.updateHWNDBounds();
+   #endif
 }
 
 void RackView::applyDockedEditorFit(const juce::Rectangle<int>& bay) {
-    if (dockedEditor == nullptr || bay.isEmpty()) return;
-    const int naturalWidth = dockedEditorNaturalSize.getWidth();
-    const int naturalHeight = dockedEditorNaturalSize.getHeight();
-    if (naturalWidth <= 0 || naturalHeight <= 0) return;
+    // Parked: see layoutDockedEditor.
+    juce::ignoreUnused(bay);
+}
 
-    // Whichever of width/height is the tighter constraint decides the scale, so
-    // one axis fills the bay and the plugin keeps its own aspect ratio.
-    const auto fit = juce::jmin(static_cast<float>(bay.getWidth())
-                                    / static_cast<float>(naturalWidth),
-                                static_cast<float>(bay.getHeight())
-                                    / static_cast<float>(naturalHeight));
-    // Ignore sub-percent moves: dragging the window would otherwise re-lay out
-    // the plugin UI on every pixel.
-    if (fit <= 0.0f || std::abs(fit - dockedEditorScale) < 0.01f) return;
-
-    const auto before = dockedEditorVisualBounds();
-    {
-        // The plugin re-sizes itself inside this call, and that resize is ours:
-        // it must not be read as the plugin choosing a size of its own.
-        const juce::ScopedValueSetter<bool> echoGuard(applyingDockedEditorScale, true);
-        dockedEditor->setScaleFactor(fit);
+void RackView::watchdogDockedEditor() {
+    // GH componentMovedOrResized, cross-process edition. The host
+    // cannot notify us when the plugin resizes itself, so poll the live
+    // window a few times a second: when it drifted from the want frame,
+    // treat it as the plugin picking a new UI size — move the baseline the
+    // fit is measured from (like GH's natural-size re-baseline), then
+    // re-fit and centre. Settles after a few passes so a plugin that
+    // insists on its own size ends centred at its real size instead of
+    // fighting the bay forever. A drift that arrives while the scale echo
+    // guard is set is ours, never the plugin's own choice. Compared in
+    // physical pixels via the peer's own scale (see positionDockedHwnd);
+    // re-baselined back to logical.
+   #if JUCE_WINDOWS
+    if (dockedHwnd == 0 || dockedEditorSettled) return;
+    if (dockedHwndView.getHWND() == nullptr) return;
+    auto* hwnd = static_cast<HWND>(reinterpret_cast<void*>(static_cast<uintptr_t>(dockedHwnd)));
+    if (::IsWindow(hwnd) == FALSE) {
+        dockedHwnd = 0;
+        return;
     }
-    // A plugin that does not support content scaling comes back at the size it
-    // already had. Remember that no scale is in effect, so a size the plugin
-    // picks later is still read as its own 100% size.
-    const auto after = dockedEditorVisualBounds();
-    const bool rescaled = after.getWidth() != before.getWidth()
-                       || after.getHeight() != before.getHeight();
-    dockedEditorScale = rescaled ? fit : 1.0f;
+    if (++dockedWatchdogTick < 10) return;
+    dockedWatchdogTick = 0;
+    auto* peer = dockedHwndView.getPeer();
+    if (peer == nullptr) return;
+    auto* topHwnd = static_cast<HWND>(peer->getNativeHandle());
+    if (topHwnd == nullptr || ::IsWindow(topHwnd) == FALSE) return;
+    const float platformScale = (float) peer->getPlatformScaleFactor();
+    const auto wantPhysical = (dockedEditorWant.toFloat() * platformScale).getSmallestIntegerContainer();
+    POINT wantOrigin = {wantPhysical.getX(), wantPhysical.getY()};
+    ::ClientToScreen(topHwnd, &wantOrigin);
+    RECT rect = {};
+    if (::GetWindowRect(hwnd, &rect) == FALSE) return;
+    const int liveW = rect.right - rect.left;
+    const int liveH = rect.bottom - rect.top;
+    const int driftX = std::abs(rect.left - wantOrigin.x);
+    const int driftY = std::abs(rect.top - wantOrigin.y);
+    const int driftW = std::abs(liveW - wantPhysical.getWidth());
+    const int driftH = std::abs(liveH - wantPhysical.getHeight());
+    if (driftX <= 2 && driftY <= 2 && driftW <= 2 && driftH <= 2) {
+        dockedEditorSettled = true;
+        // The host caught up with our fit: the echo is over, so a later
+        // drift is the plugin's own choice again.
+        applyingDockedEditorScale = false;
+        return;
+    }
+    // Clamp first, ask questions later: the live window must never paint
+    // outside the want frame (the spill-over-the-bay report). The holder
+    // re-asserts the frame on the next layout; this caps the native window
+    // right now so no frame is ever shown overflowing.
+    if (liveW > wantPhysical.getWidth() + 2 || liveH > wantPhysical.getHeight() + 2) {
+        ::SetWindowPos(hwnd, nullptr, 0, 0, wantPhysical.getWidth(), wantPhysical.getHeight(),
+                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    // The scale echo: the host is still applying our fit, so the live
+    // window has not caught up yet — not the plugin choosing a size.
+    // Re-assert the frame (which the host's own resize may have moved)
+    // without counting a pass or touching the natural-size baseline.
+    // Before that, ask the host for the editor's CURRENT outer size: when
+    // it already matches the want frame in logical units, the native
+    // window is just behind (DPI lag) — clamp it and wait, never count a
+    // drift pass. Only a host size that actually differs means the plugin
+    // picked a new size of its own.
+    if (applyingDockedEditorScale) {
+        if (dockedHost != nullptr) {
+            int hostW = 0;
+            int hostH = 0;
+            if (dockedHost->requestEditorSize(hostW, hostH) && hostW > 0 && hostH > 0) {
+                const int wantW = dockedEditorWant.getWidth();
+                const int wantH = dockedEditorWant.getHeight();
+                if (std::abs(hostW - wantW) <= 2 && std::abs(hostH - wantH) <= 2) {
+                    layoutDockedEditor();
+                    return;
+                }
+            }
+        }
+        layoutDockedEditor();
+        return;
+    }
+    if (++dockedEditorLayoutPasses > 6) {
+        // The plugin insists on its own size (fixed-size UI, or no
+        // content-scale support): GH centres it at its real size. Divide
+        // out our own fit first — the live window already carries our
+        // scale, so the baseline must be the UNSCALED size, or the next
+        // fit compounds on top of itself (the 1372x705 blowup).
+        const float inv = platformScale > 0.0f ? 1.0f / platformScale : 1.0f;
+        const float unfit = dockedEditorScale > 0.0f ? 1.0f / dockedEditorScale : 1.0f;
+        dockedHwndWidth = juce::jmax(1, (int) std::round(liveW * inv * unfit));
+        dockedHwndHeight = juce::jmax(1, (int) std::round(liveH * inv * unfit));
+        dockedEditorNaturalSize = {};
+        dockedEditorAppliedSize = {};
+        dockedEditorScale = 1.0f;
+        applyingDockedEditorScale = false;
+        dockedEditorSettled = true;
+        juce::Logger::writeToLog("plugin: editor keeps its own size " + juce::String(liveW)
+                                 + "x" + juce::String(liveH) + " physical ("
+                                 + juce::String(dockedHwndWidth) + "x"
+                                 + juce::String(dockedHwndHeight) + " logical), centring");
+        layoutDockedEditor();
+        return;
+    }
+    juce::Logger::writeToLog("plugin: editor drifted to " + juce::String(rect.left) + ","
+                             + juce::String(rect.top) + " " + juce::String(liveW) + "x"
+                             + juce::String(liveH) + ", re-asserting fit (pass "
+                             + juce::String(dockedEditorLayoutPasses) + ")");
+    layoutDockedEditor();
+   #endif
 }
 
 juce::Rectangle<int> RackView::dockedEditorVisualBounds() const {
-    if (dockedEditor == nullptr) return {};
-    // Only a pure scale is ever applied (AudioProcessorEditor::setScaleFactor
-    // installs exactly AffineTransform::scale), so the matrix diagonals are it.
-    const auto& transform = dockedEditor->getTransform();
-    return { dockedEditor->getX(), dockedEditor->getY(),
-             juce::roundToInt(static_cast<float>(dockedEditor->getWidth()) * transform.mat00),
-             juce::roundToInt(static_cast<float>(dockedEditor->getHeight()) * transform.mat11) };
-}
-
-void RackView::componentMovedOrResized(juce::Component& component, bool, bool wasResized) {
-    // Gated on a changed size: a move-only notification that outlived the
-    // layout that triggered it must not reach a plugin that already called
-    // closeDockedEditor() from its own paint, and a message-thread timer
-    // pumping layout must never be re-entered from the render path.
-    if (!wasResized || &component != dockedEditor || layingOutDockedEditor) return;
-
-    if (!applyingDockedEditorScale && dockedEditorScale > 0.0f) {
-        // A resize that is not ours is the plugin picking a new UI size (some
-        // grow when a panel inside them is expanded). Move the baseline the fit
-        // is measured from, or the next pass would shrink it straight back.
-        const auto visual = dockedEditorVisualBounds();
-        const auto natural = juce::Point<int>(
-            juce::roundToInt(static_cast<float>(visual.getWidth()) / dockedEditorScale),
-            juce::roundToInt(static_cast<float>(visual.getHeight()) / dockedEditorScale));
-        const auto drifted = std::abs(natural.x - dockedEditorNaturalSize.getWidth())
-                                 > juce::jmax(2, dockedEditorNaturalSize.getWidth() / 50)
-                             || std::abs(natural.y - dockedEditorNaturalSize.getHeight())
-                                 > juce::jmax(2, dockedEditorNaturalSize.getHeight() / 50);
-        if (!visual.isEmpty() && drifted)
-            dockedEditorNaturalSize = { 0, 0, natural.x, natural.y };
-    }
-
-    // A plugin is free to size itself once it is on screen; put it back, fitted
-    // and centred in the bay. Two passes settle it without fighting a plugin
-    // that keeps insisting on a size the bay cannot hold. A plugin parked in
-    // a layout loop still stops after the cap: no resize reaches render past
-    // this point, so nothing here can hold the message thread.
-    if (dockedEditorLayoutPasses >= 2) return;
-    ++dockedEditorLayoutPasses;
-    juce::Component::SafePointer<RackView> safe(this);
-    juce::MessageManager::callAsync([safe] {
-        if (safe == nullptr) return;
-        safe->layoutDockedEditor();
-    });
+    return {};
 }
 
 void RackView::releaseOrphanedDockedEditor() {
@@ -1569,70 +1556,74 @@ void RackView::releaseOrphanedDockedEditor() {
 }
 
 void RackView::closeDockedEditor() {
-    // The knob watcher reads the processor directly: drop it before the insert
-    // (and with it the processor) can be destroyed.
+    // Release the embedded host window back to its owner before dropping
+    // the bay state: the window stays alive in the host process, only the
+    // parenting ends here. Then drop the watcher and any parked preview
+    // state and release the bay.
+    releaseDockedHwnd();
     knobWatcher.clear();
     thumbnailWorker.clearRequest();
-    if (dockedEditor == nullptr) {
-        dockedHost = nullptr;
-        return;
-    }
-    // A capture may be printing this editor's window. Never block on it:
-    // PrintWindow asks this thread to paint, so a blocking wait deadlocks.
-    dockedEditor->removeComponentListener(this);
-    dockedEditorLayoutPasses = 0;
-    // A floating window may have taken ownership of the editor (reparented
-    // away from the dock): the window owns it now, so release our pointers
-    // without deleting.
-    if (dockedEditor->getParentComponent() != nullptr
-        && dockedEditor->getParentComponent() != &editorHolder) {
-        dockedEditor = nullptr;
-        dockedHost = nullptr;
-        dockedEditorNaturalSize = {};
-        dockedEditorScale = 1.0f;
-        applyingDockedEditorScale = false;
-        return;
-    }
-    editorHolder.removeChildComponent(dockedEditor);
-    destroyEditorWhenIdle(dockedEditor, dockedHost);
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     dockedEditor = nullptr;
     dockedHost = nullptr;
     dockedEditorNaturalSize = {};
+    dockedEditorAppliedSize = {};
+    dockedEditorWant = {};
+    dockedBayW = 0;
+    dockedBayH = 0;
+    dockedEditorSettled = false;
+    dockedWatchdogTick = 0;
     dockedEditorScale = 1.0f;
+    dockedEditorFixedSize = false;
     applyingDockedEditorScale = false;
+    dockedEditorLayoutPasses = 0;
+    layingOutDockedEditor = false;
 }
 
 void RackView::hideDockedEditor() {
-    // Nothing to thumbnail while the bay shows a panel instead.
+    // A panel owns the bay: hide the embedded window (keep the holder so
+    // it comes back on showDockedEditor) and stop thumbnails. Hiding the
+    // holder hides the HWND with it.
     thumbnailWorker.clearRequest();
-    if (dockedEditor != nullptr) dockedEditor->setVisible(false);
+    dockedHwndView.setVisible(false);
 }
 
 // Brings the insert editor back once no panel owns the bay any more.
 void RackView::showDockedEditor() {
-    if (dockedEditor == nullptr || eqFocused || dynamicsFocused || focusedEffectWindow != nullptr) return;
-    if (dockedEditor->getParentComponent() != &editorHolder) return;
-    dockedEditor->setVisible(true);
-    resized();
+    if (dockedHwnd == 0) {
+        // No window (or it died with its host): re-run the dock path, which
+        // re-requests from the host or shows the status line fail-closed.
+        refreshEditor();
+        return;
+    }
+    if (dockedHwndView.isVisible() == false) dockedHwndView.setVisible(true);
+   #if JUCE_WINDOWS
+    if (dockedHwndView.getHWND() != nullptr) {
+        dockedEditorSettled = false;
+        dockedWatchdogTick = 0;
+        layoutDockedEditor();
+        return;
+    }
+    dockedHwnd = 0;
+   #endif
+    // No window (or it died with its host): re-run the dock path, which
+    // re-requests from the host or shows the status line fail-closed.
+    refreshEditor();
 }
 
-bool RackView::pluginHostAlive(PluginHost* host) const {
-    if (host == nullptr) return false;
+bool RackView::dockedHostAlive() const {
     for (const auto& ch : audioEngine.getChannels()) {
         for (const auto& insert : ch->inserts) {
-            if (&insert->pluginHost == host) return true;
+            if (&insert->pluginHost == dockedHost) return true;
         }
     }
     for (const auto& out : audioEngine.getOutputs()) {
         for (const auto& insert : out->inserts) {
-            if (&insert->pluginHost == host) return true;
+            if (&insert->pluginHost == dockedHost) return true;
         }
     }
     return false;
-}
-
-bool RackView::dockedHostAlive() const {
-    return pluginHostAlive(dockedHost);
 }
 
 void RackView::focusEq() {
@@ -2231,7 +2222,8 @@ void RackView::rebuild() {
     // rebuild runs, so retire all previews first. Otherwise a stale editor
     // blocks the fresh one JUCE allows per processor, or its host pointer
     // dangles into a freed insert.
-    clearHiddenPreviews();
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     const bool hasChain = selectedId >= 0;
     emptyLabel.setVisible(!hasChain);
     touchBar.setVisible(hasChain);
@@ -2424,14 +2416,11 @@ void RackView::resized() {
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
-    if (dockedEditor != nullptr && focusedEffectWindow == nullptr) {
-        // The bay is the allocation: keep the holder at the visible size; the
-        // layout scales the plugin to fit that whole area.
+    if (focusedEffectWindow == nullptr) {
         editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
+        // An embedded host window tracks the holder: re-fit it on every
+        // layout so resizes move it with the bay.
         layoutDockedEditor();
-        noEditorLabel.setBounds(editorHolder.getLocalBounds());
-    } else if (focusedEffectWindow == nullptr) {
-        editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
         auto noArea = editorHolder.getLocalBounds();
         if (noEditorBypass.isVisible()) {
             noEditorBypass.setBounds(noArea.removeFromTop(24).removeFromRight(100));
@@ -2554,10 +2543,10 @@ void RackView::renameSelectedChain() {
 }
 
 juce::String RackView::insertPlugin(const juce::File& file, int pluginUniqueId) {
-    // The load runs on the message thread because that is the only thread these
-    // plugins tolerate, and some of them spend seconds initialising (Native
-    // Instruments' Raum needs ~3.5 s). Show a wait cursor now so the window
-    // explains the stall instead of just freezing.
+    // The sandboxed host starts on the message thread, and some plugins spend
+    // seconds initialising inside it (Native Instruments' Raum needs ~3.5 s).
+    // Show a wait cursor now so the window explains the stall instead of just
+    // freezing.
     juce::Component::SafePointer<RackView> safe(this);
     juce::MouseCursor::showWaitCursor();
     auto finish = [safe](juce::String error) {
@@ -2585,10 +2574,8 @@ juce::String RackView::insertPlugin(const juce::File& file, int pluginUniqueId) 
 }
 
 void RackView::erasePlugin(std::uint32_t insertId) {
-    // The docked editor always belongs to the selected chain, which is the
-    // chain this erase targets: release it while the processor is still
-    // alive, whichever slot held the focus. Erasing first would leave
-    // closeDockedEditor deleting an editor whose processor is already gone.
+    // The bay status always describes the selected chain, which is the
+    // chain this erase targets: release it before the erase.
     closeDockedEditor();
     if (auto* ch = currentChannel()) audioEngine.removePlugin(ch->id, insertId);
     else if (auto* out = currentOutput()) audioEngine.removeOutputPlugin(out->id, insertId);
@@ -2898,7 +2885,8 @@ void RackView::refreshAfterInsertChange() {
     }
     // Same ownership rule as rebuild(): the insert list changed, so any
     // preview editor may belong to a removed insert.
-    clearHiddenPreviews();
+    clearBackgroundPreview();
+    clearAllLivePreviews();
     refreshSlots();
     refreshEditor();
     juce::Component::SafePointer<RackView> safe(this);
@@ -2913,13 +2901,10 @@ bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     if (insert == nullptr) return false;
     // Clicking a slot opens that insert in the bay: clear every docked
     // built-in first, or a stuck Multiband/De-esser/Limiter keeps the bay
-    // and the VST editor never appears.
+    // and the VST status never appears.
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    // The newly focused insert gets the bay's live editor; a hidden editor
-    // for the same insert would be a second owner, which JUCE forbids.
-    retireHiddenPreview(insert->id);
     focusedInsertId = insert->id;
     refreshEditor();
     return true;

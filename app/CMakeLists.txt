@@ -108,7 +108,12 @@ target_compile_definitions(pluginrack_app PRIVATE
     JUCE_STANDALONE_APPLICATION=1
     JUCE_USE_CURL=0
     JUCE_VST3_HOST_CROSS_PLATFORM_UID=1
-    JUCE_WEB_BROWSER=0)
+    JUCE_WEB_BROWSER=0
+    # The VST3 SDK's own headers (uid.h) use legacy CRT calls (strcpy,
+    # sscanf); this is Steinberg's recommended define when consuming the
+    # SDK and only silences the deprecation warning, not /sdl's other
+    # checks on our own code.
+    _CRT_SECURE_NO_WARNINGS)
 
 # ASIO support: JUCE 9 bundles the Steinberg host headers (asio.h, asiosys.h,
 # iasiodrv.h) next to juce_audio_devices. When they are present enable ASIO so
@@ -145,9 +150,13 @@ endif()
 if(MSVC)
     target_compile_options(pluginrack_app PRIVATE /W4 /WX)
     target_compile_options(pluginrack_app PRIVATE /utf-8)
+    # PR-11: exploit-mitigation defence in depth for a process that loads
+    # third-party native code: Control Flow Guard + SDL checks. CET shadow
+    # stacks and restricted DLL search come from the linker flags below.
+    target_compile_options(pluginrack_app PRIVATE /guard:cf /sdl)
     # Keep symbols in every configuration: a crash report only names the module
-    # and a code offset, and resolving it needs the matching PDB. The build
-    # script copies PluginRack.pdb next to the exe.
+    # and a code offset, and resolving it needs the matching PDB. PDBs ship
+    # via the symbol server, not beside the exe (see build-and-copy.ps1).
     target_compile_options(pluginrack_app PRIVATE /Zi)
-    target_link_options(pluginrack_app PRIVATE /DEBUG)
+    target_link_options(pluginrack_app PRIVATE /DEBUG /guard:cf /CETCOMPAT /DEPENDENTLOADFLAG:0x800)
 endif()

@@ -1,10 +1,13 @@
 #include "SceneBridge.h"
 
+#include "PluginLibrary.h"
+
 #include <pluginrack/SceneCodec.h>
 #include <pluginrack/SceneValidator.h>
 
 namespace {
-constexpr juce::int64 kMaxSceneFileBytes = 8 * 1024 * 1024;
+constexpr juce::int64 kMaxSceneFileBytes =
+    static_cast<juce::int64>(pluginrack::kMaxSceneJsonBytes);
 constexpr int kMaxSaveNameLength = 64;
 
 std::vector<juce::File> lastSceneCandidates() {
@@ -35,8 +38,10 @@ juce::String firstValidationError(const pluginrack::Scene& scene) {
 // broken (duplicate ids, unknown route target, out-of-range values) must never
 // reach restoreScene(), which trusts what it is given.
 std::optional<pluginrack::Scene> loadValidatedScene(const juce::File& file,
-                                                    juce::String& errorMessage) {
+                                                    juce::String& errorMessage,
+                                                    bool* untrustedPlugins = nullptr) {
     errorMessage.clear();
+    if (untrustedPlugins != nullptr) *untrustedPlugins = false;
     const auto fileSize = file.getSize();
     if (fileSize < 0 || fileSize > kMaxSceneFileBytes) {
         errorMessage = "The saved scene is too large.";
@@ -55,6 +60,31 @@ std::optional<pluginrack::Scene> loadValidatedScene(const juce::File& file,
     if (!errors.empty()) {
         errorMessage = "Could not load the saved scene: " + juce::String(errors.front().message);
         return std::nullopt;
+    }
+    // PR-SEC-010: flag scenes naming plugins outside the scanned library.
+    // The UI warn-and-confirms before restoring those slots; scenes from
+    // outside the app's own scenes folder start with plugins disabled.
+    if (untrustedPlugins != nullptr) {
+        const auto check = [](const std::string& pluginPath) {
+            return !pluginPath.empty()
+                   && !PluginLibrary::isTrustedPluginPath(pluginPath);
+        };
+        for (const auto& channel : result.scene->channels) {
+            for (const auto& insert : channel.inserts) {
+                if (check(insert.pluginPath)) {
+                    *untrustedPlugins = true;
+                    return std::move(result.scene);
+                }
+            }
+        }
+        for (const auto& output : result.scene->outputs) {
+            for (const auto& insert : output.inserts) {
+                if (check(insert.pluginPath)) {
+                    *untrustedPlugins = true;
+                    return std::move(result.scene);
+                }
+            }
+        }
     }
     return std::move(result.scene);
 }
@@ -288,6 +318,24 @@ std::optional<pluginrack::Scene> SceneBridge::load(const juce::File& file, juce:
         return std::nullopt;
     }
     return loadValidatedScene(file, errorMessage);
+}
+
+// Trust-gated load: like load(), but reports whether the scene names plugins
+// outside the scanned library (PR-SEC-010). Callers warn-and-confirm before
+// restoring those slots; scenes from outside the app's own scenes folder
+// additionally start with plugins disabled until the user opts in.
+std::optional<pluginrack::Scene> SceneBridge::loadTrusted(const juce::File& file,
+                                                          juce::String& errorMessage,
+                                                          bool& untrustedPlugins,
+                                                          bool& outsideScenesFolder) {
+    errorMessage.clear();
+    untrustedPlugins = false;
+    outsideScenesFolder = false;
+    if (!file.existsAsFile()) {
+        return std::nullopt;
+    }
+    outsideScenesFolder = !file.isAChildOf(getScenesDirectory());
+    return loadValidatedScene(file, errorMessage, &untrustedPlugins);
 }
 
 std::optional<pluginrack::Scene> SceneBridge::loadNamed(const juce::String& name, juce::String& errorMessage) {

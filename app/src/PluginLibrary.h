@@ -8,7 +8,7 @@
 // Catalogue of the plugins installed on this machine.
 //
 // The plugin folders are walked for bundles and each one is described by
-// PluginHost::scanFile, which loads the plugin in a throwaway child process:
+// PluginHost::scanFile, which maps the plugin in a throwaway child process:
 // a plugin that faults while enumerating its classes cannot take the app down.
 // Results are cached in %APPDATA%/PluginRack/plugins/plugin-library.xml, so a
 // later launch only rescans the bundles that changed on disk.
@@ -44,6 +44,10 @@ public:
     static juce::String vendorNameFor(const juce::PluginDescription& description);
     // The name a plugin is listed under.
     static juce::String displayNameFor(const juce::PluginDescription& description);
+    // PR-SEC-010: true when the path names a scanned library bundle (or a
+    // bundle under an explicit scan folder). Scene restore warn-and-confirms
+    // anything else instead of loading it silently.
+    static bool isTrustedPluginPath(const juce::String& path);
 
     static juce::File cacheFile();
 

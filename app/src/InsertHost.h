@@ -15,12 +15,11 @@
 #include "pluginrack/ChainOrder.h"
 
 // Release-only hook fired synchronously BEFORE erasePlugin frees the
-// processor, so a docked editor for the doomed insert is destroyed while
-// still alive.
+// insert, so the bay status for the doomed insert is released first.
 //
 // A full onStructureChanged round-trip cannot be used here: it would
-// rebuild the rack and re-dock the doomed insert before the erase runs.
-// The view router owns the only docked editor, so it assigns this hook;
+// rebuild the rack and re-describe the doomed insert before the erase runs.
+// The view router owns the only bay status, so it assigns this hook;
 // it stays empty in unit tests, where there is no router.
 inline std::function<void()>& pluginRemovingHook() {
     static std::function<void()> hook;
@@ -79,6 +78,8 @@ public:
     virtual void eraseBuiltIn(pluginrack::ChainItem /*item*/) {}
     // Channel view overrides this to focus the clicked slot inline (returns
     // true, skipping the floating editor). Default false keeps showEditor().
+    // While editors live out-of-process every host overrides this (see
+    // RackView::insertActivated), so the default path is rarely taken.
     virtual bool insertActivated(AudioEngine::InsertSlot* /*insert*/) { return false; }
     // Moves a built-in effect into the slot `chainIndex` and unbypasses it.
     // Default no-op keeps unit-test hosts buildable; real hosts override.
@@ -182,10 +183,10 @@ public:
             // these slots only runs async afterwards. Greys out at once, so
             // a second click in that window is a guarded no-op.
             setInsert(nullptr);
-            // Release-only, synchronous: destroys the rack's docked editor
-            // (if it shows this insert) while the processor is still alive.
-            // Must run before erasePlugin, and must not rebuild (a rebuild
-            // would re-dock the doomed insert before the erase).
+            // Release-only, synchronous: releases the rack's bay status
+            // (if it describes this insert) before the erase. Must run
+            // before erasePlugin, and must not rebuild (a rebuild would
+            // re-describe the doomed insert before the erase).
             if (auto release = pluginRemovingHook()) release();
             host.erasePlugin(doomedId);
             if (hostComponent != nullptr) {
@@ -237,15 +238,22 @@ public:
         removeButton.setVisible(true);
         bypassButton.setVisible(true);
         if (insert != nullptr) {
-            nameLabel.setText(insert->pluginName.isNotEmpty() ? insert->pluginName
-                                                              : juce::File(insert->pluginPath).getFileName(),
+            // Fail-closed badge: a slot whose sandboxed host is down shows
+            // it in the card name so silence is never a mystery.
+            const bool hostDown = insert->pluginHost.isHostDown();
+            const juce::String base = insert->pluginName.isNotEmpty() ? insert->pluginName
+                                      : juce::File(insert->pluginPath).getFileName();
+            nameLabel.setText(hostDown ? base + "  [host down]" : base,
                               juce::dontSendNotification);
             bypassButton.setToggleState(insert->bypassed.get());
             bypassButton.setEnabledState(true);
             removeButton.setEnabledState(true);
-            nameLabel.setColour(juce::Label::textColourId, theme::text());
-            nameLabel.setTooltip(insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath);
-            setTooltip("Drag the dots to reorder - click to open the plugin editor");
+            nameLabel.setColour(juce::Label::textColourId,
+                                hostDown ? theme::amber() : theme::text());
+            nameLabel.setTooltip(hostDown ? base + " - sandboxed host is not running; slot is silent"
+                                          : (!insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath));
+            setTooltip(hostDown ? "Sandboxed host is down - click to open the plugin editor"
+                                : "Drag the dots to reorder - click to open the plugin editor");
         } else {
             nameLabel.setText("empty", juce::dontSendNotification);
             nameLabel.setColour(juce::Label::textColourId, theme::dim());

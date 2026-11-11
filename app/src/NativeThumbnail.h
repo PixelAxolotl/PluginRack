@@ -19,18 +19,6 @@ void* pluginWindowOf(juce::Component& editor);
 // window cannot be captured or came back as one flat colour.
 juce::Image captureWindow(void* windowHandle, int targetWidth);
 
-// A plain top-level window kept directly below the app window. Plugin windows
-// are re-parented into it, so they keep painting normally for PrintWindow while
-// the app window covers them. This is the only way to keep a VST3 window out of
-// sight: it is a child window (JUCE parents it to the app), and a child always
-// paints above its parent's content.
-void* createHiddenHost();
-void destroyHiddenHost(void* hostWindow);
-// Places the host exactly under the app window and moves the plugin's window
-// into it. Called every capture turn, because JUCE re-parents its own window
-// whenever the component moves or resizes.
-void parkBehindApp(void* pluginWindow, void* appWindow, void* hostWindow);
-
 // Captures a native window on a worker thread. PrintWindow makes the target
 // window paint its whole UI, and that paint is far too slow to sit inside a
 // message-thread timer at display rates: it starved every other message and
@@ -52,20 +40,18 @@ public:
     void clearRequest();
     void stop();
 
-    // True while the worker is inside PrintWindow. Never block the message
-    // thread waiting for this: PrintWindow asks the window's owning thread
-    // (the message thread) to paint, so a blocking wait deadlocks.
-    bool isCapturing() const { return capturing.get() != 0; }
+    // Held by the worker while it captures, and by the owner while it
+    // destroys the captured window.
+    juce::CriticalSection& captureLock() { return captureMutex; }
 
 private:
     void run() override;
 
     juce::CriticalSection requestLock;
+    juce::CriticalSection captureMutex;
     void* pendingHandle = nullptr;
     int pendingWidth = 0;
     std::function<void(juce::Image)> pendingCallback;
-    // Published under requestLock, cleared when the capture finishes.
-    juce::Atomic<int> capturing{ 0 };
     juce::WaitableEvent wake{ false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WindowCaptureWorker)

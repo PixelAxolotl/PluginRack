@@ -8,18 +8,16 @@
 // Follows the knobs the user grabs inside a VST's own editor window so the
 // rack's TOUCH AND SLIDE strip can drive them.
 //
-// A plugin's UI lives in its own native child window, so JUCE never sees those
-// clicks. What it does see is the parameter gesture: VST3 plugins call
-// beginEdit() as soon as a knob is grabbed (before any movement), and JUCE
-// forwards that to AudioProcessorParameter::Listener. That makes a plain touch
-// register the knob immediately; the value-change callback is only a fallback
-// for plugins that never send gestures.
+// PARKED while editors live out-of-process: there is no in-process instance
+// to observe, so setPlugin is a no-op and the strip stays inert. The class
+// (and its Listener base) stays so the native-reparent follow-up can rewire
+// it to the host's parameter channel without touching every caller.
 class PluginKnobWatcher final : private juce::AudioProcessorParameter::Listener {
 public:
     PluginKnobWatcher() = default;
     ~PluginKnobWatcher() override;
 
-    // The instance is not owned here: call clear() before it is destroyed.
+    // Parked no-op: kept so callers keep compiling.
     void setPlugin(juce::AudioPluginInstance* instance);
     void clear();
 

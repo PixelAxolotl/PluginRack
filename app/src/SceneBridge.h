@@ -47,6 +47,14 @@ public:
 
     static std::optional<pluginrack::Scene> load(juce::String& errorMessage);
     static std::optional<pluginrack::Scene> load(const juce::File& file, juce::String& errorMessage);
+    // Trust-gated load (PR-SEC-010): like load(), but also reports whether
+    // the scene names plugins outside the scanned library (untrustedPlugins)
+    // and whether the file lives outside the app's scenes folder
+    // (outsideScenesFolder — such scenes start with plugins disabled).
+    static std::optional<pluginrack::Scene> loadTrusted(const juce::File& file,
+                                                        juce::String& errorMessage,
+                                                        bool& untrustedPlugins,
+                                                        bool& outsideScenesFolder);
     static std::optional<pluginrack::Scene> loadNamed(const juce::String& name, juce::String& errorMessage);
     static std::optional<pluginrack::Scene> loadLast(juce::String& errorMessage);
     static std::optional<pluginrack::Scene> loadAutosave(juce::String& errorMessage) { return loadLast(errorMessage); }

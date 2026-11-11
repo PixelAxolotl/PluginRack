@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -461,9 +462,9 @@ public:
     // the marker; a successful open clears it. Returns true when any strip
     // changed. Cheap enough for a UI timer: enumeration is cached.
     bool refreshDeviceAvailability();
-    // Loads the VST3 on a worker and installs it on the message thread:
-    // instantiation blocks for as long as the plugin needs to initialise, and
-    // doing that here froze the window. pluginUniqueId selects the class
+    // Scans the VST3 on a worker and starts its sandboxed host on the message
+    // thread: host start blocks for as long as the plugin needs to initialise,
+    // and doing that here froze the window. pluginUniqueId selects the class
     // inside a multi-class bundle (0 = the bundle's first one). done() runs on
     // the message thread with an error message, or an empty string on success.
     void addPluginAsync(std::uint32_t channelId, const juce::File& file, int pluginUniqueId,
@@ -617,6 +618,12 @@ public:
     // stopped. The render path times out a hunt it started; this covers the
     // case where nothing renders at all. Safe to call at UI refresh rate.
     void pollLatencyMeasurement();
+    // Message-thread watchdog for sandboxed hosts that die after a
+    // successful launch: logs each newly-dead slot once (name + last-known
+    // state) so a silent host death is never a mystery. Returns how many
+    // slots are currently down. Safe to call at UI refresh rate; takes the
+    // same try-lock discipline as the audio thread (skips when busy).
+    int pollHostHealth();
     // Drops a stale result; called whenever the device graph or its buffer
     // configuration changes, because the old figure no longer describes it.
     void resetLatencyMeasurement();
@@ -626,13 +633,13 @@ public:
     double getMeasuredLatencyMs() const;
 
     pluginrack::Scene makeScene() const;
-    // Rebuilds strips, plugins, and devices from a saved scene. MUST run on
-    // the JUCE message thread: plugin instantiation, editor-window
-    // destruction with the old strips, and strip swapping are message-thread
-    // operations. openDevicesNow=false records the scene's device assignments
-    // and leaves the streams closed; the caller then runs
-    // openStripsDevicesAsync() so a slow driver probe never blocks the UI.
-    // Returns plugin/device load errors, empty on full success.
+    // Rebuilds strips, sandboxed hosts, and devices from a saved scene. MUST
+    // run on the JUCE message thread: host start, bay-status release with the
+    // old strips, and strip swapping are message-thread operations.
+    // openDevicesNow=false records the scene's device assignments and leaves
+    // the streams closed; the caller then runs openStripsDevicesAsync() so a
+    // slow driver probe never blocks the UI. Returns plugin/device load
+    // errors, empty on full success.
     juce::String restoreScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
 
 private:
@@ -704,6 +711,14 @@ private:
     // VSTs keep worker callbacks active after removal, so destroying them on
     // the UI thread during live playback is unsafe.
     std::vector<std::unique_ptr<InsertSlot>> retiredInserts_;
+    // Slots already reported dead by pollHostHealth (path|id keys): keeps
+    // the log to one line per death instead of one per UI tick.
+    std::set<std::string> loggedDeadHosts_;
+    // Last pollHostHealth down count: the health line logs on change only.
+    int lastPollDownCount_ = -1;
+    // First pollHostHealth tick: starts the warm-up window during which a
+    // handshaking slot is not counted as dead.
+    std::uint32_t hostHealthFirstMs_ = 0;
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
     std::vector<std::unique_ptr<Route>> routes;

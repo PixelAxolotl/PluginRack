@@ -794,9 +794,9 @@ juce::String ChannelStrip::insertPlugin(const juce::File& file, int pluginUnique
 }
 
 void ChannelStrip::erasePlugin(std::uint32_t insertId) {
-    // Mirror OutputStrip: the rack may have docked an editor owned by this
-    // insert. Release-only on purpose (see InsertHost.h): a rebuild here
-    // would re-dock the doomed insert. Null-safe; a second release from the
+    // Mirror OutputStrip: the rack bay may describe this insert.
+    // Release-only on purpose (see InsertHost.h): a rebuild here
+    // would re-describe the doomed insert. Null-safe; a second release from the
     // slot's remove button is a no-op.
     if (auto release = pluginRemovingHook()) release();
     audioEngine.removePlugin(channel.id, insertId);

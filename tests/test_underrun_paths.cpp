@@ -471,14 +471,17 @@ TEST_CASE("input and output buffer sizes are independently configurable",
 
 TEST_CASE("restored plugins do not reprepare for an unchanged device format",
           "[plugin][restore]") {
+    // Out-of-process-only: prepareToPlay records the format; the sandboxed
+    // host prepares its own instance on first block. No in-process instance
+    // exists, so there is nothing to reprepare here.
     const auto header = readSource("app/src/PluginHost.h");
     const auto body = functionBody(readSource("app/src/PluginHost.cpp"),
                                    "void PluginHost::prepareToPlay");
     CHECK(contains(header, "bool prepared = false"));
-    CHECK(contains(body, "const bool unchanged"));
-    CHECK(contains(body, "if (plugin != nullptr && !unchanged)"));
-    CHECK(contains(body, "plugin->releaseResources()"));
-    CHECK(contains(body, "prepared = true"));
+    CHECK(contains(body, "currentSampleRate = sampleRate"));
+    CHECK(contains(body, "currentBufferSize = samplesPerBlock"));
+    CHECK(contains(body, "prepared = host != nullptr && hostReady"));
+    CHECK_FALSE(contains(body, "plugin->prepareToPlay"));
 }
 
 TEST_CASE("scene restore loads plugins before the device handoff",
@@ -578,7 +581,7 @@ TEST_CASE("an already-open input is reused or released before reopening",
     CHECK(close < open);
 }
 
-TEST_CASE("adding a VST scans in a child process and creates on the message thread",
+TEST_CASE("adding a VST scans in a child process and hosts out-of-process",
           "[plugin][ui]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto add = functionBody(engine, "void AudioEngine::addPluginAsync");
@@ -587,34 +590,33 @@ TEST_CASE("adding a VST scans in a child process and creates on the message thre
     CHECK(contains(add, "juce::Thread::launch"));
     CHECK(contains(add, "PluginHost::scanFile"));
     CHECK(contains(add, "MessageManager::callAsync"));
-    // Creating the instance stays on the message thread: JUCE creates plugins
-    // there, and loading the DLL on one thread and using it on another faults
-    // inside some VST3s (Native Instruments' Raum and Replika).
-    CHECK(contains(add, "PluginHost::instantiate"));
-    CHECK_FALSE(contains(add, "PluginHost::loadFromFile"));
+    // Out-of-process-only: the message thread resolves metadata and starts
+    // the sandboxed host. No instance is ever created in the main app.
+    CHECK(contains(add, "chooseDescription"));
+    CHECK(contains(add, "loaded.uniqueId = chosen.uniqueId"));
+    CHECK_FALSE(contains(add, "PluginHost::instantiate("));
+    CHECK_FALSE(contains(add, "PluginHost::instantiateHostInstance"));
     const auto post = add.find("juce::MessageManager::callAsync");
-    const auto create = add.find("PluginHost::instantiate(");
     const auto adopt = add.find("insert->pluginHost.adopt(loaded)");
     REQUIRE(post != std::string::npos);
-    REQUIRE(create != std::string::npos);
     REQUIRE(adopt != std::string::npos);
-    CHECK(post < create);
-    CHECK(create < adopt);
+    CHECK(post < adopt);
 
     const auto addOutput = functionBody(engine, "void AudioEngine::addOutputPluginAsync");
     CHECK(contains(addOutput, "juce::Thread::launch"));
     CHECK(contains(addOutput, "PluginHost::scanFile"));
-    CHECK(contains(addOutput, "PluginHost::instantiate"));
-    CHECK_FALSE(contains(addOutput, "PluginHost::loadFromFile"));
+    CHECK(contains(addOutput, "chooseDescription"));
+    CHECK_FALSE(contains(addOutput, "PluginHost::instantiate("));
 
     // The child process is this executable with --scan-plugin, and the scan
-    // itself only runs there.
+    // itself only runs there. Instances are created only in --plugin-host.
     const auto host = readSource("app/src/PluginHost.cpp");
     CHECK(contains(host, "juce::ChildProcess"));
     CHECK(contains(host, "--scan-plugin"));
     CHECK(contains(host, "PluginHost::scanFileInProcess"));
     CHECK(contains(host, "sharedFormatLock()"));
-    CHECK(contains(host, "plugin->prepareToPlay(currentSampleRate, currentBufferSize)"));
+    CHECK(contains(host, "instantiateHostInstance"));
+    CHECK_FALSE(contains(host, "plugin->processBlock(buffer, midiBuffer)"));
 
     const auto rack = readSource("app/src/RackView.cpp");
     const auto insert = functionBody(rack, "juce::String RackView::insertPlugin");
@@ -626,12 +628,19 @@ TEST_CASE("adding a VST scans in a child process and creates on the message thre
 TEST_CASE("crashes are logged with a backtrace", "[crash]") {
     const auto main = readSource("app/src/Main.cpp");
     CHECK(contains(main, "setApplicationCrashHandler"));
+    // PR-09: the handler writes only a pending record (allocation-free);
+    // startup drains it into the blocklist and writes the full report.
+    CHECK(contains(main, "currentLoadingPluginBytes"));
+    CHECK(contains(main, "pending-crash-plugin"));
+    CHECK(contains(main, "PluginLoadGuard::block"));
     CHECK(contains(main, "getStackBacktrace"));
     CHECK(contains(main, "crash-"));
     CHECK(contains(main, "setCurrentLogger"));
     const auto cmake = readSource("app/CMakeLists.txt");
     CHECK(contains(cmake, "/Zi"));
-    CHECK(contains(cmake, "target_link_options(pluginrack_app PRIVATE /DEBUG)"));
+    // PR-SEC-015: PDBs ship via the symbol server (build/symbols), not beside
+    // the exe; the link still emits debug info for the report offsets.
+    CHECK(contains(cmake, "target_link_options(pluginrack_app PRIVATE /DEBUG"));
 }
 
 TEST_CASE("scene save captures plugin state outside the audio lock", "[underrun][rt]") {
@@ -701,6 +710,13 @@ TEST_CASE("scene and plugin inputs are bounded before native code runs", "[app][
     CHECK(contains(bridge, "fileSize > kMaxSceneFileBytes"));
     CHECK(contains(bridge, "kMaxSceneFileBytes"));
     CHECK(contains(helper, "loadFileAsString"));
+    // PR-SEC-009: the size/depth/key guards live in core so every consumer
+    // (SceneBridge, render_cli) gets them.
+    const auto codec = readSource("core/src/SceneCodec.cpp");
+    CHECK(contains(codec, "kMaxSceneJsonBytes"));
+    CHECK(contains(codec, "kMaxSceneJsonDepth"));
+    CHECK(contains(codec, "kMaxSceneJsonKeys"));
+    CHECK(contains(codec, "sax_parse"));
 
     const auto host = readSource("app/src/PluginHost.cpp");
     CHECK(contains(host, "kMaxPluginStateBase64Chars"));
@@ -775,9 +791,12 @@ TEST_CASE("the picked class inside a bundle reaches the loader", "[plugin][ui]")
     }
 
     // Scene restore reopens the same class the slot was created from.
+    // Metadata-only: the instance is created inside --plugin-host.
     const auto host = readSource("app/src/PluginHost.cpp");
-    const auto load = functionBody(host, "PluginHost::LoadedPlugin PluginHost::loadFromFile");
-    CHECK(contains(load, "description.uniqueId == pluginUniqueId"));
+    const auto load = functionBody(host, "PluginHost::loadFromFile");
+    CHECK(contains(load, "pluginUniqueId != 0 && description.uniqueId == pluginUniqueId"));
+    CHECK(contains(load, "chosen->uniqueId"));
+    CHECK_FALSE(contains(load, "instantiateHostInstance"));
 }
 
 TEST_CASE("the plugin menu refreshes when the scan finishes", "[plugin][ui]") {

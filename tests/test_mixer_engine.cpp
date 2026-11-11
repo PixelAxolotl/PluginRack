@@ -630,6 +630,42 @@ TEST_CASE("mixer non-finite input frames are flushed at the eq tap") {
     }
 }
 
+TEST_CASE("mixer output guard clamps and flushes after the insert chain") {
+    // PR-SEC-006: the guard is unconditional (EQ on or off) and runs after
+    // the output inserts, before the device write.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.0f);
+    in.left[0] = std::numeric_limits<float>::quiet_NaN();
+    in.right[0] = std::numeric_limits<float>::infinity();
+    in.left[1] = 60.0f;
+    in.right[1] = -60.0f;
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    for (int i = 0; i < kFrames; ++i) {
+        const float l = out.left[static_cast<std::size_t>(i)];
+        const float r = out.right[static_cast<std::size_t>(i)];
+        REQUIRE(std::isfinite(l));
+        REQUIRE(std::isfinite(r));
+        REQUIRE(l <= 1.0f);
+        REQUIRE(l >= -1.0f);
+        REQUIRE(r <= 1.0f);
+        REQUIRE(r >= -1.0f);
+    }
+    REQUIRE(out.left[0] == Catch::Approx(0.0f));
+    REQUIRE(out.right[0] == Catch::Approx(0.0f));
+    REQUIRE(out.left[1] == Catch::Approx(1.0f));
+    REQUIRE(out.right[1] == Catch::Approx(-1.0f));
+}
+
 TEST_CASE("mixer setChannelEqBypassed gates the eq live without re-prepare") {
     pluginrack::Scene off = eqTestScene();
     pluginrack::MixerEngine reference = prepareEngine(off);

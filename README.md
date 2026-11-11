@@ -344,8 +344,8 @@ build/dev/app/pluginrack_app_artefacts/Release/PluginRack.exe   # or Debug/
 ```
 
 `tools/build-and-copy.ps1` rebuilds and copies the executable to the repository
-root as `PluginRack.exe` (that copy is git-ignored; the script stops a running
-instance if it has to replace the file).
+root as `PluginRack.exe` (that copy is git-ignored; the script closes any running
+instance before building and waits for the file lock to clear before copying).
 
 If `JUCE_DIR` or `VST3_SDK_DIR` is missing, CMake still builds the core library
 and tests, and prints a warning that the app was skipped.

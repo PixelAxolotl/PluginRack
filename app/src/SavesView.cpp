@@ -161,9 +161,10 @@ void SavesView::setLoading(bool isLoading) {
 void SavesView::loadSave(const juce::String& name) {
     // restoreScene instantiates plugins and destroys JUCE components with
     // its old strips, so it must run on the message thread. The host's
-    // callback applies the parsed scene there; the engine parks the audio
-    // clock around the strip swap, which keeps the synchronous load brief.
-    // loading_ serialises row clicks and resets on every exit path.
+    // callback applies the parsed scene there (including its trust gate);
+    // the engine parks the audio clock around the strip swap, which keeps
+    // the synchronous load brief. loading_ serialises row clicks and resets
+    // on every exit path.
     if (loading_.exchange(true)) return;
     juce::String error;
     const auto saved = SceneBridge::loadNamed(name, error);

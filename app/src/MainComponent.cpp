@@ -232,10 +232,10 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     rackView.onStructureChanged = [this] {
         if (onStructureChanged) onStructureChanged();
     };
-    // Output/Sub strips erase inserts the rack may have docked, and they
+    // Output/Sub strips erase inserts the rack bay may describe, and they
     // cannot reach the rack directly. The InsertHost remove button fires
     // this release-only hook synchronously before the engine frees the
-    // processor; a full refreshViews here would re-dock the doomed insert
+    // insert; a full refreshViews here would re-describe the doomed insert
     // before the erase, so this releases without rebuilding.
     pluginRemovingHook() = [this] { releaseDockedEditor(); };
     ioView.onStructureChanged = [this] {
@@ -323,7 +323,12 @@ MainComponent::MainComponent()
     toolbar.onViewSelected = [this](AppView view) { router.setView(view); };
     router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
     router.onStructureChanged = [this] { refreshViews(); };
-    router.onRestoreRequested = [this](const pluginrack::Scene& scene) { return applyScene(scene); };
+    // Trust gate lives here: SavesView rows call onRestoreRequested, which
+    // warn-and-confirms untrusted plugin paths before applying.
+    router.onRestoreRequested = [this](const pluginrack::Scene& scene) {
+        applySceneWithTrust(scene, /*outsideScenesFolder=*/false);
+        return juce::String();
+    };
     router.onSaveLoaded = [this](const juce::String& name) { activeSaveName_ = name; };
     toolbar.onSave = [this] {
         // Stay where the user is: overwrite the active save, or ask for a
@@ -352,6 +357,27 @@ MainComponent::MainComponent()
 
 void MainComponent::timerCallback() {
     audioEngine.pollLatencyMeasurement();
+    // Host watchdog: when a sandboxed host dies after a good launch, the
+    // insert cards must re-read the badge. pollHostHealth logs each death
+    // once; a non-negative change in the down count refreshes the strips.
+    // Runs at the same 4 Hz as everything else here — cheap try-lock.
+    //
+    // Warm-up: the first ticks run while the scene's hosts are still
+    // handshaking. pollHostHealth already skips those; the refresh below
+    // still runs on the 0->N transition so the cards paint the badge the
+    // moment a real death lands.
+    {
+        const int down = audioEngine.pollHostHealth();
+        if (down >= 0 && down != lastHostDownCount_) {
+            const auto now = juce::Time::getMillisecondCounter();
+            juce::Logger::writeToLog("plugin: host badge count " + juce::String(lastHostDownCount_)
+                                     + " -> " + juce::String(down) + " at "
+                                     + juce::String(now) + " ms uptime");
+            lastHostDownCount_ = down;
+            router.refreshDeviceStrips();
+            mixer.refreshStrips();
+        }
+    }
     if (audioEngine.isOpeningDevices()) {
         const auto total = audioEngine.getDeviceOpenTotal();
         const auto done = audioEngine.getDeviceOpenProgress();
@@ -504,6 +530,21 @@ juce::Component* MainComponent::focusDiagnosticsEffect(pluginrack::ChainItemType
     return router.getRackView().getFocusedDiagnosticsEffect();
 }
 
+std::uint32_t MainComponent::focusDiagnosticsVst() {
+    // Headless bay check: the default scene's first channel carries the VST
+    // inserts. Select it and focus its first insert so refreshEditor runs
+    // the dock path (embed or status line) before the snapshot.
+    const auto& channels = audioEngine.getChannels();
+    if (channels.empty() || channels.front()->inserts.empty()) return 0;
+    router.getRackView().setSelectedChannel((int) channels.front()->id, false);
+    const auto id = channels.front()->inserts.front()->id;
+    if (auto* insert = router.getRackView().findInsertForDiagnostics(id)) {
+        router.getRackView().insertActivated(insert);
+        return id;
+    }
+    return 0;
+}
+
 void MainComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
     // Queue the audio startup only once the first frame has been drawn: a
@@ -553,9 +594,9 @@ void MainComponent::showMenu() {
                                             "Reset", "Cancel", nullptr,
                                             juce::ModalCallbackFunction::create([this](int result) {
                                                 if (result != 1) return;
-                                                // The rack may have docked an editor owned by a strip
-                                                // removed below: release it while the processors are
-                                                // still alive. Release-only on purpose (see InsertHost.h).
+                                                // The rack bay may describe a strip
+                                                // removed below: release it first.
+                                                // Release-only on purpose (see InsertHost.h).
                                                 if (auto release = pluginRemovingHook()) release();
                                                 // Mixer strips hold Channel&/Output& refs and their open
                                                 // EQ windows call back into those refs on destruction
@@ -739,11 +780,9 @@ void MainComponent::showSavesMenu() {
                 const auto saved = SceneBridge::loadNamed(name, error);
                 if (error.isNotEmpty()) { showError(error); return; }
                 if (!saved.has_value()) return;
-                const auto pluginErrors = applyScene(*saved);
-                if (pluginErrors.isNotEmpty())
-                    showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
-                else
-                    activeSaveName_ = name;
+                // Trust gate: warn-and-confirm untrusted plugin paths.
+                applySceneWithTrust(*saved, /*outsideScenesFolder=*/false);
+                activeSaveName_ = name;
             });
         }
         menu.addSubMenu("Load Save", loadMenu);
@@ -824,7 +863,58 @@ void MainComponent::loadScene(bool showMissingMessage) {
         if (showMissingMessage) showError("No scene has been saved yet.");
         return;
     }
-    const auto pluginErrors = applyScene(*saved);
+    applySceneWithTrust(*saved, /*outsideScenesFolder=*/false);
+}
+
+void MainComponent::applySceneWithTrust(const pluginrack::Scene& scene, bool outsideScenesFolder) {
+    // PR-SEC-010: warn-and-confirm for scenes naming plugins outside the
+    // scanned library. The dialog shows the full paths; "Load" restores the
+    // scene as-is (each slot still runs only in the sandboxed host, and a
+    // dead host stays silent with a badge), "Cancel" aborts.
+    juce::StringArray untrusted;
+    const auto collect = [&untrusted](const std::string& pluginPath) {
+        if (!pluginPath.empty()
+            && !PluginLibrary::isTrustedPluginPath(pluginPath)) {
+            untrusted.addIfNotAlreadyThere(pluginPath);
+        }
+    };
+    for (const auto& channel : scene.channels)
+        for (const auto& insert : channel.inserts) collect(insert.pluginPath);
+    for (const auto& output : scene.outputs)
+        for (const auto& insert : output.inserts) collect(insert.pluginPath);
+    if (untrusted.isEmpty() && !outsideScenesFolder) {
+        finishApplyScene(scene);
+        return;
+    }
+    juce::String message;
+    if (outsideScenesFolder) {
+        message += "This scene file lives outside PluginRack's scenes folder, so it is "
+                   "treated as untrusted: its plugins will load bypassed until you enable "
+                   "each one.\n\n";
+    }
+    if (!untrusted.isEmpty()) {
+        message += "This scene names plugins outside your scanned library:\n";
+        for (int i = 0; i < juce::jmin(untrusted.size(), 8); ++i)
+            message += "\n" + untrusted[i];
+        if (untrusted.size() > 8)
+            message += juce::String("\n...and ") + juce::String(untrusted.size() - 8)
+                       + " more.";
+        message += "\n\nLoading runs each one in the sandboxed host, but a scene from "
+                   "a forum or chat can still point at a malicious bundle. Load anyway?";
+    } else {
+        message += "Load this scene with its plugins bypassed?";
+    }
+    juce::Component::SafePointer<MainComponent> safe(this);
+    juce::AlertWindow::showOkCancelBox(
+        juce::MessageBoxIconType::WarningIcon, "Untrusted plugins in scene", message, "Load",
+        "Cancel", nullptr,
+        juce::ModalCallbackFunction::create([safe, scene](int result) {
+            if (result == 1 && safe != nullptr) safe->finishApplyScene(scene);
+        }));
+}
+
+void MainComponent::finishApplyScene(const pluginrack::Scene& scene, bool openDevicesNow) {
+    const auto pluginErrors = applyScene(scene, openDevicesNow);
     if (pluginErrors.isNotEmpty())
         showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
     else {
@@ -834,27 +924,68 @@ void MainComponent::loadScene(bool showMissingMessage) {
     }
 }
 
+void MainComponent::applySceneWithTrustAtStartup(const pluginrack::Scene& scene) {
+    // Startup cannot block on a modal dialog before the window exists, so
+    // untrusted startup scenes load with their plugins bypassed and a notice
+    // instead of the warn-and-confirm dialog. The user enables each slot.
+    juce::StringArray untrusted;
+    const auto collect = [&untrusted](const std::string& pluginPath) {
+        if (!pluginPath.empty()
+            && !PluginLibrary::isTrustedPluginPath(pluginPath)) {
+            untrusted.addIfNotAlreadyThere(pluginPath);
+        }
+    };
+    for (const auto& channel : scene.channels)
+        for (const auto& insert : channel.inserts) collect(insert.pluginPath);
+    for (const auto& output : scene.outputs)
+        for (const auto& insert : output.inserts) collect(insert.pluginPath);
+    if (!untrusted.isEmpty()) {
+        juce::Logger::writeToLog("scene: startup scene names " + juce::String(untrusted.size())
+                                 + " untrusted plugin(s); loading bypassed");
+        auto gated = scene;
+        for (auto& channel : gated.channels)
+            for (auto& insert : channel.inserts) {
+                if (!insert.pluginPath.empty()
+                    && !PluginLibrary::isTrustedPluginPath(insert.pluginPath)) {
+                    insert.bypassed = true;
+                }
+            }
+        for (auto& output : gated.outputs)
+            for (auto& insert : output.inserts) {
+                if (!insert.pluginPath.empty()
+                    && !PluginLibrary::isTrustedPluginPath(insert.pluginPath)) {
+                    insert.bypassed = true;
+                }
+            }
+        const auto pluginErrors = applyScene(gated, /*openDevicesNow=*/false);
+        juce::String notice = "The startup scene named plugins outside your scanned library, "
+                              "so those slots loaded bypassed. Enable each one when you trust it.";
+        if (pluginErrors.isNotEmpty()) notice += "\n" + pluginErrors;
+        showError(notice);
+        return;
+    }
+    finishApplyScene(scene, /*openDevicesNow=*/false);
+}
+
 juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool openDevicesNow) {
-    // All of restoreScene runs here, on the message thread: it
-    // instantiates plugins, swaps the strip vectors, and destroys the old
-    // strips whose PluginHosts own JUCE editor windows - none of which may
-    // happen on a worker thread. The device streams themselves are opened by
-    // the engine's startup worker when openDevicesNow is false. The flag
-    // serialises overlapping menu/Saves loads and resets on every path;
-    // dialogs stay on the message thread too.
+    // All of restoreScene runs here, on the message thread: it starts the
+    // sandboxed hosts, swaps the strip vectors, and releases the bay status
+    // — none of which may happen on a worker thread. The device streams
+    // themselves are opened by the engine's startup worker when
+    // openDevicesNow is false. The flag serialises overlapping menu/Saves
+    // loads and resets on every path; dialogs stay on the message thread too.
     if (sceneLoading_.exchange(true)) return {};
     if (audioEngine.isOpeningDevices()) {
         sceneLoading_.store(false);
         showError("Audio is still starting up. Please try again in a moment.");
         return {};
     }
-    // The rack may dock an editor from a strip whose plugin dies inside
-    // restoreScene; release it first (an editor outliving its processor
-    // is unsafe to delete). refreshViews below re-docks against the new
-    // strips. Mixer strips hold Channel&/Output& refs and their open EQ
-    // windows call back into those refs on destruction (analyzerTap): close
-    // them while the engine strips are still alive, before restoreScene
-    // frees the refs the pending rebuild would otherwise tear down.
+    // The bay shows a status line for the focused insert; release it before
+    // restoreScene swaps the strips it describes. Mixer strips hold
+    // Channel&/Output& refs and their open EQ windows call back into those
+    // refs on destruction (analyzerTap): close them while the engine strips
+    // are still alive, before restoreScene frees the refs the pending
+    // rebuild would otherwise tear down.
     router.releaseDockedEditor();
     mixer.closeAllEqWindows();
     const juce::String pluginErrors = audioEngine.restoreScene(scene, openDevicesNow);
@@ -872,10 +1003,9 @@ void MainComponent::initialiseAudio() {
     } else if (saved.has_value()) {
         // Build the strips and load the plugins now (fast), then let the
         // engine open the streams on its worker: a slow WASAPI probe must not
-        // take the message thread with it.
-        const auto pluginErrors = applyScene(*saved, /*openDevicesNow=*/false);
-        if (pluginErrors.isNotEmpty())
-            showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+        // take the message thread with it. Startup scenes come from our own
+        // folder, so the trust gate only fires on untrusted plugin paths.
+        applySceneWithTrustAtStartup(*saved);
         audioEngine.openStripsDevicesAsync();
     } else {
         audioEngine.openDefaultDevicesAsync();
@@ -901,8 +1031,8 @@ void MainComponent::saveSceneOnExit() {
 }
 
 void MainComponent::refreshViews() {
-    // Only drop the docked editor when its insert is gone: a structure change
-    // (an insert being added) must not destroy and rebuild a live plugin UI.
+    // Only drop the bay status when its insert is gone: a structure change
+    // (an insert being added) must not clear the bay.
     router.releaseOrphanedEditor();
     mixer.rebuild();
     router.refreshViews();

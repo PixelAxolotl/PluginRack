@@ -9,8 +9,13 @@
 #include "RestrictedHost.h"
 #include "SliderTouch.h"
 
+#include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+
+#include <cstddef>
+#include <thread>
 
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
@@ -23,6 +28,11 @@
 #endif
 
 namespace {
+
+// Crash-report handoff: the handler writes only a pending plugin path (see
+// writeCrashReport); startup drains it into the blocklist and writes the
+// full report with backtrace there, where allocation is safe.
+constexpr std::size_t kCrashRecordBytes = 1088;
 
 // Run log and crash reports. A Windows crash record only gives the module and
 // a code offset, so the report also carries the fault address and a backtrace;
@@ -52,37 +62,26 @@ private:
 };
 
 void writeCrashReport(void* exceptionInfo) {
-    juce::String text;
-    text << "PluginRack crash\n"
-         << "when: " << juce::Time::getCurrentTime().toString(true, true, true, true) << "\n"
-         << "build: " << __DATE__ << " " << __TIME__ << "\n";
-
-   #if JUCE_WINDOWS
-    if (auto* info = static_cast<EXCEPTION_POINTERS*>(exceptionInfo)) {
-        if (auto* record = info->ExceptionRecord) {
-            text << "exception: 0x"
-                 << juce::String::toHexString((juce::int64) record->ExceptionCode)
-                 << "\n";
-        }
+    // PR-09: the crash handler runs inside the unhandled-exception filter,
+    // where heap allocation, file I/O and backtraces can deadlock or fault
+    // again after heap/stack corruption. Write only a minimal pre-allocated
+    // record here; symbolising and the blocklist append happen on next launch.
+    // No JUCE calls: the byte snapshot below allocates nothing.
+    (void) exceptionInfo;
+    static char record[kCrashRecordBytes] = {};
+    const std::size_t length = PluginLoadGuard::currentLoadingPluginBytes(
+        record, sizeof(record));
+    if (length == 0) return;
+    HANDLE file = ::CreateFileW(L"pending-crash-plugin.txt", GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Relative name: the handler cannot safely build the %APPDATA% path
+    // (JUCE File allocates), so startup looks for this file in the working
+    // directory and in the log directory.
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ::WriteFile(file, record, (DWORD) length, &written, nullptr);
+        ::CloseHandle(file);
     }
-   #endif
-
-    // A plugin that faults in its own code can only be identified after the
-    // fact: record which file was in flight and refuse to load it next time.
-    const auto loadingPlugin = PluginLoadGuard::currentLoadingPlugin();
-    if (loadingPlugin.isNotEmpty()) {
-        text << "plugin: " << loadingPlugin << "\n";
-        PluginLoadGuard::block(juce::File(loadingPlugin));
-    }
-
-    const auto backtrace = juce::SystemStats::getStackBacktrace();
-    text << "stack:\n" << backtrace << "\n";
-    std::cerr << text.toStdString() << std::endl;
-
-    const auto dir = pluginRackLogDirectory();
-    dir.createDirectory();
-    const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S");
-    dir.getChildFile("crash-" + stamp + ".txt").replaceWithText(text);
 }
 
 } // namespace
@@ -188,15 +187,17 @@ public:
     const juce::String getApplicationVersion() override { return "0.1.0"; }
 
     // One session per machine, with one deliberate exception: the plugin scanner,
-    // the plugin host and the reporting switches run this same executable as
-    // short-lived child processes. Blocking those would break scanning (and
-    // silently turn the plugin host into a second launch that quits) the moment
-    // the app is open, so any '--' mode stays outside the single-instance lock
-    // and only the GUI takes it.
+    // the plugin host, and the reporting switches run this same executable as
+    // short-lived child processes. Blocking those would break scanning and
+    // out-of-process hosting the moment the app is open, so any '--' mode
+    // stays outside the single-instance lock and only the GUI takes it.
+    // PR-SEC-002: --plugin-host must be exempt or the host child is refused
+    // while the GUI holds the lock and the sandbox path is dead in practice.
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
             if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
-                || arg == "--plugin-host")
+                || arg == "--plugin-host" || arg == "--test-plugin" || arg == "--test-add"
+                || arg == "--clear-blocked-plugins" || arg == "--screenshot")
                 return true;
         }
         return false;
@@ -220,36 +221,32 @@ public:
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
-        // Restricted plugin host (PR-01): a VST3 runs here with reduced
-        // rights, never in the main app. Launched only by RestrictedHost.
-        // Optional 3rd arg: pluginUniqueId selects the class in multi-class
-        // bundles; 4th arg: base64 state blob to restore.
+        // Sandboxed plugin host: a VST3 runs here contained, never in the
+        // main app. Launched only by RestrictedHost. Argv carries the plugin
+        // path, the unique id, the per-launch shared-section name and the
+        // control pipe name; the preset state arrives over the pipe, never
+        // on the command line (PR-SEC-005).
         const int hostIndex = args.indexOf("--plugin-host");
         if (hostIndex >= 0 && hostIndex + 1 < args.size()) {
             const int uniqueId = (hostIndex + 2 < args.size())
                                      ? args[hostIndex + 2].unquoted().getIntValue()
                                      : 0;
-            // Order: path, uniqueId, mapping name, state. The mapping name is
-            // read positionally and never empty, so a host always finds its
-            // audio channel.
-            const juce::String mappingName = (hostIndex + 3 < args.size())
+            const juce::String sectionName = (hostIndex + 3 < args.size())
                                                  ? args[hostIndex + 3].unquoted()
                                                  : juce::String{};
-            juce::String state = (hostIndex + 4 < args.size())
-                                     ? args[hostIndex + 4].unquoted()
-                                     : juce::String{};
-            if (state == "-") state = {};
-            const int code =
-                RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId,
-                                        state, mappingName);
+            const juce::String pipeName = (hostIndex + 4 < args.size())
+                                              ? args[hostIndex + 4].unquoted()
+                                              : juce::String{};
+            const int code = RestrictedHost::runHost(
+                juce::File(args[hostIndex + 1].unquoted()), uniqueId, sectionName, pipeName);
             ::exit(code);
             return;
         }
 
         // Child-process scan: reads the plugin's descriptions in a throwaway
-        // process so the main window never loads a plugin binary while it is
-        // starting up (see PluginHost::scanFile). No window, no audio, and no
-        // run log: a crash here is recorded by the handler above.
+        // process so the main app never maps a plugin binary (see
+        // PluginHost::scanFile). No window, no audio, and no run log: a crash
+        // here is recorded by the handler above.
         const int scanIndex = args.indexOf("--scan-plugin");
         if (scanIndex >= 0) {
             juce::String scanError;
@@ -274,8 +271,41 @@ public:
         fileLogger = std::make_unique<TimestampedLogger>(
             pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
         juce::Logger::setCurrentLogger(fileLogger.get());
-        juce::Logger::writeToLog("initialise: " + commandLine);
-        // PR-01 trust boundary: plugins run with the user's rights.
+        // Never log the raw command line: --plugin-host argv used to carry
+        // the base64 preset (PR-SEC-005), and argv can hold paths worth
+        // keeping out of the log.
+        juce::Logger::writeToLog("initialise: flags " + juce::String(args.size()));
+        // Drain the pending crash record left by the handler (PR-09): append
+        // the blocklist entry and write the full report now, where heap and
+        // file I/O are safe. The handler writes beside the working directory
+        // (it cannot build %APPDATA% safely); also check the log directory
+        // for records from older builds.
+        {
+            juce::File pending("pending-crash-plugin.txt");
+            if (!pending.existsAsFile())
+                pending = pluginRackLogDirectory().getChildFile("pending-crash-plugin.txt");
+            if (pending.existsAsFile()) {
+                const auto crashed = pending.loadFileAsString().trim();
+                pending.deleteFile();
+                if (crashed.isNotEmpty()) {
+                    PluginLoadGuard::block(juce::File(crashed));
+                    const auto stamp =
+                        juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S");
+                    const juce::String report =
+                        juce::String("PluginRack crash\nwhen: ")
+                        + juce::Time::getCurrentTime().toString(true, true, true, true)
+                        + "\nplugin: " + crashed + "\nstack:\n"
+                        + juce::SystemStats::getStackBacktrace() + "\n";
+                    pluginRackLogDirectory()
+                        .getChildFile("crash-" + stamp + ".txt")
+                        .replaceWithText(report);
+                    juce::Logger::writeToLog("crash: previous run blamed " + crashed);
+                }
+            }
+        }
+        // Trust boundary: plugins run contained (AppContainer, low-integrity
+        // fallback), audio only through the host. Scenes still name plugin
+        // paths, so only load plugins from publishers you trust.
         juce::Logger::writeToLog("warning: VST3 plugins run with your user rights; "
                                  "only load plugins from publishers you trust");
 
@@ -331,11 +361,15 @@ public:
             outPath.getParentDirectory().createDirectory();
             // Positional size args stay backward compatible; any known view
             // name among the trailing args selects the captured view.
+            // "vst" focuses the first VST insert so the shot shows the bay
+            // dock path (embedded host window or status line) instead of
+            // the default empty selection.
             int shotW = 1600;
             int shotH = 900;
             bool haveW = false;
             AppView shotView = AppView::Rack;
             juce::String shotEffect;
+            bool shotVst = false;
             for (int a = idx + 2; a < args.size(); ++a) {
                 const auto tok = args[a].toLowerCase();
                 if (tok.isEmpty()) continue;
@@ -346,6 +380,7 @@ public:
                 else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
                 else if (tok == "multiband" || tok == "deesser" || tok == "limiter") shotEffect = tok;
+                else if (tok == "vst") shotVst = true;
                 else if (tok.containsOnly("0123456789")) {
                     if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
                     else shotH = juce::jmax(1, tok.getIntValue());
@@ -360,7 +395,12 @@ public:
             // focus it in the rack editor bay, and paint one timer frame so
             // the screenshot shows its traces instead of an empty pane.
             juce::Component* focusedEffect = nullptr;
-            if (shotEffect.isNotEmpty() && shotView == AppView::Rack) {
+            if (shotVst && shotView == AppView::Rack) {
+                // Headless bay check: no hosts run here (no audio engine),
+                // so the bay shows the fail-closed status line. The shot
+                // proves which line: host-down vs no-editor vs embedded.
+                comp->focusDiagnosticsVst();
+            } else if (shotEffect.isNotEmpty() && shotView == AppView::Rack) {
                 if (!comp->getChannelsForDiagnostics().empty()) {
                     const auto afterInsert = [&focusedEffect, shotEffect] {
                         if (focusedEffect != nullptr) {
@@ -434,12 +474,10 @@ public:
             });
         }
 
-        // Plugin smoke test: loads one VST3 the way the Add-VST path does
-        // (message thread, audio already running), reports the result and quits.
-        // Useful when a plugin is suspected of crashing the host or of stalling
-        // the window; the timings land in the run log. The probe follows the
-        // Add-VST path exactly: scan in a child process on a worker, create on
-        // the message thread.
+        // Plugin smoke test: starts one VST3 in the sandboxed host the
+        // way the Add-VST path does (message thread, audio already running),
+        // reports the result and quits. Out-of-process-only: no instance is
+        // ever created here; the probe measures scan + host start + audio.
         const int testStart = args.indexOf("--test-plugin");
         const bool probeWithAudio = args.contains("--test-plugin-audio");
         if (testStart >= 0 && testStart + 1 < args.size()) {
@@ -460,16 +498,18 @@ public:
                                           : juce::String("No VST3 plugin was found in the selected file."));
                         } else {
                             PluginHost probe;
-                            const auto loaded = PluginHost::instantiate(
-                                descriptions.getReference(0), testFile, 48000.0, 480);
-                            if (loaded.error.isNotEmpty()) {
-                                result = "failed - " + loaded.error;
+                            PluginHost::LoadedPlugin meta;
+                            meta.path = testFile.getFullPathName();
+                            meta.name = descriptions.getReference(0).name;
+                            meta.uniqueId = descriptions.getReference(0).uniqueId;
+                            probe.prepareToPlay(48000.0, 480);
+                            probe.adopt(meta);
+                            if (probe.isHostDown()) {
+                                result = "failed - the sandboxed host did not start";
                             } else {
-                                probe.prepareToPlay(48000.0, 480);
-                                probe.adopt(loaded);
-                                // Optional: run blocks through the plugin while
-                                // its editor is created, which is what happens
-                                // when a plugin is added mid-session.
+                                // Optional: run blocks through the host while
+                                // the bay waits, which is what happens when a
+                                // plugin is added mid-session.
                                 std::atomic<bool> pumping{probeWithAudio};
                                 std::thread audioThread;
                                 if (probeWithAudio) {
@@ -483,58 +523,15 @@ public:
                                     });
                                     juce::Thread::sleep(300);
                                 }
-                                // The rack docks an editor right after a plugin is
-                                // added, so the probe measures that too. Building
-                                // it is the last thing the add path does; tearing
-                                // it down is slow for some plugins and is not part
-                                // of adding, so it happens after the timing.
-                                auto* editor = probe.createEditorForDock();
                                 const auto blocked =
                                     juce::Time::getMillisecondCounterHiRes() - blockedStart;
                                 result = "loaded " + testFile.getFileName()
-                                       + ", message thread blocked for "
+                                       + " in sandboxed host, message thread blocked for "
                                        + juce::String(blocked, 1) + " ms";
                                 juce::Logger::writeToLog("plugin: test " + result);
-                                // Dock and paint it the way the rack does: a
-                                // plugin whose editor paints on the message thread
-                                // stalls there, which a create-only probe misses.
-                                if (editor != nullptr) {
-                                    // The rack scales a docked editor to fit its
-                                    // bay, which only works for plugins that
-                                    // honour host content scaling: report both
-                                    // sizes so a plugin that ignores it is easy
-                                    // to spot.
-                                    const auto naturalWidth = editor->getWidth();
-                                    const auto naturalHeight = editor->getHeight();
-                                    editor->setScaleFactor(0.8f);
-                                    const auto scaledWidth = editor->getWidth();
-                                    const auto scaledHeight = editor->getHeight();
-                                    editor->setScaleFactor(1.0f);
-                                    juce::Logger::writeToLog(
-                                        "plugin: test editor "
-                                        + juce::String(naturalWidth) + "x"
-                                        + juce::String(naturalHeight)
-                                        + ", at host scale 0.8 "
-                                        + juce::String(scaledWidth) + "x"
-                                        + juce::String(scaledHeight));
-                                    juce::Component holder;
-                                    holder.setSize(juce::jmax(320, naturalWidth),
-                                                   juce::jmax(240, naturalHeight));
-                                    holder.addAndMakeVisible(editor);
-                                    editor->setBounds(holder.getLocalBounds());
-                                    juce::Logger::writeToLog("plugin: test editor docked");
-                                    juce::Image snapshot = holder.createComponentSnapshot(
-                                        holder.getLocalBounds(), true, 1.0f);
-                                    juce::Logger::writeToLog(
-                                        "plugin: test editor painted "
-                                        + juce::String(snapshot.getWidth()) + "x"
-                                        + juce::String(snapshot.getHeight()));
-                                    holder.removeChildComponent(editor);
-                                }
                                 pumping.store(false, std::memory_order_relaxed);
                                 if (audioThread.joinable()) audioThread.join();
                                 juce::Logger::writeToLog("plugin: test audio stopped");
-                                if (editor != nullptr) probe.destroyDockEditor(editor);
                                 std::cout << result.toStdString() << "\n";
                                 if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
                                 return;
@@ -557,12 +554,11 @@ public:
         }
         if (auto* settings = properties.getUserSettings())
             settings->saveIfNeeded();
-        // Destroying a plugin is plugin code, and some VST3s (Native
-        // Instruments' Raum and Supercharger among them) block forever when
-        // their editor or processor is torn down; letting Windows unload their
-        // DLLs faults in the same place. The scene is saved and the log is
-        // written line by line, so the reliable way to close is to end the
-        // process without running any of that.
+        // The scene is saved and the log is written line by line, so the
+        // reliable way to close is to end the process without running
+        // destructors. Host children die with us via their job objects
+        // (KILL_ON_JOB_CLOSE); TerminateProcess skips our own destructors,
+        // which is what used to orphan them (PR-03).
         juce::Logger::writeToLog("shutdown: exiting without tearing plugins down");
 #if JUCE_WINDOWS
         ::TerminateProcess(::GetCurrentProcess(), 0);

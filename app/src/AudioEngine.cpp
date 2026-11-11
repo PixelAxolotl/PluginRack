@@ -1028,20 +1028,19 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
         }
     }
 
-    // Scanning happens in a child process (PluginHost::scanFile), so it is safe
-    // on a worker and keeps the window responsive through the seconds a large
-    // VST3 takes to enumerate its classes. Creating the instance has to run on
-    // the message thread, and the strip is left untouched until it exists.
-    const double rate = currentSampleRate;
-    const int block = currentBufferSize;
+    // Scanning maps the bundle in a child process (PluginHost::scanFile), so
+    // it is safe on a worker and keeps the window responsive through the
+    // seconds a large VST3 takes to enumerate its classes. Out-of-process-only:
+    // the message thread resolves metadata and starts the sandboxed host —
+    // no instance is ever created here.
     auto alive = prepareAliveToken_;
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
-    juce::Thread::launch([this, alive, channelId, file, pluginUniqueId, rate, block,
+    juce::Thread::launch([this, alive, channelId, file, pluginUniqueId,
                           done = std::move(done)]() mutable {
         juce::String scanError;
         const auto descriptions = PluginHost::scanFile(file, scanError);
         juce::MessageManager::callAsync(
-            [this, alive, channelId, file, pluginUniqueId, rate, block, descriptions, scanError,
+            [this, alive, channelId, file, pluginUniqueId, descriptions, scanError,
              done = std::move(done)]() mutable {
                 if (!alive->load(std::memory_order_acquire)) return;
 
@@ -1056,7 +1055,11 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                 } else {
                     const auto chosen = chooseDescription(descriptions, pluginUniqueId);
                     resolvedUniqueId = chosen.uniqueId;
-                    loaded = PluginHost::instantiate(chosen, file, rate, block);
+                    loaded.path = file.getFullPathName();
+                    loaded.name = chosen.name.isNotEmpty()
+                                      ? chosen.name
+                                      : file.getFileNameWithoutExtension();
+                    loaded.uniqueId = chosen.uniqueId;
                 }
                 if (loaded.error.isNotEmpty()) {
                     juce::Logger::writeToLog("plugin: failed - " + loaded.error);
@@ -1227,16 +1230,14 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
         }
     }
 
-    const double rate = currentSampleRate;
-    const int block = currentBufferSize;
     auto alive = prepareAliveToken_;
     juce::Logger::writeToLog("plugin: loading " + file.getFileName());
-    juce::Thread::launch([this, alive, outputId, file, pluginUniqueId, rate, block,
+    juce::Thread::launch([this, alive, outputId, file, pluginUniqueId,
                           done = std::move(done)]() mutable {
         juce::String scanError;
         const auto descriptions = PluginHost::scanFile(file, scanError);
         juce::MessageManager::callAsync(
-            [this, alive, outputId, file, pluginUniqueId, rate, block, descriptions, scanError,
+            [this, alive, outputId, file, pluginUniqueId, descriptions, scanError,
              done = std::move(done)]() mutable {
                 if (!alive->load(std::memory_order_acquire)) return;
 
@@ -1251,7 +1252,11 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                 } else {
                     const auto chosen = chooseDescription(descriptions, pluginUniqueId);
                     resolvedUniqueId = chosen.uniqueId;
-                    loaded = PluginHost::instantiate(chosen, file, rate, block);
+                    loaded.path = file.getFullPathName();
+                    loaded.name = chosen.name.isNotEmpty()
+                                      ? chosen.name
+                                      : file.getFileNameWithoutExtension();
+                    loaded.uniqueId = chosen.uniqueId;
                 }
                 if (loaded.error.isNotEmpty()) {
                     juce::Logger::writeToLog("plugin: failed - " + loaded.error);
@@ -1939,8 +1944,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
     }
 
     // Capture the live parameter/program state so reopening the scene does not
-    // reset every insert to its defaults. Runs unlocked: this is the part that
-    // enters plugin code.
+    // reset every insert to its defaults. Runs unlocked: each query goes over
+    // the host control pipe (never in-process plugin code).
     for (std::size_t c = 0; c < channelHosts.size(); ++c) {
         for (std::size_t i = 0; i < channelHosts[c].size(); ++i) {
             scene.channels[c].inserts[i].pluginState =
@@ -2079,15 +2084,22 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            // Scene restore still instantiates here, on the message thread:
-            // log it so a slow plugin is visible in the run log.
-            juce::Logger::writeToLog("scene: instantiating "
+            // Scene restore starts the sandboxed host here, on the message
+            // thread: log it so a slow plugin is visible in the run log.
+            // Fail-closed: a host that will not start leaves the slot silent
+            // with a badge (the error below), never an in-process render.
+            // loadPlugin canonicalises to the bundle root and records the
+            // canonical path back on the slot: the scene may name the inner
+            // binary, but the slot must remember the safe entry point.
+            juce::Logger::writeToLog("scene: starting sandboxed host for "
                                      + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
                                                              juce::String(savedInsert.pluginState),
                                                              savedInsert.pluginUniqueId);
             if (error.isNotEmpty()) {
                 loadErrors += channel->name + ": " + error + "\n";
+            } else {
+                insert->pluginPath = insert->pluginHost.getPluginPath();
             }
             insert->latencySamples = insert->pluginHost.getLatencySamples();
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
@@ -2161,13 +2173,15 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            juce::Logger::writeToLog("scene: instantiating "
+            juce::Logger::writeToLog("scene: starting sandboxed host for "
                                      + juce::File(insert->pluginPath).getFileName());
             const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
                                                              juce::String(savedInsert.pluginState),
                                                              savedInsert.pluginUniqueId);
             if (error.isNotEmpty()) {
                 loadErrors += output->name + ": " + error + "\n";
+            } else {
+                insert->pluginPath = insert->pluginHost.getPluginPath();
             }
             insert->latencySamples = insert->pluginHost.getLatencySamples();
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
@@ -3410,6 +3424,108 @@ double AudioEngine::getMeasuredLatencyMs() const {
     auto rate = latencyMeasuredRate_.load(std::memory_order_relaxed);
     if (rate <= 0.0) rate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
     return latencyMeasuredSamples_.load(std::memory_order_relaxed) / rate * 1000.0;
+}
+
+int AudioEngine::pollHostHealth() {
+    // Collect the dead slots under a try-lock (never block the UI on the
+    // audio thread), then log outside it: a host that was alive at launch
+    // and is now gone gets one line naming it. Returns the down count so
+    // the caller can refresh the badges.
+    //
+    // Warm-up guard: the first poll runs ~250 ms after startup, while the
+    // scene's hosts are still handshaking (each takes ~50-100 ms to
+    // connect). A slot whose host object exists but has not finished
+    // launching yet must not count as dead — otherwise every boot logs
+    // five false deaths before the first handshake completes.
+    //
+    // Warm-up clock: hostHealthFirstMs_ starts at the first poll, which is
+    // ~250 ms after process start (first UI tick). The window is 15 s from
+    // there — long enough for 5 sequential handshakes plus the device
+    // open, short enough that a real death still surfaces quickly.
+    struct DeadSlot {
+        juce::String name;
+        juce::String path;
+        unsigned long exitCode = 0;
+        // True when the slot's host object is gone entirely (never
+        // launched or already reaped) vs. launched-but-dead. Only the
+        // latter is a "died after launch".
+        bool hadHost = false;
+    };
+    std::vector<DeadSlot> newlyDead;
+    int downCount = 0;
+    int aliveCount = 0;
+    {
+        const juce::ScopedTryLock lock(stateLock);
+        if (!lock.isLocked()) return -1;
+        // No warm-up suppression: every poll reports the true counts, and
+        // the badge follows the truth within one 250 ms tick. (An earlier
+        // version hid deaths for 15 s after boot, which made "all hosts
+        // died at 2.6 s" read as "all hosts died at 15.6 s" and sent the
+        // investigation after the device opener instead of the launch.)
+        auto check = [&](const auto& inserts) {
+            for (const auto& insert : inserts) {
+                if (insert->pluginPath.isEmpty()) continue;
+                if (!insert->pluginHost.isHostDown()) {
+                    ++aliveCount;
+                    continue;
+                }
+                ++downCount;
+                const juce::String key = insert->pluginPath + "|" + juce::String(insert->id);
+                if (loggedDeadHosts_.insert(key.toStdString()).second) {
+                    newlyDead.push_back({insert->pluginName, insert->pluginPath,
+                                         insert->pluginHost.lastHostExitCode(),
+                                         insert->pluginHost.hasHost()});
+                }
+            }
+        };
+        for (const auto& channel : channels) check(channel->inserts);
+        for (const auto& output : outputs) check(output->inserts);
+        // Forget slots that are gone or alive again so a later death re-logs.
+        for (auto it = loggedDeadHosts_.begin(); it != loggedDeadHosts_.end();) {
+            const juce::String key(*it);
+            const auto bar = key.indexOf("|");
+            const juce::String path = bar >= 0 ? key.substring(0, bar) : key;
+            const auto id = bar >= 0 ? (std::uint32_t) key.substring(bar + 1).getIntValue()
+                                     : 0u;
+            bool stillDown = false;
+            auto find = [&](const auto& inserts) {
+                for (const auto& insert : inserts) {
+                    if (insert->id == id && insert->pluginPath == path) {
+                        stillDown = insert->pluginHost.isHostDown();
+                    }
+                }
+            };
+            for (const auto& channel : channels) find(channel->inserts);
+            for (const auto& output : outputs) find(output->inserts);
+            if (!stillDown) it = loggedDeadHosts_.erase(it);
+            else ++it;
+        }
+    }
+    for (const auto& dead : newlyDead) {
+        // Exit 0 = clean exit (the child left on its own: parentGone fired
+        // or the loop ended); anything else is a crash code. STILL_ACTIVE
+        // (259) means the handle is stale, not the process. A slot with no
+        // host object at all never launched — that is a launch failure,
+        // not a death, and its reason is already in the log above.
+        juce::String how;
+        if (!dead.hadHost) how = " (never launched — see launch error above)";
+        else if (dead.exitCode == 0) how = " (clean exit — child thought the parent was gone)";
+        else if (dead.exitCode == 259) how = " (handle stale)";
+        else how = " (crashed, code " + juce::String((juce::int64) dead.exitCode) + ")";
+        juce::Logger::writeToLog("plugin: host died after launch for "
+                                 + (dead.name.isNotEmpty() ? dead.name : dead.path) + how);
+    }
+    // Alive count rides along so the badge log shows the full picture:
+    // "0 alive, 5 down" vs "3 alive, 2 down" need different responses.
+    // Log only on change or on a new death: at 4 Hz a per-tick line would
+    // drown the log in 240 identical lines a minute. The first poll logs
+    // unconditionally so the boot always shows its starting point.
+    if (!newlyDead.empty() || downCount != lastPollDownCount_ || lastPollDownCount_ < 0) {
+        juce::Logger::writeToLog("plugin: host health alive=" + juce::String(aliveCount)
+                                 + " down=" + juce::String(downCount));
+        lastPollDownCount_ = downCount;
+    }
+    return downCount;
 }
 
 AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint32_t channelId) const {

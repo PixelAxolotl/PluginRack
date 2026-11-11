@@ -89,18 +89,13 @@ public:
     // Wired by MainComponent to its synchronous scene apply. The Saves view
     // parses save files but never touches the engine: restoreScene mutates
     // plugins and JUCE components that belong to the message thread, so the
-    // load request round-trips through the host.
+    // load request round-trips through the host. The host runs the trust
+    // gate (warn-and-confirm) before applying; the callback itself applies.
     std::function<juce::String(const pluginrack::Scene&)> onRestoreRequested;
 
-    // MainComponent calls this before engine strip mutation: the rack's
-    // docked plugin editor is backed by a strip's plugin instance, and an
-    // editor whose processor dies first is unsafe to delete.
-    void releaseDockedEditor() {
-        rackView.closeDockedEditor();
-        // Hidden preview editors own the same processors: release them before
-        // the engine destroys the insert, or they outlive it.
-        rackView.clearHiddenPreviews();
-    }
+    // MainComponent calls this before engine strip mutation: the rack's bay
+    // status line describes a strip that restoreScene is about to swap out.
+    void releaseDockedEditor() { rackView.closeDockedEditor(); }
     void releaseOrphanedEditor() { rackView.releaseOrphanedDockedEditor(); }
 
 private:
@@ -143,6 +138,10 @@ public:
     // expose these helpers to users.
     const std::vector<std::unique_ptr<AudioEngine::Channel>>& getChannelsForDiagnostics();
     juce::Component* focusDiagnosticsEffect(pluginrack::ChainItemType type);
+    // Headless bay check: focuses the first VST insert on the first channel
+    // (if any) so --screenshot can capture the embedded host window state.
+    // Returns the focused insert's id, or 0 when there is no VST insert.
+    std::uint32_t focusDiagnosticsVst();
     void feedDiagnosticsSignal(int numBins, double sampleRateHz);
     void saveSceneOnExit();
     void initialiseAudio();
@@ -153,6 +152,14 @@ private:
     void saveScene();
     void saveSceneAs();
     void loadScene(bool showMissingMessage);
+    // PR-SEC-010 trust gate: warn-and-confirm for scenes naming plugins
+    // outside the scanned library (or living outside the scenes folder),
+    // then finishApplyScene on confirmation.
+    void applySceneWithTrust(const pluginrack::Scene& scene, bool outsideScenesFolder);
+    void finishApplyScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
+    // Startup variant: no modal dialog before the window exists; untrusted
+    // slots load bypassed with a notice instead.
+    void applySceneWithTrustAtStartup(const pluginrack::Scene& scene);
     // Applies a parsed scene on the message thread and returns plugin load
     // errors. Guarded by sceneLoading_; callers run it directly (the strip
     // swap itself is brief). openDevicesNow=false defers the stream opens to
@@ -178,6 +185,8 @@ private:
     std::atomic<bool> sceneLoading_{false};
     // Counts UI ticks between device-availability checks (see timerCallback).
     int availabilityTicks_ = 0;
+    // Last pollHostHealth down count: refresh the strips only on change.
+    int lastHostDownCount_ = -1;
     // Startup: the audio restore is queued from the first paint, never from
     // the constructor, so the window is on screen before any device work.
     bool audioInitQueued_ = false;

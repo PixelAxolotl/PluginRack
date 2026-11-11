@@ -46,6 +46,44 @@ void flushNonFinite(float* left, float* right, int frames) noexcept {
     }
 }
 
+// PR-SEC-006: mandatory always-on output guard. Runs after the output insert
+// chains (untrusted plugin audio) and before the device write: flushes
+// non-finite samples and clamps to a hard 0 dBFS ceiling so a faulty plugin
+// (or a compromised shared section) cannot emit NaN/Inf or +60 dBFS straight
+// to the endpoint. Returns the number of guarded samples for the trip count.
+int guardOutput(float* left, float* right, int frames) noexcept {
+    int guarded = 0;
+    for (int i = 0; i < frames; ++i) {
+        float l = left[i];
+        float r = right[i];
+        if (!std::isfinite(l)) {
+            l = 0.0f;
+            ++guarded;
+        }
+        if (!std::isfinite(r)) {
+            r = 0.0f;
+            ++guarded;
+        }
+        if (l > 1.0f) {
+            l = 1.0f;
+            ++guarded;
+        } else if (l < -1.0f) {
+            l = -1.0f;
+            ++guarded;
+        }
+        if (r > 1.0f) {
+            r = 1.0f;
+            ++guarded;
+        } else if (r < -1.0f) {
+            r = -1.0f;
+            ++guarded;
+        }
+        left[i] = l;
+        right[i] = r;
+    }
+    return guarded;
+}
+
 } // namespace
 
 MixerEngine::MixerEngine() : eqState_(std::make_unique<EqState>()) {}
@@ -490,9 +528,13 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     for (std::size_t o = 0; o < numOutputs; ++o) {
         AudioBlock& output = outputBlocks[o];
         const int frames = clampFrames(output.numFrames, maxFrames);
-        const float* accLeft =
+        float* accLeft =
             accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
-        const float* accRight = accLeft + maxFrames;
+        float* accRight = accLeft + maxFrames;
+        // PR-SEC-006: unconditional guard after the insert chains, before
+        // the device write. A faulty plugin must not reach the DAC with
+        // NaN/Inf or full-scale DC.
+        guardOutput(accLeft, accRight, frames);
         const bool outMuted = o < outputMuted_.size() && outputMuted_[o] != 0;
         const float outGain =
             outMuted ? 0.0f : (o < outputGains_.size() ? outputGains_[o] : 1.0f);

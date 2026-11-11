@@ -105,7 +105,11 @@ private:
         std::function<void()> onDragHandleFinished;
 
     private:
+        // Public so the host-health watchdog can re-read the badge without
+        // a full strip rebuild.
+    public:
         void refreshInserts();
+    private:
         int chainBoundaryY(int targetIndex) const;
         void paintDragHandle(juce::Graphics& g) const;
 

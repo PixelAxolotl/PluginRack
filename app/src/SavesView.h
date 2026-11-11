@@ -15,7 +15,8 @@ public:
     // load errors. It runs synchronously on the message thread inside the
     // host: SavesView never touches the engine itself, because restoreScene
     // instantiates plugins and destroys JUCE components that must not be
-    // mutated off that thread.
+    // mutated off that thread. Saves from the app's own folder are trusted
+    // locations; the host warn-and-confirms untrusted plugin paths.
     // onLoaded tells the host which save is now active, so the toolbar Save
     // button overwrites it instead of asking for a new name.
     explicit SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestore,

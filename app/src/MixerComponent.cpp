@@ -702,9 +702,8 @@ juce::String MixerComponent::OutputStrip::insertPlugin(const juce::File& file, i
 }
 
 void MixerComponent::OutputStrip::erasePlugin(std::uint32_t insertId) {
-    // The rack may have docked an editor owned by this insert: release it
-    // while the processor is still alive. Release-only on purpose (see
-    // InsertHost.h): a rebuild here would re-dock the doomed insert.
+    // The rack bay may describe this insert. Release-only on purpose (see
+    // InsertHost.h): a rebuild here would re-describe the doomed insert.
     if (auto release = pluginRemovingHook()) release();
     audioEngine.removeOutputPlugin(output.id, insertId);
 }
@@ -1114,10 +1113,16 @@ void MixerComponent::finishOutputDrag(std::uint32_t outputId, int sourceIndex) {
 
 void MixerComponent::refreshStrips() {
     for (auto* s : strips) {
-        if (s != nullptr) s->refreshInput();
+        if (s != nullptr) {
+            s->refreshInput();
+            s->refreshInserts();
+        }
     }
     for (auto* s : outputStrips) {
-        if (s != nullptr) s->refresh();
+        if (s != nullptr) {
+            s->refresh();
+            s->refreshInserts();
+        }
     }
 }
 
@@ -1128,9 +1133,8 @@ void MixerComponent::rebuildChannelStrips() {
         const std::uint32_t id = ch->id;
         const int sourceIndex = stripIndex++;
         s->onRemoveRequested = [this, id] {
-            // The rack may have docked an editor owned by this strip: release it
-            // while the processors are still alive. Release-only on purpose (see
-            // InsertHost.h): a rebuild here would re-dock a doomed insert.
+            // The rack bay may describe this strip. Release-only on purpose (see
+            // InsertHost.h): a rebuild here would re-describe a doomed insert.
             if (auto release = pluginRemovingHook()) release();
             const auto err = audioEngine.removeChannel(id);
             if (err.isNotEmpty()) {
@@ -1168,9 +1172,8 @@ void MixerComponent::rebuildOutputStrips() {
         auto* s = outputStrips.add(new OutputStrip(*out, outputIndex++, audioEngine));
         const std::uint32_t id = out->id;
         s->onRemoveRequested = [this, id] {
-            // The rack may have docked an editor owned by this strip: release it
-            // while the processors are still alive. Release-only on purpose (see
-            // InsertHost.h): a rebuild here would re-dock a doomed insert.
+            // The rack bay may describe this strip. Release-only on purpose (see
+            // InsertHost.h): a rebuild here would re-describe a doomed insert.
             if (auto release = pluginRemovingHook()) release();
             const auto err = audioEngine.removeOutput(id);
             if (err.isNotEmpty()) {

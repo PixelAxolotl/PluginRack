@@ -224,6 +224,31 @@ TEST_CASE("slot plugin state is optional and survives a round trip") {
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginState == "bnVsbA==");
 }
 
+TEST_CASE("deeply nested scene JSON is rejected before validation", "[scene][security]") {
+    // PR-SEC-009: unbounded nesting exhausts the stack during parse or
+    // teardown, before any validation runs. The SAX pre-pass rejects it.
+    std::string deep(64, '[');
+    deep += std::string(64, ']');
+    const std::string json = "{\"schemaVersion\":5,\"channels\":" + deep + "}";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(!loaded.scene.has_value());
+    REQUIRE(!loaded.errors.empty());
+}
+
+TEST_CASE("scene JSON with unknown top-level keys is rejected", "[scene][security]") {
+    const pluginrack::SceneLoadResult loaded =
+        pluginrack::fromJson(R"({"schemaVersion":5,"evil":1})");
+    REQUIRE(!loaded.scene.has_value());
+    REQUIRE(!loaded.errors.empty());
+}
+
+TEST_CASE("oversized scene JSON is rejected before parsing", "[scene][security]") {
+    const std::string big(pluginrack::kMaxSceneJsonBytes + 1, ' ');
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(big);
+    REQUIRE(!loaded.scene.has_value());
+    REQUIRE(!loaded.errors.empty());
+}
+
 TEST_CASE("slot plugin class id is optional and survives a round trip") {
     pluginrack::Scene original;
     original.schemaVersion = 5;
@@ -307,6 +332,25 @@ TEST_CASE("v3 slots without plugin state load with empty state") {
 }
 
 TEST_CASE("unknown fields are ignored on load and dropped on save") {
+    // PR-SEC-009: unknown TOP-LEVEL keys are rejected (typo'd or foreign
+    // files fail fast). Unknown keys nested inside known objects are still
+    // ignored and dropped on save.
+    const std::string json = R"({)"
+                             R"("schemaVersion": 1,)"
+                             R"("name": "future",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [],)"
+                             R"("outputs": [],)"
+                             R"("routes": [])"
+                             R"(})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("futureThing") == std::string::npos);
+}
+
+TEST_CASE("unknown top-level keys are rejected", "[scene][security]") {
     const std::string json = R"({)"
                              R"("schemaVersion": 1,)"
                              R"("name": "future",)"
@@ -317,9 +361,8 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
                              R"("routes": [],)"
                              R"("futureThing": {"a": 1}})";
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
-    REQUIRE(loaded.errors.empty());
-    REQUIRE(loaded.scene.has_value());
-    REQUIRE(pluginrack::toJson(*loaded.scene).find("futureThing") == std::string::npos);
+    REQUIRE(!loaded.scene.has_value());
+    REQUIRE(!loaded.errors.empty());
 }
 
 

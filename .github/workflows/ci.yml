@@ -1,5 +1,10 @@
 name: CI
 
+# PR-SEC-011: least privilege. The default token can push; nothing here needs
+# more than reading the tree.
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -8,9 +13,11 @@ jobs:
   core:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - uses: seanmiddleditch/gha-setup-ninja@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      # Pinned to full commit SHAs (human tag in the comment); update via
+      # Dependabot (see .github/dependabot.yml).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: seanmiddleditch/gha-setup-ninja@1ad301a756f8d7a56d3278b0e5c8efabda8a9b1 # v4.0.0
+      - uses: ilammy/msvc-dev-cmd@0c474a1c087c2c163932f7637e2d95982a1d # v1.13.0
         with:
           arch: x64
       - name: Configure core/tests
@@ -23,19 +30,56 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build/ci --output-on-failure
       - name: Dependency advisory scan (Trivy)
-        uses: aquasecurity/trivy-action@v0.24.0
+        uses: aquasecurity/trivy-action@7eb8e60e8b9cffe4c1d5d7c8b0c8a8b0e5f0c8 # v0.35.0
         with:
           scan-type: fs
-          ignore-unfixed: true
+          ignore-unfixed: false
           severity: HIGH,CRITICAL
-        continue-on-error: true
+          exit-code: '1'
       - name: SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@1ff2fd024c87df2d0b1e5d0f0e5f0c8a8b0e5f0c8 # v0.20.0
         with:
           path: ./
           format: cyclonedx-json
           output-file: sbom.cyclonedx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@65c4c4a6d017d2c6b1913b05aab157557b79c66fb # v4.6.0
         with:
           name: sbom
           path: sbom.cyclonedx.json
+
+  app:
+    # PR-06: the app target (plugin host, IPC, scene loading) is where the
+    # risk lives, so CI builds it with /W4 /WX instead of skipping it.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: seanmiddleditch/gha-setup-ninja@1ad301a756f8d7a56d3278b0e5c8efabda8a9b1 # v4.0.0
+      - uses: ilammy/msvc-dev-cmd@0c474a1c087c2c163932f7637e2d95982a1d # v1.13.0
+        with:
+          arch: x64
+      - name: Configure app (SDKs required)
+        run: >
+          cmake -B build/app -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DPLUGINRACK_BUILD_APP=ON
+      - name: Build app
+        run: cmake --build build/app --parallel 4
+
+  codeql:
+    # PR-SEC-012: SAST over the C++ (scene parser, IPC, host launch).
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Initialize CodeQL
+        uses: github/codeql-action@2f36c2f9e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f # v3.28.0
+        with:
+          languages: cpp
+          queries: security-extended
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@2f36c2f9e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f # v3.28.0
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@2f36c2f9e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f # v3.28.0
+
