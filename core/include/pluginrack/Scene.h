@@ -170,6 +170,18 @@ struct AudioSettings {
     bool fullDuplexInput = false;
     bool autoReloadDevices = false;
     std::vector<WatchedDevice> watchedDevices;
+    // Scene v6 audio-pipeline hardening. Optional and off by default, so a
+    // pre-v6 save keeps its exact behaviour until the user opts in. Once a
+    // scene is saved with them on, the switch travels with the session.
+    bool slicedRender = false;
+    bool nonFiniteScrub = false;
+    bool healthReload = false;
+    bool ladderRecovery = false;
+    // Health thresholds travel with the scene; defaults are the proposed
+    // values when a save predates v6.
+    double healthYellowUnderrunsPerMinute = 1.0;
+    double healthRedUnderrunsPerMinute = 10.0;
+    double healthPinnedToEdgeMs = 5000.0;
     // Refresh rate of the Rack view's insert thumbnails, in frames per
     // second. Not an audio stream option, but it saves and loads with the
     // rest so a session comes back looking the way it was left.

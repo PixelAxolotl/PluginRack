@@ -107,6 +107,16 @@ private:
     juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
     juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
     juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
+    // Scene-v6 hardening. Off by default so a pre-v6 save behaves exactly as
+    // before; the switches save with the session once they are turned on.
+    juce::ToggleButton slicedRenderToggle { "Deadline-aware sliced rendering" };
+    juce::ToggleButton scrubToggle { "Scrub non-finite samples at inserts" };
+    juce::ToggleButton healthReloadToggle { "Reload streams that stay yellow/red" };
+    juce::ToggleButton ladderRecoveryToggle { "Allow fallback ladder to recover one rung" };
+    // Preset rows for the health thresholds; the exact values travel with the
+    // scene, so a session restores the sensitivity it was left with.
+    juce::Label healthSensitivityLabel { "", "Health sensitivity" };
+    juce::ComboBox healthSensitivityCombo;
     juce::TextButton profileButton { "Find low-latency setting" };
     WrappedLabel profileStatusLabel;
     juce::TextButton forceAsioButton { "Force ASIO" };

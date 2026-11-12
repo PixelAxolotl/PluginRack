@@ -2,10 +2,13 @@
 
 #include <string>
 
+#include "pluginrack/SampleScrub.h"
+
 namespace pluginrack {
 
 InsertChain::InsertChain(const std::vector<InsertSlot>& slots, IPluginFactory& factory,
-                         double sampleRate, int maxBlockFrames) {
+                         double sampleRate, int maxBlockFrames, bool scrubEnabled)
+    : scrubEnabled_(scrubEnabled) {
     entries_.reserve(slots.size());
     // Reserve for every slot so recording a processing failure cannot allocate.
     failed_.reserve(slots.size());
@@ -29,7 +32,15 @@ InsertChain::InsertChain(const std::vector<InsertSlot>& slots, IPluginFactory& f
 void InsertChain::process(AudioBlock& block) noexcept {
     for (Entry& entry : entries_) {
         if (entry.instance != nullptr && !entry.failed) {
-            if (entry.instance->process(block) == ProcessResult::Failed) {
+            const bool failed = entry.instance->process(block) == ProcessResult::Failed;
+            // Scrub even a failed render: the plugin may have written NaNs
+            // before it reported failure, and those must not reach the next
+            // insert or the mix bus. The guard is the v6 opt-in.
+            if (scrubEnabled_) {
+                scrubbedSamples_ += static_cast<std::uint64_t>(
+                    scrubNonFinite(block.channels, block.numChannels, block.numFrames));
+            }
+            if (failed) {
                 entry.failed = true;
                 failed_.push_back(entry.id);
             }

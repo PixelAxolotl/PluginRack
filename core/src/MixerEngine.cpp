@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <unordered_map>
 
+#include "pluginrack/SampleScrub.h"
 #include "pluginrack/SceneValidator.h"
 
 namespace pluginrack {
@@ -128,7 +129,8 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         insertChains_.reserve(scene.channels.size());
         for (const Channel& channel : scene.channels) {
             insertChains_.push_back(std::make_unique<InsertChain>(
-                channel.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
+                channel.inserts, *pluginFactory_, scene.sampleRate, maxFrames,
+                scrubEnabled_));
         }
     }
     outputInsertChains_.clear();
@@ -136,7 +138,8 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         outputInsertChains_.reserve(scene.outputs.size());
         for (const Output& output : scene.outputs) {
             outputInsertChains_.push_back(std::make_unique<InsertChain>(
-                output.inserts, *pluginFactory_, scene.sampleRate, maxFrames));
+                output.inserts, *pluginFactory_, scene.sampleRate, maxFrames,
+                scrubEnabled_));
         }
     }
 
@@ -392,10 +395,22 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             if (c < eqState_->channelDeEssers.size()) { for (auto& e : eqState_->channelDeEssers[c]) e.process(scratchLeft, scratchRight, frames); }
             if (c < eqState_->channelLimiters.size()) { for (auto& e : eqState_->channelLimiters[c]) e.process(scratchLeft, scratchRight, frames); }
         }
+        // The built-in chain is an insert too: quarantine anything it emitted
+        // before the VST chain and the fader see it.
+        if (scrubEnabled_) {
+            scrubbedSamples_ += static_cast<std::uint64_t>(
+                scrubNonFinite(scratchLeft, scratchRight, frames));
+        }
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
             AudioBlock scratchBlock{scratchPtrs, 2, frames};
             insertChains_[c]->process(scratchBlock);
+            // The chain scrubs after each VST; scrub the strip boundary as
+            // well so a plugin that wrote past its block cannot leak.
+            if (scrubEnabled_) {
+                scrubbedSamples_ += static_cast<std::uint64_t>(
+                    scrubNonFinite(scratchLeft, scratchRight, frames));
+            }
         }
         if (silenced || cache.gain == 0.0f) {
             for (int i = 0; i < frames; ++i) {
@@ -471,6 +486,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
             if (o < eqState_->outputMultiband.size()) { for (auto& e : eqState_->outputMultiband[o]) e.process(accLeft, accRight, frames); }
             if (o < eqState_->outputDeEssers.size()) { for (auto& e : eqState_->outputDeEssers[o]) e.process(accLeft, accRight, frames); }
             if (o < eqState_->outputLimiters.size()) { for (auto& e : eqState_->outputLimiters[o]) e.process(accLeft, accRight, frames); }
+            if (scrubEnabled_) {
+                scrubbedSamples_ += static_cast<std::uint64_t>(
+                    scrubNonFinite(accLeft, accRight, frames));
+            }
         }
     }
 
@@ -485,6 +504,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         float* chainPtrs[2] = {accLeft, accRight};
         AudioBlock chainBlock{chainPtrs, 2, frames};
         outputInsertChains_[o]->process(chainBlock);
+        if (scrubEnabled_) {
+            scrubbedSamples_ += static_cast<std::uint64_t>(
+                scrubNonFinite(accLeft, accRight, frames));
+        }
     }
 
     for (std::size_t o = 0; o < numOutputs; ++o) {
@@ -558,6 +581,17 @@ std::vector<std::uint32_t> MixerEngine::failedPluginSlots() const {
         }
     }
     return failed;
+}
+
+std::uint64_t MixerEngine::scrubbedSamples() const {
+    std::uint64_t total = scrubbedSamples_;
+    for (const std::unique_ptr<InsertChain>& chain : insertChains_) {
+        if (chain != nullptr) total += chain->scrubbedSamples();
+    }
+    for (const std::unique_ptr<InsertChain>& chain : outputInsertChains_) {
+        if (chain != nullptr) total += chain->scrubbedSamples();
+    }
+    return total;
 }
 
 const MeterBank& MixerEngine::meters() const noexcept { return meters_; }

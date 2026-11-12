@@ -98,6 +98,19 @@ public:
     std::uint64_t getInputUnderruns() const { return inputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
     int getReadDelaySamples() const { return readDelaySamples.load(std::memory_order_relaxed); }
+    // Green/yellow/red from the rolling underrun + fill window. The audio
+    // thread classifies once per block and publishes the enum atomically, so
+    // the UI never races the tracker.
+    pluginrack::StreamHealth healthState() const {
+        return publishedHealth_.load(std::memory_order_relaxed);
+    }
+    // Message thread: adopt the thresholds a scene carries. Resets the window
+    // so a classification made under the old thresholds cannot linger.
+    void setHealthThresholds(const pluginrack::StreamHealthThresholds& thresholds) {
+        health_.configure(60000.0, thresholds);
+        publishedHealth_.store(pluginrack::StreamHealth::Green,
+                               std::memory_order_relaxed);
+    }
     // Round-trip measurement: the render thread starts the hunt on every
     // capture at the moment the impulse is placed on the clock output, so the
     // capture clock is snapshot before the impulse can come back. The result
@@ -180,6 +193,9 @@ private:
     std::atomic<std::uint64_t> inputOverruns{0};
     std::atomic<std::uint64_t> inputUnderruns{0};
     std::atomic<std::uint64_t> inputDroppedFrames{0};
+    pluginrack::StreamHealthTracker health_;
+    std::atomic<pluginrack::StreamHealth> publishedHealth_{pluginrack::StreamHealth::Green};
+    std::uint64_t lastHealthEpoch_ = 0;
     // Round-trip latency measurement support.
     std::atomic<bool> latencyMeasureActive{false};
     std::atomic<bool> latencyImpulseDetected{false};
@@ -241,6 +257,14 @@ public:
     std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getOutputDroppedFrames() const { return outputDroppedFrames.load(std::memory_order_relaxed); }
     std::uint64_t getOutputLowWatermarks() const { return outputLowWatermarks.load(std::memory_order_relaxed); }
+    pluginrack::StreamHealth healthState() const {
+        return publishedHealth_.load(std::memory_order_relaxed);
+    }
+    void setHealthThresholds(const pluginrack::StreamHealthThresholds& thresholds) {
+        health_.configure(60000.0, thresholds);
+        publishedHealth_.store(pluginrack::StreamHealth::Green,
+                               std::memory_order_relaxed);
+    }
 
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
@@ -300,6 +324,8 @@ private:
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::atomic<std::uint64_t> outputLowWatermarks{0};
+    pluginrack::StreamHealthTracker health_;
+    std::atomic<pluginrack::StreamHealth> publishedHealth_{pluginrack::StreamHealth::Green};
     // Declick state. pushFadeInPending is only touched by push() /
     // pushSilence() (clock render thread); deviceFadeInRemaining only by the
     // device callback.
