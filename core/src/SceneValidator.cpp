@@ -302,10 +302,10 @@ std::string describeMapping(const std::vector<int>& mapping) {
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion < 1 || scene.schemaVersion > 6) {
+    if (scene.schemaVersion < 1 || scene.schemaVersion > 7) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
-                              "; expected 1 to 6"});
+                              "; expected 1 to 7"});
     }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
@@ -485,6 +485,12 @@ std::vector<SceneError> validate(const Scene& scene) {
 
     if (scene.audio.has_value()) {
         const auto& watched = scene.audio->watchedDevices;
+        if (scene.audio->wasapiProbeCapEnabled
+            && (scene.audio->wasapiProbeCapChannels < 2
+                || scene.audio->wasapiProbeCapChannels > 64)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
+                              "wasapiProbeCapChannels out of range [2, 64]"});
+        }
         if (watched.size() > kMaxWatchedDevices) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
                               "scene watches " + std::to_string(watched.size()) +

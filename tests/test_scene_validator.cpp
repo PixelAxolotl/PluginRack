@@ -95,12 +95,12 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 7;
+    scene.schemaVersion = 8;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
     // The message must name the range the validator actually accepts.
-    REQUIRE(errors[0].message.find("expected 1 to 6") != std::string::npos);
+    REQUIRE(errors[0].message.find("expected 1 to 7") != std::string::npos);
 }
 
 TEST_CASE("scene rejects an out-of-range right send level") {
@@ -545,6 +545,26 @@ TEST_CASE("collection caps are enforced") {
         REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
         REQUIRE(errors[0].message.find("outputs") != std::string::npos);
     }
+}
+
+TEST_CASE("the wasapi probe cap is bounded", "[scene][device]") {
+    auto scene = makeValidScene();
+    scene.audio = pluginrack::AudioSettings{};
+    scene.audio->wasapiProbeCapEnabled = true;
+    scene.audio->wasapiProbeCapChannels = 1;
+    auto errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+
+    scene.audio->wasapiProbeCapChannels = 65;
+    errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+
+    scene.audio->wasapiProbeCapChannels = 2;
+    CHECK(pluginrack::validate(scene).empty());
+    scene.audio->wasapiProbeCapChannels = 64;
+    CHECK(pluginrack::validate(scene).empty());
 }
 
 TEST_CASE("watched devices must reference an existing strip") {

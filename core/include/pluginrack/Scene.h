@@ -177,6 +177,10 @@ struct AudioSettings {
     bool nonFiniteScrub = false;
     bool healthReload = false;
     bool ladderRecovery = false;
+    // Scene v7: opt-in cap for JUCE's WASAPI channel-count probe. Off by
+    // default; pre-v7 saves never turn it on.
+    bool wasapiProbeCapEnabled = false;
+    int wasapiProbeCapChannels = 8;
     // Health thresholds travel with the scene; defaults are the proposed
     // values when a save predates v6.
     double healthYellowUnderrunsPerMinute = 1.0;
@@ -193,7 +197,7 @@ struct AudioSettings {
 };
 
 struct Scene {
-    int schemaVersion = 5;
+    int schemaVersion = 7;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;

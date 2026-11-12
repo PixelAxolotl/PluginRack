@@ -2,9 +2,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 6;
+constexpr int kSchemaVersion = 7;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -547,6 +549,8 @@ void to_json(nlohmann::json& j, const AudioSettings& settings) {
         {"nonFiniteScrub", settings.nonFiniteScrub},
         {"healthReload", settings.healthReload},
         {"ladderRecovery", settings.ladderRecovery},
+        {"wasapiProbeCapEnabled", settings.wasapiProbeCapEnabled},
+        {"wasapiProbeCapChannels", settings.wasapiProbeCapChannels},
         {"healthYellowUnderrunsPerMinute", settings.healthYellowUnderrunsPerMinute},
         {"healthRedUnderrunsPerMinute", settings.healthRedUnderrunsPerMinute},
         {"healthPinnedToEdgeMs", settings.healthPinnedToEdgeMs},
@@ -568,6 +572,11 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     settings.nonFiniteScrub = j.value("nonFiniteScrub", false);
     settings.healthReload = j.value("healthReload", false);
     settings.ladderRecovery = j.value("ladderRecovery", false);
+    settings.wasapiProbeCapEnabled = j.value("wasapiProbeCapEnabled", false);
+    // Clamp defensively: the validator reports an out-of-range value, but a
+    // hand-edited file must not reach the backend outside [2, 64].
+    settings.wasapiProbeCapChannels =
+        std::clamp(j.value("wasapiProbeCapChannels", 8), 2, 64);
     settings.healthYellowUnderrunsPerMinute =
         j.value("healthYellowUnderrunsPerMinute", 1.0);
     settings.healthRedUnderrunsPerMinute =
@@ -606,7 +615,7 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 6) {
+        if (schemaVersion < 1 || schemaVersion > 7) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
                                     ", expected 1 to 6");
             return result;
@@ -646,6 +655,11 @@ SceneLoadResult fromJson(std::string_view text) {
                 settings.nonFiniteScrub = false;
                 settings.healthReload = false;
                 settings.ladderRecovery = false;
+            }
+            // v7 fields are opt-in: a pre-v7 save never turns the probe cap on.
+            if (schemaVersion < 7) {
+                settings.wasapiProbeCapEnabled = false;
+                settings.wasapiProbeCapChannels = 8;
             }
             scene.audio = std::move(settings);
         }
