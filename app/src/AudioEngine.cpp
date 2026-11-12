@@ -45,8 +45,8 @@ constexpr int kProbeRenderBlockFrames = 4096;
 // device" from loadDriver(). The clock is retried this many times (total four
 // attempts) with a short pause, which is the same recovery as pressing Force
 // ASIO by hand.
-constexpr int kClockOpenAttempts = 4;
-constexpr int kClockRetryDelayMs = 350;
+constexpr int kClockOpenAttempts = 2;
+constexpr int kClockRetryDelayMs = 150;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
 

@@ -448,10 +448,13 @@ TEST_CASE("applying devices releases a reused ASIO client before reopening", "[l
     REQUIRE(retryIdx != std::string::npos);
     REQUIRE(inputIdx != std::string::npos);
     CHECK(retryIdx < inputIdx);
-    // More than one extra attempt: 150 ms was not enough for the M-Audio Duo.
+    // A short ladder is enough now that a still-refused clock is reopened on
+    // the message thread below; the ladder only wins when the driver releases
+    // within a couple of short waits.
     CHECK(contains(pass, "kClockOpenAttempts"));
     CHECK(contains(pass, "\"No such device\""));
-    CHECK(contains(engine, "constexpr int kClockOpenAttempts = 4"));
+    CHECK(contains(engine, "constexpr int kClockOpenAttempts = 2"));
+    CHECK(contains(engine, "constexpr int kClockRetryDelayMs = 150"));
     // A single-client ASIO driver also refuses forever while the open runs on a
     // throwaway worker apartment. Force ASIO works because it opens on the
     // message thread, so a still-refused clock is reopened there.
@@ -1260,6 +1263,12 @@ TEST_CASE("every device open logs its endpoint and probe time", "[device][cache]
         CHECK(contains(body, "cached="));
         CHECK(contains(body, "cachedCap"));
     }
+}
+
+TEST_CASE("the clock retry ladder is one short retry", "[device][latency]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "constexpr int kClockOpenAttempts = 2;"));
+    CHECK(contains(engine, "constexpr int kClockRetryDelayMs = 150;"));
 }
 
 TEST_CASE("scene v6 hardening switches are opt-in and persisted",
