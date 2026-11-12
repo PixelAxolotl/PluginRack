@@ -157,9 +157,8 @@ private:
     // Staged settings: nothing reaches the engine until Apply.
     AudioEngine::DeviceSettings staged_;
     bool dirty_ = false;
-    // The latency budget stays collapsed until a clock is open. Once it has
-    // been shown, keep the last good readout in place rather than collapsing
-    // again when a fresh report has not arrived yet.
+    // The latency budget draws nothing until a clock is open; the panel
+    // collapses rather than leaving a blank block of rows.
     bool hasBudget_ = false;
     std::vector<AudioEngine::ReloadableDevice> reloadDevices_;
 

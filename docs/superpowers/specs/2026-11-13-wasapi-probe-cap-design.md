@@ -177,8 +177,10 @@ In the existing "Latency tuning (opt-in)" section of `SettingsView`:
   endpoints: ~12.2 s with the toggle off, ~3.1 s at N=8, ~3.0 s at N=2. The
   channel loop is gone at either value; the remaining ~3 s is
   `querySupportedSampleRates`, which this change deliberately leaves alone.
-- A device whose real channel count exceeds N reports and opens at most N
-  channels while the cap is on. This is the documented trade of the opt-in.
+- A device whose real channel count exceeds N keeps its Windows default channel
+  count: the `fallbackNumChannels >= highestChannelToQuery` early return leaves
+  that default in place, so the cap trims probing above the default and never
+  reduces an endpoint below it. This is the documented trade of the opt-in.
 - Apply persists the value, updates the env var, and reopens devices through the
   existing `applySettingsValues` → `openStripsDevicesNow` path.
 - The next launch restores the scene value before the startup open.

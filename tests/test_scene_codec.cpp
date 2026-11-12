@@ -93,6 +93,7 @@ TEST_CASE("unsupported schema version is rejected") {
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
+    REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("expected 1 to 7"));
 }
 
 TEST_CASE("v2 scene with output inserts round-trips") {

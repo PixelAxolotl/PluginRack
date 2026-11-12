@@ -617,7 +617,7 @@ SceneLoadResult fromJson(std::string_view text) {
         const int schemaVersion = j.value("schemaVersion", 0);
         if (schemaVersion < 1 || schemaVersion > 7) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 to 6");
+                                    ", expected 1 to 7");
             return result;
         }
         Scene scene;

@@ -1427,7 +1427,8 @@ TEST_CASE("settings exposes the wasapi probe cap", "[device][probe][ui]") {
     CHECK(contains(header, "Cap WASAPI channel probe"));
 
     const auto settings = readSource("app/src/SettingsView.cpp");
-    CHECK(contains(settings, "more I/O than the cap"));
+    CHECK(contains(settings, "about a third"));
+    CHECK(contains(settings, "Windows default"));
     CHECK(contains(settings, "probeCapChannels.setRange(2.0, 64.0, 1.0)"));
     CHECK(contains(settings, "staged_.wasapiProbeCapEnabled"));
     CHECK(contains(settings, "staged_.wasapiProbeCapChannels"));

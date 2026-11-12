@@ -232,8 +232,9 @@ SettingsView::SettingsView(AudioEngine& engine)
     add(probeCapToggle);
     probeCapToggle.setTooltip(
         "Caps JUCE's WASAPI channel-count probe at the value below. Cuts a "
-        "slow endpoint's startup probe from seconds to under one; a device "
-        "with more I/O than the cap reports only the cap while enabled.");
+        "slow endpoint's startup to about a third; the rest is the sample-rate "
+        "probe. It never reports fewer channels than the Windows default, so "
+        "it trims probing above that default, not below it.");
     probeCapToggle.onClick = [this] {
         staged_.wasapiProbeCapEnabled = probeCapToggle.getToggleState();
         probeCapChannels.setEnabled(staged_.wasapiProbeCapEnabled);
@@ -462,10 +463,8 @@ void SettingsView::refresh() {
     bool relayout = false;
 
     const auto report = audioEngine.getLatencyReport();
-    // Keep the latency budget (and its last good readout) in place instead of
-    // collapsing it whenever a fresh report has not arrived yet.
-    if (!hasBudget_ && report.valid) {
-        hasBudget_ = true;
+    if (hasBudget_ != report.valid) {
+        hasBudget_ = report.valid;
         relayout = true;
     }
     const auto clockDescription = audioEngine.getClockDescription();
@@ -758,7 +757,7 @@ void SettingsView::updateMeasurement(const AudioEngine::LatencyReport& report) {
 
     measureButton.setButtonText(measuring ? "Cancel Measurement" : "Measure Round-Trip");
     measureButton.setEnabled(!busy && (measuring || ready));
-    if (report.valid) budgetView.setReport(report);
+    budgetView.setReport(report);
 
     const auto setDetail = [this](const juce::String& text, juce::Colour colour) {
         measuredDetailLabel.setText(text, juce::dontSendNotification);
