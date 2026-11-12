@@ -4258,8 +4258,11 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     bool serializeForClock = false;
     if (!outputsWanted.empty()) {
         const auto& clockName = outputsWanted.front().name;
-        const bool clockIsAsio =
-            DeviceEnumeration::asioDevices().contains(clockName);
+        const auto asioNames = DeviceEnumeration::asioDevices();
+        // "System Default" resolves to the first type that carries any device,
+        // which is ASIO when a driver is installed: unknown means serialize.
+        const bool clockIsAsio = asioNames.contains(clockName)
+            || (!asioNames.isEmpty() && clockName == "System Default");
         const bool inputSharesClock = std::any_of(
             inputsWanted.begin(), inputsWanted.end(),
             [&clockName](const Request& request) { return request.name == clockName; });

@@ -1281,7 +1281,8 @@ TEST_CASE("WASAPI opens inputs in parallel while an ASIO clock stays serialized"
     // The gate: an ASIO clock, or an input capturing from the clock endpoint,
     // still joins the outputs before any input opens.
     CHECK(contains(pass, "bool serializeForClock = false;"));
-    CHECK(contains(pass, "DeviceEnumeration::asioDevices().contains("));
+    CHECK(contains(pass, "asioNames.contains(clockName)"));
+    CHECK(contains(pass, "clockName == \"System Default\""));
     CHECK(contains(pass, "serializeForClock = clockIsAsio || inputSharesClock"));
     CHECK(contains(pass, "if (!serializeForClock) {"));
     CHECK(contains(pass, "if (serializeForClock && !shouldExit()) {"));
