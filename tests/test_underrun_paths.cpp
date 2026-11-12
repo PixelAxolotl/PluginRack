@@ -1250,6 +1250,18 @@ TEST_CASE("device capabilities are cached after a successful open", "[device][ca
     CHECK(contains(engine, "if (openErr.isEmpty())"));
 }
 
+TEST_CASE("every device open logs its endpoint and probe time", "[device][cache]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    for (const char* signature : {"juce::String AudioEngine::setChannelInputDeviceImpl",
+                                  "juce::String AudioEngine::setOutputDeviceImpl"}) {
+        const auto body = functionBody(engine, signature);
+        CHECK(contains(body, "device: open endpoint="));
+        CHECK(contains(body, "probe_ms="));
+        CHECK(contains(body, "cached="));
+        CHECK(contains(body, "cachedCap"));
+    }
+}
+
 TEST_CASE("scene v6 hardening switches are opt-in and persisted",
           "[scene][settings]") {
     const auto codec = readSource("core/src/SceneCodec.cpp");

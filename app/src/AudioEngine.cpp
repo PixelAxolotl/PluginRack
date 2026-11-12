@@ -2613,15 +2613,15 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     // Auto (0) follows the render block instead of handing the driver a "you
     // decide": the driver picks a different shared-mode period between launches
     // (480 one time, 600 the next) and the read delay moved with it.
+    const auto cachedCap = cachedCapabilities(deviceName);
     int bufferRequest =
         pluginrack::inputBufferRequest(requestedInputBufferSize_, renderBlockFrames);
     // Cache-first hint: with the size on Auto, reuse the buffer this endpoint
     // negotiated last time. A refused size still falls through to the live
     // probe, so a stale entry can never wedge a device closed.
     if (requestedInputBufferSize_ == 0) {
-        if (const auto cached = cachedCapabilities(deviceName);
-            cached.has_value() && cached->negotiatedBuffer > 0) {
-            bufferRequest = cached->negotiatedBuffer;
+        if (cachedCap.has_value() && cachedCap->negotiatedBuffer > 0) {
+            bufferRequest = cachedCap->negotiatedBuffer;
         }
     }
     const auto openStartMs = juce::Time::getMillisecondCounterHiRes();
@@ -2643,6 +2643,10 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     }
     const int probeMs = static_cast<int>(std::lround(
         juce::Time::getMillisecondCounterHiRes() - openStartMs));
+    juce::Logger::writeToLog("device: open endpoint=\"" + deviceName
+        + "\" role=input cached=" + juce::String(cachedCap.has_value() ? 1 : 0)
+        + " probe_ms=" + juce::String(probeMs)
+        + " err=" + (openErr.isEmpty() ? juce::String("none") : openErr));
     if (openErr.isNotEmpty()) {
         if (!forceReopen) {
             const juce::ScopedLock sl(stateLock);
@@ -2938,11 +2942,11 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // Cache-first hint: reuse the buffer this endpoint negotiated last time
     // when the user left the size on Auto. A refusal falls through to the live
     // probe, so the cache remains advisory.
+    const auto cachedCap = cachedCapabilities(openName);
     int outputBufferRequest = requestedOutputBufferSize_;
     if (outputBufferRequest == 0) {
-        if (const auto cached = cachedCapabilities(openName);
-            cached.has_value() && cached->negotiatedBuffer > 0) {
-            outputBufferRequest = cached->negotiatedBuffer;
+        if (cachedCap.has_value() && cachedCap->negotiatedBuffer > 0) {
+            outputBufferRequest = cachedCap->negotiatedBuffer;
         }
     }
     const auto openStartMs = juce::Time::getMillisecondCounterHiRes();
@@ -2965,6 +2969,11 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     }
     const int probeMs = static_cast<int>(std::lround(
         juce::Time::getMillisecondCounterHiRes() - openStartMs));
+    juce::Logger::writeToLog("device: open endpoint=\"" + openName
+        + "\" role=" + juce::String(isClock ? "clock" : "output")
+        + " cached=" + juce::String(cachedCap.has_value() ? 1 : 0)
+        + " probe_ms=" + juce::String(probeMs)
+        + " err=" + (openErr.isEmpty() ? juce::String("none") : openErr));
 
     // Publish the duplex decision before the inputs are prepared below: that
     // pass decides whether a channel opens its own capture or is fed by this
