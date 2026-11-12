@@ -179,7 +179,7 @@ bool PluginHost::hasPlugin() const {
 
 bool PluginHost::hostLost() const {
     const juce::ScopedLock lock(pluginLock);
-    return host != nullptr && hostReady && !host->isAlive();
+    return host != nullptr && hostReady && host->isDead();
 }
 
 juce::AudioPluginInstance* PluginHost::getInstance() const {
@@ -716,7 +716,7 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
     // the host's answer back into hostScratch; only a clean ack commits it
     // into the live buffer. A fallback therefore leaves audio intact and
     // the next block can safely retry — no byte is dropped or doubled.
-    if (host != nullptr && hostReady && host->isAlive()) {
+    if (host != nullptr && hostReady && !host->isDead()) {
         const int frames = buffer.getNumSamples();
         const int needed = juce::jmax(frames, 1);
         if (hostScratchCapacity < needed) {
@@ -753,7 +753,7 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
     // The sandbox host is gone. Record why once - a plugin that faults in its
     // host usually takes the process down with a specific exception code - and
     // keep the insert audible by rendering the in-process instance.
-    if (host != nullptr && hostReady && !host->isAlive() && !hostLossLogged) {
+    if (host != nullptr && hostReady && host->isDead() && !hostLossLogged) {
         hostLossLogged = true;
         juce::Logger::writeToLog("plugin: restricted host lost for " + pluginName
                                  + " (exit 0x"

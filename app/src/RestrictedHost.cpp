@@ -4,11 +4,13 @@
 #include "PluginHostIpc.h"
 
 #include <atomic>
+#include <thread>
 
 #include <windows.h>
 #include <appmodel.h>
 #include <aclapi.h>
 #include <UserEnv.h>
+#include <tlhelp32.h>
 
 // The restricted host aims for reduced rights (AppContainer or a low-
 // integrity token). JUCE's ChildProcess has no surface for launching into
@@ -21,8 +23,8 @@ namespace {
 
 constexpr const char* kHostFlag = "--plugin-host";
 
-// Best effort: create the AppContainer profile once. If the OS or account
-// forbids it, return false and the caller fails closed.
+// Best effort: create the AppContainer profile once. "Already exists" is a
+// success: the profile is a per-user identity, not a per-run resource.
 bool ensureAppContainer() {
     // CreateAppContainerProfile lives in UserEnv.h. It creates (or reuses)
     // the named AppContainer identity for this user; launching the child
@@ -31,10 +33,47 @@ bool ensureAppContainer() {
     // for a per-user profile. The 4th arg `requestedCapabilities` is the
     // capability SID list; empty means no network/file capabilities, which
     // is exactly the sandbox we want.
-    HRESULT hr = CreateAppContainerProfile(
+    const HRESULT hr = CreateAppContainerProfile(
         L"PixelAxolotl.PluginRack.PluginHost",
         nullptr, nullptr, nullptr, 0, nullptr);
-    return SUCCEEDED(hr);
+    return SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+}
+
+DWORD parentProcessId() {
+    const HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    const DWORD self = ::GetCurrentProcessId();
+    DWORD parent = 0;
+    if (::Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == self) {
+                parent = entry.th32ParentProcessID;
+                break;
+            }
+        } while (::Process32NextW(snapshot, &entry));
+    }
+    ::CloseHandle(snapshot);
+    return parent;
+}
+
+// The app exits with TerminateProcess (plugin teardown can hang forever), so
+// it cannot send a quit message. Watch its process handle instead and end the
+// host when it goes away; otherwise orphaned hosts keep the exe locked and
+// spin on the audio block for the rest of the session.
+void terminateWhenParentExits() {
+    const DWORD parentPid = parentProcessId();
+    if (parentPid == 0) return;
+
+    const HANDLE parent = ::OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+    if (parent == nullptr) return;
+
+    std::thread([parent] {
+        ::WaitForSingleObject(parent, INFINITE);
+        ::TerminateProcess(::GetCurrentProcess(), 0);
+    }).detach();
 }
 
 } // namespace
@@ -46,9 +85,13 @@ RestrictedHost::~RestrictedHost() {
 
 bool RestrictedHost::launch(const juce::File& file, int uniqueId,
                             const juce::String& stateBase64, juce::String& error) {
-    if (!ensureAppContainer()) {
-        juce::Logger::writeToLog("plugin: AppContainer profile unavailable; "
-                                 "launching host with normal user token");
+    // The profile is prepared for the day the host can be launched into it.
+    // Today it does not change the child token, so say what actually runs.
+    (void) ensureAppContainer();
+    static std::atomic<bool> tokenNoticeLogged{false};
+    if (!tokenNoticeLogged.exchange(true, std::memory_order_relaxed)) {
+        juce::Logger::writeToLog("plugin: hosts run with the normal user token "
+                                 "(process isolation only; AppContainer launch is not wired up)");
     }
 
     const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
@@ -57,26 +100,31 @@ bool RestrictedHost::launch(const juce::File& file, int uniqueId,
         return false;
     }
 
-    // Shared audio block: created in the app, inherited by the host via the
-    // plugin path name (both sides call CreateFileMapping with the same
-    // name; the block itself needs no ACL because AppContainer isolates it).
-    sharedName = pluginHostIpc::sharedNameFor(file.getFullPathName());
+    // Shared audio block: created in the app and handed to the host by name.
+    // The section object must stay referenced by an open handle for as long
+    // as the host needs to open it; a mapped view alone does not keep the
+    // name resolvable (see NamedSection.h), and closing the create handle
+    // here made every host exit with "audio channel unavailable".
+    //
+    // The name is per hosted instance, not per plugin file. A scene can use
+    // the same VST3 in several slots (and the smoke probe loads one more
+    // while the scene host runs), so a name keyed only by path would make
+    // two hosts read and write one audio block.
+    static std::atomic<unsigned> channelCounter{0};
+    sharedName = pluginHostIpc::sharedNameFor(file.getFullPathName()) + "-"
+                 + juce::String(static_cast<int>(++channelCounter));
     const auto size = sizeof(pluginHostIpc::SharedAudioBlock);
-    auto* mapping = ::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
-                                          PAGE_READWRITE | SEC_COMMIT,
-                                          0, (DWORD) size,
-                                          sharedName.toWideCharPointer());
-    if (mapping == nullptr) {
+    if (!audioSection.create(sharedName.toWideCharPointer(), size)) {
+        juce::Logger::writeToLog("plugin: audio channel '" + sharedName
+                                 + "' unavailable (err "
+                                 + juce::String(static_cast<int>(audioSection.error()))
+                                 + ")");
         error = "Could not create the plugin audio channel. No plugin was loaded.";
         return false;
     }
-    sharedBlock = ::MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);
-    ::CloseHandle(mapping);
-    if (sharedBlock == nullptr) {
-        error = "Could not map the plugin audio channel. No plugin was loaded.";
-        return false;
-    }
-    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(sharedBlock);
+    juce::Logger::writeToLog("plugin: audio channel '" + sharedName + "' ready ("
+                             + juce::String(static_cast<int>(size)) + " bytes)");
+    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
     block->sequence = 0;
     block->responseSequence = 0;
     block->writeSequence = 0;
@@ -87,6 +135,25 @@ bool RestrictedHost::launch(const juce::File& file, int uniqueId,
     block->numFrames = 0;
     block->bufferSize = 0;
     block->sampleRate = 0.0;
+
+    // Wake-up channel: the host waits on `request`, the app waits on
+    // `response`. Created after the section so a failed launch cannot leave a
+    // half-wired host that the app then tries to talk to.
+    const auto requestName = pluginHostIpc::requestEventNameFor(sharedName);
+    const auto responseName = pluginHostIpc::responseEventNameFor(sharedName);
+    if (!requestEvent.create(requestName.toWideCharPointer())
+        || !responseEvent.create(responseName.toWideCharPointer())) {
+        juce::Logger::writeToLog(
+            "plugin: audio events '" + requestName + "', '" + responseName
+            + "' unavailable (err "
+            + juce::String(static_cast<int>(requestEvent.error())) + "/"
+            + juce::String(static_cast<int>(responseEvent.error())) + ")");
+        audioSection.close();
+        requestEvent.close();
+        responseEvent.close();
+        error = "Could not create the plugin audio events. No plugin was loaded.";
+        return false;
+    }
 
     pluginPath = file.getFullPathName();
     pluginUniqueId = uniqueId;
@@ -111,6 +178,9 @@ bool RestrictedHost::launch(const juce::File& file, int uniqueId,
     }
 
     launched = true;
+    hostDead.store(false, std::memory_order_relaxed);
+    stopWatcher.store(false, std::memory_order_relaxed);
+    startWatcher();
     juce::Logger::writeToLog("plugin: restricted host started for " + file.getFileName());
     return true;
 }
@@ -128,7 +198,30 @@ bool RestrictedHost::configureHost(int uniqueId, const juce::String& stateBase64
 }
 
 bool RestrictedHost::isAlive() const {
-    return launched && child != nullptr && child->isRunning();
+    return launched && child != nullptr && !hostDead.load(std::memory_order_acquire);
+}
+
+bool RestrictedHost::isDead() const {
+    return hostDead.load(std::memory_order_acquire);
+}
+
+void RestrictedHost::startWatcher() {
+    // The watcher owns no state except the flags; child is only reset after
+    // stopWatcherThread() has joined it (see killAndReap).
+    watcher = std::thread([this] {
+        while (!stopWatcher.load(std::memory_order_relaxed)) {
+            if (child == nullptr || !child->isRunning()) {
+                hostDead.store(true, std::memory_order_release);
+                return;
+            }
+            juce::Thread::sleep(100);
+        }
+    });
+}
+
+void RestrictedHost::stopWatcherThread() {
+    stopWatcher.store(true, std::memory_order_relaxed);
+    if (watcher.joinable()) watcher.join();
 }
 
 int RestrictedHost::exitCode() const {
@@ -160,18 +253,15 @@ juce::String RestrictedHost::sendControl(const juce::String& jsonLine, int timeo
 
 bool RestrictedHost::submitAudioBlock(const juce::AudioBuffer<float>& input, double sampleRate,
                                       int bufferSize) {
-    if (sharedBlock == nullptr || !isAlive()) {
+    if (audioSection.data() == nullptr || !isAlive()) {
         return false;
     }
-    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(sharedBlock);
-  // If the host is not producing, give up quickly (0 ms) so the audio
-    // thread never blocks behind the IPC. The caller renders in-process.
-    const auto waitStart = juce::Time::getMillisecondCounterHiRes();
+    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
+    // If the host has not acked the previous block yet, give up immediately:
+    // the audio thread must never block behind the IPC. fetchAudioBlock waits
+    // for that ack on the response event, so this only trips when the host is
+    // genuinely late, and the caller must not overwrite the live block.
     const auto previous = block->sequence;
-    while (block->responseSequence != previous
-           && juce::Time::getMillisecondCounterHiRes() - waitStart < 0.0) {
-        juce::Thread::yield();
-    }
     if (block->responseSequence != previous) {
         return false; // host lagging; caller must not submit
     }
@@ -196,25 +286,33 @@ bool RestrictedHost::submitAudioBlock(const juce::AudioBuffer<float>& input, dou
     // Publish: a new sequence value means "process this block".
     const auto next = block->sequence + 1;
     block->sequence = next;
+    // Wake the host. It waits on the event instead of polling, so the
+    // hand-off is not bound to the system timer tick (15.6 ms in the
+    // background on Windows 11) while the audio block is only a few ms long.
+    requestEvent.signal();
     return true;
 }
 
 bool RestrictedHost::fetchAudioBlock(juce::AudioBuffer<float>& output,
                                      std::uint64_t expectedSequence, double& outRate,
                                      int& outBufferSize) {
-    if (sharedBlock == nullptr) {
+    if (audioSection.data() == nullptr) {
         return false;
     }
-    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(sharedBlock);
-    // Brief wait for the host to process this block. The audio thread cannot
-    // block long, but the host normally answers within a few ms.
+    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
+    // Wait for the host to process this block on the response event. A signal
+    // wakes the audio thread immediately, independent of timer resolution.
+    // The counter is re-checked because a stale response (from a block whose
+    // own budget already expired) can wake us before this block is answered.
+    if (!responseEvent.isOpen()) return false;
     const auto start = juce::Time::getMillisecondCounterHiRes();
-    while (block->responseSequence != expectedSequence
-           && juce::Time::getMillisecondCounterHiRes() - start < 20.0) {
-        juce::Thread::yield();
-    }
-    if (block->responseSequence != expectedSequence) {
-        return false;
+    while (block->responseSequence != expectedSequence) {
+        const double remaining = 20.0 - (juce::Time::getMillisecondCounterHiRes() - start);
+        if (remaining <= 0.0) return false;
+        if (!responseEvent.wait(static_cast<unsigned long>(juce::jmax(1.0, remaining)))) {
+            if (block->responseSequence == expectedSequence) break;
+            return false;
+        }
     }
     // Torn-read guard: two identical blockSequence reads around the copy
     // mean the payload was stable. A mismatch means the host raced us;
@@ -240,42 +338,61 @@ bool RestrictedHost::fetchAudioBlock(juce::AudioBuffer<float>& output,
 }
 
 void RestrictedHost::killAndReap() {
+    stopWatcherThread();
     if (child != nullptr && child->isRunning()) {
         child->kill();
         child->waitForProcessToFinish(5000);
     }
     child.reset();
-    if (sharedBlock != nullptr) {
-        ::UnmapViewOfFile(sharedBlock);
-        sharedBlock = nullptr;
-    }
+    audioSection.close();
+    requestEvent.close();
+    responseEvent.close();
     launched = false;
 }
 
 int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                             const juce::String& stateBase64,
                             const juce::String& sharedMappingName) {
-    // The host only ever loads the plugin in this throwaway process.
-    juce::String scanError;
-    const auto descriptions = PluginHost::scanFileInProcess(file, scanError);
-    if (descriptions.isEmpty()) {
-        // Wait briefly for the app to create the mapping, then give up.
-        juce::Thread::sleep(100);
-    }
+    terminateWhenParentExits();
 
     // The app hands over the mapping name; only fall back to recomputing it
     // when an older caller did not pass one.
     const auto mappingName = sharedMappingName.isNotEmpty()
                                  ? sharedMappingName
                                  : pluginHostIpc::sharedNameFor(file.getFullPathName());
-    auto* map = ::OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE,
-                                   mappingName.toWideCharPointer());
-    pluginHostIpc::SharedAudioBlock* block = nullptr;
-    if (map != nullptr) {
-        block = static_cast<pluginHostIpc::SharedAudioBlock*>(
-            ::MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0,
-                            sizeof(pluginHostIpc::SharedAudioBlock)));
+
+    // Open the channel before scanning: if the app did not keep the section
+    // open, the host must say so instead of spending seconds loading a plugin
+    // it can never process audio for.
+    pluginHostIpc::NamedSection audioSection;
+    if (!audioSection.open(mappingName.toWideCharPointer(),
+                           sizeof(pluginHostIpc::SharedAudioBlock))) {
+        std::cout << "HOSTERROR audio channel '" << mappingName.toStdString()
+                  << "' unavailable (err " << audioSection.error() << ")\n";
+        std::cout.flush();
+        return 1;
     }
+    auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
+
+    // Open the wake-up channel before scanning for the same reason: a host
+    // that cannot be woken must say so instead of spending seconds loading a
+    // plugin whose blocks it would answer only on the timer tick.
+    pluginHostIpc::NamedEvent requestEvent;
+    pluginHostIpc::NamedEvent responseEvent;
+    const auto requestName = pluginHostIpc::requestEventNameFor(mappingName);
+    const auto responseName = pluginHostIpc::responseEventNameFor(mappingName);
+    if (!requestEvent.open(requestName.toWideCharPointer())
+        || !responseEvent.open(responseName.toWideCharPointer())) {
+        std::cout << "HOSTERROR audio events '" << requestName.toStdString() << "', '"
+                  << responseName.toStdString() << "' unavailable (err "
+                  << requestEvent.error() << "/" << responseEvent.error() << ")\n";
+        std::cout.flush();
+        return 1;
+    }
+
+    // The host only ever loads the plugin in this throwaway process.
+    juce::String scanError;
+    const auto descriptions = PluginHost::scanFileInProcess(file, scanError);
     if (descriptions.isEmpty()) {
         std::cout << "HOSTERROR " << scanError.toStdString() << "\n";
         std::cout.flush();
@@ -303,13 +420,6 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
 
     std::cout << "HOSTREADY " << file.getFullPathName().toStdString() << "\n";
     std::cout.flush();
-
-    if (block == nullptr) {
-        std::cout << "HOSTERROR audio channel '" << mappingName.toStdString()
-                  << "' unavailable (err " << ::GetLastError() << ")\n";
-        std::cout.flush();
-        return 1;
-    }
 
     auto* plugin = loaded.instance.get();
     juce::MidiBuffer midi;
@@ -347,30 +457,35 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                 const auto after = block->blockSequence;
                 if (before != after || (before % 2) == 1) {
                     // Torn: skip this block, do not process half-written audio.
+                    // Ack it anyway, otherwise the app (which only submits after
+                    // an ack) would stop feeding this host forever. The app's
+                    // own torn guard rejects the payload and plays dry.
                     block->readSequence = seq;
-                    lastSequence = seq;
-                    block->responseSequence = seq;
-                    block->ackSequence = seq;
-                    juce::Thread::sleep(1);
-                    continue;
+                } else {
+                    block->readSequence = seq;
+                    juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), 2, 0, frames);
+                    midi.clear();
+                    plugin->processBlock(view, midi);
+                    // Write-back with the same guard: mark odd, copy, mark even.
+                    block->blockSequence = block->blockSequence + 1;
+                    for (int i = 0; i < frames; ++i) {
+                        block->interleave[i * 2] = scratch.getReadPointer(0)[i];
+                        block->interleave[i * 2 + 1] = scratch.getReadPointer(1)[i];
+                    }
+                    block->blockSequence = block->blockSequence + 1;
                 }
-                block->readSequence = seq;
-                juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), 2, 0, frames);
-                midi.clear();
-                plugin->processBlock(view, midi);
-                // Write-back with the same guard: mark odd, copy, mark even.
-                block->blockSequence = block->blockSequence + 1;
-                for (int i = 0; i < frames; ++i) {
-                    block->interleave[i * 2] = scratch.getReadPointer(0)[i];
-                    block->interleave[i * 2 + 1] = scratch.getReadPointer(1)[i];
-                }
-                block->blockSequence = block->blockSequence + 1;
             }
             block->ackSequence = seq;
             block->responseSequence = seq;
             lastSequence = seq;
+            // Wake the app's audio thread; it waits on this event instead of
+            // spinning, so the response is not bound to the system timer tick.
+            responseEvent.signal();
         }
-        juce::Thread::sleep(1);
+        // Idle until the app publishes the next block. The timeout is only an
+        // idle re-check (e.g. after the app stopped feeding); the wake-up path
+        // is the signal, which returns immediately.
+        requestEvent.wait(1000);
     }
     return 0;
 }

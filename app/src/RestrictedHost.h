@@ -2,10 +2,17 @@
 
 #include <JuceHeader.h>
 
+#include "NamedEvent.h"
+#include "NamedSection.h"
+
+#include <atomic>
+#include <thread>
+
 // Runs a VST3 in a separate process (PR-01): the main app only reads plugin
 // metadata and audio blocks it sends. The host is this executable with
 // --plugin-host. Communication is a shared-memory stereo audio block
-// (see PluginHostIpc.h) with a sequence/response handshake. Full OS-level
+// (see PluginHostIpc.h) with a sequence/response handshake, and two named
+// events that wake each side when a block is published or acked. Full OS-level
 // sandboxing (AppContainer token) is still TODO; the host currently runs
 // with the user's token, so only load trusted plugins.
 class RestrictedHost {
@@ -21,6 +28,9 @@ public:
     bool launch(const juce::File& file, int pluginUniqueId, const juce::String& stateBase64,
                 juce::String& error);
     bool isAlive() const;
+    // True once the background watcher has seen the host process exit. Reads
+    // only an atomic flag, so the audio thread never polls the OS for it.
+    bool isDead() const;
     // Exit code of the host process, for the crash log. Meaningful once the
     // process has finished; 0xC0000005 is an access violation inside a plugin.
     int exitCode() const;
@@ -64,12 +74,25 @@ private:
     HostScratch hostScratch;
 
     std::unique_ptr<juce::ChildProcess> child;
-    void* sharedBlock = nullptr;
+    pluginHostIpc::NamedSection audioSection;
+    // request wakes the host after a block is published; response wakes the
+    // audio thread when the host has acked it. Events instead of a 1 ms poll:
+    // Windows 11 ignores a background process's timer resolution, which made
+    // the host answer on the 15.6 ms tick and stuttered the output.
+    pluginHostIpc::NamedEvent requestEvent;
+    pluginHostIpc::NamedEvent responseEvent;
     juce::String sharedName;
     juce::String pluginPath;
     int pluginUniqueId = 0;
     bool launched = false;
     bool configured = false;
+
+    // Death is observed on a worker so processBlock only reads hostDead.
+    std::atomic<bool> hostDead{false};
+    std::atomic<bool> stopWatcher{false};
+    std::thread watcher;
+    void startWatcher();
+    void stopWatcherThread();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RestrictedHost)
 };

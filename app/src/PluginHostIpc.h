@@ -6,6 +6,12 @@
 // and flips the sequence counter when the block is done, so the app can tell
 // a live host from a stuck one.
 //
+// Wake-ups travel over two named auto-reset events derived from the channel
+// name: the app signals "request" after publishing a block, and the host
+// signals "response" after acking it. Events wake the waiter immediately, so
+// the hand-off does not depend on the system timer resolution (Windows 11
+// drops a background process's 1 ms request to the default 15.6 ms tick).
+//
 // Seamlessness rule: submitAudioBlock blocks until the host has acked the
 // previous block, so the single shared block can never be overwritten
 // while the host is still producing from it. If the host does not answer
@@ -40,10 +46,22 @@ struct SharedAudioBlock {
 };
 
 inline juce::String sharedNameFor(const juce::String& pluginPath) {
-    // A short per-plugin name: lower-case hex of a simple hash, no filesystem
-    // characters, so it is safe as a Win32 shared-memory name.
+    // A short base name: lower-case hex of a simple hash, no filesystem
+    // characters, so it is safe as a Win32 shared-memory name. Callers must
+    // append a per-instance discriminator: a scene can host the same plugin
+    // file in more than one slot.
     juce::String hex = juce::String::toHexString(pluginPath.hashCode());
     return "PluginRackHost-" + hex;
+}
+
+// Both processes derive the event names from the channel name that is already
+// passed on the host command line, so a name can never drift between them.
+inline juce::String requestEventNameFor(const juce::String& channelName) {
+    return channelName + "-req";
+}
+
+inline juce::String responseEventNameFor(const juce::String& channelName) {
+    return channelName + "-rsp";
 }
 
 } // namespace pluginHostIpc
