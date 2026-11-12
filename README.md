@@ -404,9 +404,17 @@ it cannot be opened nothing can play and the message says so. Exclusive mode
 adds its more expensive format probe and is only used when explicitly enabled.
 Reloading a single device avoids paying that cost for every stream.
 
-This is a JUCE backend characteristic, not a hang. If it becomes a problem, the
-options are a local JUCE patch that caps the channel-count probe, caching the
-working device mode per endpoint, or using ASIO where a driver exists.
+This is a JUCE backend characteristic, not a hang. Settings → Latency tuning
+now has an opt-in **Cap WASAPI channel probe** toggle and a 2–64 channel value
+(default 8). It caps the `queryMaxNumChannels` loop: the two slow USB endpoints
+here drop from ~12–13 s to roughly **3 s**, and values 2 and 8 measure the same
+because the remaining ~3 s is JUCE's sample-rate probe, which this cap does not
+touch. Devices with more I/O than the cap report the cap while it is enabled.
+The toggle writes `PLUGINRACK_WASAPI_MAX_PROBE_CHANNELS`; with it off, JUCE
+runs its stock probe. The patch lives in
+`tools/juce-patches/0001-wasapi-probe-cap.patch` and is applied idempotently at
+configure/build time; reverse it with
+`git -C "$JUCE_DIR" apply -R tools/juce-patches/0001-wasapi-probe-cap.patch`.
 
 ### Development notes
 

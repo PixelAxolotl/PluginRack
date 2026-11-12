@@ -173,8 +173,10 @@ In the existing "Latency tuning (opt-in)" section of `SettingsView`:
 ### 3.6 Behavior
 
 - Off: env var `0`, JUCE runs the stock 64→2 probe. No behavior change.
-- On at N: the probe starts at N. A 2-channel USB endpoint with N=8 goes from
-  ~12.4 s to roughly 1–1.5 s; N=4 is ~0.5 s; N=2 performs no extra probe.
+- On at N: the probe starts at N. Measured on 13 Nov 2026 with the two slow USB
+  endpoints: ~12.2 s with the toggle off, ~3.1 s at N=8, ~3.0 s at N=2. The
+  channel loop is gone at either value; the remaining ~3 s is
+  `querySupportedSampleRates`, which this change deliberately leaves alone.
 - A device whose real channel count exceeds N reports and opens at most N
   channels while the cap is on. This is the documented trade of the opt-in.
 - Apply persists the value, updates the env var, and reopens devices through the
@@ -209,8 +211,9 @@ Build and manual acceptance:
 1. Configure/build: the patch applies, `PluginRack.exe` is rebuilt and copied.
 2. Toggle off, relaunch: `device: open ... probe_ms=` stays ~12–13 s for the USB
    endpoints.
-3. Enable with 8, Apply, relaunch: the same endpoints log roughly 1–1.5 s.
-4. Set 2, Apply, relaunch: the same endpoints are near-instant.
+3. Enable with 8, Apply, relaunch: the same endpoints log roughly 3 s.
+4. Set 2, Apply, relaunch: roughly the same ~3 s; the remaining cost is the
+   sample-rate probe, not the channel loop.
 5. Toggle off, Apply, relaunch: ~12–13 s returns.
 6. `git -C "$JUCE_DIR" status` shows only the patched file modified.
 
