@@ -42,9 +42,9 @@ constexpr double kLatencyMeasureMaxSeconds = 5.0;
 constexpr int kProbeRenderBlockFrames = 4096;
 // A single-client ASIO driver (M-Audio M-Track) refuses a second client for a
 // moment after the previous stream is closed, reporting the bare "No such
-// device" from loadDriver(). The clock is retried this many times (total four
-// attempts) with a short pause, which is the same recovery as pressing Force
-// ASIO by hand.
+// device" from loadDriver(). The clock gets one short retry; a driver that
+// still refuses is reopened on the message thread, which is the same recovery
+// as pressing Force ASIO by hand.
 constexpr int kClockOpenAttempts = 2;
 constexpr int kClockRetryDelayMs = 150;
 // Prefix of the error shown for an assigned device that is not enumerated.
@@ -55,6 +55,16 @@ const juce::String kNoSuchDevice = "No such device: ";
 // helper keeps the strips and the budget wording identical.
 juce::String shortDeviceTypeTag(const juce::String& type) {
     return deviceBackendTag(type);
+}
+
+// The persisted mode is the type the opener actually selected, not the
+// direction: the next launch uses it to skip a mode this endpoint already
+// refused while keeping the cache advisory.
+juce::String deviceModeName(const juce::String& deviceType) {
+    if (deviceType.containsIgnoreCase("exclusive")) return "exclusive";
+    if (deviceType.containsIgnoreCase("low latency")) return "sharedLowLatency";
+    if (deviceType.equalsIgnoreCase("ASIO")) return "asio";
+    return "shared";
 }
 
 // Effects whose chain entry is missing run here. That covers scenes saved
@@ -2676,7 +2686,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     capture->setHealthThresholds(getHealthThresholds());
     recordDeviceCapabilities(deviceName, true, capture->availableInputCount(), 0,
                              capture->getSampleRate(), capture->getDeviceBufferSize(),
-                             probeMs);
+                             probeMs, deviceModeName(capture->getActiveDeviceType()));
     // The old capture closes here, outside stateLock, only after every channel
     // has moved to the new one. On failure the old one was never detached.
     return {};
@@ -2883,6 +2893,11 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
 
     juce::String err;
     const auto openName = deviceName == "System Default" ? juce::String() : deviceName;
+    // The endpoint's last successful open is advisory: the mode below can skip
+    // a probe this endpoint already refused, and the buffer hint below starts
+    // from the negotiated size. A refusal always falls through to the live
+    // probe inside open(), so a stale entry cannot wedge a device closed.
+    const auto cachedCap = cachedCapabilities(openName);
     // Always offer the engine rate, including for the clock: exclusive-mode
     // WASAPI can only negotiate when a concrete sample rate is requested.
     // The clock renders and drains in the same callback, so during the async
@@ -2901,8 +2916,20 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // Exclusive mode is limited to a standalone clock output. It is not safe
     // for non-clock outputs (which may share an endpoint) or for a clock whose
     // endpoint is also used by an input capture.
-    const bool preferExclusive = preferExclusive_.load(std::memory_order_relaxed)
-                              && isClock && !sharesClockInput;
+    bool preferExclusive = preferExclusive_.load(std::memory_order_relaxed)
+                        && isClock && !sharesClockInput;
+    // A warm start does not re-probe a mode this endpoint already refused: if
+    // its last successful open was shared, exclusive is not attempted again.
+    // Any explicit Apply/Reload clears modeCacheBypass_, so the user's toggle
+    // still forces a fresh probe instead of being pinned to the old answer.
+    const bool cachedSharedMode = cachedCap.has_value()
+        && (cachedCap->mode == "shared" || cachedCap->mode == "sharedLowLatency");
+    if (preferExclusive && cachedSharedMode
+        && !modeCacheBypass_.load(std::memory_order_relaxed)) {
+        preferExclusive = false;
+        juce::Logger::writeToLog("device: exclusive skipped for \"" + openName
+                                 + "\" (cached mode " + cachedCap->mode.c_str() + ")");
+    }
 
     // Duplex: when a capture is assigned to this same endpoint and the user
     // opted in, open both directions in one driver client. ASIO refuses a
@@ -2942,7 +2969,6 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // Cache-first hint: reuse the buffer this endpoint negotiated last time
     // when the user left the size on Auto. A refusal falls through to the live
     // probe, so the cache remains advisory.
-    const auto cachedCap = cachedCapabilities(openName);
     int outputBufferRequest = requestedOutputBufferSize_;
     if (outputBufferRequest == 0) {
         if (cachedCap.has_value() && cachedCap->negotiatedBuffer > 0) {
@@ -3043,7 +3069,8 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         recordDeviceCapabilities(
             openName, false, duplexInputs,
             juce::jmax(2, newPlayback->getNumDeviceOutputChannels()),
-            newPlayback->getSampleRate(), newPlayback->getBufferSize(), probeMs);
+            newPlayback->getSampleRate(), newPlayback->getBufferSize(), probeMs,
+            deviceModeName(newPlayback->getActiveDeviceType()));
     }
 
     OutputPlayback* retiredPlayback = nullptr;
@@ -3227,7 +3254,8 @@ void AudioEngine::stopInternalClock() {
 
 void AudioEngine::recordDeviceCapabilities(const juce::String& endpoint, bool input,
                                            int inputChannels, int outputChannels,
-                                           double sampleRate, int bufferSize, int probeMs) {
+                                           double sampleRate, int bufferSize, int probeMs,
+                                           const juce::String& mode) {
     if (endpoint.isEmpty()) return;
     pluginrack::EndpointCapabilities capabilities;
     capabilities.inputChannels = input ? juce::jmax(0, inputChannels) : 0;
@@ -3240,7 +3268,7 @@ void AudioEngine::recordDeviceCapabilities(const juce::String& endpoint, bool in
                                       ? 0
                                       : capabilities.sampleRates.front();
     capabilities.negotiatedBuffer = bufferSize;
-    capabilities.mode = input ? "input" : "output";
+    capabilities.mode = mode.isEmpty() ? "shared" : mode.toStdString();
     capabilities.probeMs = probeMs;
     const auto now = juce::Time::getCurrentTime();
     capabilities.lastGood = now.toISO8601(true).toStdString();
@@ -3815,6 +3843,7 @@ void AudioEngine::openStripsDevicesNow(const std::function<bool()>& shouldExit, 
     // instead of being retried with another type, rate, or buffer size.
     juce::Logger::writeToLog("audio: opening devices");
     const auto errors = openAllDevicesPass(shouldExit, forceInputs);
+    modeCacheBypass_.store(false, std::memory_order_relaxed);
     clearDeviceOpens();
     juce::Logger::writeToLog(errors.isNotEmpty() ? "audio: devices open with errors\n" + errors
                                                  : juce::String("audio: devices open"));
@@ -4065,6 +4094,9 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
 void AudioEngine::applyDeviceSettings(const DeviceSettings& settings) {
     if (isOpeningDevices()) return;
     applySettingsValues(settings);
+    // A user-initiated apply must re-probe the mode: the cached answer is only
+    // trusted by the automatic startup pass.
+    modeCacheBypass_.store(true, std::memory_order_relaxed);
     startDeviceJob([this](const std::function<bool()>& shouldExit) {
         openStripsDevicesNow(shouldExit, /*forceInputs=*/true);
     });

@@ -727,7 +727,8 @@ private:
     // never fatal: the cache is advisory.
     void recordDeviceCapabilities(const juce::String& endpoint, bool input,
                                   int inputChannels, int outputChannels,
-                                  double sampleRate, int bufferSize, int probeMs);
+                                  double sampleRate, int bufferSize, int probeMs,
+                                  const juce::String& mode);
     // Fresh cache entry only; a stale one is ignored and the live probe runs.
     std::optional<pluginrack::EndpointCapabilities> cachedCapabilities(
         const juce::String& endpoint) const;
@@ -824,6 +825,9 @@ private:
     std::atomic<bool> latencyTuningOptIn_{true};
     std::atomic<bool> lowLatencyInput_{true};
     std::atomic<bool> preferExclusive_{false};
+    // Set by a user-initiated Apply/Reload so that pass re-probes the device
+    // mode instead of trusting the cached answer; cleared when the pass ends.
+    std::atomic<bool> modeCacheBypass_{false};
     std::atomic<bool> lowLatencyOutputs_{true};
     std::atomic<bool> minimalClockFifo_{false};
     std::atomic<bool> fullDuplexInput_{false};

@@ -1291,6 +1291,26 @@ TEST_CASE("WASAPI opens inputs in parallel while an ASIO clock stays serialized"
           == 2);
 }
 
+TEST_CASE("a cached shared mode skips the exclusive probe", "[device][cache]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto output = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(output, "cachedSharedMode"));
+    CHECK(contains(output, "preferExclusive = false;"));
+
+    // The cache records the mode the opener actually selected, not the
+    // direction: "input"/"output" made the field useless to the opener.
+    const auto record = functionBody(engine, "void AudioEngine::recordDeviceCapabilities");
+    CHECK(contains(record, "capabilities.mode ="));
+    CHECK(contains(record, "mode.toStdString()"));
+    CHECK_FALSE(contains(record, "\"input\" : \"output\""));
+
+    const auto mode = functionBody(engine, "juce::String deviceModeName");
+    CHECK(contains(mode, "\"exclusive\""));
+    CHECK(contains(mode, "\"sharedLowLatency\""));
+    CHECK(contains(mode, "\"asio\""));
+    CHECK(contains(mode, "\"shared\""));
+}
+
 TEST_CASE("scene v6 hardening switches are opt-in and persisted",
           "[scene][settings]") {
     const auto codec = readSource("core/src/SceneCodec.cpp");
