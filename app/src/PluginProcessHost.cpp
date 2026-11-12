@@ -310,15 +310,16 @@ int PluginProcessHost::latencySamples(int timeoutMs) {
     return static_cast<int>(jsonValue(reply, "latencySamples").toString().getIntValue());
 }
 
-bool PluginProcessHost::submitBlock(const juce::AudioBuffer<float>& input, double sampleRate,
-                                    int blockSize) {
+bool PluginProcessHost::submitBlock(const juce::AudioBuffer<float>& input, int numSamples,
+                                    double sampleRate, int blockSize) {
     if (audioSection.data() == nullptr || !isAlive()) return false;
 
     auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
     const auto previous = block->sequence;
     if (block->responseSequence != previous) return false; // host still lagging
 
-    const int frames = juce::jmin(input.getNumSamples(), pluginHostIpc::kMaxBlockFrames);
+    const int frames = juce::jmin(numSamples, input.getNumSamples(), pluginHostIpc::kMaxBlockFrames);
+    if (frames <= 0) return false;
     block->blockSequence = block->blockSequence + 1; // odd: writing
     block->numFrames = frames;
     block->bufferSize = blockSize;

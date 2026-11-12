@@ -159,7 +159,13 @@ int clearBlocked() {
 
 } // namespace PluginLoadGuard
 
-PluginHost::PluginHost() = default;
+PluginHost::PluginHost() {
+    // Allocate the child scratch once, here, and never again: prepareToPlay can
+    // run on the audio thread at device start, so resizing it there raced a
+    // message-thread prepare and corrupted the heap (0xC0000374 at device open
+    // with the child host enabled). 8192 frames stereo is 64 KB per insert.
+    childScratch_.setSize(2, pluginHostIpc::kMaxBlockFrames, false, true, true);
+}
 
 PluginHost::~PluginHost() {
     delete editorWindow;
@@ -245,18 +251,27 @@ bool PluginHost::loadChildHost(const juce::File& file, int pluginUniqueId,
         return false;
     }
 
+    return adoptChildHost(std::move(host), stateBase64, sampleRate, bufferSize, 500, error);
+}
+
+bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
+                                const juce::String& stateBase64, double sampleRate,
+                                int bufferSize, int timeoutMs, juce::String& error) {
+    if (host == nullptr) {
+        error = "No child host was handed over.";
+        return false;
+    }
+
     // State before the first block: a scene with settings must not render with
     // the plugin's defaults. A failure here is a launch failure, so the caller
     // publishes an in-process slot rather than a half-wired child.
-    if (!host->setState(stateBase64, 500, error)) {
-        juce::Logger::writeToLog("plugin: child host refused the saved state for "
-                                 + file.getFileName() + " (" + error + ")");
+    if (!host->setState(stateBase64, timeoutMs, error)) {
+        juce::Logger::writeToLog("plugin: child host refused the saved state (" + error + ")");
         host->killAndReap();
         return false;
     }
-    if (!host->prepare(sampleRate, bufferSize, 500, error)) {
-        juce::Logger::writeToLog("plugin: child host refused the format for " + file.getFileName()
-                                 + " (" + error + ")");
+    if (!host->prepare(sampleRate, bufferSize, timeoutMs, error)) {
+        juce::Logger::writeToLog("plugin: child host refused the format (" + error + ")");
         host->killAndReap();
         return false;
     }
@@ -269,8 +284,15 @@ bool PluginHost::loadChildHost(const juce::File& file, int pluginUniqueId,
     cachedLatencySamples_.store(juce::jmax(0, host->latencySamples(100)),
                                 std::memory_order_relaxed);
     childHost_ = std::move(host);
-    juce::Logger::writeToLog("plugin: child host ready for " + file.getFileName());
+    juce::Logger::writeToLog("plugin: child host ready (" + juce::String(childHost_->childProcessId())
+                             + ")");
     return true;
+}
+
+bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
+    if (childHost_ == nullptr || parameterIndex < 0) return false;
+    return childHost_->setParameter(static_cast<std::uint32_t>(parameterIndex),
+                                    juce::jlimit(0.0f, 1.0f, normalisedValue));
 }
 
 void PluginHost::stopChildHost() {
@@ -749,10 +771,10 @@ void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
         const double deadline = juce::jlimit(1.0, 20.0, blockMs * 0.5);
         childBlockDeadlineMs_.store(static_cast<int>(deadline + 0.5), std::memory_order_relaxed);
     }
-    if (childScratch_.getNumSamples() < samplesPerBlock) {
-        // Allocation is fine here: prepareToPlay runs with the audio stopped.
-        childScratch_.setSize(2, juce::jmax(samplesPerBlock, 1), false, true, true);
-    }
+    // The constructor sizes the scratch to kMaxBlockFrames. If a device ever
+    // asks for more (it cannot: submit clamps to that constant too), the child
+    // path plays dry rather than allocating here - prepareToPlay can run on the
+    // audio thread, so it must not allocate.
 
     if (childHost_ != nullptr && childHost_->isAlive()) {
         juce::String childError;
@@ -813,7 +835,7 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
             childScratch_.copyFrom(channel, 0, buffer, source, 0, frames);
         }
 
-        if (!childHost_->submitBlock(childScratch_, playSampleRate_.load(std::memory_order_relaxed),
+        if (!childHost_->submitBlock(childScratch_, frames, playSampleRate_.load(std::memory_order_relaxed),
                                      playBufferSize_.load(std::memory_order_relaxed))) {
             noteChildMiss();
             return; // dry

@@ -33,6 +33,8 @@ constexpr std::uint32_t kParamFlagGestureEnd = 1u << 1;    // last message of a 
 
 struct ParamMsg {
     std::uint32_t id = 0;
+    // Normalised 0..1, the domain AudioProcessorParameter reports. Carrying an
+    // already-normalised value keeps per-plugin conversion out of the IPC.
     float value = 0.0f;
     std::uint32_t flags = 0;
     std::uint32_t reserved = 0;

@@ -113,6 +113,14 @@ public:
     bool loadChildHost(const juce::File& file, int pluginUniqueId, const juce::String& stateBase64,
                        double sampleRate, int bufferSize, int readyTimeoutMs,
                        juce::String& error);
+    // Takes over a child that a worker already spawned and handshook, so the
+    // insert load path never blocks the message thread on plugin loading.
+    // Pushes state and the format; returns false if the child cannot take them.
+    bool adoptChildHost(std::unique_ptr<PluginProcessHost> host, const juce::String& stateBase64,
+                        double sampleRate, int bufferSize, int timeoutMs, juce::String& error);
+    // Mirrors an editor-side parameter change into the child. The value is
+    // normalised (0..1), the same domain the plugin reports.
+    bool setChildParameter(int parameterIndex, float normalisedValue);
     void stopChildHost();
     bool childHostEnabled() const { return childHost_ != nullptr; }
     ChildHostStatus childHostStatus() const;

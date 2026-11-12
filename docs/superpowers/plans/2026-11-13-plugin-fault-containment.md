@@ -6,6 +6,7 @@
 | Trigger to reopen | A plugin still faults `PluginHost::processBlock` on the audio thread, or a new teardown path appears that `releaseEditorsNow()` does not cover. |
 | Scope | Keep the app and the other strips alive when one plugin faults. Not OS-level sandboxing. |
 | Spec | **Drafted, awaiting sign-off:** `docs/superpowers/specs/2026-11-13-fault-containment-ipc.md` (Phase 0, no code). Phase 1 does not start until §5.6 is fully checked. |
+| Phase 1 status | Core landed and verified (child host, IPC, null/kill diagnostics). **Engine wiring reverted — see spec §7.1:** live device audio crashed 4/8 soaks, so the child path stays diagnostic-only until the concurrency audit passes. |
 | This revision | v2 adds **WHERE** (exact files/functions) and **HOW** (step-by-step patches, commands, exit criteria) to every phase. v1 text is preserved and marked. |
 
 > How to read this file: each phase has **Goal → WHERE → HOW → Verify →

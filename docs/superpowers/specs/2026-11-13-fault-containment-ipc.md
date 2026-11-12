@@ -308,8 +308,10 @@ on the same input) so a plugin that differs against itself is visible before its
 child difference is called a transport fault.
 
 Phase 1 results (48 kHz / 256, 200 blocks): `Scope.vst3`,
-`AB Reference 2.vst3`, `GBCAudio SpectraVU.vst3`, `Bertom_DenoiserClassic.vst3`
-and `Bertom_VocalCompressor.vst3` all bit-identical, baseline 0.
+`AB Reference 2.vst3`, `GBCAudio SpectraVU.vst3`, `Bertom_DenoiserClassic.vst3`,
+`Bertom_VocalCompressor.vst3`, `True Panner.vst3` and `Ozone Imager 2.vst3` all
+bit-identical, baseline 0. See §7.1 for what is still blocking the engine
+wiring.
 
 ## 5. Compatibility
 
@@ -347,6 +349,61 @@ as claiming a sandbox, and no UI text may imply one.
 | Renderer flipping mid-session | §3.2 fixes identity at publish time; Reload is the only transition |
 | Two stale comments describing the old fallback | Rewritten in the same commit as task 1.4 (§3.2) |
 | Param coalescing table (4096 entries) cost on the message thread | It is only touched on edit/automation traffic, never per block, and never on the audio thread |
+
+## 7.1 Phase 1 status (recorded 13 Nov 2026)
+
+**Landed and verified** (`e8c7c11`, `b673010` plus the fixes below):
+
+- `PluginIpcLayout.h`: param ring and control section, JUCE-free, covered by
+  the core test binary.
+- `PluginProcessHost`: spawn, handshake, bounded fetch, control ops
+  (prepare/setState/getState/getLatency/ping), watcher, reap.
+- Child loop: one loop, two wake-ups (audio + control), per-block params,
+  peaks and latency in the audio header.
+- `PluginHost` child branch: dry on death/miss, three consecutive misses mark
+  the slot failed, state save asks the child then falls back to last-known.
+- Diagnostics: `--test-child-host` (render), `--test-child-host --kill-after-ms`
+  (kill/attribution), `--test-child-null` (A/B vs in-process with a determinism
+  baseline).
+
+Verified results: null test bit-identical on VocalCompressor (after §3.8),
+Denoiser, Scope, AB Reference 2, SpectraVU, True Panner and Ozone Imager 2;
+kill test reports dry output, exit `0xC0000005`, app alive; 368/368 ctest;
+`--test-load-save "M Audio Duo ASIO 4ms"` unchanged.
+
+**Bugs found by the diagnostics, both fixed:**
+
+1. Prepare lifecycle mismatch (§3.8) — a compressor that reseeds in
+   `prepareToPlay` rendered differently through the child.
+2. `submitBlock` sent the whole preallocated scratch as the block length, so
+   every child block played dry once the scratch became 8192 frames. The frame
+   count is now explicit.
+
+**Blocker (this is why the engine wiring is not in the tree):** wiring the
+child to live inserts under real device audio crashed 4 of 8 twenty-second
+soak runs, with two signatures — `0xC0000005` and heap corruption
+`0xC0000374` — while the fixed-format null test (48 kHz / 256, 200 blocks)
+passed and a plain run without children survived. A PageHeap run put the fault
+inside `VST3PluginInstanceHeadless::processAudio` via `PluginHost::processBlock`
+on the audio thread, which for a corruption report is the *detection* site, not
+necessarily the write site.
+
+The wiring (AudioEngine flag and spawn, `--use-child`, knob forwarding, shutdown
+reap) was implemented, verified partially, then **reverted** because a switch
+that crashes is worse than no switch. Suspects to audit before it returns:
+
+- `childHost_` lifetime versus the audio thread: `stopChildHost()` resets the
+  pointer while `processBlock` may be inside it (use-after-free).
+- `prepareToPlay` can run on the audio thread at device start and calls the
+  control channel, which is documented as one-in-flight and message-thread
+  only; `refreshLatencyCache()`/`getStateAsBase64()` use it from the message
+  thread.
+- Any allocation reachable from `prepareToPlay` (the constructor-allocation fix
+  removed one; the audit must prove there are no others).
+
+Rule until that audit passes and a 30-run soak is clean: no `--use-child`-style
+switch, no engine wiring, and the child path stays reachable from diagnostics
+only.
 
 ## 8. Out of scope
 

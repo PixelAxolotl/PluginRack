@@ -66,10 +66,13 @@ public:
     // header after every prepare.
     int latencySamples(int timeoutMs);
 
-    // Audio thread. submitBlock copies into the shared block and wakes the
-    // child; fetchBlock waits at most `deadlineMs` for that block's answer.
+    // Audio thread. submitBlock copies the block into the shared mapping and
+    // wakes the child; fetchBlock waits at most `deadlineMs` for that block's
+    // answer. numSamples is explicit because the scratch buffer is preallocated
+    // to kMaxBlockFrames and is usually larger than the callback's block.
     // Neither mutates the caller's buffer on failure.
-    bool submitBlock(const juce::AudioBuffer<float>& input, double sampleRate, int blockSize);
+    bool submitBlock(const juce::AudioBuffer<float>& input, int numSamples, double sampleRate,
+                     int blockSize);
     bool fetchBlock(juce::AudioBuffer<float>& output, int deadlineMs);
 
     // Message thread. Pushes one parameter edit at the child; dropped messages

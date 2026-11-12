@@ -199,14 +199,10 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
             auto& parameters = plugin->getParameters();
             if (index >= 0 && index < parameters.size()) {
                 if (auto* parameter = parameters[index]) {
-                    // Normalised value, notifying: the child is the only
-                    // renderer, so its parameter must move even when the
-                    // editor's own instance is the one the user touched.
-                    if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter)) {
-                        ranged->setValueNotifyingHost(ranged->convertTo0to1(msg.value));
-                    } else {
-                        parameter->setValue(parameter->getValue());
-                    }
+                    // msg.value is normalised (0..1), the domain the plugin
+                    // reports and the editor instance holds, so no per-plugin
+                    // value conversion has to cross the process boundary.
+                    parameter->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, msg.value));
                 }
             }
         }
