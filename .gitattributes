@@ -1,0 +1,12 @@
+# Keep shell scripts and hooks with LF line endings (required on Windows)
+*.sh text eol=lf
+.githooks/* text eol=lf
+# Treat these as binary
+*.exe binary
+*.pdb binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
+*.ico binary

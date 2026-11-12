@@ -7,3 +7,29 @@ CMakeUserPresets.json
 /PluginRack.pdb
 .superpowers/
 graphify-out/
+
+# AI agent artifacts and working files
+.opencode/
+.cloud-attachments/
+.claude/
+.cursor/
+.cursorrules
+.cursorignore
+.aider*
+.aider.tags.cache*
+plan.md
+
+# Editor / OS temp files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+
+# Smoke / scratch test output
+screenshots/smoke-*.txt

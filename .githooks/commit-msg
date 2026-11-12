@@ -1,0 +1,13 @@
+#!/bin/sh
+# Reject commit messages that contain a Co-authored-by (or any AI-attribution)
+# trailer. See AGENTS.md for the commit policy.
+if grep -qiE '^[[:space:]]*Co-authored-by:' "$1"; then
+  echo "ERROR: commit message contains a 'Co-authored-by:' trailer." >&2
+  echo "Remove it before committing (see AGENTS.md commit policy)." >&2
+  exit 1
+fi
+if grep -qiE '^[[:space:]]*(Generated-by|Generated with|Co-authored-by):' "$1"; then
+  echo "ERROR: commit message contains an AI-attribution trailer." >&2
+  exit 1
+fi
+exit 0

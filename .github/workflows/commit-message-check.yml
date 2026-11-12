@@ -1,0 +1,34 @@
+name: Commit message check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject AI-attribution trailers
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            range="${{ github.sha }}"
+          else
+            range="$base..${{ github.sha }}"
+          fi
+          if git log --format='%B' $range | grep -qiE '^[[:space:]]*(Co-authored-by|Generated-by|Generated with):'; then
+            echo "::error::Commit message contains an AI-attribution trailer."
+            git log --format='%H %s' $range | while read sha subj; do
+              if git log -1 --format='%B' "$sha" | grep -qiE '^[[:space:]]*(Co-authored-by|Generated-by|Generated with):'; then
+                echo "::error file=$sha:: $subj"
+              fi
+            done
+            exit 1
+          fi
+          echo "No AI-attribution trailers found."

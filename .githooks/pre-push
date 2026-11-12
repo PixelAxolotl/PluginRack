@@ -1,0 +1,25 @@
+#!/bin/sh
+# Reject any commit being pushed whose message contains a Co-authored-by (or
+# other AI-attribution) trailer. Local defense-in-depth; the server-side
+# ruleset/CI is the authoritative gate.
+remote="$1"
+url="$2"
+zero="0000000000000000000000000000000000000000"
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  if git log --format='%B' "$range" | grep -qiE '^[[:space:]]*(Co-authored-by|Generated-by|Generated with):'; then
+    echo "ERROR: one or more commits being pushed contain an AI-attribution trailer." >&2
+    git log --format='%H %s' "$range" | while read sha subj; do
+      if git log -1 --format='%B' "$sha" | grep -qiE '^[[:space:]]*(Co-authored-by|Generated-by|Generated with):'; then
+        echo "  $sha $subj" >&2
+      fi
+    done
+    exit 1
+  fi
+done
+exit 0
