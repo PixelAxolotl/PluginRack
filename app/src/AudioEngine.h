@@ -344,6 +344,9 @@ public:
         bool lowLatencyOutputs = false;
         bool minimalClockFifo = false;
         bool fullDuplexInput = false;
+        // Opt-in cap for JUCE's WASAPI channel-count probe. Off by default.
+        bool wasapiProbeCapEnabled = false;
+        int wasapiProbeCapChannels = 8;
         // Not a stream option: kept here so it saves and loads with the rest.
         bool autoReloadDevices = false;
         // Scene v6 audio-pipeline hardening, off until the user opts in.
@@ -828,6 +831,8 @@ private:
     // Set by a user-initiated Apply/Reload so that pass re-probes the device
     // mode instead of trusting the cached answer; cleared when the pass ends.
     std::atomic<bool> modeCacheBypass_{false};
+    std::atomic<bool> wasapiProbeCapEnabled_{false};
+    std::atomic<int> wasapiProbeCapChannels_{8};
     std::atomic<bool> lowLatencyOutputs_{true};
     std::atomic<bool> minimalClockFifo_{false};
     std::atomic<bool> fullDuplexInput_{false};

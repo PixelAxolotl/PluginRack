@@ -1390,3 +1390,33 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
     CHECK(contains(settings, "healthSensitivityCombo"));
     CHECK(contains(settings, "getHealthReloadDevices()"));
 }
+
+TEST_CASE("the wasapi probe cap reaches the juce backend", "[device][probe]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto header = readSource("app/src/AudioEngine.h");
+    CHECK(contains(header, "bool wasapiProbeCapEnabled = false"));
+    CHECK(contains(header, "int wasapiProbeCapChannels = 8"));
+    CHECK(contains(header, "wasapiProbeCapEnabled_"));
+    CHECK(contains(header, "wasapiProbeCapChannels_"));
+
+    const auto env = functionBody(engine, "void setWasapiProbeCapEnvironment");
+    CHECK(contains(env, "PLUGINRACK_WASAPI_MAX_PROBE_CHANNELS"));
+    CHECK(contains(env, "pluginrack::wasapiProbeCapValue("));
+    CHECK(contains(env, "_putenv_s("));
+
+    const auto constructor = functionBody(engine, "AudioEngine::AudioEngine");
+    CHECK(contains(constructor, "setWasapiProbeCapEnvironment("));
+
+    const auto apply = functionBody(engine, "void AudioEngine::applySettingsValues");
+    CHECK(contains(apply, "wasapiProbeCapEnabled_.store("));
+    CHECK(contains(apply, "wasapiProbeCapChannels_.store("));
+    CHECK(contains(apply, "setWasapiProbeCapEnvironment("));
+
+    const auto get = functionBody(engine, "AudioEngine::DeviceSettings AudioEngine::getDeviceSettings");
+    CHECK(contains(get, "wasapiProbeCapEnabled_.load()"));
+    CHECK(contains(get, "wasapiProbeCapChannels_.load()"));
+
+    const auto save = functionBody(engine, "pluginrack::Scene AudioEngine::makeScene");
+    CHECK(contains(save, "audio.wasapiProbeCapEnabled = settings.wasapiProbeCapEnabled"));
+    CHECK(contains(save, "audio.wasapiProbeCapChannels = settings.wasapiProbeCapChannels"));
+}

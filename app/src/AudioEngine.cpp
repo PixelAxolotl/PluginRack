@@ -4,6 +4,7 @@
 #include "Theme.h"
 
 #include <pluginrack/AsioDeviceMatch.h>
+#include <pluginrack/AudioDeviceProbe.h>
 #include <pluginrack/ClockFailover.h>
 #include <pluginrack/InputBufferPolicy.h>
 #include <pluginrack/InputFollowPolicy.h>
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -65,6 +67,21 @@ juce::String deviceModeName(const juce::String& deviceType) {
     if (deviceType.containsIgnoreCase("low latency")) return "sharedLowLatency";
     if (deviceType.equalsIgnoreCase("ASIO")) return "asio";
     return "shared";
+}
+
+// The JUCE patch reads this on the opener thread. Writing it on every apply
+// (including 0 when the toggle is off) is what makes turning the cap off take
+// effect on the next open instead of surviving until restart.
+void setWasapiProbeCapEnvironment(bool enabled, int channels) {
+   #if JUCE_WINDOWS
+    const auto value = pluginrack::wasapiProbeCapValue(enabled, channels);
+    const auto name = juce::String("PLUGINRACK_WASAPI_MAX_PROBE_CHANNELS");
+    _putenv_s(name.toRawUTF8(), juce::String(value).toRawUTF8());
+    juce::Logger::writeToLog("device: wasapi probe cap " + juce::String(value)
+                             + (value == 0 ? " (stock)" : " channels"));
+   #else
+    juce::ignoreUnused(enabled, channels);
+   #endif
 }
 
 // Effects whose chain entry is missing run here. That covers scenes saved
@@ -199,6 +216,8 @@ private:
 };
 
 AudioEngine::AudioEngine() {
+    // Never inherit a cap from the launching shell: only Settings may set one.
+    setWasapiProbeCapEnvironment(false, 8);
     for (auto& slot : renderOutputs_) {
         slot.store(nullptr, std::memory_order_relaxed);
     }
@@ -2067,6 +2086,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
         audio.nonFiniteScrub = settings.nonFiniteScrub;
         audio.healthReload = settings.healthReload;
         audio.ladderRecovery = settings.ladderRecovery;
+        audio.wasapiProbeCapEnabled = settings.wasapiProbeCapEnabled;
+        audio.wasapiProbeCapChannels = settings.wasapiProbeCapChannels;
         audio.healthYellowUnderrunsPerMinute = settings.healthYellowUnderrunsPerMinute;
         audio.healthRedUnderrunsPerMinute = settings.healthRedUnderrunsPerMinute;
         audio.healthPinnedToEdgeMs = settings.healthPinnedToEdgeMs;
@@ -2116,6 +2137,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         settings.nonFiniteScrub = scene.audio->nonFiniteScrub;
         settings.healthReload = scene.audio->healthReload;
         settings.ladderRecovery = scene.audio->ladderRecovery;
+        settings.wasapiProbeCapEnabled = scene.audio->wasapiProbeCapEnabled;
+        settings.wasapiProbeCapChannels = scene.audio->wasapiProbeCapChannels;
         settings.healthYellowUnderrunsPerMinute =
             scene.audio->healthYellowUnderrunsPerMinute;
         settings.healthRedUnderrunsPerMinute =
@@ -3932,6 +3955,8 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     settings.lowLatencyOutputs = lowLatencyOutputs_.load();
     settings.minimalClockFifo = minimalClockFifo_.load();
     settings.fullDuplexInput = fullDuplexInput_.load();
+    settings.wasapiProbeCapEnabled = wasapiProbeCapEnabled_.load();
+    settings.wasapiProbeCapChannels = wasapiProbeCapChannels_.load();
     settings.autoReloadDevices = autoReloadDevices_.load();
     settings.slicedRender = slicedRender_.load();
     settings.nonFiniteScrub = nonFiniteScrub_.load();
@@ -4085,6 +4110,10 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
     lowLatencyOutputs_.store(settings.latencyTuningOptIn && settings.lowLatencyOutputs);
     minimalClockFifo_.store(settings.latencyTuningOptIn && settings.minimalClockFifo);
     fullDuplexInput_.store(settings.latencyTuningOptIn && settings.fullDuplexInput);
+    wasapiProbeCapEnabled_.store(settings.wasapiProbeCapEnabled);
+    wasapiProbeCapChannels_.store(settings.wasapiProbeCapChannels);
+    setWasapiProbeCapEnvironment(settings.wasapiProbeCapEnabled,
+                                 settings.wasapiProbeCapChannels);
     autoReloadDevices_.store(settings.autoReloadDevices);
     slicedRender_.store(settings.slicedRender);
     nonFiniteScrub_.store(settings.nonFiniteScrub);
