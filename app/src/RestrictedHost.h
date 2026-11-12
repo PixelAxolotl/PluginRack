@@ -15,6 +15,11 @@
 // events that wake each side when a block is published or acked. Full OS-level
 // sandboxing (AppContainer token) is still TODO; the host currently runs
 // with the user's token, so only load trusted plugins.
+//
+// PluginHost no longer launches this for DSP: the instance the rack shows an
+// editor for has to be the instance that renders (see PluginHost::processBlock).
+// The command-line host mode and its audio channel stay in place for a future
+// bridge that can also move the editor into this process.
 class RestrictedHost {
 public:
     RestrictedHost();

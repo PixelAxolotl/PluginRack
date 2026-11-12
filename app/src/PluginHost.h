@@ -66,8 +66,10 @@ public:
                                      int bufferSize, const juce::String& stateBase64 = {},
                                      int pluginUniqueId = 0);
     // Message thread: takes over the instance and prepares it to play.
-    // UniqueId and state are forwarded to the restricted host so saved
-    // settings and multi-class bundles resolve there.
+    // The instance renders in this process, so its editor and parameters are
+    // the ones the rack shows and edits. UniqueId and state are accepted for
+    // the callers that already resolved them; loadFromFile selected the class
+    // by id and instantiate applied the state before adoption.
     void adopt(const LoadedPlugin& loaded, const juce::String& stateBase64 = {},
                int pluginUniqueId = 0);
 
@@ -82,6 +84,10 @@ public:
     juce::String getStateAsBase64() const;
     void prepareToPlay(double sampleRate, int samplesPerBlock);
     void releaseResources();
+    // Renders the instance that owns the editor and the parameters the rack
+    // exposes. A helper process would receive the audio instead, leaving the
+    // visible plugin with dead meters and every edit inaudible, so this class
+    // never hands a block to another process.
     void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed = false);
 
     juce::String getPluginPath() const;
@@ -90,9 +96,6 @@ public:
     int getBufferSize() const;
 
     bool hasPlugin() const;
-    // True when a restricted host was configured for this plugin but has
-    // since died: the insert renders dry and its UI is not worth hosting.
-    bool hostLost() const;
     // The hosted instance (message thread only, may be null). The caller must
     // not keep it across insert removal - the rack's generic parameter panel
     // re-reads it on every refresh for exactly that reason.
@@ -124,26 +127,6 @@ private:
     std::atomic<int> cachedLatencySamples_{0};
 
     juce::DocumentWindow* editorWindow = nullptr;
-
-    // PR-01: audio renders in a restricted host process when it starts.
-    // If the host cannot start, processBlock falls back to the in-process
-    // instance so the slot still sounds (degraded sandbox, not silence).
-    std::unique_ptr<class RestrictedHost> host;
-    std::uint64_t hostSequence = 0;
-    bool hostReady = false;
-    // Set once when a configured host is found dead, so the dry-block path
-    // reports it instead of silently muting the insert.
-    bool hostLossLogged = false;
-    // Seamless-add scratch: the live output block is never handed to the
-    // host IPC directly. Submit copies the range here; fetch writes the
-    // host's answer here; only on a clean ack do we copy it back into the
-    // live buffer. A fallback render then finds the live buffer untouched.
-    juce::AudioBuffer<float> hostScratch;
-    int hostScratchCapacity = 0;
-
-    void startHostLocked(const juce::File& file, int uniqueId, const juce::String& stateBase64,
-                         juce::String& error);
-    void stopHostLocked();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHost)
 };
