@@ -25,6 +25,8 @@ public:
         flagOversized = 1u << 1,
         flagInputUnderrun = 1u << 2,
         flagOutputUnderrun = 1u << 3,
+        flagPartialRender = 1u << 4,   // deadline spent; the tail was silenced
+        flagNonFiniteScrub = 1u << 5,  // NaN/Inf was replaced with silence
     };
 
     struct Sample {
@@ -46,6 +48,8 @@ public:
         std::uint64_t oversizedBlocks = 0;
         std::uint64_t inputUnderruns = 0;
         std::uint64_t outputUnderruns = 0;
+        std::uint64_t partialRenders = 0;
+        std::uint64_t nonFiniteScrubs = 0;
         std::array<std::uint32_t, kFillBuckets> outputFillHistogram{};
         int outputFillBucketLowFrames = 0;
         int outputFillBucketWidthFrames = 0;
@@ -92,6 +96,8 @@ public:
             if (sample.flags & flagOversized) ++summary.oversizedBlocks;
             if (sample.flags & flagInputUnderrun) ++summary.inputUnderruns;
             if (sample.flags & flagOutputUnderrun) ++summary.outputUnderruns;
+            if (sample.flags & flagPartialRender) ++summary.partialRenders;
+            if (sample.flags & flagNonFiniteScrub) ++summary.nonFiniteScrubs;
 
             if (!haveFill) {
                 minFill = maxFill = sample.outputFillFrames;
@@ -164,6 +170,136 @@ private:
     std::atomic<std::uint64_t> nextSequence_{0};
     std::atomic<std::uint64_t> publishedSequence_{0};
     std::atomic<bool> scratchInUse_{false};
+};
+
+// Health classification for a single stream, derived from the telemetry the
+// render/capture paths already publish. Read-only on the audio thread: the
+// tracker only accumulates counters, and the controller that acts on the
+// result lives on the message thread.
+struct StreamWindow {
+    bool error = false;
+    double underrunsPerMinute = 0.0;
+    double fillPinnedToEdgeMs = 0.0;
+};
+
+enum class StreamHealth { Green, Yellow, Red };
+
+// Tunable boundaries for classifyHealth(). The defaults are the proposed
+// values; a scene may carry its own copy so a session comes back with the
+// sensitivity it was left with.
+struct StreamHealthThresholds {
+    double yellowUnderrunsPerMinute = 1.0;
+    double redUnderrunsPerMinute = 10.0;
+    double pinnedToEdgeMs = 5000.0;
+};
+
+inline StreamHealth classifyHealth(
+    const StreamWindow& window,
+    const StreamHealthThresholds& thresholds = {}) noexcept {
+    if (window.error) return StreamHealth::Red;
+    if (window.underrunsPerMinute >= thresholds.redUnderrunsPerMinute) {
+        return StreamHealth::Red;
+    }
+    if (window.underrunsPerMinute >= thresholds.yellowUnderrunsPerMinute) {
+        return StreamHealth::Yellow;
+    }
+    if (window.fillPinnedToEdgeMs > thresholds.pinnedToEdgeMs) {
+        return StreamHealth::Yellow;
+    }
+    return StreamHealth::Green;
+}
+
+// Bounded rolling window for one stream. Underrun timestamps are capped so a
+// pathological stream cannot grow the tracker, and events older than the
+// window are pruned before every read. The pinned-to-edge duration is
+// accumulated while the flag is set and capped to the window length.
+class StreamHealthTracker {
+public:
+    static constexpr int kMaxUnderrunEvents = 128;
+
+    void configure(double windowMs = 60000.0,
+                   const StreamHealthThresholds& thresholds = {}) noexcept {
+        windowMs_ = windowMs > 1000.0 ? windowMs : 1000.0;
+        thresholds_ = thresholds;
+        reset();
+    }
+
+    StreamHealthThresholds thresholds() const noexcept { return thresholds_; }
+
+    void noteError() noexcept { error_ = true; }
+
+    // Called once per block from the audio thread. Never allocates.
+    void onBlock(double nowMs, bool underrun, bool fillPinnedToEdge) noexcept {
+        if (windowStartMs_ < 0.0) windowStartMs_ = nowMs;
+        if (nowMs - windowStartMs_ > windowMs_) {
+            // Roll the window; only the new block survives the reset.
+            windowStartMs_ = nowMs;
+            underrunCount_ = 0;
+            pinnedMs_ = 0.0;
+        }
+        if (lastBlockMs_ >= 0.0 && lastPinned_ && nowMs > lastBlockMs_) {
+            pinnedMs_ += nowMs - lastBlockMs_;
+        }
+        if (underrun && underrunCount_ < kMaxUnderrunEvents) {
+            underrunTimes_[static_cast<std::size_t>(underrunCount_)] = nowMs;
+            ++underrunCount_;
+        }
+        lastBlockMs_ = nowMs;
+        lastPinned_ = fillPinnedToEdge;
+    }
+
+    StreamWindow window(double nowMs) const noexcept {
+        StreamWindow result;
+        result.error = error_;
+        if (windowStartMs_ < 0.0) return result;
+        prune(nowMs);
+        const double minutes = windowMs_ / 60000.0;
+        result.underrunsPerMinute =
+            minutes > 0.0 ? static_cast<double>(underrunCount_) / minutes : 0.0;
+        result.fillPinnedToEdgeMs = pinnedMs_ > windowMs_ ? windowMs_ : pinnedMs_;
+        return result;
+    }
+
+    StreamHealth health(double nowMs) const noexcept {
+        return classifyHealth(window(nowMs), thresholds_);
+    }
+
+    int underrunsInWindow() const noexcept { return underrunCount_; }
+
+    void reset() noexcept {
+        error_ = false;
+        underrunCount_ = 0;
+        pinnedMs_ = 0.0;
+        lastBlockMs_ = -1.0;
+        lastPinned_ = false;
+        windowStartMs_ = -1.0;
+    }
+
+private:
+    // Reads prune in place so the rolling window never grows; the mutable
+    // state is what lets a const health snapshot do that pruning.
+    void prune(double nowMs) const noexcept {
+        const double cutoff = nowMs - windowMs_;
+        int kept = 0;
+        for (int i = 0; i < underrunCount_; ++i) {
+            if (underrunTimes_[static_cast<std::size_t>(i)] >= cutoff) {
+                underrunTimes_[static_cast<std::size_t>(kept)] =
+                    underrunTimes_[static_cast<std::size_t>(i)];
+                ++kept;
+            }
+        }
+        underrunCount_ = kept;
+    }
+
+    double windowMs_ = 60000.0;
+    StreamHealthThresholds thresholds_{};
+    mutable double windowStartMs_ = -1.0;
+    mutable std::array<double, kMaxUnderrunEvents> underrunTimes_{};
+    mutable int underrunCount_ = 0;
+    bool error_ = false;
+    mutable double pinnedMs_ = 0.0;
+    mutable double lastBlockMs_ = -1.0;
+    mutable bool lastPinned_ = false;
 };
 
 } // namespace pluginrack

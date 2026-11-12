@@ -27,6 +27,9 @@ public:
     MixerEngine();
 
     void setPluginFactory(IPluginFactory* factory) noexcept;
+    // Scene-v6 opt-in for non-finite scrubbing. Must be set before prepare()
+    // so the owned InsertChains inherit it; render() reads the same flag.
+    void setScrubEnabled(bool enabled) noexcept { scrubEnabled_ = enabled; }
     // Returns false and fills *error when the scene is invalid or has no outputs.
     bool prepare(const Scene& scene, int maxBlockFrames, std::string* error);
     // Availability overload: stopped channels render silence and disabled
@@ -38,6 +41,9 @@ public:
     int channelCount() const noexcept;
     int outputCount() const noexcept;
     std::vector<std::uint32_t> failedPluginSlots() const;
+    // Non-finite samples replaced with silence inside the render path,
+    // including those scrubbed by the per-strip insert chains.
+    std::uint64_t scrubbedSamples() const;
     const MeterBank& meters() const noexcept;
     // EQ mutation API, indexed by scene-order position; out-of-range indexes
     // are ignored. setChannelEq/setOutputEq swap bands (bypass state kept);
@@ -115,6 +121,8 @@ private:
     std::vector<std::uint32_t> channelIds_;
     std::vector<std::uint32_t> outputIds_;
     MeterBank meters_;
+    std::uint64_t scrubbedSamples_ = 0;
+    bool scrubEnabled_ = false;
     double sampleRate_ = 48000.0;
     std::size_t outputCount_ = 0;
     int maxBlockFrames_ = 0;

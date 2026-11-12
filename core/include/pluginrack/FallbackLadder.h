@@ -31,9 +31,20 @@ public:
         int eventsToStep = 3;
         double windowMs = 5000.0;
         double cooldownMs = 10000.0;
+        // Recovery is deliberately slower than degradation: one rung comes
+        // back after a long clean window, and never more often than the
+        // recovery cooldown. The anti-oscillation guarantee is kept; only the
+        // "stuck forever" case is un-stuck.
+        double cleanMs = 600000.0;         // 10 minutes without an event
+        double recoveryCooldownMs = 1800000.0; // 30 minutes between recoveries
     };
 
     void configure(const Config& config) noexcept { config_ = config; }
+
+    // A user pin turns the ladder into a one-way ratchet again. Recovery is
+    // fully disabled, exactly like the historical terminal ladder.
+    void setPinned(bool pinned) noexcept { pinned_ = pinned; }
+    bool isPinned() const noexcept { return pinned_; }
 
     Step onEvent(double nowMs) noexcept {
         if (isTerminal()) return Step::None;
@@ -80,6 +91,28 @@ public:
 
     void onClean(double /*nowMs*/) noexcept { eventCount_ = 0; }
 
+    // One careful step back up after a long clean window. Returns the step
+    // being undone (so the caller can toast and log it), or None when the
+    // ladder is at the top, pinned, still inside the clean window, or inside
+    // the recovery cooldown. Exactly one rung per call, by construction.
+    Step maybeRecover(double nowMs) noexcept {
+        if (level_ <= 0 || pinned_ || pending_) return Step::None;
+        if (!clockStarted_ || nowMs < lastEventMs_) return Step::None;
+        if (nowMs - lastEventMs_ < config_.cleanMs) return Step::None;
+        if (hasRecovered_ && nowMs - lastRecoveryMs_ < config_.recoveryCooldownMs) {
+            return Step::None;
+        }
+
+        const int recoveredFrom = level_;
+        --level_;
+        lastRecoveryMs_ = nowMs;
+        hasRecovered_ = true;
+        eventCount_ = 0;
+        pending_ = false;
+        pendingStep_ = Step::None;
+        return stepForLevel(recoveredFrom);
+    }
+
     void reset() noexcept {
         level_ = 0;
         eventCount_ = 0;
@@ -89,6 +122,9 @@ public:
         lastAppliedMs_ = 0.0;
         lastEventMs_ = 0.0;
         clockStarted_ = false;
+        lastRecoveryMs_ = 0.0;
+        hasRecovered_ = false;
+        pinned_ = false;
     }
 
     int level() const noexcept { return level_; }
@@ -144,6 +180,9 @@ private:
     double lastAppliedMs_ = 0.0;
     double lastEventMs_ = 0.0;
     bool clockStarted_ = false;
+    double lastRecoveryMs_ = 0.0;
+    bool hasRecovered_ = false;
+    bool pinned_ = false;
 };
 
 } // namespace pluginrack
