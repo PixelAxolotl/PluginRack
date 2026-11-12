@@ -2666,8 +2666,10 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     }
 
     std::shared_ptr<InputCapture> retired;
+    int settledBlockFrames = 0;
     {
         const juce::ScopedLock sl(stateLock);
+        settledBlockFrames = maxBlockFrames_;
         const auto old = inputCaptures_.find(deviceName);
         if (old != inputCaptures_.end()) retired = old->second.capture;
         for (auto& c : channels) {
@@ -2684,6 +2686,10 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         pruneUnusedCaptures();
     }
     capture->setHealthThresholds(getHealthThresholds());
+    // The clock may have negotiated while this input was probing. Settle the
+    // read delay on the real block here as well, so a capture that commits
+    // after prepareToPlayImpl's sweep cannot keep its provisional delay.
+    capture->applyRenderBlockFrames(settledBlockFrames);
     recordDeviceCapabilities(deviceName, true, capture->availableInputCount(), 0,
                              capture->getSampleRate(), capture->getDeviceBufferSize(),
                              probeMs, deviceModeName(capture->getActiveDeviceType()));
@@ -2920,9 +2926,13 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
                         && isClock && !sharesClockInput;
     // A warm start does not re-probe a mode this endpoint already refused: if
     // its last successful open was shared, exclusive is not attempted again.
+    // Only an output-side record is evidence here: an input record says the
+    // capture opened shared, which says nothing about the output's exclusive
+    // support (recordDeviceCapabilities writes outputChannels = 0 for inputs).
     // Any explicit Apply/Reload clears modeCacheBypass_, so the user's toggle
     // still forces a fresh probe instead of being pinned to the old answer.
     const bool cachedSharedMode = cachedCap.has_value()
+        && cachedCap->outputChannels > 0
         && (cachedCap->mode == "shared" || cachedCap->mode == "sharedLowLatency");
     if (preferExclusive && cachedSharedMode
         && !modeCacheBypass_.load(std::memory_order_relaxed)) {
@@ -2995,7 +3005,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     }
     const int probeMs = static_cast<int>(std::lround(
         juce::Time::getMillisecondCounterHiRes() - openStartMs));
-    juce::Logger::writeToLog("device: open endpoint=\"" + openName
+    juce::Logger::writeToLog("device: open endpoint=\"" + deviceName
         + "\" role=" + juce::String(isClock ? "clock" : "output")
         + " cached=" + juce::String(cachedCap.has_value() ? 1 : 0)
         + " probe_ms=" + juce::String(probeMs)
@@ -4165,6 +4175,9 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
     // The stream that produced the last measurement is being replaced.
     resetLatencyMeasurement();
     startDeviceJob([this, devices](const std::function<bool()>& shouldExit) {
+        // A single-device Reload is an explicit request too: re-probe the mode
+        // instead of trusting the cached answer, like Reload All does.
+        modeCacheBypass_.store(true, std::memory_order_relaxed);
         deviceOpenTotal_.store((int) devices.size());
         deviceOpenProgress_.store(0);
         juce::StringArray failures;
@@ -4186,6 +4199,7 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
         }
 
         clearDeviceOpens();
+        modeCacheBypass_.store(false, std::memory_order_relaxed);
         if (failures.isEmpty())
             juce::Logger::writeToLog("audio: reloaded " + juce::String((int) devices.size())
                                      + " device(s)");
@@ -4259,14 +4273,21 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     if (!outputsWanted.empty()) {
         const auto& clockName = outputsWanted.front().name;
         const auto asioNames = DeviceEnumeration::asioDevices();
-        // "System Default" resolves to the first type that carries any device,
-        // which is ASIO when a driver is installed: unknown means serialize.
-        const bool clockIsAsio = asioNames.contains(clockName)
-            || (!asioNames.isEmpty() && clockName == "System Default");
+        // Any ASIO output is single-client, so an input probe can block it —
+        // not only the clock. "System Default" resolves to the first type that
+        // carries a device, which is ASIO when a driver is installed: unknown
+        // means serialize.
+        const bool anyAsioOutput = std::any_of(
+            outputsWanted.begin(), outputsWanted.end(),
+            [&asioNames](const Request& request) {
+                return asioNames.contains(request.name);
+            });
+        const bool defaultMayBeAsio =
+            !asioNames.isEmpty() && clockName == "System Default";
         const bool inputSharesClock = std::any_of(
             inputsWanted.begin(), inputsWanted.end(),
             [&clockName](const Request& request) { return request.name == clockName; });
-        serializeForClock = clockIsAsio || inputSharesClock;
+        serializeForClock = anyAsioOutput || defaultMayBeAsio || inputSharesClock;
     }
 
     // Device probes are the expensive part of startup. Keep each probe on its
@@ -4325,11 +4346,10 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     outputHelpers.reserve(outputsWanted.size());
     inputHelpers.reserve(inputsWanted.size());
 
-    // Open the clock first, then the inputs: joining outputs before launching
-    // inputs is what makes Apply race-free on a single-client ASIO driver.
-    // (Previously outputs and inputs launched in parallel; whichever thread
-    // grabbed the endpoint first won and the other reported "No such device"
-    // while Force ASIO — which opens the clock synchronously first — worked.)
+    // Outputs start first. On WASAPI the inputs join them immediately; only a
+    // single-client ASIO output, or an input capturing from the clock endpoint,
+    // waits for the outputs to finish — the old always-serial order kept for
+    // that single-client race.
     if (!shouldExit()) {
         launchOutputs(openRate, outputResults, outputHelpers);
         if (!serializeForClock) {
@@ -4373,18 +4393,43 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         // this worker thread's throwaway COM apartment — retrying forever makes
         // no difference. Force ASIO succeeds because it opens from the message
         // thread, so a clock that is still refused is reopened there, which is
-        // the same call on the same thread the user's workaround uses.
-        if (outputResults.front().isNotEmpty()
+        // the same call on the same thread the user's workaround uses. The wait
+        // is interruptible: quitting must not leave the message thread blocked
+        // in stopDeviceOpenThread() while this worker waits for it to dispatch
+        // the reopen.
+        if (!shouldExit() && outputResults.front().isNotEmpty()
             && outputResults.front().indexOf("No such device") >= 0
             && !juce::MessageManager::existsAndIsCurrentThread()) {
-            juce::MessageManager::callSync([this, &outputResults, &outputsWanted, openRate] {
-                outputResults.front() = setOutputDeviceImpl(outputsWanted.front().id,
-                                                            outputsWanted.front().name, openRate);
+            struct ClockReopen {
+                std::uint32_t id = 0;
+                juce::String name;
+                double rate = 0.0;
+                juce::String result;
+                juce::WaitableEvent done{false};
+            };
+            auto state = std::make_shared<ClockReopen>();
+            state->id = outputsWanted.front().id;
+            state->name = outputsWanted.front().name;
+            state->rate = openRate;
+            auto alive = prepareAliveToken_;
+            juce::MessageManager::callAsync([this, alive, state] {
+                if (!alive->load(std::memory_order_acquire)) {
+                    state->done.signal();
+                    return;
+                }
+                state->result = setOutputDeviceImpl(state->id, state->name, state->rate);
+                state->done.signal();
             });
-            juce::Logger::writeToLog("audio: clock reopened on the message thread: "
-                                     + (outputResults.front().isEmpty()
-                                            ? juce::String("ok")
-                                            : outputResults.front()));
+            while (!state->done.wait(100)) {
+                if (shouldExit()) break;
+            }
+            if (!shouldExit()) {
+                outputResults.front() = state->result;
+                juce::Logger::writeToLog("audio: clock reopened on the message thread: "
+                                         + (outputResults.front().isEmpty()
+                                                ? juce::String("ok")
+                                                : outputResults.front()));
+            }
         }
         if (outputResults.front().isNotEmpty()) outputResults.front() = firstError;
     }

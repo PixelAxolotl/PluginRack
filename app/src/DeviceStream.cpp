@@ -310,15 +310,16 @@ juce::StringArray outputs() { return enumerate(false); }
 juce::StringArray asioDevices() {
 #if JUCE_ASIO
     // Scanning ASIO probes the driver, so cache it briefly: "Force ASIO" asks
-    // on every UI timer tick.
+    // on every UI timer tick. The lock is held across the scan on purpose:
+    // two ASIOInit calls on the same driver can overlap and fail, and an empty
+    // result reads as "no ASIO" to the device opener (which must serialize an
+    // ASIO clock). The message-thread timer and the opener worker share this.
     static juce::CriticalSection lock;
     static juce::StringArray cached;
     static juce::int64 cachedAt = 0;
     const auto now = juce::Time::currentTimeMillis();
-    {
-        const juce::ScopedLock sl(lock);
-        if (cachedAt != 0 && (now - cachedAt) < 5000) return cached;
-    }
+    const juce::ScopedLock sl(lock);
+    if (cachedAt != 0 && (now - cachedAt) < 5000) return cached;
     juce::StringArray names;
     if (auto type = std::unique_ptr<juce::AudioIODeviceType>(
             juce::AudioIODeviceType::createAudioIODeviceType_ASIO())) {
@@ -327,7 +328,12 @@ juce::StringArray asioDevices() {
         if (names.isEmpty()) names = type->getDeviceNames(true);
         names.sort(true);
     }
-    const juce::ScopedLock sl(lock);
+    // A transient scan failure must not erase a known-good list: the opener
+    // serializes ASIO clocks, so a wrong "no ASIO" is the costly direction.
+    if (names.isEmpty() && !cached.isEmpty()) {
+        cachedAt = now;
+        return cached;
+    }
     cached = names;
     cachedAt = now;
     return names;

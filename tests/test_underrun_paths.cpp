@@ -446,7 +446,7 @@ TEST_CASE("applying devices releases a reused ASIO client before reopening", "[l
     // after the previous stream closes (JUCE only releases it on destruction).
     // The clock is therefore retried, bounded, before any input launches — the
     // recovery Force ASIO performs by hand.
-    const auto retryIdx = pass.find("retryClockOpen");
+    const auto retryIdx = pass.find("for (int attempt = 2;");
     const auto inputIdx = pass.find("if (serializeForClock && !shouldExit())");
     REQUIRE(retryIdx != std::string::npos);
     REQUIRE(inputIdx != std::string::npos);
@@ -460,9 +460,14 @@ TEST_CASE("applying devices releases a reused ASIO client before reopening", "[l
     CHECK(contains(engine, "constexpr int kClockRetryDelayMs = 150"));
     // A single-client ASIO driver also refuses forever while the open runs on a
     // throwaway worker apartment. Force ASIO works because it opens on the
-    // message thread, so a still-refused clock is reopened there.
+    // message thread, so a still-refused clock is reopened there — and that
+    // wait must be interruptible so quitting cannot deadlock the opener.
     CHECK(contains(pass, "existsAndIsCurrentThread"));
-    CHECK(contains(pass, "MessageManager::callSync"));
+    CHECK(contains(pass, "MessageManager::callAsync"));
+    CHECK_FALSE(contains(pass, "MessageManager::callSync"));
+    CHECK(contains(pass, "state->done.wait(100)"));
+    CHECK(contains(pass, "if (shouldExit()) break;"));
+    CHECK(contains(pass, "prepareAliveToken_"));
 }
 
 TEST_CASE("input and output buffer sizes are independently configurable",
@@ -1278,18 +1283,62 @@ TEST_CASE("WASAPI opens inputs in parallel while an ASIO clock stays serialized"
           "[latency][devices]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto pass = functionBody(engine, "juce::String AudioEngine::openAllDevicesPass");
-    // The gate: an ASIO clock, or an input capturing from the clock endpoint,
-    // still joins the outputs before any input opens.
+    // The gate: any ASIO output, a default that may resolve to ASIO, or an
+    // input capturing from the clock endpoint still joins the outputs before
+    // any input opens.
     CHECK(contains(pass, "bool serializeForClock = false;"));
-    CHECK(contains(pass, "asioNames.contains(clockName)"));
+    CHECK(contains(pass, "const bool anyAsioOutput = std::any_of("));
+    CHECK(contains(pass, "asioNames.contains(request.name)"));
+    CHECK(contains(pass, "const bool defaultMayBeAsio ="));
     CHECK(contains(pass, "clockName == \"System Default\""));
-    CHECK(contains(pass, "serializeForClock = clockIsAsio || inputSharesClock"));
-    CHECK(contains(pass, "if (!serializeForClock) {"));
-    CHECK(contains(pass, "if (serializeForClock && !shouldExit()) {"));
+    CHECK(contains(pass, "serializeForClock = anyAsioOutput || defaultMayBeAsio || inputSharesClock"));
+    // The parallel launch is inside the gate and before the clock join.
+    const auto parallelGate = pass.find("if (!serializeForClock) {");
+    const auto parallelLaunch =
+        pass.find("launchInputs(openRate, forceInputs, inputResults, inputHelpers)");
+    const auto clockJoin = pass.find("for (auto& helper : outputHelpers) helper.join()");
+    REQUIRE(parallelGate != std::string::npos);
+    REQUIRE(parallelLaunch != std::string::npos);
+    REQUIRE(clockJoin != std::string::npos);
+    CHECK(parallelGate < parallelLaunch);
+    CHECK(parallelLaunch < clockJoin);
     // Two call sites: the parallel branch and the serialized branch.
     CHECK(countOccurrences(pass,
                            "launchInputs(openRate, forceInputs, inputResults, inputHelpers)")
           == 2);
+    const auto serialGate = pass.find("if (serializeForClock && !shouldExit()) {");
+    const auto serialLaunch = pass.find(
+        "launchInputs(openRate, forceInputs, inputResults, inputHelpers)",
+        parallelLaunch + 1);
+    REQUIRE(serialGate != std::string::npos);
+    REQUIRE(serialLaunch != std::string::npos);
+    CHECK(serialGate < serialLaunch);
+}
+
+TEST_CASE("the cached mode is bypassed only for an explicit device apply",
+          "[device][cache]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto apply = functionBody(engine, "void AudioEngine::applyDeviceSettings");
+    CHECK(contains(apply, "modeCacheBypass_.store(true"));
+    const auto reload = functionBody(engine, "void AudioEngine::reloadDevicesAsync");
+    CHECK(contains(reload, "modeCacheBypass_.store(true"));
+    CHECK(contains(reload, "modeCacheBypass_.store(false"));
+    const auto pass = functionBody(engine, "void AudioEngine::openStripsDevicesNow");
+    CHECK(contains(pass, "modeCacheBypass_.store(false"));
+}
+
+TEST_CASE("ASIO enumeration is serialized and never erases a known list",
+          "[device][latency]") {
+    const auto source = readSource("app/src/DeviceStream.cpp");
+    const auto body = functionBody(source, "juce::StringArray asioDevices");
+    const auto lock = body.find("const juce::ScopedLock sl(lock);");
+    const auto scan = body.find("scanForDevices");
+    REQUIRE(lock != std::string::npos);
+    REQUIRE(scan != std::string::npos);
+    // The lock must cover the scan: two ASIOInit calls can overlap and fail,
+    // and an empty list would un-serialize an ASIO clock in the opener.
+    CHECK(lock < scan);
+    CHECK(contains(body, "if (names.isEmpty() && !cached.isEmpty())"));
 }
 
 TEST_CASE("a cached shared mode skips the exclusive probe", "[device][cache]") {
@@ -1297,6 +1346,8 @@ TEST_CASE("a cached shared mode skips the exclusive probe", "[device][cache]") {
     const auto output = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
     CHECK(contains(output, "cachedSharedMode"));
     CHECK(contains(output, "preferExclusive = false;"));
+    // Only an output-side record may suppress the output's exclusive probe.
+    CHECK(contains(output, "cachedCap->outputChannels > 0"));
 
     // The cache records the mode the opener actually selected, not the
     // direction: "input"/"output" made the field useless to the opener.
