@@ -4219,6 +4219,21 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     if (!outputsWanted.empty())
         releaseDeviceInputsForClock(outputsWanted.front().name);
 
+    // Only a single-client ASIO clock, or an input capturing from the clock
+    // endpoint, needs the outputs fully open before any input starts. On WASAPI
+    // the two groups are independent, so probe them together and let the
+    // slowest endpoint — not their sum — set the startup time.
+    bool serializeForClock = false;
+    if (!outputsWanted.empty()) {
+        const auto& clockName = outputsWanted.front().name;
+        const bool clockIsAsio =
+            DeviceEnumeration::asioDevices().contains(clockName);
+        const bool inputSharesClock = std::any_of(
+            inputsWanted.begin(), inputsWanted.end(),
+            [&clockName](const Request& request) { return request.name == clockName; });
+        serializeForClock = clockIsAsio || inputSharesClock;
+    }
+
     // Device probes are the expensive part of startup. Keep each probe on its
     // own COM thread and let output and input probes overlap. Every stream is
     // attempted exactly once: a refusal is reported against its strip and the
@@ -4282,6 +4297,11 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     // while Force ASIO — which opens the clock synchronously first — worked.)
     if (!shouldExit()) {
         launchOutputs(openRate, outputResults, outputHelpers);
+        if (!serializeForClock) {
+            // WASAPI: inputs do not depend on the clock open, so they probe
+            // while the outputs are still negotiating.
+            launchInputs(openRate, forceInputs, inputResults, inputHelpers);
+        }
     }
     for (auto& helper : outputHelpers) helper.join();
 
@@ -4334,7 +4354,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         if (outputResults.front().isNotEmpty()) outputResults.front() = firstError;
     }
 
-    if (!shouldExit()) {
+    if (serializeForClock && !shouldExit()) {
         launchInputs(openRate, forceInputs, inputResults, inputHelpers);
     }
     for (auto& helper : inputHelpers) helper.join();

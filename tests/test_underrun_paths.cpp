@@ -423,11 +423,14 @@ TEST_CASE("applying devices releases a reused ASIO client before reopening", "[l
     REQUIRE(out != std::string::npos);
     REQUIRE(in != std::string::npos);
     CHECK(out < in);
-    // Not just launched in order: the clock's callback must be live before any
-    // input opens, or the input thread can still win the single-client race.
+    // Not just launched in order: on the serialized path the clock's callback
+    // must be live before any input opens, or the input thread can still win
+    // the single-client race.
+    const auto serialIn = pass.find("if (serializeForClock && !shouldExit())");
     const auto clockJoin = pass.find("for (auto& helper : outputHelpers) helper.join()");
+    REQUIRE(serialIn != std::string::npos);
     REQUIRE(clockJoin != std::string::npos);
-    CHECK(clockJoin < in);
+    CHECK(clockJoin < serialIn);
     // Inputs on the clock device must be released too, not left holding the
     // endpoint while the clock fronts the join.
     CHECK(contains(pass, "releaseDeviceInputsForClock"));
@@ -444,7 +447,7 @@ TEST_CASE("applying devices releases a reused ASIO client before reopening", "[l
     // The clock is therefore retried, bounded, before any input launches — the
     // recovery Force ASIO performs by hand.
     const auto retryIdx = pass.find("retryClockOpen");
-    const auto inputIdx = pass.find("launchInputs(");
+    const auto inputIdx = pass.find("if (serializeForClock && !shouldExit())");
     REQUIRE(retryIdx != std::string::npos);
     REQUIRE(inputIdx != std::string::npos);
     CHECK(retryIdx < inputIdx);
@@ -1269,6 +1272,23 @@ TEST_CASE("the clock retry ladder is one short retry", "[device][latency]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     CHECK(contains(engine, "constexpr int kClockOpenAttempts = 2;"));
     CHECK(contains(engine, "constexpr int kClockRetryDelayMs = 150;"));
+}
+
+TEST_CASE("WASAPI opens inputs in parallel while an ASIO clock stays serialized",
+          "[latency][devices]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto pass = functionBody(engine, "juce::String AudioEngine::openAllDevicesPass");
+    // The gate: an ASIO clock, or an input capturing from the clock endpoint,
+    // still joins the outputs before any input opens.
+    CHECK(contains(pass, "bool serializeForClock = false;"));
+    CHECK(contains(pass, "DeviceEnumeration::asioDevices().contains("));
+    CHECK(contains(pass, "serializeForClock = clockIsAsio || inputSharesClock"));
+    CHECK(contains(pass, "if (!serializeForClock) {"));
+    CHECK(contains(pass, "if (serializeForClock && !shouldExit()) {"));
+    // Two call sites: the parallel branch and the serialized branch.
+    CHECK(countOccurrences(pass,
+                           "launchInputs(openRate, forceInputs, inputResults, inputHelpers)")
+          == 2);
 }
 
 TEST_CASE("scene v6 hardening switches are opt-in and persisted",
