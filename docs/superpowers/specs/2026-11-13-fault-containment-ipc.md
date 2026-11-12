@@ -253,7 +253,28 @@ This is an invariant test, not a review note (§4, T3).
 
 Never: silence without a reason, a second renderer, or a spawn/retry loop.
 
-### 3.8 Meters and latency plumbing
+### 3.8 Prepare lifecycle must match the in-process path
+
+`PluginHost::instantiate` prepares once, and `PluginHost::adopt` prepares again
+on the message thread. Plugins are allowed to reseed internal state in
+`prepareToPlay`, so the child must receive **two** prepares for the same load:
+
+1. the one inside `PluginHost::instantiate`, on the child's own thread, and
+2. the `prepare` control op the app sends from `loadChildHost`.
+
+The child therefore re-prepares on every `prepare` request, even when the
+requested rate and block size already match what it was instantiated with. The
+first version skipped that prepare when the format matched, and the null test
+(`--test-child-null`) caught the consequence: Bertom VocalCompressor rendered
+bit-identically in-process against itself, but differed on **every sample**
+through the child with a max difference of 0.888. Making the child prepare
+twice produced a bit-identical result.
+
+Rule for Phase 2 onwards: any lifecycle call the app makes against its
+in-process instance and that can change plugin state must have a matching call
+on the child, in the same order. `releaseResources` is not exempt.
+
+### 3.9 Meters and latency plumbing
 
 - `InsertSlot` (`app/src/AudioEngine.h:36`) gains
   `float peakInL/peakInR/peakOutL/peakOutR` as `juce::Atomic<float>` and
@@ -276,12 +297,19 @@ or extend; the parent plan's verification matrix (V1–V12) stays authoritative.
 | T1 | Param ring SPSC correctness: N producer flushes, one consumer, no loss/duplication, coalescing keeps last value | `tests/` — the ring is JUCE-free, so the core test binary can cover it |
 | T2 | Control section round trip: op/response pairing, one-in-flight enforcement, timeout returns a status and leaves the section consistent | `tests/` |
 | T3 | Source invariant: no `DeviceStream`/`AudioDeviceManager`/`setOutputDevice` in the child translation units | `tests/test_underrun_paths.cpp`-style source scan |
-| T4 | Null test, in-process vs child (parent plan task 1.8) | `tests/test_plugin_process_null.cpp` |
-| T5 | Kill test: app alive, insert dry, others render, exit code recorded | `--test-kill-child` |
+| T4 | Null test, in-process vs child (parent plan task 1.8) | `--test-child-null <path>`: renders 200 blocks through an in-process instance, a second in-process instance (determinism baseline) and the child, then compares. First run found the prepare-lifecycle bug in §3.8. |
+| T5 | Kill test: app alive, insert dry, others render, exit code recorded | `--test-child-host <path> --kill-after-ms N` |
 
 Tolerance for T4 (decision, so the test does not invent one): **bit-identical
 for the first 1000 blocks**; if a plugin dithers, its tolerance must be
 recorded per plugin path in the spec's Phase 1 results, never relaxed globally.
+The diagnostic prints a determinism baseline (a second in-process instance run
+on the same input) so a plugin that differs against itself is visible before its
+child difference is called a transport fault.
+
+Phase 1 results (48 kHz / 256, 200 blocks): `Scope.vst3`,
+`AB Reference 2.vst3`, `GBCAudio SpectraVU.vst3`, `Bertom_DenoiserClassic.vst3`
+and `Bertom_VocalCompressor.vst3` all bit-identical, baseline 0.
 
 ## 5. Compatibility
 
@@ -290,7 +318,7 @@ recorded per plugin path in the spec's Phase 1 results, never relaxed globally.
 | ASIO single-client | Child never opens a device (§3.6). Verified on the M-Audio with `Force ASIO` + duplex on; the duplex callback path in the app is untouched. |
 | Duplex | `pullDuplexInput` and duplex buffers stay in the app; the child sees post-capture audio only. |
 | 64-bit state sizes | `uint64_t` on the wire; 1 MiB base64 cap retained as an explicit, logged refusal (`PluginHost.cpp:346`, `:567`). |
-| Rate/buffer changes | Spawn carries the format; later changes use `prepare` (IPC-8); a drifted echo gets one re-prepare, then the slot is marked failed. |
+| Rate/buffer changes | Spawn carries the format; later changes use `prepare` (IPC-8), which always re-prepares the child rather than skipping a matching format (§3.8); a drifted echo gets one re-prepare, then the slot is marked failed. |
 | Scene restore | Save asks the child with a 500 ms budget; timeout → last-known-good state, logged. Restore pushes state via `setState`, not argv (§3.5). |
 | Multi-class bundles | `pluginUniqueId` selects the class in both processes (`--plugin-host` arg 2, `loadFromFile` in-process). A mismatch is a loud log plus fallback, never a silently different plugin. |
 | Scene schema | Adding `DeviceSettings` flags bumps `kSchemaVersion` 7 → 8 (`core/src/SceneCodec.cpp:9`); missing fields read as `false`, and old files must load with the feature off. |

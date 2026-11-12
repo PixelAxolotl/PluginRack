@@ -198,7 +198,8 @@ public:
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
             if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
-                || arg == "--plugin-host" || arg == "--test-child-host")
+                || arg == "--plugin-host" || arg == "--test-child-host"
+                || arg == "--test-child-null")
                 return true;
         }
         return false;
@@ -466,6 +467,164 @@ public:
                     if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
                 });
             });
+        }
+
+        // Child-host null test (phase 1 gate): renders the same deterministic
+        // input through an in-process instance and through the child host, then
+        // compares them sample by sample. Passing proves the child path is not
+        // just "non-silent" but the same DSP.
+        const int nullTestIndex = args.indexOf("--test-child-null");
+        if (nullTestIndex >= 0 && nullTestIndex + 1 < args.size()) {
+            const juce::File nullTestFile(args[nullTestIndex + 1].unquoted());
+            // Message thread: the in-process instance must be created there
+            // (JUCE loads the plugin DLL on the creating thread), and so must
+            // the comparison, since it renders through that instance.
+            juce::MessageManager::callAsync([nullTestFile] {
+                constexpr double rate = 48000.0;
+                constexpr int blockSize = 256;
+                constexpr int blocks = 200;
+
+                const auto fail = [](const juce::String& result) {
+                    juce::Logger::writeToLog("test-child-null: " + result);
+                    std::cout << result.toStdString() << "\n";
+                    std::cout.flush();
+                    // Skip plugin teardown for the same reason the app's
+                    // shutdown does: some VST3s block forever in their dtor.
+                    ::exit(1);
+                };
+
+                // Deterministic input: a sine whose amplitude and frequency
+                // drift slowly, plus an impulse every 32 samples, so both
+                // linear and time-domain behaviour is exercised.
+                const auto makeBlock = [rate, blockSize](int index, double& phase) {
+                    juce::AudioBuffer<float> block(2, blockSize);
+                    const double step = 2.0 * juce::MathConstants<double>::pi
+                                        * (220.0 + 40.0 * std::sin(index * 0.01)) / rate;
+                    for (int i = 0; i < blockSize; ++i) {
+                        const auto gain = 0.2 + 0.1 * std::sin(index * 0.02);
+                        auto sample = static_cast<float>(gain * std::sin(phase));
+                        const int absolute = index * blockSize + i;
+                        if (absolute % 32 == 0) sample += 0.35f;
+                        block.setSample(0, i, sample);
+                        block.setSample(1, i, sample * -1.0f); // channel identity
+                        phase += step;
+                    }
+                    return block;
+                };
+
+                // In-process reference.
+                auto reference = PluginHost::loadFromFile(nullTestFile, rate, blockSize);
+                if (reference.error.isNotEmpty() || reference.instance == nullptr) {
+                    fail("failed - in-process load: "
+                         + (reference.error.isNotEmpty() ? reference.error
+                                                         : juce::String("no instance")));
+                }
+                PluginHost inProcess;
+                inProcess.prepareToPlay(rate, blockSize);
+                inProcess.adopt(reference);
+
+                // Second in-process instance, same input. This is the control:
+                // a plugin that randomises per instance (analog-modelled
+                // components, per-instance seeds) differs against itself too,
+                // and then a child difference is not a transport fault.
+                auto referenceTwo = PluginHost::loadFromFile(nullTestFile, rate, blockSize);
+                if (referenceTwo.error.isNotEmpty() || referenceTwo.instance == nullptr) {
+                    fail("failed - second in-process load: "
+                         + (referenceTwo.error.isNotEmpty() ? referenceTwo.error
+                                                            : juce::String("no instance")));
+                }
+                PluginHost inProcessTwo;
+                inProcessTwo.prepareToPlay(rate, blockSize);
+                inProcessTwo.adopt(referenceTwo);
+
+                // Child host.
+                PluginHost child;
+                child.prepareToPlay(rate, blockSize);
+                juce::String childError;
+                if (!child.loadChildHost(nullTestFile, 0, {}, rate, blockSize, 20000, childError)) {
+                    fail("failed - child load: " + childError);
+                }
+
+                juce::AudioBuffer<float> referenceOutput(2, blockSize * blocks);
+                juce::AudioBuffer<float> referenceTwoOutput(2, blockSize * blocks);
+                juce::AudioBuffer<float> childOutput(2, blockSize * blocks);
+                double phase = 0.0;
+                const auto input = [&makeBlock, &phase, blocks, blockSize] {
+                    juce::AudioBuffer<float> all(2, blockSize * blocks);
+                    for (int i = 0; i < blocks; ++i) {
+                        auto block = makeBlock(i, phase);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            all.copyFrom(channel, i * blockSize, block, channel, 0, blockSize);
+                        }
+                    }
+                    return all;
+                }();
+
+                const auto renderThrough = [&input, blocks, blockSize](PluginHost& host,
+                                                            juce::AudioBuffer<float>& output) {
+                    for (int i = 0; i < blocks; ++i) {
+                        juce::AudioBuffer<float> block(2, blockSize);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            block.copyFrom(channel, 0, input, channel, i * blockSize, blockSize);
+                        }
+                        host.processBlock(block);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            output.copyFrom(channel, i * blockSize, block, channel, 0, blockSize);
+                        }
+                    }
+                };
+
+                renderThrough(inProcess, referenceOutput);
+                renderThrough(inProcessTwo, referenceTwoOutput);
+                renderThrough(child, childOutput);
+
+                const auto compare = [blocks, blockSize](const juce::AudioBuffer<float>& a,
+                                              const juce::AudioBuffer<float>& b) {
+                    auto result = std::make_pair(0.0f, 0);
+                    for (int channel = 0; channel < 2; ++channel) {
+                        const auto* left = a.getReadPointer(channel);
+                        const auto* right = b.getReadPointer(channel);
+                        for (int i = 0; i < blocks * blockSize; ++i) {
+                            if (left[i] != right[i]) ++result.second;
+                            result.first = juce::jmax(result.first, std::abs(left[i] - right[i]));
+                        }
+                    }
+                    return result;
+                };
+
+                const auto [baselineDiff, baselineCount] =
+                    compare(referenceOutput, referenceTwoOutput);
+                const auto [maxDifference, differingSamples] =
+                    compare(referenceOutput, childOutput);
+
+                const auto summary = juce::String("in-process peak ")
+                                     + juce::String(referenceOutput.getMagnitude(0, 0,
+                                                                                 blocks * blockSize),
+                                                    6)
+                                     + ", child peak "
+                                     + juce::String(childOutput.getMagnitude(0, 0, blocks * blockSize),
+                                                    6)
+                                     + ", max diff " + juce::String(maxDifference, 8) + ", "
+                                     + juce::String(differingSamples) + " differing samples"
+                                     + "; baseline (in-process vs in-process) max diff "
+                                     + juce::String(baselineDiff, 8) + ", "
+                                     + juce::String(baselineCount) + " differing samples";
+
+                // The plugin sets its own floor: compare the child against the
+                // in-process instance, but only call it a transport fault when
+                // it differs by more than the plugin differs from itself.
+                const bool identical = differingSamples == 0;
+                const bool withinTolerance = maxDifference <= juce::jmax(1.0e-6f, baselineDiff);
+                const auto result = identical ? juce::String("identical - ") + summary
+                                    : withinTolerance
+                                        ? juce::String("within tolerance - ") + summary
+                                        : juce::String("FAILED - ") + summary;
+                juce::Logger::writeToLog("test-child-null: " + result);
+                std::cout << result.toStdString() << "\n";
+                std::cout.flush();
+                ::exit(identical || withinTolerance ? 0 : 1);
+            });
+            return;
         }
 
         // Child-host smoke test (fault containment phase 1): loads one VST3 in

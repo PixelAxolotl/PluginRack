@@ -245,13 +245,17 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                         reply = errorReply("invalid sample rate or block size");
                         break;
                     }
-                    if (rate != currentRate || frames != currentBufferSize) {
-                        plugin->releaseResources();
-                        plugin->setRateAndBufferSizeDetails(rate, frames);
-                        plugin->prepareToPlay(rate, frames);
-                        currentRate = rate;
-                        currentBufferSize = frames;
-                    }
+                    // Always re-prepare, even when the format matches what the
+                    // plugin was instantiated with. The app's own load path
+                    // prepares twice (instantiate, then adopt), and plugins that
+                    // reseed internal state in prepareToPlay must be given the
+                    // same lifecycle here or they render differently - the null
+                    // test caught exactly that with a compressor.
+                    plugin->releaseResources();
+                    plugin->setRateAndBufferSizeDetails(rate, frames);
+                    plugin->prepareToPlay(rate, frames);
+                    currentRate = rate;
+                    currentBufferSize = frames;
                     block->latencySamples = plugin->getLatencySamples();
                     reply = okReply();
                     break;
