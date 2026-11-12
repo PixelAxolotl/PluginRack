@@ -544,6 +544,15 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
     if (window.overrun && window.fresh) inputOverruns.fetch_add(1, std::memory_order_relaxed);
 
     if (window.fresh) {
+        // One health sample per render epoch, even when several channels share
+        // this capture: the stream's health must not be multiplied by fan-out.
+        if (epoch != lastHealthEpoch_) {
+            lastHealthEpoch_ = epoch;
+            const double nowMs = static_cast<double>(juce::Time::getMillisecondCounter());
+            health_.onBlock(nowMs, window.underrun,
+                            window.underrun || window.overrun);
+            publishedHealth_.store(health_.health(nowMs), std::memory_order_relaxed);
+        }
         const int currentDelay = readDelaySamples.load(std::memory_order_relaxed);
         // The cursor clamps `available` to one block whenever it can serve a
         // full window, so it cannot report how much history is left: deriving a
@@ -1216,6 +1225,11 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
         }
     } else if (ready >= bufferSize * 2) {
         lowWatermarkActive = false;
+    }
+    {
+        const double nowMs = static_cast<double>(juce::Time::getMillisecondCounter());
+        health_.onBlock(nowMs, shortRead || low, low);
+        publishedHealth_.store(health_.health(nowMs), std::memory_order_relaxed);
     }
     currentOutputChannels = nullptr;
 }

@@ -808,7 +808,14 @@ TEST_CASE("the clock callback records render telemetry without locking",
     // would describe a filtered subset of callbacks.
     CHECK(contains(render, "pluginrack::AudioTelemetry::flagRenderMiss"));
     CHECK(contains(render, "pluginrack::AudioTelemetry::flagOversized"));
-    CHECK(contains(render, "recordRenderTelemetry(frames, elapsedNanos(), 0, clockFillFrames)"));
+    CHECK(contains(render, "recordRenderTelemetry(frames, elapsedNanos(), renderFlags, clockFillFrames)"));
+    // Deadline-aware slicing and the insert scrubber are both part of the
+    // callback now; neither may allocate or take a lock.
+    CHECK(contains(render, "pluginrack::planSlices(frames, slicingEnabled ? 4 : 1)"));
+    CHECK(contains(render, "pluginrack::deadlineExceededMs"));
+    CHECK(contains(render, "pluginrack::scrubNonFinite"));
+    CHECK(contains(render, "pluginrack::AudioTelemetry::flagPartialRender"));
+    CHECK(contains(render, "pluginrack::AudioTelemetry::flagNonFiniteScrub"));
 
     const auto record = functionBody(cpp, "void AudioEngine::recordRenderTelemetry");
     CHECK(contains(record, "renderTelemetry_.push(sample)"));
@@ -1194,4 +1201,79 @@ TEST_CASE("a driver negotiated buffer is accepted when it is supported", "[laten
     // must be gone for duplex; the new check supports negotiated sizes.
     CHECK_FALSE(contains(open,
                          "device->getCurrentBufferSizeSamples() != requestedBufferSize) {"));
+}
+
+TEST_CASE("clock loss promotes or falls back instead of ending the session",
+          "[clock][failover]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    // The policy is the tested core helper; the engine only applies it.
+    CHECK(contains(engine, "pluginrack::chooseClockFailover"));
+    CHECK(contains(engine, "AudioEngine::handleClockLoss"));
+    CHECK(contains(engine, "AudioEngine::startInternalClock"));
+    CHECK(contains(engine, "Clock promoted to"));
+
+    const auto refresh = functionBody(engine, "bool AudioEngine::refreshDeviceAvailability");
+    CHECK(contains(refresh, "clockLost"));
+    CHECK(contains(refresh, "handleClockLoss()"));
+    CHECK(contains(refresh, "clockFailoverActive_"));
+
+    // A successful open gives the clock back and stops the fallback timer.
+    const auto open = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(open, "clockFailoverActive_ = false"));
+    CHECK(contains(open, "stopInternalClock()"));
+}
+
+TEST_CASE("stream health drives the bounded auto-reload path", "[latency][health]") {
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "audioEngine.getChannelHealth(device.stripId)"));
+    CHECK(contains(settings, "audioEngine.getOutputHealth(device.stripId)"));
+    CHECK(contains(settings, "health != pluginrack::StreamHealth::Green"));
+    // The existing backoff is reused: three rounds, five seconds apart.
+    CHECK(contains(settings, "kMaxAutoReloadRounds"));
+    CHECK(contains(settings, "kAutoReloadCooldownMs"));
+
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    CHECK(contains(device, "health_.onBlock"));
+    const auto header = readSource("app/src/DeviceStream.h");
+    CHECK(contains(header, "pluginrack::StreamHealthTracker health_"));
+    CHECK(contains(header, "healthState()"));
+}
+
+TEST_CASE("device capabilities are cached after a successful open", "[device][cache]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "device-cache.json"));
+    CHECK(contains(engine, "deviceCache_.loadFromFile"));
+    CHECK(contains(engine, "deviceCache_.saveToFile"));
+    CHECK(contains(engine, "recordDeviceCapabilities"));
+    CHECK(contains(engine, "lastGoodUnixMs"));
+    // The cache is advisory: the opener records only after a real open.
+    CHECK(contains(engine, "if (openErr.isEmpty())"));
+}
+
+TEST_CASE("scene v6 hardening switches are opt-in and persisted",
+          "[scene][settings]") {
+    const auto codec = readSource("core/src/SceneCodec.cpp");
+    CHECK(contains(codec, "\"slicedRender\""));
+    CHECK(contains(codec, "\"nonFiniteScrub\""));
+    CHECK(contains(codec, "\"healthReload\""));
+    CHECK(contains(codec, "\"ladderRecovery\""));
+    CHECK(contains(codec, "if (schemaVersion < 6)"));
+
+    const auto header = readSource("core/include/pluginrack/Scene.h");
+    CHECK(contains(header, "bool slicedRender = false"));
+    CHECK(contains(header, "double healthPinnedToEdgeMs = 5000.0"));
+
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "slicedRender_.load(std::memory_order_relaxed)"));
+    CHECK(contains(engine, "nonFiniteScrub_.load(std::memory_order_relaxed)"));
+    CHECK(contains(engine, "audio.slicedRender = settings.slicedRender"));
+    CHECK(contains(engine, "settings.slicedRender = scene.audio->slicedRender"));
+
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "slicedRenderToggle"));
+    CHECK(contains(settings, "scrubToggle"));
+    CHECK(contains(settings, "healthReloadToggle"));
+    CHECK(contains(settings, "ladderRecoveryToggle"));
+    CHECK(contains(settings, "healthSensitivityCombo"));
+    CHECK(contains(settings, "getHealthReloadDevices()"));
 }

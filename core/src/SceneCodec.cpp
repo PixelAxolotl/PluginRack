@@ -4,7 +4,7 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 5;
+constexpr int kSchemaVersion = 6;
 
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
@@ -543,6 +543,13 @@ void to_json(nlohmann::json& j, const AudioSettings& settings) {
         {"watchedDevices", settings.watchedDevices},
         {"rackThumbnailFps", settings.rackThumbnailFps},
         {"rackPreviewMode", settings.rackPreviewMode},
+        {"slicedRender", settings.slicedRender},
+        {"nonFiniteScrub", settings.nonFiniteScrub},
+        {"healthReload", settings.healthReload},
+        {"ladderRecovery", settings.ladderRecovery},
+        {"healthYellowUnderrunsPerMinute", settings.healthYellowUnderrunsPerMinute},
+        {"healthRedUnderrunsPerMinute", settings.healthRedUnderrunsPerMinute},
+        {"healthPinnedToEdgeMs", settings.healthPinnedToEdgeMs},
     };
 }
 
@@ -557,6 +564,15 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     settings.minimalClockFifo = j.value("minimalClockFifo", false);
     settings.fullDuplexInput = j.value("fullDuplexInput", false);
     settings.autoReloadDevices = j.value("autoReloadDevices", false);
+    settings.slicedRender = j.value("slicedRender", false);
+    settings.nonFiniteScrub = j.value("nonFiniteScrub", false);
+    settings.healthReload = j.value("healthReload", false);
+    settings.ladderRecovery = j.value("ladderRecovery", false);
+    settings.healthYellowUnderrunsPerMinute =
+        j.value("healthYellowUnderrunsPerMinute", 1.0);
+    settings.healthRedUnderrunsPerMinute =
+        j.value("healthRedUnderrunsPerMinute", 10.0);
+    settings.healthPinnedToEdgeMs = j.value("healthPinnedToEdgeMs", 5000.0);
     // The version-aware opt-in gate lives in fromJson(Scene): before v5 the
     // individual keys could appear without the marker, and honouring them
     // would silently switch an old session to aggressive latency modes.
@@ -590,9 +606,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 5) {
+        if (schemaVersion < 1 || schemaVersion > 6) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 to 4");
+                                    ", expected 1 to 6");
             return result;
         }
         Scene scene;
@@ -622,6 +638,14 @@ SceneLoadResult fromJson(std::string_view text) {
                 settings.lowLatencyOutputs = false;
                 settings.minimalClockFifo = false;
                 settings.fullDuplexInput = false;
+            }
+            // v6 fields are opt-in: a pre-v6 save never turns them on, even if
+            // a hand-edited file happens to contain the keys.
+            if (schemaVersion < 6) {
+                settings.slicedRender = false;
+                settings.nonFiniteScrub = false;
+                settings.healthReload = false;
+                settings.ladderRecovery = false;
             }
             scene.audio = std::move(settings);
         }

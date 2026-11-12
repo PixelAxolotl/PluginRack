@@ -228,6 +228,75 @@ SettingsView::SettingsView(AudioEngine& engine)
         "endpoint refuses to open both directions, the app falls back to a "
         "separate capture automatically.");
 
+    const std::array<juce::ToggleButton*, 4> hardeningToggles {
+        &slicedRenderToggle, &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle,
+    };
+    for (auto* toggle : hardeningToggles) {
+        theme::ui::styleToggle(*toggle);
+        add(*toggle);
+    }
+    slicedRenderToggle.setTooltip(
+        "Splits each clock callback into quarter-block slices with a deadline. "
+        "A stalling plugin loses at most one slice instead of the whole block; "
+        "the silenced tail is flagged in telemetry.");
+    slicedRenderToggle.onClick = [this] {
+        staged_.slicedRender = slicedRenderToggle.getToggleState();
+        updatePendingState();
+    };
+    scrubToggle.setTooltip(
+        "Replaces NaN/Inf with silence after every insert and at the mix bus, "
+        "so one bad plugin cannot ring through the downstream EQ and every "
+        "routed output. The cleaned count appears in telemetry.");
+    scrubToggle.onClick = [this] {
+        staged_.nonFiniteScrub = scrubToggle.getToggleState();
+        updatePendingState();
+    };
+    healthReloadToggle.setTooltip(
+        "Reopens a stream that stays yellow or red in the telemetry window, "
+        "using the same three attempts five seconds apart as a hard error.");
+    healthReloadToggle.onClick = [this] {
+        staged_.healthReload = healthReloadToggle.getToggleState();
+        updatePendingState();
+    };
+    ladderRecoveryToggle.setTooltip(
+        "Lets the fallback ladder climb back one rung after ten clean minutes, "
+        "at most once every thirty minutes. Off in this stage so a transient "
+        "spike can never make an automatic controller oscillate.");
+    ladderRecoveryToggle.onClick = [this] {
+        staged_.ladderRecovery = ladderRecoveryToggle.getToggleState();
+        updatePendingState();
+    };
+
+    healthSensitivityLabel.setFont(theme::ui::bodyFont());
+    healthSensitivityLabel.setColour(juce::Label::textColourId, theme::dim());
+    healthSensitivityLabel.setJustificationType(juce::Justification::centredRight);
+    add(healthSensitivityLabel);
+    theme::ui::styleCombo(healthSensitivityCombo);
+    healthSensitivityCombo.addItem("Relaxed", 1);
+    healthSensitivityCombo.addItem("Default", 2);
+    healthSensitivityCombo.addItem("Aggressive", 3);
+    healthSensitivityCombo.onChange = [this] {
+        switch (healthSensitivityCombo.getSelectedId()) {
+            case 1:
+                staged_.healthYellowUnderrunsPerMinute = 2.0;
+                staged_.healthRedUnderrunsPerMinute = 20.0;
+                staged_.healthPinnedToEdgeMs = 10000.0;
+                break;
+            case 3:
+                staged_.healthYellowUnderrunsPerMinute = 1.0;
+                staged_.healthRedUnderrunsPerMinute = 5.0;
+                staged_.healthPinnedToEdgeMs = 2500.0;
+                break;
+            default:
+                staged_.healthYellowUnderrunsPerMinute = 1.0;
+                staged_.healthRedUnderrunsPerMinute = 10.0;
+                staged_.healthPinnedToEdgeMs = 5000.0;
+                break;
+        }
+        updatePendingState();
+    };
+    add(healthSensitivityCombo);
+
     theme::ui::styleButton(profileButton);
     profileButton.setTooltip(
         "Steps the buffer down one size at a time, watches for real glitches, "
@@ -476,11 +545,21 @@ void SettingsView::refresh() {
         lowLatencyOutputsToggle.setToggleState(staged_.lowLatencyOutputs, juce::dontSendNotification);
         minimalClockFifoToggle.setToggleState(staged_.minimalClockFifo, juce::dontSendNotification);
         fullDuplexToggle.setToggleState(staged_.fullDuplexInput, juce::dontSendNotification);
+        slicedRenderToggle.setToggleState(staged_.slicedRender, juce::dontSendNotification);
+        scrubToggle.setToggleState(staged_.nonFiniteScrub, juce::dontSendNotification);
+        healthReloadToggle.setToggleState(staged_.healthReload, juce::dontSendNotification);
+        ladderRecoveryToggle.setToggleState(staged_.ladderRecovery, juce::dontSendNotification);
+        const int healthId = staged_.healthYellowUnderrunsPerMinute >= 2.0
+                                 ? 1
+                                 : (staged_.healthRedUnderrunsPerMinute <= 5.0 ? 3 : 2);
+        healthSensitivityCombo.setSelectedId(healthId, juce::dontSendNotification);
     }
     for (auto* toggle : { &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
-                           &minimalClockFifoToggle, &fullDuplexToggle }) {
+                           &minimalClockFifoToggle, &fullDuplexToggle, &slicedRenderToggle,
+                           &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle }) {
         toggle->setEnabled(!busy);
     }
+    healthSensitivityCombo.setEnabled(!busy);
 
     const auto profile = audioEngine.getLatencyProfileState();
     profileButton.setButtonText(profile.active ? "Cancel search" : "Find low-latency setting");
@@ -572,7 +651,16 @@ void SettingsView::updatePendingState() {
           || staged_.preferExclusive != applied.preferExclusive
           || staged_.lowLatencyOutputs != applied.lowLatencyOutputs
           || staged_.minimalClockFifo != applied.minimalClockFifo
-          || staged_.fullDuplexInput != applied.fullDuplexInput;
+          || staged_.fullDuplexInput != applied.fullDuplexInput
+          || staged_.slicedRender != applied.slicedRender
+          || staged_.nonFiniteScrub != applied.nonFiniteScrub
+          || staged_.healthReload != applied.healthReload
+          || staged_.ladderRecovery != applied.ladderRecovery
+          || staged_.healthYellowUnderrunsPerMinute
+                 != applied.healthYellowUnderrunsPerMinute
+          || staged_.healthRedUnderrunsPerMinute
+                 != applied.healthRedUnderrunsPerMinute
+          || staged_.healthPinnedToEdgeMs != applied.healthPinnedToEdgeMs;
     pendingLabel.setText(dirty_ ? "Pending changes - press Apply" : "",
                          juce::dontSendNotification);
     const bool busy = audioEngine.isOpeningDevices();
@@ -766,10 +854,19 @@ void SettingsView::pollAutoReload() {
                                            });
         if (!isWatched) continue;
 
+        // Health-driven recovery: a starving stream is yellow/red before it
+        // raises a hard error, so the same bounded 3 x 5 s reload backoff now
+        // starts on the telemetry classification, not only on a driver error.
+        const auto health = device.isInput
+            ? audioEngine.getChannelHealth(device.stripId)
+            : audioEngine.getOutputHealth(device.stripId);
+        const bool healthFailing = audioEngine.getHealthReloadDevices()
+            && health != pluginrack::StreamHealth::Green;
         const bool failing =
-            device.isInput
-                ? audioEngine.getChannelDeviceState(device.stripId).error.isNotEmpty()
-                : audioEngine.getOutputDeviceState(device.stripId).error.isNotEmpty();
+            healthFailing
+            || (device.isInput
+                    ? audioEngine.getChannelDeviceState(device.stripId).error.isNotEmpty()
+                    : audioEngine.getOutputDeviceState(device.stripId).error.isNotEmpty());
 
         auto& state = autoReloadState_[key];
         if (!failing) {
@@ -963,18 +1060,22 @@ int SettingsView::layoutBody(int width) {
         const int asioRowH = juce::jmax(theme::ui::kControlH, asioStatusH);
         constexpr int kToggleW = 430;
         constexpr int kToggleColGap = 24;
-        // Five opt-in switches read as one list in a narrow window and as rows
+        // Nine opt-in switches read as one list in a narrow window and as rows
         // of two when the panel is wide enough to hold them side by side.
         const bool twoColumns = innerW >= 2 * kToggleW + kToggleColGap;
-        const int toggleRows = twoColumns ? 3 : 5;
+        constexpr int kToggleCount = 9;
+        const int toggleRows = twoColumns ? (kToggleCount + 1) / 2 : kToggleCount;
         const int togglesH = toggleRows * kToggleH + (toggleRows - 1) * kToggleGap;
-        const int panelH = pad + togglesH + 10 + profileRowH + 6 + asioRowH + pad;
+        const int panelH = pad + togglesH + 6 + theme::ui::kControlH + 10
+                         + profileRowH + 6 + asioRowH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
-        const std::array<juce::ToggleButton*, 5> toggles{{
+        const std::array<juce::ToggleButton*, kToggleCount> toggles{{
             &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
             &minimalClockFifoToggle, &fullDuplexToggle,
+            &slicedRenderToggle, &scrubToggle, &healthReloadToggle,
+            &ladderRecoveryToggle,
         }};
         const int columnW = twoColumns ? (innerW - kToggleColGap) / 2 : innerW;
         for (int i = 0; i < (int) toggles.size(); ++i) {
@@ -985,6 +1086,11 @@ int SettingsView::layoutBody(int width) {
                                   juce::jmin(kToggleW, columnW), kToggleH);
         }
         inner.removeFromTop(togglesH);
+
+        inner.removeFromTop(6);
+        auto healthRow = inner.removeFromTop(theme::ui::kControlH);
+        healthSensitivityLabel.setBounds(healthRow.removeFromLeft(160));
+        healthSensitivityCombo.setBounds(healthRow.removeFromLeft(200));
 
         inner.removeFromTop(10);
         auto profileRow = inner.removeFromTop(profileRowH);

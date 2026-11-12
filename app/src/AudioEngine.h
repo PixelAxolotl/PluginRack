@@ -8,10 +8,12 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <pluginrack/AudioTelemetry.h>
+#include <pluginrack/DeviceCache.h>
 #include <pluginrack/EqEngine.h>
 #include <pluginrack/LatencyProfile.h>
 #include <pluginrack/Meters.h>
@@ -344,6 +346,14 @@ public:
         bool fullDuplexInput = false;
         // Not a stream option: kept here so it saves and loads with the rest.
         bool autoReloadDevices = false;
+        // Scene v6 audio-pipeline hardening, off until the user opts in.
+        bool slicedRender = false;
+        bool nonFiniteScrub = false;
+        bool healthReload = false;
+        bool ladderRecovery = false;
+        double healthYellowUnderrunsPerMinute = 1.0;
+        double healthRedUnderrunsPerMinute = 10.0;
+        double healthPinnedToEdgeMs = 5000.0;
         // Rack insert thumbnail refresh rate (fps); also not a stream option.
         int rackThumbnailFps = 15;
         // Which inserts keep live previews; also not a stream option.
@@ -406,6 +416,15 @@ public:
     void reloadDevicesAsync(const std::vector<ReloadableDevice>& devices);
     void render(int frames);
     std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
+    // Deadline-aware rendering: blocks whose tail had to be silenced, and
+    // non-finite samples quarantined at insert boundaries. Both are lifetime
+    // counters; the rolling telemetry window carries the same events.
+    std::uint64_t getPartialRenderCount() const { return partialRenders_.load(); }
+    std::uint64_t getScrubbedSamples() const { return scrubbedSamples_.load(); }
+    // Advisory per-endpoint capability cache (diagnostics / Settings). The
+    // cache is persisted after every successful open; a stale entry is never
+    // used, the live probe always wins.
+    juce::String getDeviceCacheJson() const;
     void releaseResources();
     // Ensures every channel with an assigned input device shares one capture
     // opened wide enough for the highest physical index it maps. Callers that
@@ -582,6 +601,16 @@ public:
     LatencyReport getLatencyReport() const;
 
     FifoDiagnostics getFifoDiagnostics() const;
+    // Green/yellow/red per stream, from the same underrun + fill window the
+    // strips display. A missing stream reads green so the auto-reload
+    // controller falls back to the error path.
+    pluginrack::StreamHealth getChannelHealth(std::uint32_t channelId) const;
+    pluginrack::StreamHealth getOutputHealth(std::uint32_t outputId) const;
+    bool getSlicedRenderEnabled() const { return slicedRender_.load(); }
+    bool getNonFiniteScrubEnabled() const { return nonFiniteScrub_.load(); }
+    bool getHealthReloadDevices() const { return healthReload_.load(); }
+    bool getLadderRecoveryEnabled() const { return ladderRecovery_.load(); }
+    pluginrack::StreamHealthThresholds getHealthThresholds() const;
     // Render-load summary from the clock callback: percentiles of the time
     // spent inside render(), the share of a block period that p99 costs, and
     // the fill distribution that shows whether the FIFO target is right.
@@ -637,6 +666,7 @@ public:
 
 private:
     class DeviceOpenThread;
+    class InternalClock;
 
     Channel* findChannel(std::uint32_t channelId);
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);
@@ -686,6 +716,23 @@ private:
     // Requires stateLock.
     void pruneUnusedCaptures();
     void cancelLatencyMeasurementImpl();
+    // Clock failover: promote the next live output in the same rate class, or
+    // keep rendering on a free-running internal clock when none qualifies.
+    // Called from the message-thread availability watchdog; never silent.
+    void handleClockLoss();
+    void startInternalClock(int sampleRate);
+    void stopInternalClock();
+    // Records and persists what one endpoint cost and negotiated. Worker
+    // thread; serialized by deviceCacheLock_. A failure to write is logged,
+    // never fatal: the cache is advisory.
+    void recordDeviceCapabilities(const juce::String& endpoint, bool input,
+                                  int inputChannels, int outputChannels,
+                                  double sampleRate, int bufferSize, int probeMs);
+    // Fresh cache entry only; a stale one is ignored and the live probe runs.
+    std::optional<pluginrack::EndpointCapabilities> cachedCapabilities(
+        const juce::String& endpoint) const;
+    // Pushes the current health thresholds into every open stream tracker.
+    void applyHealthThresholdsToStreams();
 
     struct SharedInputCapture {
         std::shared_ptr<InputCapture> capture;
@@ -721,6 +768,8 @@ private:
     int maxBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
+    std::atomic<std::uint64_t> partialRenders_{0};
+    std::atomic<std::uint64_t> scrubbedSamples_{0};
     // Written by the clock callback only, read by the UI. Mutable so the
     // const report getters can summarise it without a lock.
     mutable pluginrack::AudioTelemetry renderTelemetry_;
@@ -743,6 +792,10 @@ private:
     std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
     bool fullDuplex_ = false;
+    std::unique_ptr<InternalClock> internalClock_;
+    bool clockFailoverActive_ = false;
+    mutable juce::CriticalSection deviceCacheLock_;
+    pluginrack::DeviceCache deviceCache_;
 
     // Background device opener (startup path). Kept last so its lifetime ends
     // before the strips it reports on.
@@ -782,6 +835,13 @@ private:
     const float* const* duplexInputBuffers_ = nullptr;
     int duplexInputBufferCount_ = 0;
     std::atomic<bool> autoReloadDevices_{false};
+    std::atomic<bool> slicedRender_{false};
+    std::atomic<bool> nonFiniteScrub_{false};
+    std::atomic<bool> healthReload_{false};
+    std::atomic<bool> ladderRecovery_{false};
+    std::atomic<double> healthYellowUnderrunsPerMinute_{1.0};
+    std::atomic<double> healthRedUnderrunsPerMinute_{10.0};
+    std::atomic<double> healthPinnedToEdgeMs_{5000.0};
     std::atomic<int> rackThumbnailFps_{15};
     // Plain enum: only ever touched on the message thread (Settings writes,
     // RackView reads), so no atomic needed.
