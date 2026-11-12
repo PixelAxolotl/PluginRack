@@ -51,6 +51,11 @@ public:
     void closeDockedEditor();
     // Releases every background preview editor too, for the same reason.
     void clearHiddenPreviews();
+    // Synchronous form used before the engine destroys a strip (scene restore,
+    // plugin removal): deletes the docked, hidden-preview and queued-preview
+    // editors now, while their processors are still alive. The deferred form
+    // above only queues a timer, which is too late for a scene swap.
+    void releaseEditorsNow();
     // Releases the docked editor only when its insert is gone from the engine.
     // A structure change (adding an insert) must not tear a live editor down and
     // rebuild it: that costs a full UI re-create and some plugins hang on the

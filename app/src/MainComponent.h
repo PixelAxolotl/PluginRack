@@ -92,14 +92,12 @@ public:
     // load request round-trips through the host.
     std::function<juce::String(const pluginrack::Scene&)> onRestoreRequested;
 
-    // MainComponent calls this before engine strip mutation: the rack's
-    // docked plugin editor is backed by a strip's plugin instance, and an
-    // editor whose processor dies first is unsafe to delete.
+    // MainComponent calls this before engine strip mutation: every rack editor
+    // is backed by a strip's plugin instance, and an editor whose processor
+    // dies first is unsafe to delete. This must be synchronous - a queued
+    // timer would run after restoreScene has freed the processor.
     void releaseDockedEditor() {
-        rackView.closeDockedEditor();
-        // Hidden preview editors own the same processors: release them before
-        // the engine destroys the insert, or they outlive it.
-        rackView.clearHiddenPreviews();
+        rackView.releaseEditorsNow();
     }
     void releaseOrphanedEditor() { rackView.releaseOrphanedDockedEditor(); }
 
@@ -143,6 +141,9 @@ public:
     // expose these helpers to users.
     const std::vector<std::unique_ptr<AudioEngine::Channel>>& getChannelsForDiagnostics();
     juce::Component* focusDiagnosticsEffect(pluginrack::ChainItemType type);
+    // Loads a named save exactly like the Saves view does, for --test-load-save.
+    // Reproduces scene-swap lifecycle crashes without driving the UI.
+    juce::String loadSaveForDiagnostics(const juce::String& name);
     void feedDiagnosticsSignal(int numBins, double sampleRateHz);
     void saveSceneOnExit();
     void initialiseAudio();

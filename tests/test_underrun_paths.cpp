@@ -1454,3 +1454,23 @@ TEST_CASE("the juce probe cap patch is shipped and applied", "[device][probe][bu
     const auto build = readSource("tools/build-and-copy.ps1");
     CHECK(contains(build, "apply-wasapi-probe-cap.cmake"));
 }
+TEST_CASE("scene swaps release plugin editors before their processors", "[app][ui][crash]") {
+    const auto rack = readSource("app/src/RackView.cpp");
+    const auto release = functionBody(rack, "void RackView::releaseEditorsNow");
+    CHECK(contains(release, "hiddenPreviews"));
+    CHECK(contains(release, "doomedPreviews"));
+    CHECK(contains(release, "destroyDockEditor"));
+    CHECK_FALSE(contains(release, "destroyEditorWhenIdle"));
+
+    const auto mainHeader = readSource("app/src/MainComponent.h");
+    const auto router = functionBody(mainHeader, "void releaseDockedEditor()");
+    CHECK(contains(router, "releaseEditorsNow"));
+
+    const auto apply = functionBody(readSource("app/src/MainComponent.cpp"),
+                                    "juce::String MainComponent::applyScene");
+    const auto releaseIdx = apply.find("releaseDockedEditor()");
+    const auto restoreIdx = apply.find("restoreScene(");
+    REQUIRE(releaseIdx != std::string::npos);
+    REQUIRE(restoreIdx != std::string::npos);
+    CHECK(releaseIdx < restoreIdx);
+}

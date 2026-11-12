@@ -434,6 +434,28 @@ public:
             });
         }
 
+        // Lifecycle diagnostic: loads a named save after the first scene and
+        // audio are up, then reports whether the message thread survives the
+        // swap. Reproduces the editor-after-processor crash without the UI.
+        const int loadStart = args.indexOf("--test-load-save");
+        if (loadStart >= 0 && loadStart + 1 < args.size()) {
+            const auto saveName = args[loadStart + 1].unquoted();
+            juce::Timer::callAfterDelay(8000, [this, saveName] {
+                juce::Logger::writeToLog("test-load-save: loading " + saveName);
+                if (auto* component =
+                        dynamic_cast<MainComponent*>(mainWindow->getContentComponent())) {
+                    const auto error = component->loadSaveForDiagnostics(saveName);
+                    juce::Logger::writeToLog(error.isEmpty()
+                                                 ? "test-load-save: loaded, still alive"
+                                                 : "test-load-save: " + error);
+                }
+                juce::Timer::callAfterDelay(15000, [] {
+                    juce::Logger::writeToLog("test-load-save: still alive after 15 s, quitting");
+                    if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
+                });
+            });
+        }
+
         // Plugin smoke test: loads one VST3 the way the Add-VST path does
         // (message thread, audio already running), reports the result and quits.
         // Useful when a plugin is suspected of crashing the host or of stalling

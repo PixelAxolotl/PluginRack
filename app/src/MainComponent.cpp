@@ -438,6 +438,14 @@ const std::vector<std::unique_ptr<AudioEngine::Channel>>& MainComponent::getChan
     return audioEngine.getChannels();
 }
 
+juce::String MainComponent::loadSaveForDiagnostics(const juce::String& name) {
+    juce::String error;
+    auto saved = SceneBridge::loadNamed(name, error);
+    if (error.isNotEmpty()) return error;
+    if (!saved.has_value()) return "Save not found: " + name;
+    return applyScene(*saved);
+}
+
 void MainComponent::feedDiagnosticsSignal(int /*numBins*/, double sampleRateHz) {
     // Headless screenshot: no audio engine runs, so the analyzer taps stay
     // silent and one timer frame of zeros floors every RTA to -60 dB.

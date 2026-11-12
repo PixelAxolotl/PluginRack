@@ -1298,6 +1298,60 @@ void RackView::clearHiddenPreviews() {
     hiddenPreviews.clear();
 }
 
+void RackView::releaseEditorsNow() {
+    // Must run while every processor is still alive: a plugin editor's
+    // destructor calls back into its processor, so deleting one after the
+    // engine destroyed the insert is a use-after-free.
+    knobWatcher.clear();
+    thumbnailWorker.clearRequest();
+
+    const auto destroyEditor = [this](juce::AudioProcessorEditor* editor, PluginHost* host) {
+        if (editor == nullptr) return;
+        if (auto* parent = editor->getParentComponent())
+            parent->removeChildComponent(editor);
+        if (host != nullptr && pluginHostAlive(host)) {
+            host->destroyDockEditor(editor);
+        } else {
+            // Already orphaned by a path that slipped past this one: deleting
+            // it would call into freed plugin state, so leak it instead.
+            juce::Logger::writeToLog(
+                "rack: editor released after its processor; leaking it");
+        }
+    };
+
+    for (auto& entry : hiddenPreviews) destroyEditor(entry.second.editor, entry.second.host);
+    hiddenPreviews.clear();
+    hiddenPreviewFailed.clear();
+
+    for (auto& entry : doomedPreviews) destroyEditor(entry.second.editor, entry.second.host);
+    doomedPreviews.clear();
+
+    if (dockedEditor == nullptr) {
+        dockedHost = nullptr;
+        return;
+    }
+    // A floating window may own the editor after a reparent; ~PluginHost
+    // deletes that window before the processor, so release the pointer only.
+    if (dockedEditor->getParentComponent() != nullptr
+        && dockedEditor->getParentComponent() != &editorHolder) {
+        dockedEditor = nullptr;
+        dockedHost = nullptr;
+        dockedEditorNaturalSize = {};
+        dockedEditorScale = 1.0f;
+        applyingDockedEditorScale = false;
+        return;
+    }
+    dockedEditor->removeComponentListener(this);
+    auto* editor = dockedEditor;
+    auto* host = dockedHost;
+    dockedEditor = nullptr;
+    dockedHost = nullptr;
+    dockedEditorNaturalSize = {};
+    dockedEditorScale = 1.0f;
+    applyingDockedEditorScale = false;
+    destroyEditor(editor, host);
+}
+
 void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host,
                                      std::uint32_t insertId) {
     if (editor == nullptr) return;
@@ -1312,11 +1366,17 @@ void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginH
         }
         auto* component = safe.getComponent();
         self->removeChildComponent(component);
-        // The host may have died with its insert; never touch it then.
-        if (host != nullptr && self->pluginHostAlive(host))
-            host->destroyDockEditor(component);
-        else
+        if (host == nullptr) {
             delete component;
+        } else if (self->pluginHostAlive(host)) {
+            host->destroyDockEditor(component);
+        } else {
+            // The processor is gone; deleting the editor now calls into freed
+            // plugin state. releaseEditorsNow() should have handled this before
+            // the strip died, so leak rather than crash if one slipped through.
+            juce::Logger::writeToLog(
+                "rack: deferred editor outlived its processor; leaking it");
+        }
         if (insertId != 0 && self->doomedPreviews.erase(insertId) != 0) {
             // The processor is free again: the bay can dock its editor now.
             self->refreshEditor();
