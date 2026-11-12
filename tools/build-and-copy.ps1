@@ -13,6 +13,19 @@ if (-not (Test-Path $vcVars)) {
     throw "MSVC environment script was not found at $vcVars"
 }
 
+# Keep the opt-in WASAPI probe cap applied: `cmake --build` does not reconfigure,
+# so a JUCE checkout that was reset or updated would silently lose the patch.
+$cacheFile = Join-Path $repoRoot "build\dev\CMakeCache.txt"
+if (Test-Path $cacheFile) {
+    $juceLine = Select-String -Path $cacheFile -Pattern '^JUCE_DIR:PATH=(.+)$'
+    if ($juceLine) {
+        $juceDir = $juceLine.Matches[0].Groups[1].Value
+        & $cmake "-DJUCE_DIR=$juceDir" `
+                 "-DPATCH_FILE=$repoRoot\tools\juce-patches\0001-wasapi-probe-cap.patch" `
+                 -P "$repoRoot\tools\juce-patches\apply-wasapi-probe-cap.cmake"
+    }
+}
+
 $command = "call `"$vcVars`" >nul && cd /d `"$repoRoot`" && `"$cmake`" --build build\dev --parallel 4"
 & $env:ComSpec /c $command
 if ($LASTEXITCODE -ne 0) {

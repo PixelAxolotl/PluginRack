@@ -37,6 +37,19 @@ if(EXISTS "${VST3_SDK_DIR}/CMakeLists.txt")
     endif()
 endif()
 
+# The opt-in WASAPI probe cap needs a one-function patch in the external JUCE
+# tree. Applying it is idempotent and non-fatal: without the patch the setting
+# is inert and builds still work.
+option(PLUGINRACK_PATCH_JUCE_WASAPI_PROBE
+       "Apply PluginRack's opt-in WASAPI probe cap to JUCE_DIR at configure time" ON)
+if(PLUGINRACK_BUILD_APP AND PLUGINRACK_PATCH_JUCE_WASAPI_PROBE)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+                "-DJUCE_DIR=${JUCE_DIR}"
+                "-DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tools/juce-patches/0001-wasapi-probe-cap.patch"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/juce-patches/apply-wasapi-probe-cap.cmake")
+endif()
+
 if(PLUGINRACK_BUILD_APP)
     if(EXISTS "${JUCE_DIR}/CMakeLists.txt"
        AND EXISTS "${VST3_SDK_DIR}/pluginterfaces/base/fplatform.h")

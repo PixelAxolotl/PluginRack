@@ -1436,3 +1436,20 @@ TEST_CASE("settings exposes the wasapi probe cap", "[device][probe][ui]") {
     CHECK(contains(settings, "wasapiProbeCapEnabled != applied.wasapiProbeCapEnabled"));
     CHECK(contains(settings, "wasapiProbeCapChannels != applied.wasapiProbeCapChannels"));
 }
+TEST_CASE("the juce probe cap patch is shipped and applied", "[device][probe][build]") {
+    const auto patch = readSource("tools/juce-patches/0001-wasapi-probe-cap.patch");
+    CHECK(contains(patch, "PLUGINRACK_WASAPI_MAX_PROBE_CHANNELS"));
+    CHECK(contains(patch, "highestChannelToQuery"));
+    CHECK(contains(patch, "queryMaxNumChannels"));
+
+    const auto cmake = readSource("CMakeLists.txt");
+    CHECK(contains(cmake, "apply-wasapi-probe-cap.cmake"));
+    CHECK(contains(cmake, "PLUGINRACK_PATCH_JUCE_WASAPI_PROBE"));
+
+    const auto script = readSource("tools/juce-patches/apply-wasapi-probe-cap.cmake");
+    CHECK(contains(script, "apply --check --reverse"));
+    CHECK(contains(script, "does not apply"));
+
+    const auto build = readSource("tools/build-and-copy.ps1");
+    CHECK(contains(build, "apply-wasapi-probe-cap.cmake"));
+}

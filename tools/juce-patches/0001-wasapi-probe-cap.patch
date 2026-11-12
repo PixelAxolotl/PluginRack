@@ -1,0 +1,28 @@
+diff --git a/modules/juce_audio_devices/native/juce_WASAPI_windows.cpp b/modules/juce_audio_devices/native/juce_WASAPI_windows.cpp
+--- a/modules/juce_audio_devices/native/juce_WASAPI_windows.cpp
++++ b/modules/juce_audio_devices/native/juce_WASAPI_windows.cpp
+@@ -831,12 +831,22 @@
+     int queryMaxNumChannels (IAudioClient* clientToUse) const
+     {
+         static constexpr auto maxNumChannelsToQuery = static_cast<int> (AudioChannelSet::maxChannelsOfNamedLayout);
+         const auto fallbackNumChannels = defaultNumChannels;
+ 
++        auto highestChannelToQuery = maxNumChannelsToQuery;
++
++        // PluginRack: opt-in cap (absent/0/invalid = stock behaviour). The app
++        // sets this from Settings; it skips the 64..2 channel probe on drivers
++        // that answer each format check slowly.
++        if (const auto cap = SystemStats::getEnvironmentVariable (
++                "PLUGINRACK_WASAPI_MAX_PROBE_CHANNELS", {}).getIntValue();
++            cap >= 2)
++            highestChannelToQuery = jmin (highestChannelToQuery, cap);
++
+-        if (fallbackNumChannels >= maxNumChannelsToQuery)
++        if (fallbackNumChannels >= highestChannelToQuery)
+             return fallbackNumChannels;
+ 
+         auto result = fallbackNumChannels;
+ 
+-        for (auto ch = maxNumChannelsToQuery; ch > result; --ch)
++        for (auto ch = highestChannelToQuery; ch > result; --ch)
+         {
