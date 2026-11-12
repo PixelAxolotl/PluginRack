@@ -107,6 +107,9 @@ private:
     juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
     juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
     juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
+    juce::ToggleButton probeCapToggle { "Cap WASAPI channel probe" };
+    juce::Label probeCapLabel { "", "Max channels" };
+    juce::Slider probeCapChannels;
     // Scene-v6 hardening. Off by default so a pre-v6 save behaves exactly as
     // before; the switches save with the session once they are turned on.
     juce::ToggleButton slicedRenderToggle { "Deadline-aware sliced rendering" };
@@ -154,8 +157,9 @@ private:
     // Staged settings: nothing reaches the engine until Apply.
     AudioEngine::DeviceSettings staged_;
     bool dirty_ = false;
-    // The latency budget draws nothing until a clock is open; the panel
-    // collapses rather than leaving a blank block of rows.
+    // The latency budget stays collapsed until a clock is open. Once it has
+    // been shown, keep the last good readout in place rather than collapsing
+    // again when a fresh report has not arrived yet.
     bool hasBudget_ = false;
     std::vector<AudioEngine::ReloadableDevice> reloadDevices_;
 

@@ -1420,3 +1420,19 @@ TEST_CASE("the wasapi probe cap reaches the juce backend", "[device][probe]") {
     CHECK(contains(save, "audio.wasapiProbeCapEnabled = settings.wasapiProbeCapEnabled"));
     CHECK(contains(save, "audio.wasapiProbeCapChannels = settings.wasapiProbeCapChannels"));
 }
+TEST_CASE("settings exposes the wasapi probe cap", "[device][probe][ui]") {
+    const auto header = readSource("app/src/SettingsView.h");
+    CHECK(contains(header, "probeCapToggle"));
+    CHECK(contains(header, "probeCapChannels"));
+    CHECK(contains(header, "Cap WASAPI channel probe"));
+
+    const auto settings = readSource("app/src/SettingsView.cpp");
+    CHECK(contains(settings, "more I/O than the cap"));
+    CHECK(contains(settings, "probeCapChannels.setRange(2.0, 64.0, 1.0)"));
+    CHECK(contains(settings, "staged_.wasapiProbeCapEnabled"));
+    CHECK(contains(settings, "staged_.wasapiProbeCapChannels"));
+    CHECK(contains(settings, "probeCapToggle.setEnabled(!busy)"));
+    CHECK(contains(settings, "probeCapChannels.setEnabled(!busy"));
+    CHECK(contains(settings, "wasapiProbeCapEnabled != applied.wasapiProbeCapEnabled"));
+    CHECK(contains(settings, "wasapiProbeCapChannels != applied.wasapiProbeCapChannels"));
+}

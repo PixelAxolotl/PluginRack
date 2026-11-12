@@ -228,6 +228,35 @@ SettingsView::SettingsView(AudioEngine& engine)
         "endpoint refuses to open both directions, the app falls back to a "
         "separate capture automatically.");
 
+    theme::ui::styleToggle(probeCapToggle);
+    add(probeCapToggle);
+    probeCapToggle.setTooltip(
+        "Caps JUCE's WASAPI channel-count probe at the value below. Cuts a "
+        "slow endpoint's startup probe from seconds to under one; a device "
+        "with more I/O than the cap reports only the cap while enabled.");
+    probeCapToggle.onClick = [this] {
+        staged_.wasapiProbeCapEnabled = probeCapToggle.getToggleState();
+        probeCapChannels.setEnabled(staged_.wasapiProbeCapEnabled);
+        updatePendingState();
+    };
+
+    styleCaption(probeCapLabel);
+    add(probeCapLabel);
+    probeCapChannels.setSliderStyle(juce::Slider::IncDecButtons);
+    probeCapChannels.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 64,
+                                     theme::ui::kControlH);
+    probeCapChannels.setRange(2.0, 64.0, 1.0);
+    probeCapChannels.setValue(8.0, juce::dontSendNotification);
+    probeCapChannels.setTextValueSuffix(" ch");
+    probeCapChannels.setColour(juce::Slider::textBoxTextColourId, theme::text());
+    probeCapChannels.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    probeCapChannels.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    probeCapChannels.onValueChange = [this] {
+        staged_.wasapiProbeCapChannels = (int) probeCapChannels.getValue();
+        updatePendingState();
+    };
+    add(probeCapChannels);
+
     const std::array<juce::ToggleButton*, 4> hardeningToggles {
         &slicedRenderToggle, &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle,
     };
@@ -433,8 +462,10 @@ void SettingsView::refresh() {
     bool relayout = false;
 
     const auto report = audioEngine.getLatencyReport();
-    if (hasBudget_ != report.valid) {
-        hasBudget_ = report.valid;
+    // Keep the latency budget (and its last good readout) in place instead of
+    // collapsing it whenever a fresh report has not arrived yet.
+    if (!hasBudget_ && report.valid) {
+        hasBudget_ = true;
         relayout = true;
     }
     const auto clockDescription = audioEngine.getClockDescription();
@@ -545,6 +576,8 @@ void SettingsView::refresh() {
         lowLatencyOutputsToggle.setToggleState(staged_.lowLatencyOutputs, juce::dontSendNotification);
         minimalClockFifoToggle.setToggleState(staged_.minimalClockFifo, juce::dontSendNotification);
         fullDuplexToggle.setToggleState(staged_.fullDuplexInput, juce::dontSendNotification);
+        probeCapToggle.setToggleState(staged_.wasapiProbeCapEnabled, juce::dontSendNotification);
+        probeCapChannels.setValue(staged_.wasapiProbeCapChannels, juce::dontSendNotification);
         slicedRenderToggle.setToggleState(staged_.slicedRender, juce::dontSendNotification);
         scrubToggle.setToggleState(staged_.nonFiniteScrub, juce::dontSendNotification);
         healthReloadToggle.setToggleState(staged_.healthReload, juce::dontSendNotification);
@@ -559,6 +592,8 @@ void SettingsView::refresh() {
                            &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle }) {
         toggle->setEnabled(!busy);
     }
+    probeCapToggle.setEnabled(!busy);
+    probeCapChannels.setEnabled(!busy && staged_.wasapiProbeCapEnabled);
     healthSensitivityCombo.setEnabled(!busy);
 
     const auto profile = audioEngine.getLatencyProfileState();
@@ -652,6 +687,8 @@ void SettingsView::updatePendingState() {
           || staged_.lowLatencyOutputs != applied.lowLatencyOutputs
           || staged_.minimalClockFifo != applied.minimalClockFifo
           || staged_.fullDuplexInput != applied.fullDuplexInput
+          || staged_.wasapiProbeCapEnabled != applied.wasapiProbeCapEnabled
+          || staged_.wasapiProbeCapChannels != applied.wasapiProbeCapChannels
           || staged_.slicedRender != applied.slicedRender
           || staged_.nonFiniteScrub != applied.nonFiniteScrub
           || staged_.healthReload != applied.healthReload
@@ -721,7 +758,7 @@ void SettingsView::updateMeasurement(const AudioEngine::LatencyReport& report) {
 
     measureButton.setButtonText(measuring ? "Cancel Measurement" : "Measure Round-Trip");
     measureButton.setEnabled(!busy && (measuring || ready));
-    budgetView.setReport(report);
+    if (report.valid) budgetView.setReport(report);
 
     const auto setDetail = [this](const juce::String& text, juce::Colour colour) {
         measuredDetailLabel.setText(text, juce::dontSendNotification);
@@ -1060,13 +1097,14 @@ int SettingsView::layoutBody(int width) {
         const int asioRowH = juce::jmax(theme::ui::kControlH, asioStatusH);
         constexpr int kToggleW = 430;
         constexpr int kToggleColGap = 24;
-        // Nine opt-in switches read as one list in a narrow window and as rows
+        // Ten opt-in switches read as one list in a narrow window and as rows
         // of two when the panel is wide enough to hold them side by side.
         const bool twoColumns = innerW >= 2 * kToggleW + kToggleColGap;
-        constexpr int kToggleCount = 9;
+        constexpr int kToggleCount = 10;
         const int toggleRows = twoColumns ? (kToggleCount + 1) / 2 : kToggleCount;
         const int togglesH = toggleRows * kToggleH + (toggleRows - 1) * kToggleGap;
-        const int panelH = pad + togglesH + 6 + theme::ui::kControlH + 10
+        const int panelH = pad + togglesH + 6 + theme::ui::kControlH
+                         + 6 + theme::ui::kControlH + 10
                          + profileRowH + 6 + asioRowH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
@@ -1075,7 +1113,7 @@ int SettingsView::layoutBody(int width) {
             &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
             &minimalClockFifoToggle, &fullDuplexToggle,
             &slicedRenderToggle, &scrubToggle, &healthReloadToggle,
-            &ladderRecoveryToggle,
+            &ladderRecoveryToggle, &probeCapToggle,
         }};
         const int columnW = twoColumns ? (innerW - kToggleColGap) / 2 : innerW;
         for (int i = 0; i < (int) toggles.size(); ++i) {
@@ -1086,6 +1124,11 @@ int SettingsView::layoutBody(int width) {
                                   juce::jmin(kToggleW, columnW), kToggleH);
         }
         inner.removeFromTop(togglesH);
+
+        inner.removeFromTop(6);
+        auto probeCapRow = inner.removeFromTop(theme::ui::kControlH);
+        probeCapLabel.setBounds(probeCapRow.removeFromLeft(160));
+        probeCapChannels.setBounds(probeCapRow.removeFromLeft(200));
 
         inner.removeFromTop(6);
         auto healthRow = inner.removeFromTop(theme::ui::kControlH);
