@@ -463,8 +463,10 @@ void SettingsView::refresh() {
     bool relayout = false;
 
     const auto report = audioEngine.getLatencyReport();
-    if (hasBudget_ != report.valid) {
-        hasBudget_ = report.valid;
+    // Keep the latency budget (and its last good readout) in place instead of
+    // collapsing it whenever a fresh report has not arrived yet.
+    if (!hasBudget_ && report.valid) {
+        hasBudget_ = true;
         relayout = true;
     }
     const auto clockDescription = audioEngine.getClockDescription();
@@ -757,7 +759,7 @@ void SettingsView::updateMeasurement(const AudioEngine::LatencyReport& report) {
 
     measureButton.setButtonText(measuring ? "Cancel Measurement" : "Measure Round-Trip");
     measureButton.setEnabled(!busy && (measuring || ready));
-    budgetView.setReport(report);
+    if (report.valid) budgetView.setReport(report);
 
     const auto setDetail = [this](const juce::String& text, juce::Colour colour) {
         measuredDetailLabel.setText(text, juce::dontSendNotification);
