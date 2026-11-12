@@ -64,7 +64,7 @@ Every row is decided. `Plan` is the row id in the parent plan (§5.1, §5.2).
 | # | Decision | Value |
 | --- | --- | --- |
 | LC-1 | Spawn | One child per insert, `PluginRack.exe --plugin-host <file> <uniqueId> <mapping> <state\|-> <sampleRate> <blockSize>`. Spawned **and** handshaken on a worker, never on the message thread. For an interactive add that worker already exists: the `juce::Thread::launch` inside `addPluginAsync` (`AudioEngine.cpp:1189`), which today only scans. Scene restore has no worker today — `restoreScene` loads inserts serially on the message thread (`AudioEngine.cpp:2256`, `:2336`) — so Phase 1 adds the parallel spawn step there. Spawning is OS work only; the app-side editor instance still has to be built on the message thread. |
-| LC-2 | Handshake | `HOSTREADY` on stdout within 10 s, or `HOSTERROR <reason>`, or timeout; the waiting worker classifies the insert as ready or launch-failed. A launch failure is **decided before the insert is published** (§3.7). |
+| LC-2 | Handshake | The child publishes `ControlSection::hostReady` (`0` starting, `1` loaded, `2` failed) and the app polls that flag with a 10 s budget. Stdout still prints `HOSTREADY <path>` / `HOSTERROR <reason>` for the log, but it is **not** the handshake: `ChildProcess::readProcessOutput` blocks when the pipe has no data, so polling stdout deadlocks the worker that is waiting. A ready child has every channel open and the plugin instantiated. On failure the app reads stdout only after the child has exited (`outputAfterExit()`), where a read returns at EOF. |
 | LC-3 | Per-block timeout | IPC-3 deadline. Consecutive misses counted per insert; 3 in a row marks the insert failed (dry, badge), 1 miss is just a dry block. Any successful block resets the counter. |
 | LC-4 | Child crash | Existing watcher (100 ms poll of `ChildProcess::isRunning`) sets `hostDead`; the audio thread only ever reads that atomic. The exit code and `pendingOutput()` are read on the message thread when the badge is built. |
 | LC-5 | Restart policy | No auto-restart. `killAndReap()`, record the fault (Phase 3), re-spawn only on an explicit **Reload**. |
@@ -219,9 +219,18 @@ PluginRack.exe --plugin-host <pluginPath> <uniqueId> <mappingName> <state|-> <sa
   `HOSTERROR <reason>`, 10 s budget. The child must print `HOSTREADY` only
   after the plugin instance exists **and** the param and control sections are
   open, so a ready child is a fully wired child.
-- `--test-kill-child` and any `--use-child` switch must be added to
+- Handshake, corrected during Phase 1: readiness is the shared flag
+  `ControlSection::hostReady`, not the stdout text. `HOSTREADY <path>` and
+  `HOSTERROR <reason>` are still printed (the log and the failure report use
+  them), but polling the output pipe blocks while it is empty and hung the
+  loading worker — that is exactly the kind of bug a "HOSTREADY on stdout"
+  contract invites, so the flag is authoritative.
+- The child stores its own pid in `ControlSection::hostPid` before loading
+  anything: this JUCE `ChildProcess` exposes no pid, and a fault record (and the
+  `--test-child-host --kill-after-ms` diagnostic) has to name the process.
+- `--test-child-host` and any `--use-child`-style switch must be added to
   `moreThanOneInstanceAllowed()` (`app/src/Main.cpp:196-203`), or the second
-  launch takes the single-instance path and kills itself.
+  launch takes the single-instance path and never runs the diagnostic.
 
 ### 3.6 Child input policy
 
