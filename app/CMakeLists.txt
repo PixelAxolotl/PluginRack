@@ -26,6 +26,7 @@ target_sources(pluginrack_app PRIVATE
     src/ChannelStrip.h
     src/ConsoleLookAndFeel.cpp
     src/ConsoleLookAndFeel.h
+    src/CrashContext.h
     src/DeviceBackend.h
     src/DeviceControl.cpp
     src/DeviceControl.h
