@@ -120,6 +120,11 @@ public:
                         double sampleRate, int bufferSize, int timeoutMs, juce::String& error);
     // Mirrors an editor-side parameter change into the child. The value is
     // normalised (0..1), the same domain the plugin reports.
+    //
+    // PARKED: no caller yet (13 Nov 2026). This is the Phase 2 entry point
+    // (plan task 2.1). Do not wire it before the four fixes in plan §6.0 -
+    // forwarding edits into the child while the renderer can still fall through
+    // to the in-process instance was part of the configuration that crashed.
     bool setChildParameter(int parameterIndex, float normalisedValue);
     void stopChildHost();
     bool childHostEnabled() const { return childHost_ != nullptr; }

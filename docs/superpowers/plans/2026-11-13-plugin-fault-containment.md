@@ -6,7 +6,7 @@
 | Trigger to reopen | A plugin still faults `PluginHost::processBlock` on the audio thread, or a new teardown path appears that `releaseEditorsNow()` does not cover. |
 | Scope | Keep the app and the other strips alive when one plugin faults. Not OS-level sandboxing. |
 | Spec | **Drafted, awaiting sign-off:** `docs/superpowers/specs/2026-11-13-fault-containment-ipc.md` (Phase 0, no code). Phase 1 does not start until §5.6 is fully checked. |
-| Phase 1 status | Core landed and verified (child host, IPC, null/kill diagnostics). **Engine wiring reverted — see spec §7.1:** live device audio crashed 4/8 soaks, so the child path stays diagnostic-only until the concurrency audit passes. |
+| Phase 1 status | **Parked 13 Nov 2026 — diagnostics only, not wired.** Core landed and verified (child host, IPC, null/kill diagnostics). Engine wiring was reverted: with live device audio it crashed 4/8 soaks. Resume from §6.0 below and spec §7.1. |
 | This revision | v2 adds **WHERE** (exact files/functions) and **HOW** (step-by-step patches, commands, exit criteria) to every phase. v1 text is preserved and marked. |
 
 > How to read this file: each phase has **Goal → WHERE → HOW → Verify →
@@ -290,6 +290,57 @@ Death:  watcher sees exit (e.g. 0xC0000005) ──► insert bypasses dry, badge
 
 **Goal:** one insert renders through a child with a dry-bypass on
 failure, behind a flag, with the in-process path still default.
+
+> **Parked 13 Nov 2026.** Tasks 1.0–1.2, 1.4, 1.5 and 1.8 are done and verified;
+> 1.3, 1.6 and 1.7 are partial or unreachable. Before any task below resumes,
+> read §6.0 — the four defects that reverted the engine wiring are the entry
+> point, not an afterthought.
+
+### 6.0 Resume here (parked state, 13 Nov 2026)
+
+**Where the work lives.** Branch `feat/audio-robustness`, commits `aab9e31`
+(plan v2), `7d480bb` (Phase 0 spec), `e8c7c11` (child host core),
+`b673010` (null test + prepare lifecycle), `cf55ecf` (block length + scratch
+allocation), `b7ee6f2` (third-party verification). Nothing is merged to
+`master`; Fix 1 (`5132a41`) already is.
+
+**What is proven today, through diagnostics only:**
+
+```powershell
+# child renders, then dies on command: expect "insert is dry, app alive, exit 0xC0000005"
+.\PluginRack.exe --test-child-host "C:\...\Any.vst3" --kill-after-ms 1000
+# child == in-process, sample for sample, with a determinism baseline
+.\PluginRack.exe --test-child-null "C:\...\Any.vst3"
+```
+
+Bit-identical on seven plugins at 48 kHz / 256; `ctest` 368/368; `/W4 /WX`
+clean; the Fix-1 load-save guard still green. No insert in the app can reach
+the child path.
+
+**Why the wiring is not in the tree.** With live device audio it crashed 4 of 8
+twenty-second soaks (`0xC0000005`, `0xC0000374`). Spec §7.1 has the evidence and
+the independent review. The four fixes, in order, are the resume gate:
+
+1. Replace the nullable-pointer renderer test with an explicit mode fixed at
+   publish time. A child-mode slot with no live host plays **dry**; it must
+   never fall through to `plugin->processBlock`. The crash stacks are
+   consistent with that fall-through.
+2. Publish/retire `childHost_` safely against the audio thread (no reset while
+   `submitBlock`/`fetchBlock` can be inside it).
+3. Skip the child `prepare` when the format is unchanged, and never run it (or
+   any control round trip) on a path the audio thread waits on.
+4. Serialise `controlCall` and recover the sequence after a timeout.
+
+**Then, and only then:** re-wire the engine behind a session switch, and accept
+Stage 2 on a **30-run soak with zero crashes**, plus the V9 rate/buffer sweep,
+V10 M-Audio duplex and V7/V8 state round-trip from §11.
+
+**Known dead code, deliberately kept:** `PluginHost::setChildParameter()` has no
+callers — it is the Phase 2 entry point (task 2.1) and is annotated as such. Do
+not wire it before the four fixes.
+
+**Do not** flip any default, persist a flag, or touch the scene schema until
+Stage 2 passes.
 
 ### Task 1.1 — Introduce `PluginProcessHost` behind `PluginHost`
 
