@@ -46,6 +46,12 @@ public:
         // so a crash inside the plugin names it (see CrashContext.h). Assigned
         // when the insert is created; never freed.
         const char* crashLabel = nullptr;
+        // Fault containment: set when the child host dies or wedges; cleared only
+        // on a successful Reload. Audio stays dry while this is true.
+        juce::Atomic<bool> failed{false};
+        juce::Atomic<int> failExitCode{0};
+        // Records to faults.json exactly once per failure transition.
+        juce::Atomic<bool> faultRecorded{false};
     };
 
     // Task 6 analyzer tap: when an EQ window turns the spectrum on, render()
@@ -496,6 +502,9 @@ public:
                         std::function<void(juce::String)> done);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
+    // Fault containment: re-spawn the child host for a failed insert (Reload).
+    // Clears `failed` only on a successful HOSTREADY. Message thread only.
+    bool reloadInsert(std::uint32_t channelId, std::uint32_t insertId);
     void moveChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item, int targetIndex);
     // Removes a chain entry (a built-in effect). Picking the same effect from
     // the plugin menu appends it back; the scene save keeps whatever chain is
@@ -617,6 +626,10 @@ public:
     bool getNonFiniteScrubEnabled() const { return nonFiniteScrub_.load(); }
     bool getHealthReloadDevices() const { return healthReload_.load(); }
     bool getLadderRecoveryEnabled() const { return ladderRecovery_.load(); }
+    // Fault containment (beta): run insert DSP in a child process. Default off;
+    // persisted scene/schema changes are deferred until Stage 2 passes.
+    void setChildProcessDsp(bool enabled) { childProcessDsp_.store(enabled, std::memory_order_release); }
+    bool getChildProcessDsp() const { return childProcessDsp_.load(std::memory_order_acquire); }
     pluginrack::StreamHealthThresholds getHealthThresholds() const;
     // Render-load summary from the clock callback: percentiles of the time
     // spent inside render(), the share of a block period that p99 costs, and
@@ -852,6 +865,7 @@ private:
     std::atomic<bool> nonFiniteScrub_{false};
     std::atomic<bool> healthReload_{false};
     std::atomic<bool> ladderRecovery_{false};
+    std::atomic<bool> childProcessDsp_{false};
     std::atomic<double> healthYellowUnderrunsPerMinute_{1.0};
     std::atomic<double> healthRedUnderrunsPerMinute_{10.0};
     std::atomic<double> healthPinnedToEdgeMs_{5000.0};

@@ -63,6 +63,9 @@ public:
     virtual juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) = 0;
     virtual void erasePlugin(std::uint32_t insertId) = 0;
     virtual void setPluginBypass(std::uint32_t insertId, bool bypassed) = 0;
+    // Fault containment: re-spawn the child host for a failed insert. Default
+    // no-op keeps unit-test hosts buildable.
+    virtual void reloadPlugin(std::uint32_t /*insertId*/) {}
     virtual void refreshAfterInsertChange() = 0;
     virtual void openPicker(juce::Component& anchor) { openPluginPicker(*this, anchor); }
     virtual void reorderInsert(std::uint32_t /*insertId*/, int /*targetIndex*/) {}
@@ -201,6 +204,18 @@ public:
         removeButton.setTooltip("Remove this plugin");
         addAndMakeVisible(removeButton);
 
+        reloadButton.setClickAction([this] {
+            if (insert == nullptr) return;
+            host.reloadPlugin(insert->id);
+            juce::MessageManager::callAsync([safeHost = juce::Component::SafePointer<juce::Component>(hostComponent)] {
+                if (auto* comp = safeHost.getComponent())
+                    if (auto* h = dynamic_cast<IInsertHost*>(comp)) h->refreshAfterInsertChange();
+            });
+        });
+        reloadButton.setTooltip("Reload the crashed plugin");
+        reloadButton.setVisible(false);
+        addAndMakeVisible(reloadButton);
+
         // A card can hold more than one effect (the Dynamics card carries the
         // EQ and the compressor), so it carries one switch per effect instead
         // of the single bypass button. Each switch follows the strip
@@ -243,7 +258,13 @@ public:
             bypassButton.setToggleState(insert->bypassed.get());
             bypassButton.setEnabledState(true);
             removeButton.setEnabledState(true);
-            nameLabel.setColour(juce::Label::textColourId, theme::text());
+            const bool crashed = insert->failed.get();
+            reloadButton.setVisible(crashed);
+            if (crashed) {
+                nameLabel.setText("Plugin crashed (" + juce::String::toHexString(insert->failExitCode.get()).paddedLeft('0', 8).toUpperCase() + ")", juce::dontSendNotification);
+                nameLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            }
+            if (!crashed) nameLabel.setColour(juce::Label::textColourId, theme::text());
             nameLabel.setTooltip(insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath);
             setTooltip("Drag the dots to reorder - click to open the plugin editor");
         } else {
@@ -276,6 +297,7 @@ public:
         nameLabel.setTooltip("Add a VST3 plugin to this slot");
         bypassButton.setVisible(false);
         removeButton.setVisible(false);
+        reloadButton.setVisible(false);
         setTooltip("Click to add a VST3 plugin");
         repaint();
     }
@@ -403,6 +425,8 @@ public:
             return;
         }
         removeButton.setBounds(area.removeFromRight(18));
+        area.removeFromRight(2);
+        reloadButton.setBounds(area.removeFromRight(18));
         area.removeFromRight(2);
         bypassButton.setBounds(area.removeFromRight(18));
         area.removeFromRight(3);
@@ -537,6 +561,7 @@ private:
     juce::Label nameLabel;
     MiniButton bypassButton{"B"};
     MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
+    MiniButton reloadButton{"R"};
     MiniButton pairFirstButton{"EQ"};
     MiniButton pairSecondButton{"C"};
     CardSwitch pairFirst;

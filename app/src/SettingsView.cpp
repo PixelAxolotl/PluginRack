@@ -424,6 +424,16 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     add(closeToTrayToggle);
 
+    clearFaultsButton.onClick = [this] {
+        const int n = PluginFaultGuard::clear();
+        faultsLabel.setText("Cleared " + juce::String(n) + " fault record(s).", juce::dontSendNotification);
+    };
+    theme::ui::styleButton(clearFaultsButton);
+    add(clearFaultsButton);
+    faultsLabel.setFont(theme::ui::captionFont());
+    faultsLabel.setColour(juce::Label::textColourId, theme::dim());
+    add(faultsLabel);
+
     // AUDIO DEVICES
     devicesLabel.setText("AUDIO DEVICES", juce::dontSendNotification);
     styleCaption(devicesLabel);
@@ -1157,7 +1167,7 @@ int SettingsView::layoutBody(int width) {
     // APP
     {
         const int panelTop = startSection(appCaption, nullptr);
-        const int panelH = pad + theme::ui::kControlH + 6 + theme::ui::kControlH + pad;
+        const int panelH = pad + theme::ui::kControlH + 6 + theme::ui::kControlH + 6 + theme::ui::kControlH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1174,6 +1184,12 @@ int SettingsView::layoutBody(int width) {
         peakHoldCombo.setBounds(row2.removeFromLeft(90));
         row2.removeFromLeft(24);
         closeToTrayToggle.setBounds(row2.removeFromLeft(320));
+
+        inner.removeFromTop(6);
+        auto row3 = inner.removeFromTop(theme::ui::kControlH);
+        clearFaultsButton.setBounds(row3.removeFromLeft(220));
+        row3.removeFromLeft(8);
+        faultsLabel.setBounds(row3.removeFromLeft(260));
         endSection(panel);
     }
 

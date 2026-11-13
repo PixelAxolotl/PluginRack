@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "PluginProcessHost.h"
+
 // Tracks the plugin file currently inside plugin code so a crash can be blamed
 // on it, and remembers plugins that crashed the app while loading. A plugin
 // that faults in its own DllMain cannot be caught in-process, so a crashed
@@ -18,6 +20,16 @@ bool isBlocked(const juce::File& file);
 void block(const juce::File& file);
 int clearBlocked();                   // returns how many entries were dropped
 } // namespace PluginLoadGuard
+
+// Records plugin faults that killed a child host, persisted in faults.json.
+// Unlike the load blocklist (which refuses to load), fault records only warn.
+namespace PluginFaultGuard {
+juce::File faultsFile();
+// Appends one record (idempotent on path within a short window is not required;
+// the caller dedupes via InsertSlot::faultRecorded). Returns true on success.
+bool record(const juce::String& path, int exitCode, std::uint32_t insertId);
+int clear(); // returns how many entries dropped
+} // namespace PluginFaultGuard
 
 class PluginHost {
 public:
@@ -90,6 +102,51 @@ public:
     // never hands a block to another process.
     void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed = false);
 
+    // --- Fault containment: child-process DSP ------------------------------
+    // Off unless loadChildHost() is called. Once a slot is published its
+    // renderer is fixed: a launch failure leaves it in-process (the caller just
+    // does not call loadChildHost), and a later child death leaves it DRY until
+    // the slot is rebuilt. Nothing here ever switches a live slot to the
+    // in-process instance; see
+    // docs/superpowers/specs/2026-11-13-fault-containment-ipc.md §3.2.
+    struct ChildHostStatus {
+        bool enabled = false;
+        bool failed = false;
+        int exitCode = 0;
+        int missedBlocks = 0;
+    };
+
+    // Spawns the child, waits for HOSTREADY, pushes the saved state and the
+    // current format. Worker thread only (it waits for the plugin to load).
+    // Returns false with `error` set; the caller then publishes an in-process
+    // slot, which is a launch failure, not a degraded child slot.
+    bool loadChildHost(const juce::File& file, int pluginUniqueId, const juce::String& stateBase64,
+                       double sampleRate, int bufferSize, int readyTimeoutMs,
+                       juce::String& error);
+    // Takes over a child that a worker already spawned and handshook, so the
+    // insert load path never blocks the message thread on plugin loading.
+    // Pushes state and the format; returns false if the child cannot take them.
+    bool adoptChildHost(std::unique_ptr<PluginProcessHost> host, const juce::String& stateBase64,
+                        double sampleRate, int bufferSize, int timeoutMs, juce::String& error);
+    // Mirrors an editor-side parameter change into the child. The value is
+    // normalised (0..1), the same domain the plugin reports.
+    //
+    // PARKED: no caller yet (13 Nov 2026). This is the Phase 2 entry point
+    // (plan task 2.1). Do not wire it before the four fixes in plan §6.0 -
+    // forwarding edits into the child while the renderer can still fall through
+    // to the in-process instance was part of the configuration that crashed.
+    bool setChildParameter(int parameterIndex, float normalisedValue);
+    void stopChildHost();
+    bool childHostEnabled() const {
+        return childHost_.load(std::memory_order_acquire) != nullptr;
+    }
+    // Renderer mode is fixed for the life of the slot (spec §3.2). 0 = in-process, 1 = child.
+    int rendererMode() const { return rendererMode_.load(std::memory_order_acquire); }
+    void setRendererMode(int mode) { rendererMode_.store(mode, std::memory_order_release); }
+    ChildHostStatus childHostStatus() const;
+    int childProcessId() const;
+    PluginProcessHost::Peaks childPeaks() const;
+
     juce::String getPluginPath() const;
     juce::String getPluginName() const;
     double getSampleRate() const;
@@ -125,6 +182,24 @@ private:
     int currentBufferSize = 256;
     bool prepared = false;
     std::atomic<int> cachedLatencySamples_{0};
+
+    // Child-process DSP state. childScratch_ is sized in prepareToPlay and is
+    // the only buffer the audio thread hands to the child, so a failed block
+    // can never have mutated the caller's live audio.
+    // Published atomically so the audio thread can never observe a
+    // half-torn pointer (fix 2 of the resume gate). A slot whose renderer
+    // mode is "child" keeps reading dry when this is null.
+    std::atomic<std::shared_ptr<PluginProcessHost>> childHost_{};
+    std::atomic<int> rendererMode_{0}; // 0 = in-process, 1 = child (fix 1)
+    juce::AudioBuffer<float> childScratch_;
+    std::atomic<double> playSampleRate_{48000.0};
+    std::atomic<int> playBufferSize_{256};
+    std::atomic<int> childBlockDeadlineMs_{10};
+    std::atomic<int> childConsecutiveMisses_{0};
+    std::atomic<bool> childFailed_{false};
+    mutable juce::String childLastKnownState_;
+
+    void noteChildMiss();
 
     juce::DocumentWindow* editorWindow = nullptr;
 

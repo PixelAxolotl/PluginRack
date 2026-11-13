@@ -128,11 +128,15 @@ bool contains(const std::string& haystack, const std::string& needle) {
 
 TEST_CASE("the plugin host audio loop is woken by events, not a timer tick",
           "[plugin][ipc][rt]") {
-    const auto cpp = readSource("app/src/RestrictedHost.cpp");
+    const auto child = readSource("app/src/RestrictedHost.cpp");
+    const auto app = readSource("app/src/PluginProcessHost.cpp");
 
-    // The host wakes on the request event and acks on the response event.
-    const auto host = functionBody(cpp, "int RestrictedHost::runHost");
-    CHECK(contains(host, "requestEvent.wait("));
+    // The child waits on the audio and control events together and acks on the
+    // response event. WaitForMultipleObjects keeps the control channel off the
+    // system timer tick as well, which a polled control request would not.
+    const auto host = functionBody(child, "int RestrictedHost::runHost");
+    CHECK(contains(host, "WaitForMultipleObjects"));
+    CHECK(contains(host, "requestEvent.nativeHandle()"));
     CHECK(contains(host, "responseEvent.signal()"));
     // A 1 ms sleep is a timer-tick wait. Windows 11 ignores the process's
     // timer-resolution request in the background, which is exactly what made
@@ -141,20 +145,22 @@ TEST_CASE("the plugin host audio loop is woken by events, not a timer tick",
 
     // The app signals the request after publishing and waits on the response
     // instead of spinning on the audio thread.
-    const auto submit = functionBody(cpp, "bool RestrictedHost::submitAudioBlock");
+    const auto submit = functionBody(app, "bool PluginProcessHost::submitBlock");
     CHECK(contains(submit, "requestEvent.signal()"));
-    const auto fetch = functionBody(cpp, "bool RestrictedHost::fetchAudioBlock");
+    const auto fetch = functionBody(app, "bool PluginProcessHost::fetchBlock");
     CHECK(contains(fetch, "responseEvent.wait("));
     CHECK_FALSE(contains(fetch, "juce::Thread::yield()"));
 
-    // Both sides must create/open the same channel before a host is usable.
-    const auto launch = functionBody(cpp, "bool RestrictedHost::launch");
-    CHECK(contains(launch, "requestEvent.create("));
-    CHECK(contains(launch, "responseEvent.create("));
+    // Both sides must create/open the same channels before a host is usable.
+    const auto open = functionBody(app, "bool PluginProcessHost::openChannel");
+    CHECK(contains(open, "requestEvent.create("));
+    CHECK(contains(open, "responseEvent.create("));
     CHECK(contains(host, "requestEvent.open("));
     CHECK(contains(host, "responseEvent.open("));
 
     const auto names = readSource("app/src/PluginHostIpc.h");
     CHECK(contains(names, "requestEventNameFor("));
     CHECK(contains(names, "responseEventNameFor("));
+    CHECK(contains(names, "controlRequestEventNameFor("));
+    CHECK(contains(names, "controlResponseEventNameFor("));
 }

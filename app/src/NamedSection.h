@@ -15,6 +15,14 @@
 #include <cstddef>
 
 #ifdef _WIN32
+// See NamedEvent.h: keep the min/max macros out of headers that are included
+// next to core code using std::max.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 namespace pluginHostIpc {

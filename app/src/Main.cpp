@@ -10,7 +10,9 @@
 #include "RestrictedHost.h"
 #include "SliderTouch.h"
 
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 #if JUCE_WINDOWS
@@ -205,7 +207,8 @@ public:
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
             if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
-                || arg == "--plugin-host" || arg == "--test-crash-report")
+                || arg == "--plugin-host" || arg == "--test-crash-report"
+                || arg == "--test-child-host" || arg == "--test-child-null")
                 return true;
         }
         return false;
@@ -229,18 +232,22 @@ public:
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
-        // Restricted plugin host (PR-01): a VST3 runs here with reduced
-        // rights, never in the main app. Launched only by RestrictedHost.
+        // Restricted plugin host (fault containment): a VST3 runs here with
+        // reduced rights, never in the main app. Launched only by
+        // PluginProcessHost.
         // Optional 3rd arg: pluginUniqueId selects the class in multi-class
-        // bundles; 4th arg: base64 state blob to restore.
+        // bundles; 4th: mapping name; 5th: base64 state ("-" when the app will
+        // push it over the control channel, which is the normal case because a
+        // command line cannot carry a megabyte of state); 6th/7th: sample rate
+        // and block size to instantiate at.
         const int hostIndex = args.indexOf("--plugin-host");
         if (hostIndex >= 0 && hostIndex + 1 < args.size()) {
             const int uniqueId = (hostIndex + 2 < args.size())
                                      ? args[hostIndex + 2].unquoted().getIntValue()
                                      : 0;
-            // Order: path, uniqueId, mapping name, state. The mapping name is
-            // read positionally and never empty, so a host always finds its
-            // audio channel.
+            // Order: path, uniqueId, mapping name, state, sampleRate, blockSize.
+            // The mapping name is read positionally and never empty, so a host
+            // always finds its audio channel.
             const juce::String mappingName = (hostIndex + 3 < args.size())
                                                  ? args[hostIndex + 3].unquoted()
                                                  : juce::String{};
@@ -248,9 +255,15 @@ public:
                                      ? args[hostIndex + 4].unquoted()
                                      : juce::String{};
             if (state == "-") state = {};
-            const int code =
-                RestrictedHost::runHost(juce::File(args[hostIndex + 1].unquoted()), uniqueId,
-                                        state, mappingName);
+            const double sampleRate = (hostIndex + 5 < args.size())
+                                          ? args[hostIndex + 5].unquoted().getDoubleValue()
+                                          : 48000.0;
+            const int blockSize = (hostIndex + 6 < args.size())
+                                      ? args[hostIndex + 6].unquoted().getIntValue()
+                                      : 256;
+            const int code = RestrictedHost::runHost(
+                juce::File(args[hostIndex + 1].unquoted()), uniqueId, state, mappingName,
+                sampleRate > 0.0 ? sampleRate : 48000.0, blockSize > 0 ? blockSize : 256);
             ::exit(code);
             return;
         }
@@ -480,6 +493,269 @@ public:
             std::cout.flush();
             ::RaiseException(0xC0000005u, 0, 0, nullptr);
             return; // not reached
+        }
+
+        // Child-host null test (phase 1 gate): renders the same deterministic
+        // input through an in-process instance and through the child host, then
+        // compares them sample by sample. Passing proves the child path is not
+        // just "non-silent" but the same DSP.
+        const int nullTestIndex = args.indexOf("--test-child-null");
+        if (nullTestIndex >= 0 && nullTestIndex + 1 < args.size()) {
+            const juce::File nullTestFile(args[nullTestIndex + 1].unquoted());
+            // Message thread: the in-process instance must be created there
+            // (JUCE loads the plugin DLL on the creating thread), and so must
+            // the comparison, since it renders through that instance.
+            juce::MessageManager::callAsync([nullTestFile] {
+                constexpr double rate = 48000.0;
+                constexpr int blockSize = 256;
+                constexpr int blocks = 200;
+
+                const auto fail = [](const juce::String& result) {
+                    juce::Logger::writeToLog("test-child-null: " + result);
+                    std::cout << result.toStdString() << "\n";
+                    std::cout.flush();
+                    // Skip plugin teardown for the same reason the app's
+                    // shutdown does: some VST3s block forever in their dtor.
+                    ::exit(1);
+                };
+
+                // Deterministic input: a sine whose amplitude and frequency
+                // drift slowly, plus an impulse every 32 samples, so both
+                // linear and time-domain behaviour is exercised.
+                const auto makeBlock = [rate, blockSize](int index, double& phase) {
+                    juce::AudioBuffer<float> block(2, blockSize);
+                    const double step = 2.0 * juce::MathConstants<double>::pi
+                                        * (220.0 + 40.0 * std::sin(index * 0.01)) / rate;
+                    for (int i = 0; i < blockSize; ++i) {
+                        const auto gain = 0.2 + 0.1 * std::sin(index * 0.02);
+                        auto sample = static_cast<float>(gain * std::sin(phase));
+                        const int absolute = index * blockSize + i;
+                        if (absolute % 32 == 0) sample += 0.35f;
+                        block.setSample(0, i, sample);
+                        block.setSample(1, i, sample * -1.0f); // channel identity
+                        phase += step;
+                    }
+                    return block;
+                };
+
+                // In-process reference.
+                auto reference = PluginHost::loadFromFile(nullTestFile, rate, blockSize);
+                if (reference.error.isNotEmpty() || reference.instance == nullptr) {
+                    fail("failed - in-process load: "
+                         + (reference.error.isNotEmpty() ? reference.error
+                                                         : juce::String("no instance")));
+                }
+                PluginHost inProcess;
+                inProcess.prepareToPlay(rate, blockSize);
+                inProcess.adopt(reference);
+
+                // Second in-process instance, same input. This is the control:
+                // a plugin that randomises per instance (analog-modelled
+                // components, per-instance seeds) differs against itself too,
+                // and then a child difference is not a transport fault.
+                auto referenceTwo = PluginHost::loadFromFile(nullTestFile, rate, blockSize);
+                if (referenceTwo.error.isNotEmpty() || referenceTwo.instance == nullptr) {
+                    fail("failed - second in-process load: "
+                         + (referenceTwo.error.isNotEmpty() ? referenceTwo.error
+                                                            : juce::String("no instance")));
+                }
+                PluginHost inProcessTwo;
+                inProcessTwo.prepareToPlay(rate, blockSize);
+                inProcessTwo.adopt(referenceTwo);
+
+                // Child host.
+                PluginHost child;
+                child.prepareToPlay(rate, blockSize);
+                juce::String childError;
+                if (!child.loadChildHost(nullTestFile, 0, {}, rate, blockSize, 20000, childError)) {
+                    fail("failed - child load: " + childError);
+                }
+
+                juce::AudioBuffer<float> referenceOutput(2, blockSize * blocks);
+                juce::AudioBuffer<float> referenceTwoOutput(2, blockSize * blocks);
+                juce::AudioBuffer<float> childOutput(2, blockSize * blocks);
+                double phase = 0.0;
+                const auto input = [&makeBlock, &phase, blocks, blockSize] {
+                    juce::AudioBuffer<float> all(2, blockSize * blocks);
+                    for (int i = 0; i < blocks; ++i) {
+                        auto block = makeBlock(i, phase);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            all.copyFrom(channel, i * blockSize, block, channel, 0, blockSize);
+                        }
+                    }
+                    return all;
+                }();
+
+                const auto renderThrough = [&input, blocks, blockSize](PluginHost& host,
+                                                            juce::AudioBuffer<float>& output) {
+                    for (int i = 0; i < blocks; ++i) {
+                        juce::AudioBuffer<float> block(2, blockSize);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            block.copyFrom(channel, 0, input, channel, i * blockSize, blockSize);
+                        }
+                        host.processBlock(block);
+                        for (int channel = 0; channel < 2; ++channel) {
+                            output.copyFrom(channel, i * blockSize, block, channel, 0, blockSize);
+                        }
+                    }
+                };
+
+                renderThrough(inProcess, referenceOutput);
+                renderThrough(inProcessTwo, referenceTwoOutput);
+                renderThrough(child, childOutput);
+
+                const auto compare = [blocks, blockSize](const juce::AudioBuffer<float>& a,
+                                              const juce::AudioBuffer<float>& b) {
+                    auto result = std::make_pair(0.0f, 0);
+                    for (int channel = 0; channel < 2; ++channel) {
+                        const auto* left = a.getReadPointer(channel);
+                        const auto* right = b.getReadPointer(channel);
+                        for (int i = 0; i < blocks * blockSize; ++i) {
+                            if (left[i] != right[i]) ++result.second;
+                            result.first = juce::jmax(result.first, std::abs(left[i] - right[i]));
+                        }
+                    }
+                    return result;
+                };
+
+                const auto [baselineDiff, baselineCount] =
+                    compare(referenceOutput, referenceTwoOutput);
+                const auto [maxDifference, differingSamples] =
+                    compare(referenceOutput, childOutput);
+
+                const auto summary = juce::String("in-process peak ")
+                                     + juce::String(referenceOutput.getMagnitude(0, 0,
+                                                                                 blocks * blockSize),
+                                                    6)
+                                     + ", child peak "
+                                     + juce::String(childOutput.getMagnitude(0, 0, blocks * blockSize),
+                                                    6)
+                                     + ", max diff " + juce::String(maxDifference, 8) + ", "
+                                     + juce::String(differingSamples) + " differing samples"
+                                     + "; baseline (in-process vs in-process) max diff "
+                                     + juce::String(baselineDiff, 8) + ", "
+                                     + juce::String(baselineCount) + " differing samples";
+
+                // The plugin sets its own floor: compare the child against the
+                // in-process instance, but only call it a transport fault when
+                // it differs by more than the plugin differs from itself.
+                const bool identical = differingSamples == 0;
+                const bool withinTolerance = maxDifference <= juce::jmax(1.0e-6f, baselineDiff);
+                const auto result = identical ? juce::String("identical - ") + summary
+                                    : withinTolerance
+                                        ? juce::String("within tolerance - ") + summary
+                                        : juce::String("FAILED - ") + summary;
+                juce::Logger::writeToLog("test-child-null: " + result);
+                std::cout << result.toStdString() << "\n";
+                std::cout.flush();
+                ::exit(identical || withinTolerance ? 0 : 1);
+            });
+            return;
+        }
+
+        // Child-host smoke test (fault containment phase 1): loads one VST3 in
+        // the child process only, renders through the shared audio channel and
+        // reports whether output is non-silent. With --kill-after-ms N it then
+        // kills the child mid-render and checks the insert plays DRY (the block
+        // comes back bit-identical to its input) while this process stays alive.
+        const int childTestIndex = args.indexOf("--test-child-host");
+        if (childTestIndex >= 0 && childTestIndex + 1 < args.size()) {
+            const juce::File childTestFile(args[childTestIndex + 1].unquoted());
+            const int killIndex = args.indexOf("--kill-after-ms");
+            const int killAfterMs = (killIndex >= 0 && killIndex + 1 < args.size())
+                                        ? args[killIndex + 1].unquoted().getIntValue()
+                                        : 0;
+            juce::Thread::launch([childTestFile, killAfterMs] {
+                const auto finish = [](const juce::String& result) {
+                    juce::Logger::writeToLog("test-child-host: " + result);
+                    std::cout << result.toStdString() << "\n";
+                    std::cout.flush();
+                    juce::MessageManager::callAsync([] {
+                        if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
+                    });
+                };
+
+                constexpr double rate = 48000.0;
+                constexpr int blockSize = 256;
+                PluginHost host;
+                host.prepareToPlay(rate, blockSize);
+
+                juce::String error;
+                if (!host.loadChildHost(childTestFile, 0, {}, rate, blockSize, 20000, error)) {
+                    finish("failed - " + error);
+                    return;
+                }
+
+                // Render a sine and remember what went in, so a killed child can
+                // be checked against true dry audio rather than "not silent".
+                const auto renderBlock = [&host](double phaseStep, double& phase) {
+                    juce::AudioBuffer<float> block(2, blockSize);
+                    for (int i = 0; i < blockSize; ++i) {
+                        const auto sample =
+                            static_cast<float>(0.25 * std::sin(phase));
+                        block.setSample(0, i, sample);
+                        block.setSample(1, i, sample);
+                        phase += phaseStep;
+                    }
+                    return block;
+                };
+
+                double phase = 0.0;
+                const double step = 2.0 * juce::MathConstants<double>::pi * 220.0 / rate;
+                float peak = 0.0f;
+                for (int i = 0; i < 200; ++i) {
+                    auto block = renderBlock(step, phase);
+                    host.processBlock(block);
+                    peak = juce::jmax(peak, block.getMagnitude(0, 0, blockSize));
+                }
+                if (peak <= 0.0f) {
+                    finish("failed - the child rendered silence");
+                    return;
+                }
+
+                if (killAfterMs <= 0) {
+                    finish("rendered " + juce::String(200) + " blocks through the child, peak "
+                           + juce::String(peak, 4) + ", status "
+                           + (host.childHostStatus().failed ? "failed" : "ok"));
+                    return;
+                }
+
+                juce::Thread::sleep(killAfterMs);
+                const int pid = host.childProcessId();
+                if (pid == 0) {
+                    finish("failed - no child process to kill");
+                    return;
+                }
+#if JUCE_WINDOWS
+                const HANDLE victim = ::OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+                if (victim != nullptr) {
+                    ::TerminateProcess(victim, 0xC0000005);
+                    ::CloseHandle(victim);
+                }
+#else
+                juce::ignoreUnused(pid);
+#endif
+                juce::Thread::sleep(500);
+
+                // The slot must now be dry: processBlock leaves the buffer alone.
+                auto block = renderBlock(step, phase);
+                const auto before = block;
+                host.processBlock(block);
+                bool dry = true;
+                for (int channel = 0; channel < 2 && dry; ++channel) {
+                    dry = std::memcmp(before.getReadPointer(channel),
+                                      block.getReadPointer(channel),
+                                      sizeof(float) * static_cast<std::size_t>(blockSize)) == 0;
+                }
+                const auto status = host.childHostStatus();
+                finish((dry ? "killed child: insert is dry, app alive, exit 0x"
+                            : "killed child: insert is NOT dry, exit 0x")
+                       + juce::String::toHexString(status.exitCode).toUpperCase()
+                       + ", status " + (status.failed ? "failed" : "not failed"));
+            });
+            // No window, no devices: this diagnostic only exercises the child
+            // through PluginProcessHost, so it must not open the audio rig.
+            return;
         }
 
         // Plugin smoke test: loads one VST3 the way the Add-VST path does

@@ -62,6 +62,9 @@ target_sources(pluginrack_app PRIVATE
     src/PluginHost.cpp
     src/PluginHost.h
     src/PluginHostIpc.h
+    src/PluginIpcLayout.h
+    src/PluginProcessHost.cpp
+    src/PluginProcessHost.h
     src/RestrictedHost.cpp
     src/RestrictedHost.h
     src/PluginLibrary.cpp

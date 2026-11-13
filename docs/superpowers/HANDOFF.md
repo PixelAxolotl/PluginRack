@@ -1,5 +1,25 @@
 # PluginRack — Handoff Document for Next Session/Agent
 
+## Fault containment (2026-11-13) — PARKED, diagnostics only
+
+Read first: `docs/superpowers/plans/2026-11-13-plugin-fault-containment.md`
+§6.0 and `docs/superpowers/specs/2026-11-13-fault-containment-ipc.md` §7.1.
+
+- Branch `feat/audio-robustness` holds the whole attempt; `master` has none of
+  it (Fix 1 `5132a41` is already on master and must stay green).
+- Working today: `--test-child-host <vst3> [--kill-after-ms N]` renders one
+  plugin in a child process and proves the insert goes dry when the child is
+  killed; `--test-child-null <vst3>` proves child output is bit-identical to
+  in-process output (with a determinism baseline). Seven plugins identical at
+  48 kHz / 256.
+- Not wired: no insert in the app uses a child. The engine wiring was written,
+  crashed 4 of 8 twenty-second soaks under live device audio, and was reverted.
+- Resume gate: the four fixes in plan §6.0 (explicit renderer mode, safe host
+  lifetime, no prepare/control on the render path, serialised control calls).
+  Do not re-wire before those, and accept the result only on a 30-run soak with
+  zero crashes.
+- `PluginHost::setChildParameter()` is deliberately caller-less (Phase 2 entry).
+
 ## Project Overview
 
 PluginRack is a Windows desktop audio mixer (JUCE/VST3) with per-channel and per-output VST3 insert racks, multichannel input support, and latency diagnostics. Built with C++20, JUCE 9, MSVC `/W4 /WX`.

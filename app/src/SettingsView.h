@@ -140,6 +140,8 @@ private:
     juce::Label peakHoldLabel { "", "Peak hold" };
     juce::ComboBox peakHoldCombo;
     juce::ToggleButton closeToTrayToggle { "Minimize to system tray when closed" };
+    juce::TextButton clearFaultsButton { "Clear Fault Quarantine" };
+    juce::Label faultsLabel;
 
     juce::Label devicesLabel;
     juce::TextButton reloadAllButton { "Reload All Audio Devices" };

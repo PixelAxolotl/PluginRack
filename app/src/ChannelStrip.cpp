@@ -806,6 +806,11 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     audioEngine.setPluginBypassed(channel.id, insertId, bypassed);
 }
 
+void ChannelStrip::reloadPlugin(std::uint32_t insertId) {
+    audioEngine.reloadInsert(channel.id, insertId);
+    refreshAfterInsertChange();
+}
+
 void ChannelStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
     audioEngine.moveChannelChainItem(channel.id, {pluginrack::ChainItemType::Insert, insertId},
                                      targetIndex);

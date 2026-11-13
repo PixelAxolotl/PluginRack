@@ -15,6 +15,15 @@
 #include <cstddef>
 
 #ifdef _WIN32
+// Never let windows.h define the min/max macros: this header is included by
+// app headers that also pull in core headers using std::max. Define before the
+// include so the macro is never created in the first place.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 namespace pluginHostIpc {
@@ -49,6 +58,10 @@ public:
     }
 
     bool isOpen() const { return event != nullptr; }
+
+    // Raw handle, for callers that must wait on several events at once
+    // (WaitForMultipleObjects) instead of polling one at a time.
+    HANDLE nativeHandle() const { return event; }
 
     bool signal() const { return event != nullptr && ::SetEvent(event) != FALSE; }
     bool reset() const { return event != nullptr && ::ResetEvent(event) != FALSE; }

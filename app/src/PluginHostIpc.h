@@ -15,17 +15,19 @@
 // Seamlessness rule: submitAudioBlock blocks until the host has acked the
 // previous block, so the single shared block can never be overwritten
 // while the host is still producing from it. If the host does not answer
-// within the budget, submit fails and the caller (PluginHost::processBlock)
-// falls back to rendering the in-process instance — but it must NOT have
-// mutated the caller's buffer, and it must NOT have consumed the block.
-// That is why the app never submits the live output block directly: it
-// copies the range into a per-slot scratch first (see PluginHost), so a
-// fallback leaves the audio intact and the next block can safely retry the
-// host.
+// within the budget, the caller (PluginHost::processBlock) leaves the block
+// DRY for that callback. It must not render the in-process instance instead:
+// that instance has had no input all session, so switching to it would be a
+// silent audible discontinuity with stale meters (see the fault containment
+// spec, docs/superpowers/specs/2026-11-13-fault-containment-ipc.md §3.2).
+// The caller must NOT have mutated its live buffer and must NOT have consumed
+// the block, so it copies the range into a per-slot scratch first.
 
 #include <JuceHeader.h>
 
 #include <cstdint>
+
+#include "PluginIpcLayout.h"
 
 namespace pluginHostIpc {
 
@@ -42,6 +44,13 @@ struct SharedAudioBlock {
     int numFrames = 0;
     int bufferSize = 0;
     double sampleRate = 0.0;
+    // Written by the host before it bumps responseSequence, so a value read
+    // after a matching ack belongs to the block that was just processed.
+    float peakInL = 0.0f;
+    float peakInR = 0.0f;
+    float peakOutL = 0.0f;
+    float peakOutR = 0.0f;
+    std::int32_t latencySamples = 0;
     float interleave[kMaxBlockFrames * 2] = {};
 };
 
@@ -62,6 +71,18 @@ inline juce::String requestEventNameFor(const juce::String& channelName) {
 
 inline juce::String responseEventNameFor(const juce::String& channelName) {
     return channelName + "-rsp";
+}
+
+// Control channel wake-ups. Kept separate from the audio pair so a blocked
+// state request can never delay an audio callback (and vice versa). Parameter
+// traffic has no event of its own: the app flushes its ring before publishing
+// a block, and the host flushes its ring before acking one.
+inline juce::String controlRequestEventNameFor(const juce::String& channelName) {
+    return channelName + "-ctl-req";
+}
+
+inline juce::String controlResponseEventNameFor(const juce::String& channelName) {
+    return channelName + "-ctl-rsp";
 }
 
 } // namespace pluginHostIpc
