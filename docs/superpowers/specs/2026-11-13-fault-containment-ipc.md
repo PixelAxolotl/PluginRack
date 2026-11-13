@@ -405,6 +405,48 @@ Rule until that audit passes and a 30-run soak is clean: no `--use-child`-style
 switch, no engine wiring, and the child path stays reachable from diagnostics
 only.
 
+**Third-party verification (Gemini 4 Argon via coarena, 13 Nov 2026).** An
+independent reviewer reproduced all five checks — `/W4 /WX` build, 368/368
+ctest, null test bit-identical for VocalCompressor/Scope/True Panner, kill test
+dry + `0xC0000005`, and the Fix-1 load-save guard with no new crash file — and
+confirmed the blocker from the code. Its findings, which I checked against the
+tree before recording:
+
+1. **`AudioEngine::prepareToPlayImpl` runs `host->prepareToPlay()` outside
+   `stateLock`** (`AudioEngine.cpp:319-327`) while the audio thread may be
+   rendering. That is pre-existing, but the child branch made it worse: it
+   sends a control `prepare` (500 ms budget) and the child answers it with an
+   unconditional `releaseResources()` + `prepareToPlay()`, which stalls block
+   processing long enough to trip the three-miss failure latch. It also
+   allocates (DynamicObject, JSON, Strings), so the earlier claim that
+   "prepareToPlay allocates nothing" was true only of the scratch buffer — the
+   control path allocates and must not run during rendering.
+2. **`childHost_` is a plain `unique_ptr` read on the audio thread and
+   reset/written without synchronisation** (`PluginHost.cpp:257`, `:298`,
+   `:811`). Worse, the renderer is *inferred* from `childHost_ != nullptr`: if
+   the pointer is null — before adoption completes, or after
+   `stopChildHost()` — `processBlock` falls through to the in-process branch,
+   which is exactly the §3.2 violation this design forbids. The crash stacks
+   inside `processAudio` through the in-process branch are consistent with
+   that fall-through, not with the child channel itself.
+3. **`PluginProcessHost::controlCall` is not serialised** (no lock) and a
+   timeout leaves `requestSeq != responseSeq`, poisoning every later control
+   request with "still answering the previous request".
+
+Fixes needed before wiring returns, in this order:
+
+- Replace the nullable-pointer renderer test with an explicit mode
+  (`inProcess` | `child`) fixed at publish time. A child-mode slot with no
+  live host plays **dry**; it must never reach `plugin->processBlock`.
+- Publish `childHost_` before the insert is visible to the audio thread, and
+  make teardown safe (swap to a retired list or use an atomic handoff) so no
+  reset can race `submitBlock`/`fetchBlock`.
+- Skip the child `prepare` when the format is unchanged (mirror the in-process
+  `unchanged` check), and never call it while rendering is live; move control
+  traffic off any path the audio thread waits on.
+- Serialise `controlCall` with a `CriticalSection` and recover the expected
+  sequence after a timeout.
+
 ## 8. Out of scope
 
 - AppContainer launch, low-integrity tokens.
