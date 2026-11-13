@@ -316,6 +316,11 @@ void ViewRouter::resized() {
 
 MainComponent::MainComponent()
     : mixer(audioEngine), router(audioEngine, mixer) {
+    const auto args = juce::JUCEApplication::getCommandLineParameterArray();
+    if (args.contains("--child-dsp")) {
+        audioEngine.setChildProcessDsp(true);
+        juce::Logger::writeToLog("plugin: child DSP enabled via --child-dsp (beta)");
+    }
     addAndMakeVisible(toolbar);
     addAndMakeVisible(router);
 

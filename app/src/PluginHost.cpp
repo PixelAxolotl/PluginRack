@@ -159,6 +159,66 @@ int clearBlocked() {
 
 } // namespace PluginLoadGuard
 
+namespace PluginFaultGuard {
+
+juce::File faultsFile() {
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("PluginRack")
+        .getChildFile("plugins")
+        .getChildFile("faults.json");
+}
+
+bool record(const juce::String& path, int exitCode, std::uint32_t insertId) {
+    if (path.isEmpty()) return false;
+    auto file = faultsFile();
+    file.getParentDirectory().createDirectory();
+
+    juce::var root;
+    if (file.existsAsFile()) {
+        root = juce::JSON::parse(file.loadFileAsString());
+    }
+    if (auto* obj = root.getDynamicObject()) {
+        // ok
+    } else {
+        auto* o = new juce::DynamicObject();
+        o->setProperty("faults", juce::var(juce::Array<juce::var>{}));
+        root = juce::var(o);
+    }
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return false;
+    auto faultsVar = obj->getProperty("faults");
+    juce::Array<juce::var> faults;
+    if (auto* arr = faultsVar.getArray()) faults = *arr;
+
+    auto* entry = new juce::DynamicObject();
+    entry->setProperty("path", path);
+    entry->setProperty("exitCode", "0x" + juce::String::toHexString(exitCode).paddedLeft('0', 8).toUpperCase());
+    entry->setProperty("insertId", (int)insertId);
+    entry->setProperty("time", juce::Time::getCurrentTime().toISO8601(true));
+    faults.add(juce::var(entry));
+
+    // Bound to last 100.
+    while (faults.size() > 100) faults.remove(0);
+
+    auto* out = new juce::DynamicObject();
+    out->setProperty("faults", juce::var(faults));
+    return file.replaceWithText(juce::JSON::toString(juce::var(out), true));
+}
+
+int clear() {
+    auto file = faultsFile();
+    if (!file.existsAsFile()) return 0;
+    juce::var root = juce::JSON::parse(file.loadFileAsString());
+    int count = 0;
+    if (auto* obj = root.getDynamicObject()) {
+        if (auto* arr = obj->getProperty("faults").getArray()) count = arr->size();
+    }
+    file.deleteFile();
+    return count;
+}
+
+} // namespace PluginFaultGuard
+
 PluginHost::PluginHost() {
     // Allocate the child scratch once, here, and never again: prepareToPlay can
     // run on the audio thread at device start, so resizing it there raced a
@@ -168,6 +228,7 @@ PluginHost::PluginHost() {
 }
 
 PluginHost::~PluginHost() {
+    stopChildHost();
     delete editorWindow;
     editorWindow = nullptr;
     const juce::ScopedLock lock(pluginLock);
@@ -191,9 +252,10 @@ juce::String PluginHost::getStateAsBase64() const {
     // state is the one that matters. Bounded wait on the calling (message)
     // thread; a timeout falls back to the last state the child confirmed,
     // never to a truncated or in-process blob.
-    if (childHost_ != nullptr) {
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host != nullptr) {
         juce::String childError;
-        const auto live = childHost_->getState(500, childError);
+        const auto live = host->getState(500, childError);
         if (live.isNotEmpty()) {
             childLastKnownState_ = live;
             return live;
@@ -220,8 +282,9 @@ void PluginHost::refreshLatencyCache() {
     // Child-backed slots ask the child (bounded, message thread); the answer is
     // written into the same lock-free cache the audio path never reads
     // directly. A control timeout keeps the previous value.
-    if (childHost_ != nullptr && childHost_->isAlive()) {
-        const int childLatency = childHost_->latencySamples(100);
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host != nullptr && host->isAlive()) {
+        const int childLatency = host->latencySamples(100);
         if (childLatency >= 0) {
             cachedLatencySamples_.store(childLatency, std::memory_order_relaxed);
             return;
@@ -283,22 +346,26 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
     playBufferSize_.store(bufferSize, std::memory_order_relaxed);
     cachedLatencySamples_.store(juce::jmax(0, host->latencySamples(100)),
                                 std::memory_order_relaxed);
-    childHost_ = std::move(host);
-    juce::Logger::writeToLog("plugin: child host ready (" + juce::String(childHost_->childProcessId())
+    childHost_.store(std::shared_ptr<PluginProcessHost>(std::move(host)),
+                     std::memory_order_release);
+    auto published = childHost_.load(std::memory_order_acquire);
+    rendererMode_.store(1, std::memory_order_release);
+    juce::Logger::writeToLog("plugin: child host ready (" + juce::String(published->childProcessId())
                              + ")");
     return true;
 }
 
 bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
-    if (childHost_ == nullptr || parameterIndex < 0) return false;
-    return childHost_->setParameter(static_cast<std::uint32_t>(parameterIndex),
-                                    juce::jlimit(0.0f, 1.0f, normalisedValue));
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host == nullptr || parameterIndex < 0) return false;
+    return host->setParameter(static_cast<std::uint32_t>(parameterIndex),
+                              juce::jlimit(0.0f, 1.0f, normalisedValue));
 }
 
 void PluginHost::stopChildHost() {
-    if (childHost_ != nullptr) {
-        childHost_->killAndReap();
-        childHost_.reset();
+    auto host = childHost_.exchange(nullptr, std::memory_order_acq_rel);
+    if (host != nullptr) {
+        host->killAndReap();
     }
     childFailed_.store(false, std::memory_order_relaxed);
     childConsecutiveMisses_.store(0, std::memory_order_relaxed);
@@ -306,21 +373,24 @@ void PluginHost::stopChildHost() {
 
 PluginHost::ChildHostStatus PluginHost::childHostStatus() const {
     ChildHostStatus status;
-    if (childHost_ == nullptr) return status;
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host == nullptr) return status;
     status.enabled = true;
-    status.exitCode = childHost_->exitCode();
-    status.missedBlocks = childHost_->missedBlocks();
+    status.exitCode = host->exitCode();
+    status.missedBlocks = host->missedBlocks();
     status.failed =
-        childFailed_.load(std::memory_order_acquire) || childHost_->isDead();
+        childFailed_.load(std::memory_order_acquire) || host->isDead();
     return status;
 }
 
 int PluginHost::childProcessId() const {
-    return childHost_ != nullptr ? childHost_->childProcessId() : 0;
+    auto host = childHost_.load(std::memory_order_acquire);
+    return host != nullptr ? host->childProcessId() : 0;
 }
 
 PluginProcessHost::Peaks PluginHost::childPeaks() const {
-    return childHost_ != nullptr ? childHost_->peaks() : PluginProcessHost::Peaks{};
+    auto host = childHost_.load(std::memory_order_acquire);
+    return host != nullptr ? host->peaks() : PluginProcessHost::Peaks{};
 }
 
 void PluginHost::editorBeingDeleted(juce::AudioProcessorEditor* ed) {
@@ -776,12 +846,21 @@ void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
     // path plays dry rather than allocating here - prepareToPlay can run on the
     // audio thread, so it must not allocate.
 
-    if (childHost_ != nullptr && childHost_->isAlive()) {
-        juce::String childError;
-        if (!childHost_->prepare(sampleRate, samplesPerBlock, 500, childError)) {
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host != nullptr && host->isAlive()) {
+        // Skip re-prepare when the format is unchanged (fix 3). Mirror the
+        // in-process `unchanged` check so the child only re-prepares on a
+        // real format change, and never runs control traffic on a path the
+        // audio thread can be waiting on.
+        const bool childUnchanged = prepared && currentSampleRate == sampleRate
+            && currentBufferSize == samplesPerBlock;
+        if (!childUnchanged) {
+            juce::String childError;
+            if (!host->prepare(sampleRate, samplesPerBlock, 500, childError)) {
             juce::Logger::writeToLog("plugin: child host could not re-prepare ("
                                      + childError + ")");
         }
+    }
     }
 
     const juce::ScopedLock lock(pluginLock);
@@ -813,13 +892,13 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
         return;
     }
 
-    // Child-process path. The renderer is fixed for the life of the slot: when
-    // the child is dead or wedged this returns DRY audio and nothing else. It
-    // must never render the in-process instance instead - that instance has had
-    // no input all session, so switching to it would be a silent audible
-    // discontinuity with stale meters.
-    if (childHost_ != nullptr) {
-        if (childFailed_.load(std::memory_order_acquire) || !childHost_->isAlive()) {
+    // Child-process path. The renderer mode is fixed for the life of the slot
+    // (fix 1): a child-mode slot never falls through to the in-process
+    // instance, even when the host pointer is null (before adoption completes
+    // or after teardown) - it plays dry instead. See spec §3.2.
+    if (rendererMode_.load(std::memory_order_acquire) == 1) {
+        auto host = childHost_.load(std::memory_order_acquire);
+        if (host == nullptr || childFailed_.load(std::memory_order_acquire) || !host->isAlive()) {
             return; // dry, explained by childHostStatus()
         }
 
@@ -835,14 +914,14 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
             childScratch_.copyFrom(channel, 0, buffer, source, 0, frames);
         }
 
-        if (!childHost_->submitBlock(childScratch_, frames, playSampleRate_.load(std::memory_order_relaxed),
-                                     playBufferSize_.load(std::memory_order_relaxed))) {
+        if (!host->submitBlock(childScratch_, frames, playSampleRate_.load(std::memory_order_relaxed),
+                               playBufferSize_.load(std::memory_order_relaxed))) {
             noteChildMiss();
             return; // dry
         }
 
         juce::AudioBuffer<float> view(childScratch_.getArrayOfWritePointers(), 2, 0, frames);
-        if (!childHost_->fetchBlock(view, childBlockDeadlineMs_.load(std::memory_order_relaxed))) {
+        if (!host->fetchBlock(view, childBlockDeadlineMs_.load(std::memory_order_relaxed))) {
             noteChildMiss();
             return; // dry
         }
@@ -853,6 +932,8 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
         }
         return;
     }
+
+    // In-process path: only slots that were never published with a child host.
 
     const juce::ScopedTryLock lock(pluginLock);
     if (!lock.isLocked() || plugin == nullptr) {

@@ -555,8 +555,21 @@ void AudioEngine::render(int frames) {
                     } else {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
-                        if (insert != channel->inserts.end())
+                        if (insert != channel->inserts.end()) {
                             (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            // Fault containment: mirror the child's death/wedge
+                            // into the slot so the UI and reload path can see it.
+                            const auto status = (*insert)->pluginHost.childHostStatus();
+                            if (status.enabled && status.failed) {
+                                (*insert)->failed = true;
+                                (*insert)->failExitCode = status.exitCode;
+                                if (!(*insert)->faultRecorded.get()) {
+                                    (*insert)->faultRecorded = true;
+                                    PluginFaultGuard::record((*insert)->pluginPath, status.exitCode,
+                                                            (*insert)->id);
+                                }
+                            }
+                        }
                     }
                     // Every insert boundary is a quarantine point: a NaN that
                     // escaped one plugin must not reach the next one's state or
@@ -665,8 +678,19 @@ void AudioEngine::render(int frames) {
                     } else {
                         auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
-                        if (insert != output->inserts.end())
+                        if (insert != output->inserts.end()) {
                             (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            const auto status = (*insert)->pluginHost.childHostStatus();
+                            if (status.enabled && status.failed) {
+                                (*insert)->failed = true;
+                                (*insert)->failExitCode = status.exitCode;
+                                if (!(*insert)->faultRecorded.get()) {
+                                    (*insert)->faultRecorded = true;
+                                    PluginFaultGuard::record((*insert)->pluginPath, status.exitCode,
+                                                            (*insert)->id);
+                                }
+                            }
+                        }
                     }
                     scrubRange(output->buffer, start, count);
                 }
@@ -1222,6 +1246,18 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                 insert->pluginUniqueId = resolvedUniqueId;
                 insert->latencySamples = insert->pluginHost.getLatencySamples();
 
+                if (getChildProcessDsp()) {
+                    juce::String childError;
+                    const bool ok = insert->pluginHost.loadChildHost(
+                        juce::File(loaded.path), resolvedUniqueId,
+                        insert->pluginHost.getStateAsBase64(), currentSampleRate,
+                        currentBufferSize, 20000, childError);
+                    juce::Logger::writeToLog(ok
+                                                 ? "plugin: child host ready for " + loaded.name
+                                                 : "plugin: child host unavailable for " + loaded.name
+                                                       + " (" + childError + ")");
+                }
+
                 juce::String error;
                 {
                     const juce::ScopedLock lock(stateLock);
@@ -1361,6 +1397,31 @@ void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t inser
     }
 }
 
+bool AudioEngine::reloadInsert(std::uint32_t channelId, std::uint32_t insertId) {
+    InsertSlot* insert = findInsert(channelId, insertId);
+    bool isOutput = false;
+    if (insert == nullptr) {
+        insert = findOutputInsert(channelId, insertId);
+        isOutput = (insert != nullptr);
+    }
+    if (insert == nullptr) return false;
+    if (!getChildProcessDsp()) return false;
+
+    insert->pluginHost.stopChildHost();
+    juce::String error;
+    const bool ok = insert->pluginHost.loadChildHost(
+        juce::File(insert->pluginPath), insert->pluginUniqueId,
+        insert->pluginHost.getStateAsBase64(), currentSampleRate, currentBufferSize, 20000,
+        error);
+    if (ok) {
+        insert->failed = false;
+        insert->failExitCode = 0;
+        insert->faultRecorded = false;
+        insert->latencySamples = insert->pluginHost.getLatencySamples();
+    }
+    return ok;
+}
+
 void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File& file,
                                        int pluginUniqueId, std::function<void(juce::String)> done) {
     {
@@ -1416,6 +1477,18 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                 insert->pluginName = loaded.name;
                 insert->pluginUniqueId = resolvedUniqueId;
                 insert->latencySamples = insert->pluginHost.getLatencySamples();
+
+                if (getChildProcessDsp()) {
+                    juce::String childError;
+                    const bool ok = insert->pluginHost.loadChildHost(
+                        juce::File(loaded.path), resolvedUniqueId,
+                        insert->pluginHost.getStateAsBase64(), currentSampleRate,
+                        currentBufferSize, 20000, childError);
+                    juce::Logger::writeToLog(ok
+                                                 ? "plugin: child host ready for " + loaded.name
+                                                 : "plugin: child host unavailable for " + loaded.name
+                                                       + " (" + childError + ")");
+                }
 
                 juce::String error;
                 {
@@ -2260,6 +2333,17 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
                 loadErrors += channel->name + ": " + error + "\n";
             }
             insert->latencySamples = insert->pluginHost.getLatencySamples();
+            if (getChildProcessDsp()) {
+                juce::String childError;
+                const bool ok = insert->pluginHost.loadChildHost(
+                    juce::File(insert->pluginPath), savedInsert.pluginUniqueId,
+                    juce::String(savedInsert.pluginState), sampleRate, bufferSize, 20000,
+                    childError);
+                juce::Logger::writeToLog(ok
+                                             ? "plugin: child host ready for " + insert->pluginName
+                                             : "plugin: child host unavailable for " + insert->pluginName
+                                                   + " (" + childError + ")");
+            }
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             channel->inserts.push_back(std::move(insert));
             if (std::none_of(channel->chain.begin(), channel->chain.end(),
@@ -2340,6 +2424,17 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
                 loadErrors += output->name + ": " + error + "\n";
             }
             insert->latencySamples = insert->pluginHost.getLatencySamples();
+            if (getChildProcessDsp()) {
+                juce::String childError;
+                const bool ok = insert->pluginHost.loadChildHost(
+                    juce::File(insert->pluginPath), savedInsert.pluginUniqueId,
+                    juce::String(savedInsert.pluginState), sampleRate, bufferSize, 20000,
+                    childError);
+                juce::Logger::writeToLog(ok
+                                             ? "plugin: child host ready for " + insert->pluginName
+                                             : "plugin: child host unavailable for " + insert->pluginName
+                                                   + " (" + childError + ")");
+            }
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             output->inserts.push_back(std::move(insert));
             if (std::none_of(output->chain.begin(), output->chain.end(),

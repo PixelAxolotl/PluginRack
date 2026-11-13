@@ -205,6 +205,7 @@ bool PluginProcessHost::waitReady(int timeoutMs, juce::String& error) {
 bool PluginProcessHost::controlCall(pluginHostIpc::ControlOp op, const juce::String& requestJson,
                                     int timeoutMs, juce::String& responseJson,
                                     juce::String& error) {
+    const juce::ScopedLock lock(controlLock_);
     if (!controlSection.isOpen() || !controlRequestEvent.isOpen()
         || !controlResponseEvent.isOpen()) {
         error = "The plugin host control channel is not open.";
@@ -216,10 +217,13 @@ bool PluginProcessHost::controlCall(pluginHostIpc::ControlOp op, const juce::Str
     }
 
     auto* control = static_cast<pluginHostIpc::ControlSection*>(controlSection.data());
-    const auto request = control->requestSeq.load(std::memory_order_acquire);
-    if (control->responseSeq.load(std::memory_order_acquire) != request) {
-        error = "The plugin host is still answering the previous request.";
-        return false;
+    auto request = control->requestSeq.load(std::memory_order_acquire);
+    const auto response = control->responseSeq.load(std::memory_order_acquire);
+    if (response != request) {
+        // Recover (fix 4): a previous timeout left the sequences out of step.
+        // Abandon the stale request and continue rather than poisoning forever.
+        request = response;
+        control->requestSeq.store(response, std::memory_order_release);
     }
 
     pluginHostIpc::controlBeginWrite(*control);
@@ -246,6 +250,10 @@ bool PluginProcessHost::controlCall(pluginHostIpc::ControlOp op, const juce::Str
         }
         const double remaining = deadline - juce::Time::getMillisecondCounterHiRes();
         if (remaining <= 0.0) {
+            // Recover the sequence (fix 4): abandon the in-flight request so the
+            // next control call is not poisoned with "still answering previous".
+            control->requestSeq.store(control->responseSeq.load(std::memory_order_acquire),
+                                     std::memory_order_release);
             error = juce::String("The plugin host did not answer '")
                     + pluginHostIpc::controlOpName(op) + "' within " + juce::String(timeoutMs)
                     + " ms.";

@@ -2659,6 +2659,12 @@ void RackView::setPluginBypass(std::uint32_t insertId, bool bypassed) {
     else if (auto* out = currentOutput()) audioEngine.setOutputPluginBypassed(out->id, insertId, bypassed);
 }
 
+void RackView::reloadPlugin(std::uint32_t insertId) {
+    if (auto* ch = currentChannel()) audioEngine.reloadInsert(ch->id, insertId);
+    else if (auto* out = currentOutput()) audioEngine.reloadInsert(out->id, insertId);
+    refreshSlots();
+}
+
 void RackView::reorderInsert(std::uint32_t insertId, int targetIndex) {
     if (selectedIsOutput)
         audioEngine.moveOutputChainItem(selectedId, {pluginrack::ChainItemType::Insert, insertId},

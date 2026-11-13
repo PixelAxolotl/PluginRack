@@ -713,6 +713,11 @@ void MixerComponent::OutputStrip::setPluginBypass(std::uint32_t insertId, bool b
     audioEngine.setOutputPluginBypassed(output.id, insertId, bypassed);
 }
 
+void MixerComponent::OutputStrip::reloadPlugin(std::uint32_t insertId) {
+    audioEngine.reloadInsert(output.id, insertId);
+    refreshAfterInsertChange();
+}
+
 void MixerComponent::OutputStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
     audioEngine.moveOutputChainItem(output.id, {pluginrack::ChainItemType::Insert, insertId},
                                     targetIndex);

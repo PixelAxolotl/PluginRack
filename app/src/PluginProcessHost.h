@@ -124,6 +124,7 @@ private:
     pluginHostIpc::NamedEvent controlResponseEvent;
 
     std::uint64_t lastSubmitted = 0;
+    juce::CriticalSection controlLock_;
     bool launched = false;
     bool ready = false;
     juce::String lastKnownState_;

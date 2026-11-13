@@ -21,6 +21,16 @@ void block(const juce::File& file);
 int clearBlocked();                   // returns how many entries were dropped
 } // namespace PluginLoadGuard
 
+// Records plugin faults that killed a child host, persisted in faults.json.
+// Unlike the load blocklist (which refuses to load), fault records only warn.
+namespace PluginFaultGuard {
+juce::File faultsFile();
+// Appends one record (idempotent on path within a short window is not required;
+// the caller dedupes via InsertSlot::faultRecorded). Returns true on success.
+bool record(const juce::String& path, int exitCode, std::uint32_t insertId);
+int clear(); // returns how many entries dropped
+} // namespace PluginFaultGuard
+
 class PluginHost {
 public:
     // Result of instantiating a VST3 file. The instance is shared so it can be
@@ -127,7 +137,12 @@ public:
     // to the in-process instance was part of the configuration that crashed.
     bool setChildParameter(int parameterIndex, float normalisedValue);
     void stopChildHost();
-    bool childHostEnabled() const { return childHost_ != nullptr; }
+    bool childHostEnabled() const {
+        return childHost_.load(std::memory_order_acquire) != nullptr;
+    }
+    // Renderer mode is fixed for the life of the slot (spec §3.2). 0 = in-process, 1 = child.
+    int rendererMode() const { return rendererMode_.load(std::memory_order_acquire); }
+    void setRendererMode(int mode) { rendererMode_.store(mode, std::memory_order_release); }
     ChildHostStatus childHostStatus() const;
     int childProcessId() const;
     PluginProcessHost::Peaks childPeaks() const;
@@ -171,7 +186,11 @@ private:
     // Child-process DSP state. childScratch_ is sized in prepareToPlay and is
     // the only buffer the audio thread hands to the child, so a failed block
     // can never have mutated the caller's live audio.
-    std::unique_ptr<PluginProcessHost> childHost_;
+    // Published atomically so the audio thread can never observe a
+    // half-torn pointer (fix 2 of the resume gate). A slot whose renderer
+    // mode is "child" keeps reading dry when this is null.
+    std::atomic<std::shared_ptr<PluginProcessHost>> childHost_{};
+    std::atomic<int> rendererMode_{0}; // 0 = in-process, 1 = child (fix 1)
     juce::AudioBuffer<float> childScratch_;
     std::atomic<double> playSampleRate_{48000.0};
     std::atomic<int> playBufferSize_{256};

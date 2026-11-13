@@ -45,6 +45,7 @@ public:
     juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
     void erasePlugin(std::uint32_t insertId) override;
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
+    void reloadPlugin(std::uint32_t insertId) override;
     void refreshAfterInsertChange() override;
     void reorderInsert(std::uint32_t insertId, int targetIndex) override;
     void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
