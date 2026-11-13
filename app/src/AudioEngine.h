@@ -42,6 +42,10 @@ public:
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
         int latencySamples = 0;
+        // Stable text the audio thread publishes while it renders this insert,
+        // so a crash inside the plugin names it (see CrashContext.h). Assigned
+        // when the insert is created; never freed.
+        const char* crashLabel = nullptr;
     };
 
     // Task 6 analyzer tap: when an EQ window turns the spectrum on, render()

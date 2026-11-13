@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 
+#include "CrashContext.h"
 #include "DeviceBackend.h"
 #include "Theme.h"
 
@@ -36,6 +37,21 @@
 namespace {
 // A loopback either answers inside this window or the hunt is abandoned.
 constexpr std::uint32_t kLatencyMeasureTimeoutMs = 3000;
+
+// Text the audio thread publishes while it renders an insert, so a crash inside
+// the plugin names the insert instead of just naming a module offset
+// (CrashContext.h). Built once, on the message thread, when the insert is
+// created; the registry keeps the text alive for the life of the process.
+// When the child-process renderer lands, append its mode here ("child" vs
+// "in-process") - see the parked plan, section 6.0.
+const char* makeCrashLabel(const juce::String& stripName, std::uint32_t insertId,
+                           const juce::String& pluginName, const juce::String& pluginPath) {
+    const auto strip = stripName.isNotEmpty() ? stripName : juce::String("output");
+    const auto text = strip.toStdString() + " insert " + std::to_string(insertId) + " \""
+                      + pluginName.toStdString() + "\" ["
+                      + juce::File(pluginPath).getFileName().toStdString() + "]";
+    return crash_context::registerLabel(text);
+}
 // A detected impulse further away than this cannot be the loopback.
 constexpr double kLatencyMeasureMaxSeconds = 5.0;
 // Device probes can finish in either order. Reserve enough FIFO/ring history
@@ -556,7 +572,9 @@ void AudioEngine::render(int frames) {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
                         if (insert != channel->inserts.end())
+                            crash_context::setCurrentRender((*insert)->crashLabel);
                             (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            crash_context::clearCurrentRender();
                     }
                     // Every insert boundary is a quarantine point: a NaN that
                     // escaped one plugin must not reach the next one's state or
@@ -666,7 +684,9 @@ void AudioEngine::render(int frames) {
                         auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
                         if (insert != output->inserts.end())
+                            crash_context::setCurrentRender((*insert)->crashLabel);
                             (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            crash_context::clearCurrentRender();
                     }
                     scrubRange(output->buffer, start, count);
                 }
@@ -1234,6 +1254,9 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                     } else {
                         insert->id = nextInsertId++;
                         const auto insertId = insert->id;
+                        insert->crashLabel = makeCrashLabel(channel->name, insertId,
+                                                            insert->pluginName,
+                                                            insert->pluginPath);
                         channel->inserts.push_back(std::move(insert));
                         channel->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
                     }
@@ -1429,6 +1452,9 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                     } else {
                         insert->id = nextInsertId++;
                         const auto insertId = insert->id;
+                        insert->crashLabel = makeCrashLabel(output->name, insertId,
+                                                            insert->pluginName,
+                                                            insert->pluginPath);
                         output->inserts.push_back(std::move(insert));
                         output->chain.push_back({pluginrack::ChainItemType::Insert, insertId});
                     }
@@ -2248,6 +2274,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            insert->crashLabel = makeCrashLabel(channel->name, insert->id, insert->pluginName,
+                                                insert->pluginPath);
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
             // Scene restore still instantiates here, on the message thread:
             // log it so a slow plugin is visible in the run log.
@@ -2330,6 +2358,8 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            insert->crashLabel = makeCrashLabel(output->name, insert->id, insert->pluginName,
+                                                insert->pluginPath);
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
             juce::Logger::writeToLog("scene: instantiating "
                                      + juce::File(insert->pluginPath).getFileName());
