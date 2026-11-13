@@ -2,6 +2,7 @@
 
 #include "AppLogos.h"
 #include "ConsoleLookAndFeel.h"
+#include "CrashContext.h"
 #include "DeviceStream.h"
 #include "MainComponent.h"
 #include "PluginHost.h"
@@ -73,6 +74,14 @@ void writeCrashReport(void* exceptionInfo) {
     if (loadingPlugin.isNotEmpty()) {
         text << "plugin: " << loadingPlugin << "\n";
         PluginLoadGuard::block(juce::File(loadingPlugin));
+    }
+
+    // Which insert was rendering on the faulting thread. Without this a crash
+    // inside a plugin names a module and an offset and nothing else, which is
+    // how a fault gets blamed on the wrong plugin.
+    const auto rendering = crash_context::currentRender();
+    if (!rendering.empty()) {
+        text << "rendering: " << juce::String(rendering) << "\n";
     }
 
     const auto backtrace = juce::SystemStats::getStackBacktrace();
@@ -196,7 +205,7 @@ public:
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
             if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
-                || arg == "--plugin-host")
+                || arg == "--plugin-host" || arg == "--test-crash-report")
                 return true;
         }
         return false;
@@ -454,6 +463,23 @@ public:
                     if (auto* app = juce::JUCEApplication::getInstance()) app->quit();
                 });
             });
+        }
+
+        // Crash-report diagnostic: faults on purpose while an insert label is
+        // published, so the report's plugin attribution can be verified end to
+        // end. The crash is the test; there is no other effect.
+        const int crashReportIndex = args.indexOf("--test-crash-report");
+        if (crashReportIndex >= 0) {
+            const auto labelFile = crashReportIndex + 1 < args.size()
+                                       ? args[crashReportIndex + 1].unquoted()
+                                       : juce::String("Test.vst3");
+            const auto label = std::string("Vox insert 1 \"Test\" [")
+                               + juce::File(labelFile).getFileName().toStdString() + "]";
+            crash_context::setCurrentRender(crash_context::registerLabel(label));
+            std::cout << "test-crash-report: faulting while rendering '" << label << "'\n";
+            std::cout.flush();
+            ::RaiseException(0xC0000005u, 0, 0, nullptr);
+            return; // not reached
         }
 
         // Plugin smoke test: loads one VST3 the way the Add-VST path does
