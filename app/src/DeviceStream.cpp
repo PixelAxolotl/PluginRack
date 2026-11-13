@@ -1,6 +1,7 @@
 #include "DeviceStream.h"
 
 #include "RealtimeThread.h"
+#include "WindowsEndpointFormat.h"
 
 #include <pluginrack/DeviceTypePolicy.h>
 #include <pluginrack/OutputBufferPolicy.h>
@@ -235,6 +236,39 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
             // Negotiated a supported size different from the ask: keep it.
             if (device != nullptr)
                 rememberBufferFor(selectedDeviceName, actual);
+        }
+    }
+    // Shared-mode Windows Audio is locked to the endpoint's default format: the
+    // driver lists only that rate and AudioDeviceManager clamps any request to
+    // it, so retrying the same rate never helps. Rewrite the endpoint's format
+    // once, then reopen; a refusal falls through to the caller's error.
+    if (err.isEmpty() && engineSampleRate > 0.0 && device != nullptr
+        && std::abs (device->getCurrentSampleRate() - engineSampleRate) > 0.5)
+    {
+        const auto formatErr = pluginrack::endpointformat::setDefaultSampleRate (
+            selectedDeviceName, wantInput, engineSampleRate);
+
+        juce::Logger::writeToLog ("device: format endpoint=\"" + selectedDeviceName
+            + "\" rate=" + juce::String (engineSampleRate, 0)
+            + " err=" + (formatErr.isEmpty() ? juce::String ("none") : formatErr));
+
+        if (formatErr.isEmpty())
+        {
+            manager.closeAudioDevice();
+            err = manager.initialise (numInputChannels, numOutputChannels, &typeSetup, false,
+                                      selectedDeviceName, &setup);
+            device = err.isEmpty() ? manager.getCurrentAudioDevice() : nullptr;
+            if (err.isEmpty() && device == nullptr)
+                err = "Could not open " + selectedDeviceName + ".";
+        }
+
+        if (err.isEmpty() && device != nullptr
+            && std::abs (device->getCurrentSampleRate() - engineSampleRate) > 0.5)
+        {
+            err = "Needs " + formatKhz (engineSampleRate) + " (device is "
+                + formatKhz (device->getCurrentSampleRate()) + ")"
+                + (formatErr.isEmpty() ? juce::String (" - the endpoint refused the format change")
+                                       : " - " + formatErr);
         }
     }
     if (err.isNotEmpty()) {

@@ -103,6 +103,8 @@ target_sources(pluginrack_app PRIVATE
     src/LimiterWindow.h
     src/ValueEditSlider.cpp
     src/ValueEditSlider.h
+    src/WindowsEndpointFormat.cpp
+    src/WindowsEndpointFormat.h
     src/WrappedLabel.h)
 
 target_compile_features(pluginrack_app PRIVATE cxx_std_20)
