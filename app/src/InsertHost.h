@@ -146,6 +146,15 @@ public:
         nameLabel.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(nameLabel);
 
+        // Rack cards carry the plugin's reported delay under its name; the
+        // compact mixer rows keep a single line and never show it.
+        delayLabel.setJustificationType(juce::Justification::centred);
+        delayLabel.setFont(juce::Font(juce::FontOptions(9.0f)));
+        delayLabel.setColour(juce::Label::textColourId, theme::dim());
+        delayLabel.setInterceptsMouseClicks(false, false);
+        delayLabel.setVisible(false);
+        addAndMakeVisible(delayLabel);
+
         bypassButton.setClickAction([this] {
             if (builtIn) {
                 const bool next = !bypassButton.getToggleState();
@@ -239,8 +248,11 @@ public:
         addChildComponent(pairSecondButton);
     }
 
-    void setInsert(AudioEngine::InsertSlot* newInsert) {
+    // sampleRateHz feeds the rack card's delay line only. Callers that leave it
+    // out (mixer rows, tests) keep the single-line name with no delay.
+    void setInsert(AudioEngine::InsertSlot* newInsert, double sampleRateHz = 0.0) {
         insert = newInsert;
+        delaySampleRate = sampleRateHz;
         chainItem = insert == nullptr ? pluginrack::ChainItem{} :
                                         pluginrack::ChainItem{pluginrack::ChainItemType::Insert, insert->id};
         builtIn = false;
@@ -276,6 +288,8 @@ public:
             removeButton.setEnabledState(false);
             setTooltip("Click to load a VST3 plugin");
         }
+        updateDelayLabel();
+        resized();
         repaint();
     }
 
@@ -289,6 +303,7 @@ public:
         addSlot = true;
         addSlotPrimary = primary;
         paired = false;
+        delayLabel.setVisible(false);
         pairFirstButton.setVisible(false);
         pairSecondButton.setVisible(false);
         nameLabel.setText(primary ? "+ Add VST3" : juce::String(),
@@ -309,6 +324,7 @@ public:
         addSlot = false;
         addSlotPrimary = false;
         paired = false;
+        delayLabel.setVisible(false);
         pairFirstButton.setVisible(false);
         pairSecondButton.setVisible(false);
         bypassButton.setVisible(true);
@@ -331,6 +347,9 @@ public:
             addAndMakeVisible(*mini);
             mini->setBounds(getLocalBounds().withTrimmedTop(kHeaderHeight));
         }
+        // setInsert() usually runs before the rack hands the card its preview,
+        // so the delay line is evaluated again here once the card is tall.
+        updateDelayLabel();
         resized();
         repaint();
     }
@@ -348,6 +367,7 @@ public:
         builtIn = true;
         addSlot = false;
         paired = true;
+        delayLabel.setVisible(false);
         pairFirst = first;
         pairSecond = second;
         pairFirstButton.setLabel(first.label);
@@ -393,6 +413,7 @@ public:
     }
 
     static constexpr int kHeaderHeight = 36;
+    static constexpr int kDelayLineHeight = 11;
 
     void resized() override {
         auto area = getLocalBounds().reduced(3, 1);
@@ -430,6 +451,12 @@ public:
         area.removeFromRight(2);
         bypassButton.setBounds(area.removeFromRight(18));
         area.removeFromRight(3);
+        // Rack cards stack the delay line under the name; compact mixer rows
+        // never show it, so their single line keeps the full row.
+        if (delayLabel.isVisible()) {
+            const int delayHeight = juce::jmin(kDelayLineHeight, area.getHeight() / 2);
+            delayLabel.setBounds(area.removeFromBottom(delayHeight));
+        }
         nameLabel.setBounds(area);
     }
 
@@ -539,6 +566,26 @@ public:
     }
 
 private:
+    // Rack cards show the plugin's reported delay under its name. Plugins that
+    // report none, built-ins, empty slots, crashed inserts, and compact mixer
+    // rows keep the line hidden so the name is never followed by a blank row.
+    void updateDelayLabel() {
+        const bool show = mini != nullptr && insert != nullptr && !builtIn && !addSlot
+                          && !insert->failed.get() && insert->latencySamples > 0
+                          && delaySampleRate > 0.0;
+        if (!show) {
+            delayLabel.setVisible(false);
+            return;
+        }
+        const int ms = juce::roundToInt(insert->latencySamples / delaySampleRate * 1000.0);
+        if (ms <= 0) {
+            delayLabel.setVisible(false);
+            return;
+        }
+        delayLabel.setText(juce::String(ms) + " ms", juce::dontSendNotification);
+        delayLabel.setVisible(true);
+    }
+
     bool inHandle(const juce::MouseEvent& e) const {
         return e.x < 28 && e.y < kHeaderHeight && (insert != nullptr || builtIn);
     }
@@ -559,6 +606,8 @@ private:
     int pendingTarget = -1;
     juce::Label indexLabel;
     juce::Label nameLabel;
+    juce::Label delayLabel;
+    double delaySampleRate = 0.0;
     MiniButton bypassButton{"B"};
     MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
     MiniButton reloadButton{"R"};

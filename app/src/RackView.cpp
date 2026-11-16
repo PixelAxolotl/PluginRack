@@ -600,7 +600,7 @@ void RackView::refreshSlots() {
                     }
             if (found == nullptr) continue;
             auto* slot = slots.add(new InsertSlotComponent(*this, row));
-            slot->setInsert(found);
+            slot->setInsert(found, liveRateHz);
             auto mini = std::make_unique<InsertMiniView>();
             mini->showVst();
             if (const auto thumb = vstThumbs.find(found->id); thumb != vstThumbs.end())
