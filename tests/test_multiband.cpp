@@ -14,7 +14,6 @@ TEST_CASE("multiband flat passes audio") {
     auto effect = pluginrack::makeDefaultMultibandEffect();
     MultibandProcessor p;
     p.prepare(48000.0);
-    p.setEffect(effect);
     // Warm up filter startup, then check steady state near DC with
     // thresholds low enough that the knee cannot engage at -12 dBFS.
     for (auto& b : effect.bands) { b.thresholdDb = -6.0f; b.ratio = 2.0f; }

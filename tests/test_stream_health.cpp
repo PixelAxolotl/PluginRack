@@ -46,7 +46,6 @@ TEST_CASE("the rolling window prunes old events and stays bounded",
     // More underruns than the tracker can hold: the cap keeps memory fixed.
     for (int i = 0; i < 200; ++i) tracker.onBlock(static_cast<double>(i), true, false);
     CHECK(tracker.underrunsInWindow() == StreamHealthTracker::kMaxUnderrunEvents);
-    CHECK(tracker.underrunsInWindow() <= StreamHealthTracker::kMaxUnderrunEvents);
 
     // Far beyond the window every event has aged out.
     CHECK(tracker.window(20000.0).underrunsPerMinute == 0.0);

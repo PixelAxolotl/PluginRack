@@ -6,8 +6,8 @@
 TEST_CASE("render_limits: scene size cap matches the GUI loader", "[render][limits]") {
     using namespace render_limits;
     CHECK(sceneWithinLimit(0));
-    CHECK(sceneWithinLimit(8 * 1024 * 1024));
-    CHECK_FALSE(sceneWithinLimit(8 * 1024 * 1024 + 1));
+    CHECK(sceneWithinLimit(kMaxSceneFileBytes));
+    CHECK_FALSE(sceneWithinLimit(kMaxSceneFileBytes + 1));
     CHECK_FALSE(sceneWithinLimit(-1));
 }
 

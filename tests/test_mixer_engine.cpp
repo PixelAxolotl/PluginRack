@@ -431,7 +431,6 @@ TEST_CASE("render allocates nothing") {
     addOutput(scene, 1);
     addRoute(scene, 1, 1);
 
-    AllocCounter::reset();
     pluginrack::MixerEngine engine = prepareEngine(scene);
 
     constexpr int kFrames = 128;

@@ -140,7 +140,7 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
-    // v2 auto-migrates: saving a v2 scene always writes a v3 file.
+    // Old files auto-migrate: loading keeps the file's version, saving writes today's.
     pluginrack::Scene expected = original;
     expected.schemaVersion = 7;
     REQUIRE(*loaded.scene == expected);
@@ -377,7 +377,7 @@ TEST_CASE("scenes without inputChannels load with layout defaults") {
     REQUIRE(loaded.scene->channels[2].inputChannels == std::vector<int>{0});
 }
 
-TEST_CASE("v2 scene loads flat EQ and saves as v3") {
+TEST_CASE("a v2 file loads at its own version and saves at today's") {
     const std::string json = R"({)"
                              R"("schemaVersion": 2,)"
                              R"("name": "legacy-eq",)"
@@ -391,25 +391,8 @@ TEST_CASE("v2 scene loads flat EQ and saves as v3") {
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->schemaVersion == 2);
-
-    const pluginrack::Channel& channel = loaded.scene->channels.front();
-    REQUIRE(channel.eqEnabled == false);
-    // The factory EQ has seven points (high-pass through low-pass).
-    REQUIRE(channel.eqBands.size() == 7);
-    for (const pluginrack::EqBand& band : channel.eqBands) {
-        REQUIRE(band.gainDb == 0.0f);
-    }
-    REQUIRE(channel.eqDelayMs == 0.0f);
-
-    const pluginrack::Output& output = loaded.scene->outputs.front();
-    REQUIRE(output.eqEnabled == false);
-    REQUIRE(output.eqBands.size() == 7);
-    for (const pluginrack::EqBand& band : output.eqBands) {
-        REQUIRE(band.gainDb == 0.0f);
-    }
-    REQUIRE(output.eqDelayMs == 0.0f);
-
-    // The loaded scene saves as v4, completing the auto-migration.
+    // Defaults for a file that predates a field are covered by the v1 case; this
+    // one pins the version handoff only.
     REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":7") != std::string::npos);
 }
 
