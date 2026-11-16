@@ -14,6 +14,11 @@
 
 namespace pluginrack {
 
+// Bumped only when an older file must be read differently. The writer stamps
+// this value, the reader compares against it, and the validator rejects
+// anything newer, so the number lives in one place.
+inline constexpr int kSchemaVersion = 7;
+
 struct InsertSlot {
     std::uint32_t id = 0;
     std::string pluginPath;
@@ -43,18 +48,16 @@ struct ChainItem {
     bool operator==(const ChainItem&) const = default;
 };
 
-struct Channel {
+// Everything a channel and an output share: identity, level, inserts, the
+// effect chain and the EQ. Both strip kinds render through the same
+// MixerEngine::StripDsp, so a field that changes the audio path belongs here
+// and reaches both at once.
+struct Strip {
     std::uint32_t id = 0;
     std::string name;
-    SourceKind sourceKind = SourceKind::Hardware;
-    std::string sourceDeviceId;
-    ChannelLayout layout = ChannelLayout::Mono;
-    std::vector<int> inputChannels{0};
+    ChannelLayout layout = ChannelLayout::Stereo;
     float gainDb = 0.0f;
-    float trimDb = 0.0f;
-    float pan = 0.0f;
     bool muted = false;
-    bool soloed = false;
     std::vector<InsertSlot> inserts;
     std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
     std::vector<MultibandEffect> multibandEffects;
@@ -82,42 +85,27 @@ struct Channel {
     // Analyzer weighting: 0 = Z (flat), 1 = A, 2 = C. Display only.
     int eqRtaWeighting = 0;
 
+    bool operator==(const Strip&) const = default;
+};
+
+struct Channel : Strip {
+    // Inputs default to mono; a scene can widen them.
+    Channel() { layout = ChannelLayout::Mono; }
+
+    SourceKind sourceKind = SourceKind::Hardware;
+    std::string sourceDeviceId;
+    std::vector<int> inputChannels{0};
+    float trimDb = 0.0f;
+    float pan = 0.0f;
+    bool soloed = false;
+
     bool operator==(const Channel&) const = default;
 };
 
-struct Output {
-    std::uint32_t id = 0;
-    std::string name;
+struct Output : Strip {
     OutputKind kind = OutputKind::Physical;
     std::string deviceId;
-    ChannelLayout layout = ChannelLayout::Stereo;
     bool flipped = false;
-    float gainDb = 0.0f;
-    bool muted = false;
-    std::vector<InsertSlot> inserts;
-    std::vector<DynamicsEffect> effects = defaultDynamicsEffects();
-    std::vector<MultibandEffect> multibandEffects;
-    std::vector<DeEsserEffect> deEsserEffects;
-    std::vector<LimiterEffect> limiterEffects;
-    float multibandRtaOffsetDb = 0.0f;
-    int multibandRtaWeighting = 0;
-    float deEsserRtaOffsetDb = 0.0f;
-    int deEsserRtaWeighting = 0;
-    std::vector<ChainItem> chain;
-    bool eqEnabled = false;
-    std::vector<EqBand> eqBands = defaultEqBands();
-    // Post-EQ delay in milliseconds, 0..EqEngine::kMaxDelayMs; 0 keeps the
-    // chain undelayed. Like the bands it only runs while eqEnabled.
-    float eqDelayMs = 0.0f;
-    // Strip identity hue in degrees; 0 means "assign on load".
-    float colourHue = 0.0f;
-    // Polarity flip applied after the EQ runs (inverts phase).
-    bool eqPhaseFlip = false;
-    // RTA display offset in dB, shown relative to the default view (0 ==
-    // default). Display only: it never touches the audio path.
-    float eqRtaOffsetDb = 0.0f;
-    // Analyzer weighting: 0 = Z (flat), 1 = A, 2 = C. Display only.
-    int eqRtaWeighting = 0;
 
     bool operator==(const Output&) const = default;
 };
@@ -197,7 +185,7 @@ struct AudioSettings {
 };
 
 struct Scene {
-    int schemaVersion = 7;
+    int schemaVersion = kSchemaVersion;
     std::string name;
     double sampleRate = 48000;
     int bufferFrames = 256;

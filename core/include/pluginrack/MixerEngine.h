@@ -104,8 +104,7 @@ private:
         std::vector<StripDsp> outputs;
     };
 
-    template <typename StripScene>
-    static StripDsp buildStrip(const StripScene& source, double sampleRate, int maxFrames);
+    static StripDsp buildStrip(const Strip& source, double sampleRate, int maxFrames);
     static void processStrip(StripDsp& strip, float* left, float* right, int frames);
 
     std::vector<ChannelCache> channels_;

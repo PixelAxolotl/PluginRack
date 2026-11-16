@@ -341,37 +341,10 @@ public:
     bool getLatencyOption(LatencyOption option) const;
 
     // Everything the Settings page can change. Applied as one unit so a
-    // device that refuses the new configuration can fall back cleanly.
-    struct DeviceSettings {
-        int inputBuffer = 0;
-        int outputBuffer = 0;
-        // Beta latency modes are ignored unless the user explicitly opts in
-        // through Settings and applies the choice. Persisted with scenes so
-        // an old session cannot silently turn them back on.
-        bool latencyTuningOptIn = false;
-        bool lowLatencyInput = false;
-        bool preferExclusive = false;
-        bool lowLatencyOutputs = false;
-        bool minimalClockFifo = false;
-        bool fullDuplexInput = false;
-        // Opt-in cap for JUCE's WASAPI channel-count probe. Off by default.
-        bool wasapiProbeCapEnabled = false;
-        int wasapiProbeCapChannels = 8;
-        // Not a stream option: kept here so it saves and loads with the rest.
-        bool autoReloadDevices = false;
-        // Scene v6 audio-pipeline hardening, off until the user opts in.
-        bool slicedRender = false;
-        bool nonFiniteScrub = false;
-        bool healthReload = false;
-        bool ladderRecovery = false;
-        double healthYellowUnderrunsPerMinute = 1.0;
-        double healthRedUnderrunsPerMinute = 10.0;
-        double healthPinnedToEdgeMs = 5000.0;
-        // Rack insert thumbnail refresh rate (fps); also not a stream option.
-        int rackThumbnailFps = 15;
-        // Which inserts keep live previews; also not a stream option.
-        pluginrack::RackPreviewMode rackPreviewMode = pluginrack::RackPreviewMode::Selected;
-    };
+    // device that refuses the new configuration can fall back cleanly. This is
+    // the scene's own struct: the settings travel with a save, so a second
+    // copy of the field list would drift from the file format.
+    using DeviceSettings = pluginrack::AudioSettings;
     DeviceSettings getDeviceSettings() const;
     // Reopens every device with these settings on the background opener. If a
     // device refuses to open, the previous settings are restored and the

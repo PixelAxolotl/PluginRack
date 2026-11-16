@@ -299,13 +299,42 @@ std::string describeMapping(const std::vector<int>& mapping) {
 
 } // namespace
 
+namespace {
+
+// Everything a channel and an output are validated for, once. The caller
+// checks the fields only its own kind has.
+void validateStrip(const char* kind, const Strip& strip, std::vector<SceneError>& errors) {
+    if (!std::isfinite(strip.gainDb) || strip.gainDb < kMinGainDb ||
+        strip.gainDb > kMaxGainDb) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                          std::string(kind) + " " + std::to_string(strip.id) +
+                              " gainDb out of range [-60, 12]"});
+    }
+    validateInserts(kind, strip.id, strip.inserts, errors);
+    validateEqBands(kind, strip.id, strip.eqBands, errors);
+    validateEqDelay(kind, strip.id, strip.eqDelayMs, errors);
+    validateEffects(kind, strip.id, strip.effects, errors);
+    validateMultiband(kind, strip.id, strip.multibandEffects, errors);
+    validateDeEssers(kind, strip.id, strip.deEsserEffects, errors);
+    validateLimiters(kind, strip.id, strip.limiterEffects, errors);
+    validateChain(kind, strip.id, strip.chain, strip.inserts, errors);
+    validateRtaSettings(kind, strip.id, strip.eqRtaOffsetDb, strip.eqRtaWeighting,
+                        errors);
+    validateEffectRtaSettings(kind, strip.id, "multiband", strip.multibandRtaOffsetDb,
+                              strip.multibandRtaWeighting, errors);
+    validateEffectRtaSettings(kind, strip.id, "deEsser", strip.deEsserRtaOffsetDb,
+                              strip.deEsserRtaWeighting, errors);
+}
+
+} // namespace
+
 std::vector<SceneError> validate(const Scene& scene) {
     std::vector<SceneError> errors;
 
-    if (scene.schemaVersion < 1 || scene.schemaVersion > 7) {
+    if (scene.schemaVersion < 1 || scene.schemaVersion > kSchemaVersion) {
         errors.push_back({SceneErrorCode::UnsupportedSchemaVersion, 0,
                           "unsupported schemaVersion " + std::to_string(scene.schemaVersion) +
-                              "; expected 1 to 7"});
+                              "; expected 1 to " + std::to_string(kSchemaVersion)});
     }
     if (scene.channels.empty()) {
         errors.push_back({SceneErrorCode::NoChannels, 0, "scene has no channels"});
@@ -347,12 +376,6 @@ std::vector<SceneError> validate(const Scene& scene) {
             errors.push_back({SceneErrorCode::DuplicateChannelId, channel.id,
                               "duplicate channel id " + std::to_string(channel.id)});
         }
-        if (!std::isfinite(channel.gainDb) || channel.gainDb < kMinGainDb ||
-            channel.gainDb > kMaxGainDb) {
-            errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
-                              "channel " + std::to_string(channel.id) +
-                                  " gainDb out of range [-60, 12]"});
-        }
         if (!std::isfinite(channel.trimDb) || channel.trimDb < kMinTrimDb ||
             channel.trimDb > kMaxTrimDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
@@ -364,7 +387,6 @@ std::vector<SceneError> validate(const Scene& scene) {
                               "channel " + std::to_string(channel.id) +
                                   " pan out of range [-1, 1]"});
         }
-        validateInserts("channel", channel.id, channel.inserts, errors);
         if (channel.layout == ChannelLayout::Mono) {
             if (channel.inputChannels.size() != 1 || channel.inputChannels[0] < 0) {
                 errors.push_back({SceneErrorCode::ValueOutOfRange, channel.id,
@@ -380,21 +402,7 @@ std::vector<SceneError> validate(const Scene& scene) {
                                   describeMapping(channel.inputChannels) +
                                   " must contain exactly two distinct non-negative indexes"});
         }
-        validateEqBands("channel", channel.id, channel.eqBands, errors);
-        validateEqDelay("channel", channel.id, channel.eqDelayMs, errors);
-        validateEffects("channel", channel.id, channel.effects, errors);
-        validateMultiband("channel", channel.id, channel.multibandEffects, errors);
-        validateDeEssers("channel", channel.id, channel.deEsserEffects, errors);
-        validateLimiters("channel", channel.id, channel.limiterEffects, errors);
-        validateChain("channel", channel.id, channel.chain, channel.inserts, errors);
-        validateRtaSettings("channel", channel.id, channel.eqRtaOffsetDb, channel.eqRtaWeighting,
-                            errors);
-        validateEffectRtaSettings("channel", channel.id, "multiband",
-                                  channel.multibandRtaOffsetDb, channel.multibandRtaWeighting,
-                                  errors);
-        validateEffectRtaSettings("channel", channel.id, "deEsser",
-                                  channel.deEsserRtaOffsetDb, channel.deEsserRtaWeighting,
-                                  errors);
+        validateStrip("channel", channel, errors);
     }
 
     std::unordered_set<std::uint32_t> outputIds;
@@ -408,28 +416,7 @@ std::vector<SceneError> validate(const Scene& scene) {
             errors.push_back({SceneErrorCode::DuplicateOutputId, output.id,
                               "duplicate output id " + std::to_string(output.id)});
         }
-        if (!std::isfinite(output.gainDb) || output.gainDb < kMinGainDb ||
-            output.gainDb > kMaxGainDb) {
-            errors.push_back({SceneErrorCode::ValueOutOfRange, output.id,
-                              "output " + std::to_string(output.id) +
-                                  " gainDb out of range [-60, 12]"});
-        }
-        validateInserts("output", output.id, output.inserts, errors);
-        validateEqBands("output", output.id, output.eqBands, errors);
-        validateEqDelay("output", output.id, output.eqDelayMs, errors);
-        validateEffects("output", output.id, output.effects, errors);
-        validateMultiband("output", output.id, output.multibandEffects, errors);
-        validateDeEssers("output", output.id, output.deEsserEffects, errors);
-        validateLimiters("output", output.id, output.limiterEffects, errors);
-        validateChain("output", output.id, output.chain, output.inserts, errors);
-        validateRtaSettings("output", output.id, output.eqRtaOffsetDb, output.eqRtaWeighting,
-                            errors);
-        validateEffectRtaSettings("output", output.id, "multiband",
-                                  output.multibandRtaOffsetDb, output.multibandRtaWeighting,
-                                  errors);
-        validateEffectRtaSettings("output", output.id, "deEsser",
-                                  output.deEsserRtaOffsetDb, output.deEsserRtaWeighting,
-                                  errors);
+        validateStrip("output", output, errors);
     }
 
     std::unordered_set<std::uint64_t> routePairs;

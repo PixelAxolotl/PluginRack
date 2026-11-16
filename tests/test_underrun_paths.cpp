@@ -505,43 +505,11 @@ TEST_CASE("scene restore loads plugins before the device handoff",
     CHECK(contains(body, "savedInsert.pluginState"));
 }
 
-TEST_CASE("scene save and restore carry every mix level", "[plugin][restore]") {
-    const auto cpp = readSource("app/src/AudioEngine.cpp");
-    const auto save = functionBody(cpp, "pluginrack::Scene AudioEngine::makeScene");
-    const auto restore = functionBody(cpp, "juce::String AudioEngine::restoreScene");
-
-    CHECK(contains(save, "savedChannel.gainDb"));
-    CHECK(contains(save, "savedChannel.trimDb"));
-    CHECK(contains(save, "savedChannel.pan"));
-    CHECK(contains(save, "savedOutput.gainDb"));
-    CHECK(contains(save, "savedOutput.muted"));
-
-    CHECK(contains(restore, "channel->gainDb = savedChannel.gainDb"));
-    CHECK(contains(restore, "channel->trimDb = savedChannel.trimDb"));
-    CHECK(contains(restore, "output->gainDb = savedOutput.gainDb"));
-    CHECK(contains(restore, "output->muted = savedOutput.muted"));
-}
-
 TEST_CASE("scene save captures the live plugin state", "[plugin][restore]") {
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
                                    "pluginrack::Scene AudioEngine::makeScene");
     CHECK(contains(body, "getStateAsBase64"));
     CHECK(contains(body, "pluginState"));
-}
-
-TEST_CASE("scene save and restore carry the audio tuning", "[plugin][restore]") {
-    const auto cpp = readSource("app/src/AudioEngine.cpp");
-    const auto save = functionBody(cpp, "pluginrack::Scene AudioEngine::makeScene");
-    const auto restore = functionBody(cpp, "juce::String AudioEngine::restoreScene");
-
-    CHECK(contains(save, "pluginrack::AudioSettings audio"));
-    CHECK(contains(save, "audio.latencyTuningOptIn"));
-    CHECK(contains(save, "audio.autoReloadDevices"));
-    CHECK(contains(save, "getWatchedDevices"));
-    CHECK(contains(restore, "scene.audio.has_value()"));
-    CHECK(contains(restore, "settings.latencyTuningOptIn"));
-    CHECK(contains(restore, "applySettingsValues(settings)"));
-    CHECK(contains(restore, "setWatchedDevices(scene.audio->watchedDevices)"));
 }
 
 TEST_CASE("views read device strings through the locked snapshot", "[underrun][thread]") {
@@ -654,7 +622,7 @@ TEST_CASE("scene save captures plugin state outside the audio lock", "[underrun]
     REQUIRE(lockStart != std::string::npos);
     // The settings block is the last thing copied under the lock; everything
     // after it (the plugin state capture) runs unlocked.
-    const auto lockEnd = save.find("scene.audio = std::move(audio);");
+    const auto lockEnd = save.find("scene.audio = getDeviceSettings();");
     REQUIRE(lockEnd != std::string::npos);
     const auto capture = save.find("getStateAsBase64");
     REQUIRE(capture != std::string::npos);
@@ -1379,8 +1347,11 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
     const auto engine = readSource("app/src/AudioEngine.cpp");
     CHECK(contains(engine, "slicedRender_.load(std::memory_order_relaxed)"));
     CHECK(contains(engine, "nonFiniteScrub_.load(std::memory_order_relaxed)"));
-    CHECK(contains(engine, "audio.slicedRender = settings.slicedRender"));
-    CHECK(contains(engine, "settings.slicedRender = scene.audio->slicedRender"));
+    const auto save = functionBody(engine, "pluginrack::Scene AudioEngine::makeScene");
+    CHECK(contains(save, "scene.audio = getDeviceSettings();"));
+    const auto restore =
+        functionBody(engine, "juce::String AudioEngine::restoreScene");
+    CHECK(contains(restore, "applySettingsValues(*scene.audio);"));
 
     const auto settings = readSource("app/src/SettingsView.cpp");
     CHECK(contains(settings, "slicedRenderToggle"));
@@ -1393,9 +1364,10 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
 
 TEST_CASE("the wasapi probe cap reaches the juce backend", "[device][probe]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto scene = readSource("core/include/pluginrack/Scene.h");
+    CHECK(contains(scene, "bool wasapiProbeCapEnabled = false"));
+    CHECK(contains(scene, "int wasapiProbeCapChannels = 8"));
     const auto header = readSource("app/src/AudioEngine.h");
-    CHECK(contains(header, "bool wasapiProbeCapEnabled = false"));
-    CHECK(contains(header, "int wasapiProbeCapChannels = 8"));
     CHECK(contains(header, "wasapiProbeCapEnabled_"));
     CHECK(contains(header, "wasapiProbeCapChannels_"));
 
@@ -1417,8 +1389,7 @@ TEST_CASE("the wasapi probe cap reaches the juce backend", "[device][probe]") {
     CHECK(contains(get, "wasapiProbeCapChannels_.load()"));
 
     const auto save = functionBody(engine, "pluginrack::Scene AudioEngine::makeScene");
-    CHECK(contains(save, "audio.wasapiProbeCapEnabled = settings.wasapiProbeCapEnabled"));
-    CHECK(contains(save, "audio.wasapiProbeCapChannels = settings.wasapiProbeCapChannels"));
+    CHECK(contains(save, "scene.audio = getDeviceSettings();"));
 }
 TEST_CASE("settings exposes the wasapi probe cap", "[device][probe][ui]") {
     const auto header = readSource("app/src/SettingsView.h");
@@ -1434,8 +1405,7 @@ TEST_CASE("settings exposes the wasapi probe cap", "[device][probe][ui]") {
     CHECK(contains(settings, "staged_.wasapiProbeCapChannels"));
     CHECK(contains(settings, "probeCapToggle.setEnabled(!busy)"));
     CHECK(contains(settings, "probeCapChannels.setEnabled(!busy"));
-    CHECK(contains(settings, "wasapiProbeCapEnabled != applied.wasapiProbeCapEnabled"));
-    CHECK(contains(settings, "wasapiProbeCapChannels != applied.wasapiProbeCapChannels"));
+    CHECK(contains(settings, "dirty_ = !(staged_ == applied);"));
 }
 TEST_CASE("the juce probe cap patch is shipped and applied", "[device][probe][build]") {
     const auto patch = readSource("tools/juce-patches/0001-wasapi-probe-cap.patch");

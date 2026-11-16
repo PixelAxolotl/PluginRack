@@ -690,25 +690,10 @@ bool SettingsView::setWrappedText(WrappedLabel& label, const juce::String& text,
 
 void SettingsView::updatePendingState() {
     const auto applied = audioEngine.getDeviceSettings();
-    dirty_ = staged_.inputBuffer != applied.inputBuffer
-          || staged_.outputBuffer != applied.outputBuffer
-          || staged_.latencyTuningOptIn != applied.latencyTuningOptIn
-          || staged_.lowLatencyInput != applied.lowLatencyInput
-          || staged_.preferExclusive != applied.preferExclusive
-          || staged_.lowLatencyOutputs != applied.lowLatencyOutputs
-          || staged_.minimalClockFifo != applied.minimalClockFifo
-          || staged_.fullDuplexInput != applied.fullDuplexInput
-          || staged_.wasapiProbeCapEnabled != applied.wasapiProbeCapEnabled
-          || staged_.wasapiProbeCapChannels != applied.wasapiProbeCapChannels
-          || staged_.slicedRender != applied.slicedRender
-          || staged_.nonFiniteScrub != applied.nonFiniteScrub
-          || staged_.healthReload != applied.healthReload
-          || staged_.ladderRecovery != applied.ladderRecovery
-          || staged_.healthYellowUnderrunsPerMinute
-                 != applied.healthYellowUnderrunsPerMinute
-          || staged_.healthRedUnderrunsPerMinute
-                 != applied.healthRedUnderrunsPerMinute
-          || staged_.healthPinnedToEdgeMs != applied.healthPinnedToEdgeMs;
+    // One comparison over one struct: every field the page can stage is part
+    // of it, so a new setting cannot be forgotten here (the previous
+    // hand-written list had already lost three).
+    dirty_ = !(staged_ == applied);
     pendingLabel.setText(dirty_ ? "Pending changes - press Apply" : "",
                          juce::dontSendNotification);
     const bool busy = audioEngine.isOpeningDevices();

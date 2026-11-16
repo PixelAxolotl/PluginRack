@@ -202,8 +202,7 @@ bool MixerEngine::prepare(const Scene& scene, const SceneAvailability& availabil
     return true;
 }
 
-template <typename StripScene>
-MixerEngine::StripDsp MixerEngine::buildStrip(const StripScene& source, double sampleRate, int maxFrames) {
+MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sampleRate, int maxFrames) {
     StripDsp strip;
     strip.eq.prepare(sampleRate, maxFrames);
     strip.eq.setBands(source.eqBands);

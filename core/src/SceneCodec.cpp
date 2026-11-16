@@ -6,8 +6,6 @@
 
 namespace pluginrack {
 
-constexpr int kSchemaVersion = 7;
-
 void to_json(nlohmann::json& j, SourceKind kind) {
     switch (kind) {
         case SourceKind::Hardware: j = "Hardware"; break;
@@ -325,174 +323,133 @@ void from_json(const nlohmann::json& j, ChainItem& item) {
     j.at("id").get_to(item.id);
 }
 
-void to_json(nlohmann::json& j, const Channel& channel) {
+namespace {
+
+// Scenes saved while the limiter was still a dynamics type carry entries this
+// build no longer instantiates; the rest load as their concrete effect type.
+template <typename Effect>
+std::vector<Effect> readEffects(const nlohmann::json& entries) {
+    std::vector<Effect> effects;
+    for (const auto& entry : entries) {
+        if (entry.value("type", std::string()) == "Limiter") continue;
+        effects.push_back(entry.get<Effect>());
+    }
+    return effects;
+}
+
+} // namespace
+
+void to_json(nlohmann::json& j, const Strip& strip) {
     j = nlohmann::json{
-        {"id", channel.id},
-        {"name", channel.name},
-        {"sourceKind", channel.sourceKind},
-        {"sourceDeviceId", channel.sourceDeviceId},
-        {"layout", channel.layout},
-        {"inputChannels", channel.inputChannels},
-        {"gainDb", channel.gainDb},
-        {"trimDb", channel.trimDb},
-        {"pan", channel.pan},
-        {"muted", channel.muted},
-        {"soloed", channel.soloed},
-        {"inserts", channel.inserts},
-        {"effects", channel.effects},
-        {"multibandEffects", channel.multibandEffects},
-        {"deEsserEffects", channel.deEsserEffects},
-        {"limiterEffects", channel.limiterEffects},
-        {"multibandRtaOffsetDb", channel.multibandRtaOffsetDb},
-        {"multibandRtaWeighting", channel.multibandRtaWeighting},
-        {"deEsserRtaOffsetDb", channel.deEsserRtaOffsetDb},
-        {"deEsserRtaWeighting", channel.deEsserRtaWeighting},
-        {"chain", channel.chain},
-        {"eqEnabled", channel.eqEnabled},
-        {"eqBands", channel.eqBands},
-        {"eqDelayMs", channel.eqDelayMs},
-        {"eqPhaseFlip", channel.eqPhaseFlip},
-        {"colourHue", channel.colourHue},
-        {"eqRtaOffsetDb", channel.eqRtaOffsetDb},
-        {"eqRtaWeighting", channel.eqRtaWeighting},
+        {"id", strip.id},
+        {"name", strip.name},
+        {"layout", strip.layout},
+        {"gainDb", strip.gainDb},
+        {"muted", strip.muted},
+        {"inserts", strip.inserts},
+        {"effects", strip.effects},
+        {"multibandEffects", strip.multibandEffects},
+        {"deEsserEffects", strip.deEsserEffects},
+        {"limiterEffects", strip.limiterEffects},
+        {"multibandRtaOffsetDb", strip.multibandRtaOffsetDb},
+        {"multibandRtaWeighting", strip.multibandRtaWeighting},
+        {"deEsserRtaOffsetDb", strip.deEsserRtaOffsetDb},
+        {"deEsserRtaWeighting", strip.deEsserRtaWeighting},
+        {"chain", strip.chain},
+        {"eqEnabled", strip.eqEnabled},
+        {"eqBands", strip.eqBands},
+        {"eqDelayMs", strip.eqDelayMs},
+        {"eqPhaseFlip", strip.eqPhaseFlip},
+        {"colourHue", strip.colourHue},
+        {"eqRtaOffsetDb", strip.eqRtaOffsetDb},
+        {"eqRtaWeighting", strip.eqRtaWeighting},
     };
+}
+
+void from_json(const nlohmann::json& j, Strip& strip) {
+    j.at("id").get_to(strip.id);
+    strip.name = j.value("name", std::string{});
+    if (j.contains("layout")) {
+        j.at("layout").get_to(strip.layout);
+    }
+    strip.gainDb = j.value("gainDb", 0.0f);
+    strip.muted = j.value("muted", false);
+    if (j.contains("inserts")) {
+        j.at("inserts").get_to(strip.inserts);
+    }
+    if (j.contains("effects")) {
+        strip.effects = readEffects<DynamicsEffect>(j.at("effects"));
+    }
+    // The chain used to be read only beside "effects". A scene (or a hand
+    // edit) that carries a chain without the legacy dynamics list still has
+    // to restore its routing of the other effects.
+    if (j.contains("chain")) j.at("chain").get_to(strip.chain);
+    // v1/v2 files have no EQ keys: the strip keeps eqEnabled == false with the
+    // flat defaultEqBands(), and v3 files written before the delay knob have
+    // no eqDelayMs (0 ms).
+    if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(strip.multibandEffects);
+    if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(strip.deEsserEffects);
+    if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(strip.limiterEffects);
+    strip.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
+    strip.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
+    strip.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
+    strip.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
+    strip.eqEnabled = j.value("eqEnabled", false);
+    strip.eqDelayMs = j.value("eqDelayMs", 0.0f);
+    strip.eqPhaseFlip = j.value("eqPhaseFlip", false);
+    strip.colourHue = j.value("colourHue", 0.0f);
+    // Absent before the offset was saved: 0 is the default view.
+    strip.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
+    strip.eqRtaWeighting = j.value("eqRtaWeighting", 0);
+    if (j.contains("eqBands")) {
+        j.at("eqBands").get_to(strip.eqBands);
+    }
+}
+
+void to_json(nlohmann::json& j, const Channel& channel) {
+    to_json(j, static_cast<const Strip&>(channel));
+    j["sourceKind"] = channel.sourceKind;
+    j["sourceDeviceId"] = channel.sourceDeviceId;
+    j["inputChannels"] = channel.inputChannels;
+    j["trimDb"] = channel.trimDb;
+    j["pan"] = channel.pan;
+    j["soloed"] = channel.soloed;
 }
 
 void from_json(const nlohmann::json& j, Channel& channel) {
     channel = Channel{};
-    j.at("id").get_to(channel.id);
-    channel.name = j.value("name", std::string{});
+    from_json(j, static_cast<Strip&>(channel));
     if (j.contains("sourceKind")) {
         j.at("sourceKind").get_to(channel.sourceKind);
     }
     channel.sourceDeviceId = j.value("sourceDeviceId", std::string{});
-    if (j.contains("layout")) {
-        j.at("layout").get_to(channel.layout);
-    }
     if (j.contains("inputChannels")) {
         j.at("inputChannels").get_to(channel.inputChannels);
-    } else {
-        if (channel.layout == ChannelLayout::Stereo) {
-            channel.inputChannels = {0, 1};
-        } else {
-            channel.inputChannels = {0};
-        }
+    } else if (channel.layout == ChannelLayout::Stereo) {
+        channel.inputChannels = {0, 1};
     }
-    channel.gainDb = j.value("gainDb", 0.0f);
     channel.trimDb = j.value("trimDb", 0.0f);
     channel.pan = j.value("pan", 0.0f);
-    channel.muted = j.value("muted", false);
     channel.soloed = j.value("soloed", false);
-    if (j.contains("inserts")) {
-        j.at("inserts").get_to(channel.inserts);
-    }
-    if (j.contains("effects")) {
-        channel.effects.clear();
-        for (const auto& entry : j.at("effects")) {
-            // The limiter was retired; scenes saved with one still load.
-            if (entry.value("type", std::string()) == "Limiter") continue;
-            channel.effects.push_back(entry.get<DynamicsEffect>());
-        }
-        if (j.contains("chain")) j.at("chain").get_to(channel.chain);
-    }
-    // v1/v2 files have no EQ keys: the channel keeps eqEnabled == false with
-    // the flat defaultEqBands() from Channel{} above, and v3 files written
-    // before the delay knob have no eqDelayMs (0 ms).
-    if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(channel.multibandEffects);
-    if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(channel.deEsserEffects);
-    if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(channel.limiterEffects);
-    channel.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
-    channel.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
-    channel.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
-    channel.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
-    channel.eqEnabled = j.value("eqEnabled", false);
-    channel.eqDelayMs = j.value("eqDelayMs", 0.0f);
-    channel.eqPhaseFlip = j.value("eqPhaseFlip", false);
-    channel.colourHue = j.value("colourHue", 0.0f);
-    // Absent before the offset was saved: 0 is the default view.
-    channel.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
-    channel.eqRtaWeighting = j.value("eqRtaWeighting", 0);
-    if (j.contains("eqBands")) {
-        j.at("eqBands").get_to(channel.eqBands);
-    }
 }
 
 void to_json(nlohmann::json& j, const Output& output) {
-    j = nlohmann::json{
-        {"id", output.id},
-        {"name", output.name},
-        {"kind", output.kind},
-        {"deviceId", output.deviceId},
-        {"layout", output.layout},
-        {"flipped", output.flipped},
-        {"gainDb", output.gainDb},
-        {"muted", output.muted},
-        {"inserts", output.inserts},
-        {"effects", output.effects},
-        {"multibandEffects", output.multibandEffects},
-        {"deEsserEffects", output.deEsserEffects},
-        {"limiterEffects", output.limiterEffects},
-        {"multibandRtaOffsetDb", output.multibandRtaOffsetDb},
-        {"multibandRtaWeighting", output.multibandRtaWeighting},
-        {"deEsserRtaOffsetDb", output.deEsserRtaOffsetDb},
-        {"deEsserRtaWeighting", output.deEsserRtaWeighting},
-        {"chain", output.chain},
-        {"eqEnabled", output.eqEnabled},
-        {"eqBands", output.eqBands},
-        {"eqDelayMs", output.eqDelayMs},
-        {"eqPhaseFlip", output.eqPhaseFlip},
-        {"colourHue", output.colourHue},
-        {"eqRtaOffsetDb", output.eqRtaOffsetDb},
-        {"eqRtaWeighting", output.eqRtaWeighting},
-    };
+    to_json(j, static_cast<const Strip&>(output));
+    j["kind"] = output.kind;
+    j["deviceId"] = output.deviceId;
+    j["flipped"] = output.flipped;
 }
 
 void from_json(const nlohmann::json& j, Output& output) {
     output = Output{};
-    j.at("id").get_to(output.id);
-    output.name = j.value("name", std::string{});
+    from_json(j, static_cast<Strip&>(output));
     if (j.contains("kind")) {
         j.at("kind").get_to(output.kind);
     }
     output.deviceId = j.value("deviceId", std::string{});
-    if (j.contains("layout")) {
-        j.at("layout").get_to(output.layout);
-    }
-    output.flipped = j.value("flipped", false);
-    output.gainDb = j.value("gainDb", 0.0f);
-    output.muted = j.value("muted", false);
-    if (j.contains("inserts")) {
-        j.at("inserts").get_to(output.inserts);
-    }
-    if (j.contains("effects")) {
-        output.effects.clear();
-        for (const auto& entry : j.at("effects")) {
-            if (entry.value("type", std::string()) == "Limiter") continue;
-            output.effects.push_back(entry.get<DynamicsEffect>());
-        }
-        if (j.contains("chain")) j.at("chain").get_to(output.chain);
-    }
-    // v1/v2 files have no EQ keys: the output keeps eqEnabled == false with
-    // the flat defaultEqBands() from Output{} above, and v3 files written
-    // before the delay knob have no eqDelayMs (0 ms).
-    if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(output.multibandEffects);
-    if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(output.deEsserEffects);
-    if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(output.limiterEffects);
-    output.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
-    output.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
-    output.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
-    output.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
-    output.eqEnabled = j.value("eqEnabled", false);
-    output.eqDelayMs = j.value("eqDelayMs", 0.0f);
-    output.eqPhaseFlip = j.value("eqPhaseFlip", false);
-    output.colourHue = j.value("colourHue", 0.0f);
-    output.eqRtaOffsetDb = j.value("eqRtaOffsetDb", 0.0f);
-    output.eqRtaWeighting = j.value("eqRtaWeighting", 0);
     // Scenes written before the stream-output class was retired still carry
     // "streamOutput"; unknown keys are ignored, so they load as monitors.
-    if (j.contains("eqBands")) {
-        j.at("eqBands").get_to(output.eqBands);
-    }
+    output.flipped = j.value("flipped", false);
 }
 
 void to_json(nlohmann::json& j, const Route& route) {

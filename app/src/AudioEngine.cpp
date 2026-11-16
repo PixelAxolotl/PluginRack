@@ -2056,6 +2056,59 @@ const std::vector<std::unique_ptr<AudioEngine::Route>>& AudioEngine::getRoutes()
     return routes;
 }
 
+namespace {
+
+// The live strip and the saved strip keep the same names for everything they
+// share, but the live one guards the audio-thread fields with atomics. Copying
+// the strip's own half in one place keeps a new field from being forgotten on
+// one side (the output side had already lost its OutputKind).
+template <typename LiveStrip, typename SavedStrip>
+void copyStripFields(const LiveStrip& from, SavedStrip& to) {
+    to.id = from.id;
+    to.name = from.name.toStdString();
+    to.layout = from.layout;
+    to.gainDb = from.gainDb.get();
+    to.muted = from.muted.get();
+    to.eqEnabled = !from.eqBypassed.get();
+    to.eqBands = from.eqBands;
+    to.eqDelayMs = from.eqDelayMs;
+    to.eqPhaseFlip = from.eqPhaseFlip.get();
+    to.colourHue = from.colourHue;
+    to.eqRtaOffsetDb = from.eqRtaOffsetDb;
+    to.eqRtaWeighting = from.eqRtaWeighting;
+    to.multibandRtaOffsetDb = from.multibandRtaOffsetDb;
+    to.multibandRtaWeighting = from.multibandRtaWeighting;
+    to.deEsserRtaOffsetDb = from.deEsserRtaOffsetDb;
+    to.deEsserRtaWeighting = from.deEsserRtaWeighting;
+    to.effects = from.effects;
+    to.multibandEffects = from.multibandEffects;
+    to.deEsserEffects = from.deEsserEffects;
+    to.limiterEffects = from.limiterEffects;
+    to.chain = from.chain;
+}
+
+// The host pointers stay live until capture finishes; the slot copy carries
+// only what the scene file stores.
+template <typename LiveInserts>
+std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
+                                           std::vector<pluginrack::InsertSlot>& saved) {
+    std::vector<const PluginHost*> hosts;
+    hosts.reserve(inserts.size());
+    for (const auto& insert : inserts) {
+        pluginrack::InsertSlot slot;
+        slot.id = insert->id;
+        slot.pluginPath = insert->pluginPath.toStdString();
+        slot.pluginName = insert->pluginName.toStdString();
+        slot.pluginUniqueId = insert->pluginUniqueId;
+        slot.bypassed = insert->bypassed.get();
+        saved.push_back(std::move(slot));
+        hosts.push_back(&insert->pluginHost);
+    }
+    return hosts;
+}
+
+} // namespace
+
 pluginrack::Scene AudioEngine::makeScene() const {
     pluginrack::Scene scene;
     // Plugin state capture is plugin code of unbounded length, and render()
@@ -2073,86 +2126,24 @@ pluginrack::Scene AudioEngine::makeScene() const {
         scene.bufferFrames = currentBufferSize;
         for (const auto& channel : channels) {
             pluginrack::Channel savedChannel;
-            savedChannel.id = channel->id;
-            savedChannel.name = channel->name.toStdString();
+            copyStripFields(*channel, savedChannel);
             savedChannel.sourceKind = channel->sourceKind;
             savedChannel.sourceDeviceId = channel->sourceDeviceId;
-            savedChannel.layout = channel->layout;
             savedChannel.inputChannels = channel->inputChannels;
-            savedChannel.gainDb = channel->gainDb.get();
             savedChannel.trimDb = channel->trimDb.get();
             savedChannel.pan = channel->pan.get();
-            savedChannel.muted = channel->muted.get();
             savedChannel.soloed = channel->soloed.get();
-            savedChannel.eqEnabled = !channel->eqBypassed.get();
-            savedChannel.eqBands = channel->eqBands;
-            savedChannel.eqDelayMs = channel->eqDelayMs;
-            savedChannel.eqPhaseFlip = channel->eqPhaseFlip.get();
-            savedChannel.colourHue = channel->colourHue;
-            savedChannel.eqRtaOffsetDb = channel->eqRtaOffsetDb;
-            savedChannel.eqRtaWeighting = channel->eqRtaWeighting;
-            savedChannel.multibandRtaOffsetDb = channel->multibandRtaOffsetDb;
-            savedChannel.multibandRtaWeighting = channel->multibandRtaWeighting;
-            savedChannel.deEsserRtaOffsetDb = channel->deEsserRtaOffsetDb;
-            savedChannel.deEsserRtaWeighting = channel->deEsserRtaWeighting;
-            savedChannel.effects = channel->effects;
-            savedChannel.multibandEffects = channel->multibandEffects;
-            savedChannel.deEsserEffects = channel->deEsserEffects;
-            savedChannel.limiterEffects = channel->limiterEffects;
-            savedChannel.chain = channel->chain;
-            std::vector<const PluginHost*> hosts;
-            hosts.reserve(channel->inserts.size());
-            for (const auto& insert : channel->inserts) {
-                pluginrack::InsertSlot savedInsert;
-                savedInsert.id = insert->id;
-                savedInsert.pluginPath = insert->pluginPath.toStdString();
-                savedInsert.pluginName = insert->pluginName.toStdString();
-                savedInsert.pluginUniqueId = insert->pluginUniqueId;
-                savedInsert.bypassed = insert->bypassed.get();
-                savedChannel.inserts.push_back(std::move(savedInsert));
-                hosts.push_back(&insert->pluginHost);
-            }
-            channelHosts.push_back(std::move(hosts));
+            channelHosts.push_back(copyInserts(channel->inserts, savedChannel.inserts));
             scene.channels.push_back(std::move(savedChannel));
         }
         for (const auto& output : outputs) {
             pluginrack::Output savedOutput;
-            savedOutput.id = output->id;
-            savedOutput.name = output->name.toStdString();
-            savedOutput.layout = output->layout;
-            savedOutput.flipped = output->flipped.get();
-            savedOutput.gainDb = output->gainDb.get();
-            savedOutput.muted = output->muted.get();
+            copyStripFields(*output, savedOutput);
+            // The live engine models physical endpoints only; a saved output
+            // therefore stays OutputKind::Physical.
             savedOutput.deviceId = output->outputDeviceName.toStdString();
-            savedOutput.eqEnabled = !output->eqBypassed.get();
-            savedOutput.eqBands = output->eqBands;
-            savedOutput.eqDelayMs = output->eqDelayMs;
-            savedOutput.eqPhaseFlip = output->eqPhaseFlip.get();
-            savedOutput.colourHue = output->colourHue;
-            savedOutput.eqRtaOffsetDb = output->eqRtaOffsetDb;
-            savedOutput.eqRtaWeighting = output->eqRtaWeighting;
-            savedOutput.multibandRtaOffsetDb = output->multibandRtaOffsetDb;
-            savedOutput.multibandRtaWeighting = output->multibandRtaWeighting;
-            savedOutput.deEsserRtaOffsetDb = output->deEsserRtaOffsetDb;
-            savedOutput.deEsserRtaWeighting = output->deEsserRtaWeighting;
-            savedOutput.effects = output->effects;
-            savedOutput.multibandEffects = output->multibandEffects;
-            savedOutput.deEsserEffects = output->deEsserEffects;
-            savedOutput.limiterEffects = output->limiterEffects;
-            savedOutput.chain = output->chain;
-            std::vector<const PluginHost*> hosts;
-            hosts.reserve(output->inserts.size());
-            for (const auto& insert : output->inserts) {
-                pluginrack::InsertSlot savedInsert;
-                savedInsert.id = insert->id;
-                savedInsert.pluginPath = insert->pluginPath.toStdString();
-                savedInsert.pluginName = insert->pluginName.toStdString();
-                savedInsert.pluginUniqueId = insert->pluginUniqueId;
-                savedInsert.bypassed = insert->bypassed.get();
-                savedOutput.inserts.push_back(std::move(savedInsert));
-                hosts.push_back(&insert->pluginHost);
-            }
-            outputHosts.push_back(std::move(hosts));
+            savedOutput.flipped = output->flipped.get();
+            outputHosts.push_back(copyInserts(output->inserts, savedOutput.inserts));
             scene.outputs.push_back(std::move(savedOutput));
         }
         for (const auto& route : routes) {
@@ -2170,30 +2161,7 @@ pluginrack::Scene AudioEngine::makeScene() const {
 
         // The tuning the session runs with travels with the save, so loading it
         // restores the same buffers, stream modes and device watchdog.
-        const auto settings = getDeviceSettings();
-        pluginrack::AudioSettings audio;
-        audio.inputBuffer = settings.inputBuffer;
-        audio.outputBuffer = settings.outputBuffer;
-        audio.latencyTuningOptIn = settings.latencyTuningOptIn;
-        audio.lowLatencyInput = settings.lowLatencyInput;
-        audio.preferExclusive = settings.preferExclusive;
-        audio.lowLatencyOutputs = settings.lowLatencyOutputs;
-        audio.minimalClockFifo = settings.minimalClockFifo;
-        audio.fullDuplexInput = settings.fullDuplexInput;
-        audio.autoReloadDevices = settings.autoReloadDevices;
-        audio.slicedRender = settings.slicedRender;
-        audio.nonFiniteScrub = settings.nonFiniteScrub;
-        audio.healthReload = settings.healthReload;
-        audio.ladderRecovery = settings.ladderRecovery;
-        audio.wasapiProbeCapEnabled = settings.wasapiProbeCapEnabled;
-        audio.wasapiProbeCapChannels = settings.wasapiProbeCapChannels;
-        audio.healthYellowUnderrunsPerMinute = settings.healthYellowUnderrunsPerMinute;
-        audio.healthRedUnderrunsPerMinute = settings.healthRedUnderrunsPerMinute;
-        audio.healthPinnedToEdgeMs = settings.healthPinnedToEdgeMs;
-        audio.rackThumbnailFps = settings.rackThumbnailFps;
-        audio.rackPreviewMode = settings.rackPreviewMode;
-        audio.watchedDevices = getWatchedDevices();
-        scene.audio = std::move(audio);
+        scene.audio = getDeviceSettings();
     }
 
     // Capture the live parameter/program state so reopening the scene does not
@@ -2222,30 +2190,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
     // sizes and modes. Scenes written before schema 4 carry no tuning block,
     // and loading one leaves the live settings alone.
     if (scene.audio.has_value()) {
-        DeviceSettings settings = getDeviceSettings();
-        settings.inputBuffer = scene.audio->inputBuffer;
-        settings.outputBuffer = scene.audio->outputBuffer;
-        settings.latencyTuningOptIn = scene.audio->latencyTuningOptIn;
-        settings.lowLatencyInput = scene.audio->lowLatencyInput;
-        settings.preferExclusive = scene.audio->preferExclusive;
-        settings.lowLatencyOutputs = scene.audio->lowLatencyOutputs;
-        settings.minimalClockFifo = scene.audio->minimalClockFifo;
-        settings.fullDuplexInput = scene.audio->fullDuplexInput;
-        settings.autoReloadDevices = scene.audio->autoReloadDevices;
-        settings.slicedRender = scene.audio->slicedRender;
-        settings.nonFiniteScrub = scene.audio->nonFiniteScrub;
-        settings.healthReload = scene.audio->healthReload;
-        settings.ladderRecovery = scene.audio->ladderRecovery;
-        settings.wasapiProbeCapEnabled = scene.audio->wasapiProbeCapEnabled;
-        settings.wasapiProbeCapChannels = scene.audio->wasapiProbeCapChannels;
-        settings.healthYellowUnderrunsPerMinute =
-            scene.audio->healthYellowUnderrunsPerMinute;
-        settings.healthRedUnderrunsPerMinute =
-            scene.audio->healthRedUnderrunsPerMinute;
-        settings.healthPinnedToEdgeMs = scene.audio->healthPinnedToEdgeMs;
-        settings.rackThumbnailFps = scene.audio->rackThumbnailFps;
-        settings.rackPreviewMode = scene.audio->rackPreviewMode;
-        applySettingsValues(settings);
+        applySettingsValues(*scene.audio);
         setWatchedDevices(scene.audio->watchedDevices);
     }
     double sampleRate;
@@ -4094,6 +4039,7 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     settings.healthPinnedToEdgeMs = healthPinnedToEdgeMs_.load();
     settings.rackThumbnailFps = rackThumbnailFps_.load();
     settings.rackPreviewMode = rackPreviewMode_;
+    settings.watchedDevices = getWatchedDevices();
     return settings;
 }
 
@@ -4258,6 +4204,7 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
 void AudioEngine::applyDeviceSettings(const DeviceSettings& settings) {
     if (isOpeningDevices()) return;
     applySettingsValues(settings);
+    setWatchedDevices(settings.watchedDevices);
     // A user-initiated apply must re-probe the mode: the cached answer is only
     // trusted by the automatic startup pass.
     modeCacheBypass_.store(true, std::memory_order_relaxed);
