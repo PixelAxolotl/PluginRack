@@ -592,15 +592,15 @@ void MainComponent::showMenu() {
                                                         insertIds.push_back(insert->id);
                                                     for (const auto insertId : insertIds)
                                                         audioEngine.removeOutputPlugin(outputId, insertId);
-                                                    audioEngine.setOutputEq((int)i, pluginrack::defaultEqBands());
-                                                    audioEngine.setOutputEqBypassed((int)i, true);
-                                                    audioEngine.setOutputEqDelay((int)i, 0.0f);
-                                                    audioEngine.setOutputEqRtaOffset((int)i, 0.0f);
-                                                    audioEngine.setOutputEqRtaWeighting((int)i, 0);
-                                                    audioEngine.setOutputMultibandRtaOffset((int)i, 0.0f);
-                                                    audioEngine.setOutputMultibandRtaWeighting((int)i, 0);
-                                                    audioEngine.setOutputDeEsserRtaOffset((int)i, 0.0f);
-                                                    audioEngine.setOutputDeEsserRtaWeighting((int)i, 0);
+                                                    audioEngine.setOutputEq(outputId, pluginrack::defaultEqBands());
+                                                    audioEngine.setOutputEqBypassed(outputId, true);
+                                                    audioEngine.setOutputEqDelay(outputId, 0.0f);
+                                                    audioEngine.setOutputEqRtaOffset(outputId, 0.0f);
+                                                    audioEngine.setOutputEqRtaWeighting(outputId, 0);
+                                                    audioEngine.setOutputMultibandRtaOffset(outputId, 0.0f);
+                                                    audioEngine.setOutputMultibandRtaWeighting(outputId, 0);
+                                                    audioEngine.setOutputDeEsserRtaOffset(outputId, 0.0f);
+                                                    audioEngine.setOutputDeEsserRtaWeighting(outputId, 0);
                                                     audioEngine.setOutputEffects(outputId, pluginrack::defaultDynamicsEffects());
                                                     audioEngine.setOutputChain(outputId, AudioEngine::defaultChain());
                                                     audioEngine.setOutputGain(outputId, 0.0f);

@@ -543,17 +543,17 @@ public:
     void setChannelMultibandRtaWeighting(std::uint32_t channelId, int weighting);
     void setChannelDeEsserRtaOffset(std::uint32_t channelId, float offsetDb);
     void setChannelDeEsserRtaWeighting(std::uint32_t channelId, int weighting);
-    void setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands);
-    void setOutputEqBypassed(int outIdx, bool bypassed);
-    void setOutputEqDelay(int outIdx, float delayMs);
-    void setOutputEqPhaseFlip(int outIdx, bool flipped);
-    void setOutputColourHue(int outIdx, float hueDegrees);
-    void setOutputEqRtaOffset(int outIdx, float offsetDb);
-    void setOutputEqRtaWeighting(int outIdx, int weighting);
-    void setOutputMultibandRtaOffset(int outIdx, float offsetDb);
-    void setOutputMultibandRtaWeighting(int outIdx, int weighting);
-    void setOutputDeEsserRtaOffset(int outIdx, float offsetDb);
-    void setOutputDeEsserRtaWeighting(int outIdx, int weighting);
+    void setOutputEq(std::uint32_t outputId, const std::vector<pluginrack::EqBand>& bands);
+    void setOutputEqBypassed(std::uint32_t outputId, bool bypassed);
+    void setOutputEqDelay(std::uint32_t outputId, float delayMs);
+    void setOutputEqPhaseFlip(std::uint32_t outputId, bool flipped);
+    void setOutputColourHue(std::uint32_t outputId, float hueDegrees);
+    void setOutputEqRtaOffset(std::uint32_t outputId, float offsetDb);
+    void setOutputEqRtaWeighting(std::uint32_t outputId, int weighting);
+    void setOutputMultibandRtaOffset(std::uint32_t outputId, float offsetDb);
+    void setOutputMultibandRtaWeighting(std::uint32_t outputId, int weighting);
+    void setOutputDeEsserRtaOffset(std::uint32_t outputId, float offsetDb);
+    void setOutputDeEsserRtaWeighting(std::uint32_t outputId, int weighting);
     void setChannelEffects(std::uint32_t channelId,
                            const std::vector<pluginrack::DynamicsEffect>& effects);
     void setOutputEffects(std::uint32_t outputId,

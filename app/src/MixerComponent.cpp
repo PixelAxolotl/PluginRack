@@ -6,9 +6,9 @@
 #include "LimiterWindow.h"
 #include "MultibandWindow.h"
 
-MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int outputIdx,
+MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
                                                  AudioEngine& engine)
-    : output(outputState), outputIndex(outputIdx), audioEngine(engine),
+    : output(outputState), audioEngine(engine),
       meter(gainSlider, outputState.peakL, outputState.peakR, outputState.rmsL,
             outputState.rmsR) {
     deviceControl.setTitle(output.name);
@@ -59,7 +59,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState, int o
                           [safe](const juce::String& newName, float newHue) {
             if (safe == nullptr) return;
             safe->audioEngine.setOutputName(safe->output.id, newName);
-            safe->audioEngine.setOutputColourHue(safe->outputIndex, newHue);
+            safe->audioEngine.setOutputColourHue(safe->output.id, newHue);
             safe->deviceControl.setTitle(newName);
             safe->repaint();
             if (safe->onRenamed) safe->onRenamed();
@@ -353,43 +353,23 @@ void MixerComponent::OutputStrip::openEqWindow() {
     juce::Component::SafePointer<OutputStrip> safe(this);
     // Live device rate for the curve's magnitude maths (see ChannelStrip).
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
-    // setOutputEq is keyed by scene-order position (Task 3 asymmetry), so
-    // resolve the position by id at edit time rather than trusting the
-    // cached strip index across open->edit gaps. Engagement follows edits,
-    // same rationale as the channel strip.
+    // Outputs are addressed by id, like channels, so a reordered output list
+    // can never retarget an edit that arrives after the window opened.
     auto* window = new EQWindow(
         "EQ - " + output.name, output.eqBands,
         [safe, outputId](const std::vector<pluginrack::EqBand>& bands) {
             if (safe == nullptr) return;
-            const auto& outs = safe->audioEngine.getOutputs();
-            for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-                if (outs[static_cast<std::size_t>(i)]->id == outputId) {
-                    safe->audioEngine.setOutputEqBypassed(i, false);
-                    safe->audioEngine.setOutputEq(i, bands);
-                    break;
-                }
-            }
+            safe->audioEngine.setOutputEqBypassed(outputId, false);
+            safe->audioEngine.setOutputEq(outputId, bands);
         },
         liveRateHz, false, output.eqRtaOffsetDb, output.eqRtaWeighting);
     window->applySpectrumOffset = [safe, outputId](float offsetDb) {
         if (safe == nullptr) return;
-        const auto& outs = safe->audioEngine.getOutputs();
-        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
-                safe->audioEngine.setOutputEqRtaOffset(i, offsetDb);
-                break;
-            }
-        }
+        safe->audioEngine.setOutputEqRtaOffset(outputId, offsetDb);
     };
     window->applyWeighting = [safe, outputId](int weighting) {
         if (safe == nullptr) return;
-        const auto& outs = safe->audioEngine.getOutputs();
-        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
-                safe->audioEngine.setOutputEqRtaWeighting(i, weighting);
-                break;
-            }
-        }
+        safe->audioEngine.setOutputEqRtaWeighting(outputId, weighting);
     };
     // Analyzer wiring: the EQ reads its own post-EQ tap (eqTap), so its
     // RTA shows what leaves the EQ — a later plugin can't tint it.
@@ -410,27 +390,15 @@ void MixerComponent::OutputStrip::openEqWindow() {
     window->setDelayMs(output.eqDelayMs);
     window->applyDelayMs = [safe, outputId](float delayMs) {
         if (safe == nullptr) return;
-        const auto& outs = safe->audioEngine.getOutputs();
-        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
-                safe->audioEngine.setOutputEqBypassed(i, false);
-                safe->audioEngine.setOutputEqDelay(i, delayMs);
-                break;
-            }
-        }
+        safe->audioEngine.setOutputEqBypassed(outputId, false);
+        safe->audioEngine.setOutputEqDelay(outputId, delayMs);
     };
     // Phase flip, same contract as the channel strip.
     window->setPhaseFlip(output.eqPhaseFlip.get());
     window->applyPhaseFlip = [safe, outputId](bool flipped) {
         if (safe == nullptr) return;
-        const auto& outs = safe->audioEngine.getOutputs();
-        for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-            if (outs[static_cast<std::size_t>(i)]->id == outputId) {
-                safe->audioEngine.setOutputEqBypassed(i, false);
-                safe->audioEngine.setOutputEqPhaseFlip(i, flipped);
-                break;
-            }
-        }
+        safe->audioEngine.setOutputEqBypassed(outputId, false);
+        safe->audioEngine.setOutputEqPhaseFlip(outputId, flipped);
     };
     eqWindow = window;
     window->onCloseRequest = [safe] {
@@ -776,7 +744,7 @@ void MixerComponent::OutputStrip::clearChainPreview() {
 
 void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     if (item.type == pluginrack::ChainItemType::Eq) {
-        audioEngine.setOutputEqBypassed(outputIndex, bypassed);
+        audioEngine.setOutputEqBypassed(output.id, bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Multiband) {
@@ -1160,9 +1128,10 @@ void MixerComponent::rebuildChannelStrips() {
 }
 
 void MixerComponent::rebuildOutputStrips() {
-    int outputIndex = 0;
-    for (const auto& out : audioEngine.getOutputs()) {
-        auto* s = outputStrips.add(new OutputStrip(*out, outputIndex++, audioEngine));
+    const auto& outputs = audioEngine.getOutputs();
+    for (std::size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
+        const auto& out = outputs[outputIndex];
+        auto* s = outputStrips.add(new OutputStrip(*out, audioEngine));
         const std::uint32_t id = out->id;
         s->onRemoveRequested = [this, id] {
             // The rack may have docked an editor owned by this strip: release it
@@ -1188,7 +1157,7 @@ void MixerComponent::rebuildOutputStrips() {
             if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), true);
         };
         // Output strips reorder with the same grip as the input strips.
-        const int sourceIndex = outputIndex - 1;
+        const int sourceIndex = static_cast<int>(outputIndex);
         s->setDragHandleVisible(true);
         s->onDragHandleStarted = [this] { outputInsertIndex = -1; };
         s->onDragHandleMoved = [this](juce::Point<int> screenPosition) {

@@ -1604,9 +1604,7 @@ void AudioEngine::setChannelPan(std::uint32_t channelId, float pan) {
 
 void AudioEngine::setChannelName(std::uint32_t channelId, const juce::String& name) {
     const juce::ScopedLock lock(stateLock);
-    for (auto& channel : channels) {
-        if (channel->id == channelId) { channel->name = name; return; }
-    }
+    if (auto* channel = findChannel(channelId)) channel->name = name;
 }
 
 void AudioEngine::setChannelMuted(std::uint32_t channelId, bool muted) {
@@ -1699,35 +1697,25 @@ void AudioEngine::setSendGainR(std::uint32_t channelId, std::uint32_t outputId, 
 }
 
 void AudioEngine::setOutputGain(std::uint32_t outputId, float gainDb) {
-    for (auto& output : outputs) {
-        if (output->id == outputId) { output->gainDb = gainDb; return; }
-    }
+    if (auto* output = findOutput(outputId)) output->gainDb = gainDb;
 }
 
 void AudioEngine::setOutputMuted(std::uint32_t outputId, bool muted) {
-    for (auto& output : outputs) {
-        if (output->id == outputId) { output->muted = muted; return; }
-    }
+    if (auto* output = findOutput(outputId)) output->muted = muted;
 }
 
 void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name) {
     const juce::ScopedLock lock(stateLock);
-    for (auto& output : outputs) {
-        if (output->id == outputId) { output->name = name; return; }
-    }
+    if (auto* output = findOutput(outputId)) output->name = name;
 }
 
 void AudioEngine::setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout) {
     const juce::ScopedLock lock(stateLock);
-    for (auto& output : outputs) {
-        if (output->id == outputId) { output->layout = layout; return; }
-    }
+    if (auto* output = findOutput(outputId)) output->layout = layout;
 }
 
 void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
-    for (auto& output : outputs) {
-        if (output->id == outputId) { output->flipped = flipped; return; }
-    }
+    if (auto* output = findOutput(outputId)) output->flipped = flipped;
 }
 
 void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands) {
@@ -1813,106 +1801,79 @@ void AudioEngine::setChannelDeEsserRtaWeighting(std::uint32_t channelId, int wei
         channel->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
-void AudioEngine::setOutputEq(int outIdx, const std::vector<pluginrack::EqBand>& bands) {
+void AudioEngine::setOutputEq(std::uint32_t outputId,
+                              const std::vector<pluginrack::EqBand>& bands) {
     const juce::ScopedLock lock(stateLock);
-    // Out-of-range indexes are ignored, matching core's setOutputEq.
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
-    output->eqBands = bands;
-    output->eqDirty = true;
-    output->eq.setBands(output->eqBands);
-    output->eqDirty = false;
-}
-
-void AudioEngine::setOutputEqBypassed(int outIdx, bool bypassed) {
-    const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-
-    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
-    output->eqBypassed = bypassed;
-    if (bypassed) {
-        output->eq.reset();
+    if (auto* output = findOutput(outputId)) {
+        output->eqBands = bands;
+        output->eqDirty = true;
+        output->eq.setBands(output->eqBands);
+        output->eqDirty = false;
     }
 }
 
-void AudioEngine::setOutputEqDelay(int outIdx, float delayMs) {
+void AudioEngine::setOutputEqBypassed(std::uint32_t outputId, bool bypassed) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
+    if (auto* output = findOutput(outputId)) {
+        output->eqBypassed = bypassed;
+        if (bypassed) {
+            output->eq.reset();
+        }
     }
-    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
-    output->eqDelayMs = delayMs;
-    output->eq.setDelayMs(delayMs);
 }
 
-void AudioEngine::setOutputEqPhaseFlip(int outIdx, bool flipped) {
+void AudioEngine::setOutputEqDelay(std::uint32_t outputId, float delayMs) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
+    if (auto* output = findOutput(outputId)) {
+        output->eqDelayMs = delayMs;
+        output->eq.setDelayMs(delayMs);
     }
-    auto* output = outputs[static_cast<std::size_t>(outIdx)].get();
-    output->eqPhaseFlip = flipped;
-    output->eq.setPhaseFlip(flipped);
 }
 
-void AudioEngine::setOutputColourHue(int outIdx, float hueDegrees) {
+void AudioEngine::setOutputEqPhaseFlip(std::uint32_t outputId, bool flipped) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
+    if (auto* output = findOutput(outputId)) {
+        output->eqPhaseFlip = flipped;
+        output->eq.setPhaseFlip(flipped);
     }
-    outputs[static_cast<std::size_t>(outIdx)]->colourHue = hueDegrees;
 }
 
-void AudioEngine::setOutputEqRtaOffset(int outIdx, float offsetDb) {
+void AudioEngine::setOutputColourHue(std::uint32_t outputId, float hueDegrees) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->eqRtaOffsetDb = offsetDb;
+    if (auto* output = findOutput(outputId)) output->colourHue = hueDegrees;
 }
 
-void AudioEngine::setOutputEqRtaWeighting(int outIdx, int weighting) {
+void AudioEngine::setOutputEqRtaOffset(std::uint32_t outputId, float offsetDb) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->eqRtaWeighting = juce::jlimit(0, 2, weighting);
+    if (auto* output = findOutput(outputId)) output->eqRtaOffsetDb = offsetDb;
 }
 
-void AudioEngine::setOutputMultibandRtaOffset(int outIdx, float offsetDb) {
+void AudioEngine::setOutputEqRtaWeighting(std::uint32_t outputId, int weighting) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->multibandRtaOffsetDb = offsetDb;
+    if (auto* output = findOutput(outputId))
+        output->eqRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
-void AudioEngine::setOutputMultibandRtaWeighting(int outIdx, int weighting) {
+void AudioEngine::setOutputMultibandRtaOffset(std::uint32_t outputId, float offsetDb) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->multibandRtaWeighting = juce::jlimit(0, 2, weighting);
+    if (auto* output = findOutput(outputId)) output->multibandRtaOffsetDb = offsetDb;
 }
 
-void AudioEngine::setOutputDeEsserRtaOffset(int outIdx, float offsetDb) {
+void AudioEngine::setOutputMultibandRtaWeighting(std::uint32_t outputId, int weighting) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->deEsserRtaOffsetDb = offsetDb;
+    if (auto* output = findOutput(outputId))
+        output->multibandRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
-void AudioEngine::setOutputDeEsserRtaWeighting(int outIdx, int weighting) {
+void AudioEngine::setOutputDeEsserRtaOffset(std::uint32_t outputId, float offsetDb) {
     const juce::ScopedLock lock(stateLock);
-    if (outIdx < 0 || static_cast<std::size_t>(outIdx) >= outputs.size()) {
-        return;
-    }
-    outputs[static_cast<std::size_t>(outIdx)]->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
+    if (auto* output = findOutput(outputId)) output->deEsserRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setOutputDeEsserRtaWeighting(std::uint32_t outputId, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* output = findOutput(outputId))
+        output->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
 void AudioEngine::setChannelEffects(

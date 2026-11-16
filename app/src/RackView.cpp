@@ -1760,35 +1760,17 @@ void RackView::focusEq() {
             "EQ - " + out->name, out->eqBands,
             [safe, outputId](const std::vector<pluginrack::EqBand>& bands) {
                 if (safe == nullptr) return;
-                const auto& outs = safe->audioEngine.getOutputs();
-                for (int i = 0; i < (int)outs.size(); ++i) {
-                    if (outs[(size_t)i]->id == outputId) {
-                        safe->audioEngine.setOutputEqBypassed(i, false);
-                        safe->audioEngine.setOutputEq(i, bands);
-                        break;
-                    }
-                }
+                safe->audioEngine.setOutputEqBypassed(outputId, false);
+                safe->audioEngine.setOutputEq(outputId, bands);
             },
             liveRateHz, true, out->eqRtaOffsetDb, out->eqRtaWeighting);
         window->applySpectrumOffset = [safe, outputId](float offsetDb) {
             if (safe == nullptr) return;
-            const auto& outs = safe->audioEngine.getOutputs();
-            for (int i = 0; i < (int)outs.size(); ++i) {
-                if (outs[(size_t)i]->id == outputId) {
-                    safe->audioEngine.setOutputEqRtaOffset(i, offsetDb);
-                    break;
-                }
-            }
+            safe->audioEngine.setOutputEqRtaOffset(outputId, offsetDb);
         };
         window->applyWeighting = [safe, outputId](int weighting) {
             if (safe == nullptr) return;
-            const auto& outs = safe->audioEngine.getOutputs();
-            for (int i = 0; i < (int)outs.size(); ++i) {
-                if (outs[(size_t)i]->id == outputId) {
-                    safe->audioEngine.setOutputEqRtaWeighting(i, weighting);
-                    break;
-                }
-            }
+            safe->audioEngine.setOutputEqRtaWeighting(outputId, weighting);
         };
         window->pullAnalyzerTap = [safe](bool postEq, float* destL, float* destR) {
             if (safe == nullptr) return;
@@ -1805,14 +1787,8 @@ void RackView::focusEq() {
         window->setDelayMs(out->eqDelayMs);
         window->applyDelayMs = [safe, outputId](float delayMs) {
             if (safe == nullptr) return;
-            const auto& outs = safe->audioEngine.getOutputs();
-            for (int i = 0; i < (int)outs.size(); ++i) {
-                if (outs[(size_t)i]->id == outputId) {
-                    safe->audioEngine.setOutputEqBypassed(i, false);
-                    safe->audioEngine.setOutputEqDelay(i, delayMs);
-                    break;
-                }
-            }
+            safe->audioEngine.setOutputEqBypassed(outputId, false);
+            safe->audioEngine.setOutputEqDelay(outputId, delayMs);
         };
         eqWindow = window;
         eqFocused = true;
@@ -2587,14 +2563,7 @@ void RackView::renameSelectedChain() {
             safe->audioEngine.setChannelColourHue(static_cast<std::uint32_t>(selected), newHue);
         } else {
             safe->audioEngine.setOutputName(static_cast<std::uint32_t>(selected), newName);
-            const auto& outs = safe->audioEngine.getOutputs();
-            for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
-                if (outs[static_cast<std::size_t>(i)]->id
-                    == static_cast<std::uint32_t>(selected)) {
-                    safe->audioEngine.setOutputColourHue(i, newHue);
-                    break;
-                }
-            }
+            safe->audioEngine.setOutputColourHue(static_cast<std::uint32_t>(selected), newHue);
         }
         safe->rebuild();
     });
@@ -2756,10 +2725,7 @@ void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
 void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     if (item.type == pluginrack::ChainItemType::Eq) {
         if (selectedIsOutput) {
-            const auto& outputs = audioEngine.getOutputs();
-            for (int i = 0; i < static_cast<int>(outputs.size()); ++i)
-                if (outputs[static_cast<std::size_t>(i)]->id == static_cast<std::uint32_t>(selectedId))
-                    audioEngine.setOutputEqBypassed(i, bypassed);
+            audioEngine.setOutputEqBypassed(static_cast<std::uint32_t>(selectedId), bypassed);
         } else {
             audioEngine.setChannelEqBypassed(static_cast<std::uint32_t>(selectedId), bypassed);
         }

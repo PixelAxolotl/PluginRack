@@ -53,7 +53,7 @@ private:
         // Output EQ is keyed by scene-order position (Task 3 asymmetry), so the
         // strip captures its index at construction; rebuild() recreates strips
         // whenever the structure changes, keeping it fresh.
-        OutputStrip(AudioEngine::Output& output, int outputIndex, AudioEngine& engine);
+        OutputStrip(AudioEngine::Output& output, AudioEngine& engine);
         ~OutputStrip() override;
         void resized() override;
         void paint(juce::Graphics& g) override;
@@ -67,8 +67,7 @@ private:
         void openLimiterWindow();
         void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
         void refreshDynamicsButtons();
-        int getOutputIndex() const { return outputIndex; }
-
+    
         // IInsertHost
         juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
         void erasePlugin(std::uint32_t insertId) override;
@@ -114,8 +113,7 @@ private:
         bool draggingHandle = false;
 
         AudioEngine::Output& output;
-        int outputIndex = 0;
-        AudioEngine& audioEngine;
+            AudioEngine& audioEngine;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::ComboBox modeCombo;
