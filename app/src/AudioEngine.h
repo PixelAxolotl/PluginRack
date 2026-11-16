@@ -35,6 +35,13 @@ public:
     // it exists so a runaway add-loop cannot allocate without bound.
     static constexpr int kMaxInserts = 64;
 
+    // Send levels live in dB. A send at or below kSendOffDb is silent (the
+    // fader cannot go lower), and the routing chips treat anything above
+    // kSendAudibleDb as carrying signal. Both rules used to travel as bare
+    // literals through the strip, the patch view and the engine.
+    static constexpr float kSendOffDb = -60.0f;
+    static constexpr float kSendAudibleDb = -30.0f;
+
     struct InsertSlot {
         std::uint32_t id = 0;
         juce::String pluginPath;

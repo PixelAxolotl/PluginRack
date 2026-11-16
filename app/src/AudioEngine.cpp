@@ -1078,7 +1078,7 @@ void AudioEngine::addChannel() {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
         route->outputId = output->id;
-        const float g = output == outputs.front() ? 0.0f : -60.0f;
+        const float g = output == outputs.front() ? 0.0f : kSendOffDb;
         route->sendGainDbL = g;
         route->sendGainDbR = g;
         routes.push_back(std::move(route));
@@ -1120,8 +1120,8 @@ void AudioEngine::addOutput() {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
         route->outputId = output->id;
-        route->sendGainDbL = -60.0f;
-        route->sendGainDbR = -60.0f;
+        route->sendGainDbL = kSendOffDb;
+        route->sendGainDbR = kSendOffDb;
         routes.push_back(std::move(route));
     }
     outputs.push_back(std::move(output));
@@ -1954,7 +1954,7 @@ float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) 
             return route->sendGainDbL.get();
         }
     }
-    return -60.0f;
+    return kSendOffDb;
 }
 
 float AudioEngine::getSendGainL(std::uint32_t channelId, std::uint32_t outputId) const {
@@ -1963,7 +1963,7 @@ float AudioEngine::getSendGainL(std::uint32_t channelId, std::uint32_t outputId)
             return route->sendGainDbL.get();
         }
     }
-    return -60.0f;
+    return kSendOffDb;
 }
 
 float AudioEngine::getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const {
@@ -1972,7 +1972,7 @@ float AudioEngine::getSendGainR(std::uint32_t channelId, std::uint32_t outputId)
             return route->sendGainDbR.get();
         }
     }
-    return -60.0f;
+    return kSendOffDb;
 }
 
 const std::vector<std::unique_ptr<AudioEngine::Channel>>& AudioEngine::getChannels() const {
@@ -3799,7 +3799,7 @@ AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {
-    return gainDb <= -60.0f ? 0.0f : std::pow(10.0f, gainDb / 20.0f);
+    return gainDb <= AudioEngine::kSendOffDb ? 0.0f : std::pow(10.0f, gainDb / 20.0f);
 }
 
 //==============================================================================

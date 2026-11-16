@@ -76,49 +76,32 @@ void PatchesView::paintCanvas(juce::Graphics& g) {
         drawDashedCubic(g, from, to, cable.colour);
     }
 
-    // Input labels: hollow pills — the channel's own colour as the outline,
-    // dark and hollow in the middle, channel-coloured text. The selected
-    // one gets a solid fill. Socket dot outlined on the right edge.
-    for (int i = 0; i < (int)inputs.size(); ++i) {
-        const auto& node = inputs[static_cast<std::size_t>(i)];
-        const auto accent = theme::stripColour(node.hue);
-        const bool selected = selInput == i;
-        g.setColour(selected ? accent : theme::panel());
-        g.fillRoundedRectangle(node.box.toFloat(), 8.0f);
-        g.setColour(accent);
-        g.drawRoundedRectangle(node.box.toFloat().reduced(0.5f), 8.0f, selected ? 2.5f : 2.0f);
-        g.setColour(selected ? theme::bg() : accent);
-        g.setFont(theme::ui::bodyBoldFont());
-        g.drawText(node.name.toUpperCase(), node.box.reduced(10, 0),
-                   juce::Justification::centred, true);
-        g.setColour(accent);
-        if (selected)
-            g.fillEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f);
-        else
-            g.drawEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f, 1.5f);
-    }
+    // Input and output pills share one painting rule: hollow in the strip's
+    // own colour, solid fill and dark text when selected, socket dot on the
+    // right edge outlined or filled with the same state.
+    const auto paintPills = [&g](const auto& nodes, int selectedIndex) {
+        for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
+            const auto& node = nodes[static_cast<std::size_t>(i)];
+            const auto accent = theme::stripColour(node.hue);
+            const bool selected = selectedIndex == i;
+            g.setColour(selected ? accent : theme::panel());
+            g.fillRoundedRectangle(node.box.toFloat(), 8.0f);
+            g.setColour(accent);
+            g.drawRoundedRectangle(node.box.toFloat().reduced(0.5f), 8.0f, selected ? 2.5f : 2.0f);
+            g.setColour(selected ? theme::bg() : accent);
+            g.setFont(theme::ui::bodyBoldFont());
+            g.drawText(node.name.toUpperCase(), node.box.reduced(10, 0),
+                       juce::Justification::centred, true);
+            g.setColour(accent);
+            if (selected)
+                g.fillEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f);
+            else
+                g.drawEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f, 1.5f);
+        }
+    };
 
-    // Output labels: hollow pills in the output's own colour, exactly like
-    // the inputs — outline in the output colour, hollow dark centre,
-    // output-coloured text. Solid fill means selected.
-    for (int i = 0; i < (int)outputs.size(); ++i) {
-        const auto& node = outputs[static_cast<std::size_t>(i)];
-        const auto accent = theme::stripColour(node.hue);
-        const bool selected = selOutput == i;
-        g.setColour(selected ? accent : theme::panel());
-        g.fillRoundedRectangle(node.box.toFloat(), 8.0f);
-        g.setColour(accent);
-        g.drawRoundedRectangle(node.box.toFloat().reduced(0.5f), 8.0f, selected ? 2.5f : 2.0f);
-        g.setColour(selected ? theme::bg() : accent);
-        g.setFont(theme::ui::bodyBoldFont());
-        g.drawText(node.name.toUpperCase(), node.box.reduced(10, 0),
-                   juce::Justification::centred, true);
-        g.setColour(accent);
-        if (selected)
-            g.fillEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f);
-        else
-            g.drawEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f, 1.5f);
-    }
+    paintPills(inputs, selInput);
+    paintPills(outputs, selOutput);
 }
 
 void PatchesView::mouseDown(const juce::MouseEvent&) {
@@ -213,7 +196,7 @@ void PatchesView::rebuild() {
         for (int oi = 0; oi < (int)outs.size(); ++oi) {
             const float gain = audioEngine.getSendGainL(channels[static_cast<std::size_t>(ci)]->id,
                                                         outs[static_cast<std::size_t>(oi)]->id);
-            if (gain <= -59.0f) continue;
+            if (gain <= AudioEngine::kSendOffDb) continue;
             cables.push_back({ci, oi, theme::stripColour(outs[static_cast<std::size_t>(oi)]->colourHue)});
         }
     }

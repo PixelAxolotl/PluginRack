@@ -629,7 +629,7 @@ void ChannelStrip::refreshRouting() {
         bool enabled = false;
         if (i < (int)routingOutputIds.size() && i < (int)outputs.size()) {
             const float g = audioEngine.getSendGain(channel.id, routingOutputIds[i]);
-            on = g > -30.0f;
+            on = g > AudioEngine::kSendAudibleDb;
             enabled = true;
         }
         routingButtons[i]->setEnabled(enabled);
@@ -994,7 +994,7 @@ void ChannelStrip::rebuildRoutingButtons() {
         const std::uint32_t outputId = output->id;
         routingOutputIds.push_back(outputId);
         btn->onClick = [this, btn, outputId] {
-            audioEngine.setSendGain(channel.id, outputId, btn->getToggleState() ? 0.0f : -60.0f);
+            audioEngine.setSendGain(channel.id, outputId, btn->getToggleState() ? 0.0f : AudioEngine::kSendOffDb);
         };
         addAndMakeVisible(*btn);
     }
