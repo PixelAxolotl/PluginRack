@@ -23,12 +23,17 @@ built-in effects.
 - **Channel strips** with trim, gain, pan, mute/solo, peak metering, and mono or
   stereo layout (mono is upmixed for processing).
 - **VST3 inserts** — multiple host slots per channel and per output, hosted in-process,
-  with bypass and plugin editors docked in the Rack view.
+  with bypass and plugin editors docked in the Rack view. Each insert can take a
+  **side-chain** key from any channel, output or dedicated aux bus, tapped
+  pre-insert or post-fader, with its own gain and a live key-level meter.
 - **Plugin library** — an empty insert slot opens a menu of what is actually
   installed, grouped as VST3 ▸ vendor ▸ plugin, scanned from the standard VST3
   folders plus any folders you add.
-- **Built-in Channel FX** — six-band EQ with delay, plus compressor and gate
-  presented as one Compressor / Gate surface.
+- **Built-in Channel FX** — six-band EQ with delay, compressor and gate on one
+  Compressor / Gate surface, multiband compressor, de-esser, limiter, and a
+  feedback suppressor.
+- **Insert latency readout** — rack cards show the processing delay each plugin
+  reports, so look-ahead and linear-phase plugins are visible at a glance.
 - **Routing matrix** — every channel can feed every output with an independent
   per-cell send level; outputs can be added and removed while audio is running.
 - **Multiple output devices** — each output strip picks its own device. The first
@@ -97,11 +102,20 @@ the standard VST3 folders as **VST3 ▸ vendor ▸ plugin**, and ends with **Add
 plugin folder...** (scan another folder of your own), **Rescan plugin folders**
 and **Browse...** (pick a `.vst3` by hand). Left-click a loaded slot to open or
 focus its editor, right-click for bypass/removal options. The built-in cards
-(EQ, Dynamics, Multiband Comp, De-esser, Limiter) open their own editors; the
-Dynamics card opens the panel that carries both compressor and gate, and each
-has its own **Enable** switch there. The gate starts bypassed,
-so its knobs do nothing until it is switched on. Insert state is saved with the
-scene.
+(EQ, Dynamics, Multiband Comp, De-esser, Limiter, Feedback Suppressor) open their
+own editors; the Dynamics card opens the panel that carries both compressor and
+gate, and each has its own **Enable** switch there. The gate starts bypassed,
+so its knobs do nothing until it is switched on. The Feedback Suppressor takes a
+single **Strength** control and hunts narrow notches automatically. Insert state
+is saved with the scene.
+
+With an insert's editor focused, the bar above it carries its **Side chain**
+controls: source type (None, Channel, Output or an aux **Bus**), the source
+strip, the tap point (**Pre-insert** or **Post-fader**), and a gain trim of
+-60 to +12 dB. The **Key** readout shows the level actually reaching the
+plugin's side-chain input, which makes a quiet or mis-tapped key obvious. **+ Bus**
+creates a dedicated aux bus and **Sources** picks which channels feed it; buses
+are saved with the scene.
 
 ### Devices and the clock
 
