@@ -608,7 +608,12 @@ TEST_CASE("adding a VST scans in a child process and creates on the message thre
     CHECK(contains(host, "pluginHostIpc::kScanSwitch"));
     CHECK(contains(host, "PluginHost::scanFileInProcess"));
     CHECK(contains(host, "sharedFormatLock()"));
-    CHECK(contains(host, "pluginprepare::prepareInstance(*plugin, currentSampleRate, currentBufferSize)"));
+    CHECK(contains(host, "pluginprepare::prepareInstance(*plugin, preparedRate, preparedBlock)"));
+    // A restore must never configure a VST3 at 0 Hz / 0 frames.
+    CHECK(contains(host, "if (sampleRate <= 0.0) sampleRate = 48000.0"));
+    // And a render must never hand a plugin fewer channels than its buses.
+    CHECK(contains(host, "if (pluginInputs > channels)"));
+    CHECK(contains(host, "compositeChannels >= pluginInputs"));
 
     const auto rack = readSource("app/src/RackView.cpp");
     const auto insert = functionBody(rack, "juce::String RackView::insertPlugin");

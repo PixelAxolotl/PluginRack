@@ -1369,6 +1369,12 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                 }
 
                 auto insert = std::make_unique<InsertSlot>();
+                // Size the side-chain scratch here too: prepareToPlayImpl only
+                // sizes inserts that exist when the engine is prepared, and a
+                // freshly added insert renders before the next prepare. An
+                // unsized buffer means null read pointers in the render loop.
+                insert->sideChainBuffer.setSize(2, juce::jmax(1, currentBufferSize), false, true,
+                                                true);
                 insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
                 insert->pluginHost.adopt(loaded);
                 insert->pluginPath = loaded.path;
@@ -1657,6 +1663,12 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                 }
 
                 auto insert = std::make_unique<InsertSlot>();
+                // Size the side-chain scratch here too: prepareToPlayImpl only
+                // sizes inserts that exist when the engine is prepared, and a
+                // freshly added insert renders before the next prepare. An
+                // unsized buffer means null read pointers in the render loop.
+                insert->sideChainBuffer.setSize(2, juce::jmax(1, currentBufferSize), false, true,
+                                                true);
                 insert->pluginHost.prepareToPlay(currentSampleRate, currentBufferSize);
                 insert->pluginHost.adopt(loaded);
                 insert->pluginPath = loaded.path;
@@ -2378,8 +2390,15 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
     std::map<std::uint32_t, juce::String> savedOutputDevices;
     {
         const juce::ScopedLock lock(stateLock);
-        sampleRate = currentSampleRate;
-        bufferSize = currentBufferSize;
+        // A restore can run before the clock device has reported its format
+        // (startup restores the last scene). Preparing a VST3 at 0 Hz / 0
+        // frames leaves it with zero-length internal buffers and the first
+        // real processBlock faults inside the plugin; fall back to the scene's
+        // saved format, then to a sane default.
+        sampleRate = currentSampleRate > 0.0
+                         ? currentSampleRate
+                         : (scene.sampleRate > 0.0 ? scene.sampleRate : 48000.0);
+        bufferSize = currentBufferSize > 0 ? currentBufferSize : 512;
         for (const auto& c : channels) savedInputDevices[c->id] = c->inputDeviceName;
         for (const auto& o : outputs) savedOutputDevices[o->id] = o->outputDeviceName;
     }

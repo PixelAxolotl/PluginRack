@@ -692,6 +692,11 @@ PluginHost::LoadedPlugin PluginHost::instantiate(const juce::PluginDescription& 
                                                  const juce::String& stateBase64) {
     LoadedPlugin loaded;
     loaded.path = file.getFullPathName();
+    // Never configure or prepare an instance at 0 Hz / 0 frames: a restore can
+    // run before the clock device reports its format, and plugins that size
+    // internal buffers in prepareToPlay then fault on the first real block.
+    if (sampleRate <= 0.0) sampleRate = 48000.0;
+    if (bufferSize <= 0) bufferSize = 512;
     if (isRemotePath(file)) {
         loaded.error = "Network plugin paths are not supported.";
         return loaded;
@@ -845,7 +850,9 @@ void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase
     sideChainChannels_.store(loaded.sideChainChannels, std::memory_order_relaxed);
     plugin = loaded.instance;
     const auto prepareStart = juce::Time::getMillisecondCounterHiRes();
-    pluginprepare::prepareInstance(*plugin, currentSampleRate, currentBufferSize);
+    const double preparedRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
+    const int preparedBlock = currentBufferSize > 0 ? currentBufferSize : 512;
+    pluginprepare::prepareInstance(*plugin, preparedRate, preparedBlock);
     prepared = true;
     cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
     juce::Logger::writeToLog("plugin: prepare "
@@ -976,22 +983,42 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
     const int frames = buffer.getNumSamples();
     const int channels = buffer.getNumChannels();
     const int sideChannels = sideChainChannels_.load(std::memory_order_relaxed);
-    if (sideChannels >= 2 && sideChainL != nullptr && sideChainR != nullptr && frames > 0
-        && channels > 0 && sideChainFrames >= frames
-        && frames <= sideChainComposite_.getNumSamples()) {
-        // A side-chained render needs one contiguous four-channel buffer:
-        // 0/1 are the main block, 2/3 the side-chain input.
-        sideChainComposite_.copyFrom(0, 0, buffer, 0, 0, frames);
-        sideChainComposite_.copyFrom(1, 0, buffer, juce::jmin(1, channels - 1), 0, frames);
-        sideChainComposite_.copyFrom(2, 0, sideChainL, frames);
-        sideChainComposite_.copyFrom(3, 0, sideChainR, frames);
-        juce::AudioBuffer<float> composite(sideChainComposite_.getArrayOfWritePointers(), 4, 0,
-                                           frames);
+    // A VST3 with an active side-chain bus has four input channels. JUCE maps
+    // the plugin's buses straight onto the buffer we hand it, so an undersized
+    // buffer makes the plugin write past the channel array (0xC0000005 inside
+    // processAudio). The composite below is therefore used whenever the plugin
+    // wants more inputs than the engine block carries - side-chain source or
+    // not - and a plugin that wants more channels than the composite holds is
+    // left dry instead of being given a short buffer.
+    const int pluginInputs = juce::jmax(1, plugin->getTotalNumInputChannels());
+    const int compositeChannels = sideChainComposite_.getNumChannels();
+    const bool sideChainReady = sideChannels >= 2 && sideChainL != nullptr
+                                && sideChainR != nullptr && sideChainFrames >= frames;
+    const bool useComposite = pluginInputs > channels || sideChainReady;
+    if (frames > 0 && channels > 0 && compositeChannels >= pluginInputs
+        && frames <= sideChainComposite_.getNumSamples() && useComposite) {
+        // One contiguous buffer: 0/1 main, 2/3 side-chain key, any further
+        // channels silent. Cleared first so a stale key can never leak into a
+        // block whose source changed mid-stream.
+        sideChainComposite_.clear(0, frames);
+        for (int channel = 0; channel < juce::jmin(2, compositeChannels); ++channel) {
+            sideChainComposite_.copyFrom(channel, 0, buffer,
+                                         juce::jmin(channel, channels - 1), 0, frames);
+        }
+        if (sideChainReady && compositeChannels >= 4) {
+            sideChainComposite_.copyFrom(2, 0, sideChainL, frames);
+            sideChainComposite_.copyFrom(3, 0, sideChainR, frames);
+        }
+        juce::AudioBuffer<float> composite(sideChainComposite_.getArrayOfWritePointers(),
+                                           compositeChannels, 0, frames);
         plugin->processBlock(composite, midiBuffer);
         for (int channel = 0; channel < channels; ++channel) {
             buffer.copyFrom(channel, 0, sideChainComposite_, juce::jmin(channel, 1), 0, frames);
         }
         return;
+    }
+    if (pluginInputs > channels) {
+        return; // dry: never hand a VST3 fewer channels than its active buses
     }
     plugin->processBlock(buffer, midiBuffer);
 }
