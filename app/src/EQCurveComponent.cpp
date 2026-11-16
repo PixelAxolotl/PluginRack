@@ -1,5 +1,7 @@
 #include "EQCurveComponent.h"
 
+#include "AnalyzerConfig.h"
+
 #include <cmath>
 
 #include "Theme.h"
@@ -22,8 +24,8 @@ constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
 constexpr double kGridFreqs[] = {
     20, 30, 50, 70, 100, 200, 300, 500, 700, 1000, 2000, 3000, 5000, 7000, 10000, 20000
 };
-// Frequency-axis text labels.
-constexpr int kLabelFreqs[] = {20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000};
+// Frequency-axis text labels: the same list every spectrum graph uses.
+constexpr auto& kLabelFreqs = analyzer::kLabelFrequenciesHz;
 
 bool paramsFinite(const pluginrack::EqBand& band) noexcept {
     return std::isfinite(static_cast<double>(band.freqHz))
@@ -88,7 +90,7 @@ bool isGainlessBand(const pluginrack::EqBand& band) noexcept {
 
 juce::Point<float> EQCurveComponent::nodePosition(const pluginrack::EqBand& band,
                                                   int width, int height) {
-    const double t = std::log(band.freqHz / kMinFreqHz) / std::log(kMaxFreqHz / kMinFreqHz);
+    const double t = analyzer::frequencyToFraction(band.freqHz);
     const float x = static_cast<float>(juce::jlimit(0.0, 1.0, t) * width);
     const double gain = isGainlessBand(band)
                             ? 0.0
@@ -233,12 +235,11 @@ void EQCurveComponent::setWeighting(Weighting newWeighting) {
 
 double EQCurveComponent::xToFreq(float x) const {
     const double t = juce::jlimit(0.0, 1.0, static_cast<double>(x) / static_cast<double>(juce::jmax(1, getWidth())));
-    return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, t);
+    return analyzer::fractionToFrequency(static_cast<float>(t));
 }
 
 float EQCurveComponent::freqToX(double hz) const {
-    const double t = std::log(juce::jlimit(kMinFreqHz, kMaxFreqHz, hz) / kMinFreqHz)
-                   / std::log(kMaxFreqHz / kMinFreqHz);
+    const double t = analyzer::frequencyToFraction(hz);
     return static_cast<float>(t * getWidth());
 }
 
@@ -290,7 +291,7 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         g.drawText(freqLabel(f), juce::Rectangle<int>(labelX, h - 13, 40, 12),
                    juce::Justification::centred, false);
     }
-    for (int db = -60; db <= 12; db += 12) {
+    for (int db = static_cast<int>(analyzer::kMinDb); db <= static_cast<int>(analyzer::kMaxDb); db += analyzer::kDbGridStep) {
         const float y = gainToY(static_cast<double>(db));
         g.setColour(db == 0 ? theme::line().withAlpha(0.8f) : theme::border().withAlpha(0.4f));
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);

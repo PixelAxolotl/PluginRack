@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AnalyzerConfig.h"
+
 #include <JuceHeader.h>
 #include <pluginrack/MultibandEffect.h>
 #include "ValueEditSlider.h"
@@ -11,8 +13,8 @@
 class MultibandWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
     using ApplyCallback = std::function<void(const pluginrack::MultibandEffect&, bool bypassChanged)>;
-    static constexpr int kWidth = 860;
-    static constexpr int kHeight = 560;
+    static constexpr int kWidth = theme::ui::kEffectWindowW;
+    static constexpr int kHeight = theme::ui::kEffectWindowH;
     MultibandWindow(const juce::String& title,
                     const pluginrack::MultibandEffect& initialEffect,
                     ApplyCallback apply,
@@ -70,7 +72,7 @@ private:
     double sampleRateHz = 48000.0;
     int selectedBand = 0;
     float liveGr = 0.0f;
-    static constexpr int kAnalyzerFftSize = 8192;
+    static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
     std::vector<float> tapL;
     std::vector<float> tapR;
     std::unique_ptr<juce::dsp::FFT> analyzerFft;

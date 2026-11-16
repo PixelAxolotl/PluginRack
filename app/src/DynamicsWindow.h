@@ -22,8 +22,8 @@ public:
     // Below these the knob rows collide with the graph, so the bay gives the
     // panel at least this much room (the EQ page does the same). Every
     // built-in window is 860x560; the gate row shares this height.
-    static constexpr int kMinWidth = 860;
-    static constexpr int kMinHeight = 560;
+    static constexpr int kMinWidth = theme::ui::kEffectWindowW;
+    static constexpr int kMinHeight = theme::ui::kEffectWindowH;
 
     DynamicsWindow(const juce::String& title,
                    const pluginrack::DynamicsEffect& initialEffect,

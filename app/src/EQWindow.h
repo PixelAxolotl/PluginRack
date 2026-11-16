@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AnalyzerConfig.h"
+
 #include <JuceHeader.h>
 
 #include <juce_dsp/juce_dsp.h>
@@ -80,15 +82,15 @@ private:
 // fps once (spec: overload slows the analyzer, never the audio).
 class EQWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
-    static constexpr int kWidth = 860;
-    static constexpr int kHeight = 560;
+    static constexpr int kWidth = theme::ui::kEffectWindowW;
+    static constexpr int kHeight = theme::ui::kEffectWindowH;
 
     // Analyzer mode codes: the setAnalyzerTapMode callback forwards these to
     // AudioEngine::AnalyzerTap::setMode (kOff/kPre/kPost mirror).
     static constexpr int kAnalyzerOff = 0;
     static constexpr int kAnalyzerPre = 1;
     static constexpr int kAnalyzerPost = 2;
-    static constexpr int kAnalyzerFftSize = 8192; // == AnalyzerTap::kSamples
+    static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
 
     EQWindow(const juce::String& title,
              const std::vector<pluginrack::EqBand>& initialBands,

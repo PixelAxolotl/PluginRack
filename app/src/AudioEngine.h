@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AnalyzerConfig.h"
+
 #include <JuceHeader.h>
 
 #include <array>
@@ -63,7 +65,7 @@ public:
     // torn sample only shifts one visual frame, so mode and cursors are
     // atomics and the rings are never resized.
     struct AnalyzerTap {
-        static constexpr int kSamples = 8192; // == EQWindow::kAnalyzerFftSize
+        static constexpr int kSamples = analyzer::kFftSize;
         static constexpr std::uint32_t kOff = 0;  // mirrors kAnalyzerOff
         static constexpr std::uint32_t kPre = 1;  // mirrors kAnalyzerPre
         static constexpr std::uint32_t kPost = 2; // mirrors kAnalyzerPost

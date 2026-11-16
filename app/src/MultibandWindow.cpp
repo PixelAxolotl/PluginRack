@@ -14,7 +14,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
     : juce::DocumentWindow(title, theme::strip(), juce::DocumentWindow::allButtons),
       effect(initialEffect), apply(std::move(applyCallback)),
       sampleRateHz(initialSampleRateHz > 0.0 ? initialSampleRateHz : 48000.0),
-      analyzerFft(std::make_unique<juce::dsp::FFT>(13)) {
+      analyzerFft(std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder)) {
     MultibandCurveComponent::normaliseEffect(effect);
     setResizable(false, false);
     setContentOwned(&content, false);
@@ -388,13 +388,12 @@ void MultibandWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;
     installedContent->setBounds(getLocalBounds());
-    auto area = installedContent->getLocalBounds().reduced(8);
+    auto area = installedContent->getLocalBounds().reduced(theme::ui::kEffectPad);
 
-    auto header = area.removeFromTop(36);
-    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
-    presetCombo.setBounds(header.removeFromRight(120));
-    header.removeFromRight(6);
-    enableButton.setBounds(header.removeFromRight(72));
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    modeLabel.setBounds(header.title.reduced(12, 0));
+    presetCombo.setBounds(header.preset);
+    enableButton.setBounds(header.enable);
 
     auto controls = area.removeFromBottom(132);
     area.removeFromBottom(8);

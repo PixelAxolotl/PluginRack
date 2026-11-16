@@ -212,7 +212,7 @@ EQWindow::EQWindow(const juce::String& title,
     // here on the message thread so the timer callback never touches the
     // heap. A Hann window keeps spectral leakage down; the tap rings arrive
     // through pullAnalyzerTap, wired by the owning strip.
-    analyzerFft = std::make_unique<juce::dsp::FFT>(13); // 2^13 = 8192
+    analyzerFft = std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder);
     hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const double t = juce::MathConstants<double>::twoPi * i / kAnalyzerFftSize;
@@ -491,17 +491,16 @@ void EQWindow::closeButtonPressed() {
 
 void EQWindow::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    theme::ui::drawWindowHeader(g, getLocalBounds().reduced(8).removeFromTop(36));
+    theme::ui::drawWindowHeader(g, getLocalBounds().reduced(theme::ui::kEffectPad).removeFromTop(36));
 }
 
 void EQWindow::resized() {
     // With a native title bar the component bounds *are* the content area.
-    auto area = getLocalBounds().reduced(8);
-    auto header = area.removeFromTop(36);
-    titleLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
-    presetCombo.setBounds(header.removeFromRight(120));
-    header.removeFromRight(6);
-    enableButton.setBounds(header.removeFromRight(72));
+    auto area = getLocalBounds().reduced(theme::ui::kEffectPad);
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    titleLabel.setBounds(header.title.reduced(12, 0));
+    presetCombo.setBounds(header.preset);
+    enableButton.setBounds(header.enable);
     area.removeFromTop(6);
     // Tall enough for a label, the dial and its value box without clipping the
     // box against the window edge.

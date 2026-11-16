@@ -9,8 +9,8 @@
 class LimiterWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
     using ApplyCallback = std::function<void(const pluginrack::LimiterEffect&, bool bypassChanged)>;
-    static constexpr int kWidth = 860;
-    static constexpr int kHeight = 560;
+    static constexpr int kWidth = theme::ui::kEffectWindowW;
+    static constexpr int kHeight = theme::ui::kEffectWindowH;
     LimiterWindow(const juce::String& title, const pluginrack::LimiterEffect& initialEffect, ApplyCallback apply);
     ~LimiterWindow() override = default;
     void resized() override;

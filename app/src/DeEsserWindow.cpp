@@ -1,4 +1,6 @@
 #include "DeEsserWindow.h"
+
+#include "AnalyzerConfig.h"
 #include <algorithm>
 #include <cmath>
 using namespace pluginrack;
@@ -10,7 +12,7 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
     : juce::DocumentWindow(title, theme::strip(), juce::DocumentWindow::allButtons),
       effect(initialEffect), apply(std::move(applyCallback)),
       sampleRateHz(initialSampleRateHz > 0.0 ? initialSampleRateHz : 48000.0),
-      analyzerFft(std::make_unique<juce::dsp::FFT>(13)) {
+      analyzerFft(std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder)) {
     setResizable(false, false); setContentOwned(&content, false); setUsingNativeTitleBar(true);
     centreWithSize(kWidth, kHeight);
 
@@ -116,12 +118,10 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
     graph.setMode(TraceGraphMode::Frequency);
     graph.setOverlayPainter([this](juce::Graphics& g, juce::Rectangle<float> graphBounds) {
         const auto freqToX = [graphBounds](float frequency) {
-            const auto position = std::log(std::clamp(static_cast<double>(frequency), 20.0, 20000.0) / 20.0)
-                / std::log(1000.0);
-            return graphBounds.getX() + static_cast<float>(position) * graphBounds.getWidth();
+            return graphBounds.getX() + analyzer::frequencyToFraction(frequency) * graphBounds.getWidth();
         };
         const auto thresholdY = graphBounds.getBottom()
-            - std::clamp((effect.thresholdDb + 60.0f) / 72.0f, 0.0f, 1.0f) * graphBounds.getHeight();
+            - analyzer::dbToFraction(effect.thresholdDb) * graphBounds.getHeight();
         g.setColour(theme::cyan().withAlpha(0.65f));
         g.drawHorizontalLine(juce::roundToInt(thresholdY), graphBounds.getX(), graphBounds.getRight());
         g.setColour(theme::text().withAlpha(0.8f));
@@ -206,12 +206,11 @@ void DeEsserWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;
     installedContent->setBounds(getLocalBounds());
-    auto area = installedContent->getLocalBounds().reduced(8);
-    auto header = area.removeFromTop(36);
-    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
-    presetCombo.setBounds(header.removeFromRight(120));
-    header.removeFromRight(6);
-    enableButton.setBounds(header.removeFromRight(72));
+    auto area = installedContent->getLocalBounds().reduced(theme::ui::kEffectPad);
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    modeLabel.setBounds(header.title.reduced(12, 0));
+    presetCombo.setBounds(header.preset);
+    enableButton.setBounds(header.enable);
     area.removeFromTop(6);
     auto analyzerRow = area.removeFromTop(28);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(60));

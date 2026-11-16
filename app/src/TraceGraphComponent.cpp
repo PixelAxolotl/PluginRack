@@ -1,16 +1,18 @@
 #include "TraceGraphComponent.h"
 
+#include "AnalyzerConfig.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 
 namespace {
-constexpr float kMinDb = -60.0f;
-constexpr float kMaxDb = 12.0f;
-constexpr double kMinFrequency = 20.0;
-constexpr double kMaxFrequency = 20000.0;
+constexpr float kMinDb = analyzer::kMinDb;
+constexpr float kMaxDb = analyzer::kMaxDb;
+constexpr double kMinFrequency = analyzer::kMinFrequencyHz;
+constexpr double kMaxFrequency = analyzer::kMaxFrequencyHz;
 
-constexpr std::array<double, 10> kGridFrequencies{
+constexpr std::array<double, analyzer::kLabelFrequenciesHz.size()> kGridFrequencies{
     20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0
 };
 
@@ -73,9 +75,7 @@ float dbToY(float db, juce::Rectangle<float> graph) {
 }
 
 float frequencyToX(double hz, juce::Rectangle<float> graph) {
-    const double position = std::log(std::clamp(hz, kMinFrequency, kMaxFrequency) / kMinFrequency)
-        / std::log(kMaxFrequency / kMinFrequency);
-    return graph.getX() + static_cast<float>(position) * graph.getWidth();
+    return graph.getX() + analyzer::frequencyToFraction(hz) * graph.getWidth();
 }
 
 void drawFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Rectangle<float> graph,
@@ -109,7 +109,7 @@ void drawFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Rectangle
                    juce::Justification::right);
     }
 
-    for (int db = -60; db <= 12; db += 12) {
+    for (int db = static_cast<int>(analyzer::kMinDb); db <= static_cast<int>(analyzer::kMaxDb); db += analyzer::kDbGridStep) {
         const auto y = dbToY(static_cast<float>(db), graph);
         g.setColour(theme::line().withAlpha(db == 0 ? 0.65f : 0.3f));
         g.drawHorizontalLine(juce::roundToInt(y), graph.getX(), graph.getRight());

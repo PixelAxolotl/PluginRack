@@ -468,7 +468,7 @@ void InsertMiniView::paintDynamics(juce::Graphics& g) {
 }
 
 MiniSpectrum::MiniSpectrum()
-    : fft(std::make_unique<juce::dsp::FFT>(13)), // 2^13 == kFftSize
+    : fft(std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder)),
       hann(static_cast<std::size_t>(kFftSize)),
       scratch(static_cast<std::size_t>(kFftSize) * 2, 0.0f),
       fresh(static_cast<std::size_t>(kFftSize) / 2 + 1, 0.0f),

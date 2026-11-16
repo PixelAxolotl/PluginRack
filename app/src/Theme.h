@@ -251,6 +251,35 @@ inline void styleBetaLabel(juce::Label& label) {
     label.setJustificationType(juce::Justification::centredLeft);
 }
 
+// Floating effect editors share one shell: same window size, same inset, same
+// header row. A new effect window inherits the chrome instead of re-deriving
+// it, and retuning the shell is one edit.
+inline constexpr int kEffectWindowW = 860;
+inline constexpr int kEffectWindowH = 560;
+inline constexpr int kEffectPad = 8;
+inline constexpr int kEffectHeaderH = 36;
+inline constexpr int kEffectTitleW = 250;
+inline constexpr int kEffectPresetW = 120;
+inline constexpr int kEffectHeaderGap = 6;
+inline constexpr int kEffectEnableW = 72;
+
+struct EffectHeaderBounds {
+    juce::Rectangle<int> title;
+    juce::Rectangle<int> preset;
+    juce::Rectangle<int> enable;
+};
+
+// Splits the top of an editor's padded area into its three header slots. The
+// caller removes the header row from its own area first.
+inline EffectHeaderBounds layoutEffectHeader(juce::Rectangle<int> header) {
+    EffectHeaderBounds bounds;
+    bounds.title = header.removeFromLeft(kEffectTitleW);
+    bounds.preset = header.removeFromRight(kEffectPresetW);
+    header.removeFromRight(kEffectHeaderGap);
+    bounds.enable = header.removeFromRight(kEffectEnableW);
+    return bounds;
+}
+
 } // namespace ui
 
 } // namespace theme

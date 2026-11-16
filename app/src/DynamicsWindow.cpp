@@ -279,7 +279,7 @@ DynamicsWindow::DynamicsWindow(
     // of a 132 px gate row, plus padding, with the curve between them. That
     // keeps every built-in window the same height, so switching between them
     // never changes the panel size or leaves a black bar behind.
-    setContentComponentSize(860, 560);
+    setContentComponentSize(theme::ui::kEffectWindowW, theme::ui::kEffectWindowH);
     startTimerHz(static_cast<int>(kTimerHz));
 }
 
@@ -333,13 +333,12 @@ void DynamicsWindow::syncControls() {
 
 void DynamicsWindow::resized() {
     content.setBounds(getLocalBounds());
-    auto area = content.getLocalBounds().reduced(8);
+    auto area = content.getLocalBounds().reduced(theme::ui::kEffectPad);
 
-    auto header = area.removeFromTop(36);
-    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
-    presetCombo.setBounds(header.removeFromRight(120));
-    header.removeFromRight(6);
-    enableButton.setBounds(header.removeFromRight(72));
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    modeLabel.setBounds(header.title.reduced(12, 0));
+    presetCombo.setBounds(header.preset);
+    enableButton.setBounds(header.enable);
     area.removeFromTop(6);
 
     const std::vector<std::pair<juce::Label*, juce::Slider*>> mainKnobs{

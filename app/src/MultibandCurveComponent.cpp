@@ -1,5 +1,7 @@
 #include "MultibandCurveComponent.h"
 
+#include "AnalyzerConfig.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -107,14 +109,12 @@ juce::Colour MultibandCurveComponent::bandColour(std::size_t index) {
 }
 
 float MultibandCurveComponent::freqToX(double hz) const {
-    const auto range = std::log(kMaxFreqHz / kMinFreqHz);
-    return static_cast<float>(std::log(juce::jlimit(kMinFreqHz, kMaxFreqHz, hz) / kMinFreqHz)
-                              / range * getWidth());
+    return analyzer::frequencyToFraction(hz) * getWidth();
 }
 
 double MultibandCurveComponent::xToFreq(float x) const {
     const float t = juce::jlimit(0.0f, 1.0f, x / static_cast<float>(juce::jmax(1, getWidth())));
-    return kMinFreqHz * std::pow(kMaxFreqHz / kMinFreqHz, static_cast<double>(t));
+    return analyzer::fractionToFrequency(t);
 }
 
 int MultibandCurveComponent::bandAtX(float x) const {

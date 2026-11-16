@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AnalyzerConfig.h"
+
 #include <JuceHeader.h>
 
 #include <juce_dsp/juce_dsp.h>
@@ -110,7 +112,7 @@ private:
 // thumbnail.
 class MiniSpectrum {
 public:
-    static constexpr int kFftSize = 8192;
+    static constexpr int kFftSize = analyzer::kFftSize;
 
     MiniSpectrum();
 

@@ -1,4 +1,6 @@
 #pragma once
+
+#include "AnalyzerConfig.h"
 #include <JuceHeader.h>
 #include <pluginrack/DeEsserEffect.h>
 #include "MiniButton.h"
@@ -10,8 +12,8 @@
 class DeEsserWindow final : public juce::DocumentWindow, private juce::Timer {
 public:
     using ApplyCallback = std::function<void(const pluginrack::DeEsserEffect&, bool bypassChanged)>;
-    static constexpr int kWidth = 860;
-    static constexpr int kHeight = 560;
+    static constexpr int kWidth = theme::ui::kEffectWindowW;
+    static constexpr int kHeight = theme::ui::kEffectWindowH;
     DeEsserWindow(const juce::String& title, const pluginrack::DeEsserEffect& initialEffect,
                   ApplyCallback apply,
                   float initialRtaOffsetDb = 0.0f,
@@ -42,7 +44,7 @@ private:
     ValueEditSlider freq, q, threshold, range, attack, release;
     juce::Label freqLabel{"", "Freq"}, qLabel{"", "Q"}, thresholdLabel{"", "Threshold"},
                rangeLabel{"", "Range"}, attackLabel{"", "Attack"}, releaseLabel{"", "Release"};
-    static constexpr int kAnalyzerFftSize = 8192;
+    static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
     std::vector<float> tapL;
     std::vector<float> tapR;
     std::unique_ptr<juce::dsp::FFT> analyzerFft;

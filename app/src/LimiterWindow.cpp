@@ -1,4 +1,6 @@
 #include "LimiterWindow.h"
+
+#include "AnalyzerConfig.h"
 #include <algorithm>
 #include <cmath>
 using namespace pluginrack;
@@ -55,7 +57,7 @@ LimiterWindow::LimiterWindow(const juce::String& title, const LimiterEffect& ini
     graph.setMode(TraceGraphMode::Time);
     graph.setOverlayPainter([this](juce::Graphics& g, juce::Rectangle<float> graphBounds) {
         const auto ceilingY = graphBounds.getBottom()
-            - std::clamp((effect.ceilingDb + 60.0f) / 72.0f, 0.0f, 1.0f) * graphBounds.getHeight();
+            - analyzer::dbToFraction(effect.ceilingDb) * graphBounds.getHeight();
         g.setColour(theme::cyan().withAlpha(0.75f));
         g.drawHorizontalLine(juce::roundToInt(ceilingY), graphBounds.getX(), graphBounds.getRight());
     });
@@ -113,12 +115,11 @@ void LimiterWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;
     installedContent->setBounds(getLocalBounds());
-    auto area = installedContent->getLocalBounds().reduced(8);
-    auto header = area.removeFromTop(36);
-    modeLabel.setBounds(header.removeFromLeft(250).reduced(12, 0));
-    presetCombo.setBounds(header.removeFromRight(120));
-    header.removeFromRight(6);
-    enableButton.setBounds(header.removeFromRight(72));
+    auto area = installedContent->getLocalBounds().reduced(theme::ui::kEffectPad);
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    modeLabel.setBounds(header.title.reduced(12, 0));
+    presetCombo.setBounds(header.preset);
+    enableButton.setBounds(header.enable);
     area.removeFromTop(6);
     auto controls = area.removeFromBottom(132);
     area.removeFromBottom(8);
