@@ -102,7 +102,7 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
     auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
 
     pluginHostIpc::NamedSection paramSection;
-    if (!paramSection.open((mappingName + "-param").toWideCharPointer(),
+    if (!paramSection.open(pluginHostIpc::paramSectionNameFor(mappingName).toWideCharPointer(),
                            sizeof(pluginHostIpc::ParamSection))) {
         std::cout << "HOSTERROR param channel '" << mappingName.toStdString()
                   << "' unavailable (err " << paramSection.error() << ")\n";
@@ -112,7 +112,7 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
     auto* params = static_cast<pluginHostIpc::ParamSection*>(paramSection.data());
 
     pluginHostIpc::NamedSection controlSection;
-    if (!controlSection.open((mappingName + "-ctl").toWideCharPointer(),
+    if (!controlSection.open(pluginHostIpc::controlSectionNameFor(mappingName).toWideCharPointer(),
                              sizeof(pluginHostIpc::ControlSection))) {
         std::cout << "HOSTERROR control channel '" << mappingName.toStdString()
                   << "' unavailable (err " << controlSection.error() << ")\n";

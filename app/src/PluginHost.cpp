@@ -93,6 +93,12 @@ struct ScopedPluginLoadMark {
     juce::File path;
     bool armed = false;
 };
+
+// Control ops (load, state, prepare) may take half a second; status queries
+// (latency, meters) must answer inside a tenth of that or the caller uses its
+// cached value.
+constexpr int kChildControlTimeoutMs = 500;
+constexpr int kChildQueryTimeoutMs = 100;
 } // namespace
 
 namespace PluginLoadGuard {
@@ -255,7 +261,7 @@ juce::String PluginHost::getStateAsBase64() const {
     auto host = childHost_.load(std::memory_order_acquire);
     if (host != nullptr) {
         juce::String childError;
-        const auto live = host->getState(500, childError);
+        const auto live = host->getState(kChildControlTimeoutMs, childError);
         if (live.isNotEmpty()) {
             childLastKnownState_ = live;
             return live;
@@ -284,7 +290,7 @@ void PluginHost::refreshLatencyCache() {
     // directly. A control timeout keeps the previous value.
     auto host = childHost_.load(std::memory_order_acquire);
     if (host != nullptr && host->isAlive()) {
-        const int childLatency = host->latencySamples(100);
+        const int childLatency = host->latencySamples(kChildQueryTimeoutMs);
         if (childLatency >= 0) {
             cachedLatencySamples_.store(childLatency, std::memory_order_relaxed);
             return;
@@ -314,7 +320,7 @@ bool PluginHost::loadChildHost(const juce::File& file, int pluginUniqueId,
         return false;
     }
 
-    return adoptChildHost(std::move(host), stateBase64, sampleRate, bufferSize, 500, error);
+    return adoptChildHost(std::move(host), stateBase64, sampleRate, bufferSize, kChildControlTimeoutMs, error);
 }
 
 bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
@@ -344,7 +350,7 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
     childConsecutiveMisses_.store(0, std::memory_order_relaxed);
     playSampleRate_.store(sampleRate, std::memory_order_relaxed);
     playBufferSize_.store(bufferSize, std::memory_order_relaxed);
-    cachedLatencySamples_.store(juce::jmax(0, host->latencySamples(100)),
+    cachedLatencySamples_.store(juce::jmax(0, host->latencySamples(kChildQueryTimeoutMs)),
                                 std::memory_order_relaxed);
     childHost_.store(std::shared_ptr<PluginProcessHost>(std::move(host)),
                      std::memory_order_release);
@@ -534,7 +540,6 @@ bool describeFromJson(const juce::String& text, juce::PluginDescription& descrip
     return description.name.isNotEmpty() && description.fileOrIdentifier.isNotEmpty();
 }
 
-constexpr const char* kScanFlag = "--scan-plugin";
 constexpr const char* kScanResultPrefix = "PLUGINDESC ";
 constexpr const char* kScanErrorPrefix = "PLUGINSCANERROR ";
 constexpr int kMaxPluginStateBase64Chars = 1 * 1024 * 1024;
@@ -574,7 +579,7 @@ juce::Array<juce::PluginDescription> PluginHost::scanFile(const juce::File& file
 
     const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     juce::ChildProcess child;
-    const juce::StringArray arguments { executable.getFullPathName(), kScanFlag,
+    const juce::StringArray arguments { executable.getFullPathName(), pluginHostIpc::kScanSwitch,
                                         file.getFullPathName() };
     if (!executable.existsAsFile()
         || !child.start(arguments, juce::ChildProcess::wantStdOut)) {
@@ -846,26 +851,28 @@ void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
     // path plays dry rather than allocating here - prepareToPlay can run on the
     // audio thread, so it must not allocate.
 
-    auto host = childHost_.load(std::memory_order_acquire);
-    if (host != nullptr && host->isAlive()) {
-        // Skip re-prepare when the format is unchanged (fix 3). Mirror the
-        // in-process `unchanged` check so the child only re-prepares on a
-        // real format change, and never runs control traffic on a path the
-        // audio thread can be waiting on.
-        const bool childUnchanged = prepared && currentSampleRate == sampleRate
+    // One predicate decides for both renderers: the in-process plugin and the
+    // child were both prepared at the same format, so a new format is the only
+    // thing that needs a re-prepare (fix 3).
+    bool unchanged = false;
+    {
+        const juce::ScopedLock lock(pluginLock);
+        unchanged = prepared && currentSampleRate == sampleRate
             && currentBufferSize == samplesPerBlock;
-        if (!childUnchanged) {
-            juce::String childError;
-            if (!host->prepare(sampleRate, samplesPerBlock, 500, childError)) {
+    }
+
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host != nullptr && host->isAlive() && !unchanged) {
+        // Never run control traffic on a path the audio thread can be waiting
+        // on: the child re-prepare happens before pluginLock is taken.
+        juce::String childError;
+        if (!host->prepare(sampleRate, samplesPerBlock, kChildControlTimeoutMs, childError)) {
             juce::Logger::writeToLog("plugin: child host could not re-prepare ("
                                      + childError + ")");
         }
     }
-    }
 
     const juce::ScopedLock lock(pluginLock);
-    const bool unchanged = prepared && currentSampleRate == sampleRate
-        && currentBufferSize == samplesPerBlock;
     currentSampleRate = sampleRate;
     currentBufferSize = samplesPerBlock;
     if (plugin != nullptr && !unchanged) {

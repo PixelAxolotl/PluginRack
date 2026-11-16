@@ -6,6 +6,7 @@
 #include "DeviceStream.h"
 #include "MainComponent.h"
 #include "PluginHost.h"
+#include "PluginHostIpc.h"
 #include "PluginLibrary.h"
 #include "RestrictedHost.h"
 #include "SliderTouch.h"
@@ -206,8 +207,9 @@ public:
     // and only the GUI takes it.
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
-            if (arg == "--scan-plugin" || arg == "--list-devices" || arg == "--list-plugins"
-                || arg == "--plugin-host" || arg == "--test-crash-report"
+            if (arg == pluginHostIpc::kScanSwitch || arg == "--list-devices"
+                || arg == "--list-plugins" || arg == pluginHostIpc::kHostSwitch
+                || arg == "--test-crash-report"
                 || arg == "--test-child-host" || arg == "--test-child-null")
                 return true;
         }
@@ -234,36 +236,12 @@ public:
 
         // Restricted plugin host (fault containment): a VST3 runs here with
         // reduced rights, never in the main app. Launched only by
-        // PluginProcessHost.
-        // Optional 3rd arg: pluginUniqueId selects the class in multi-class
-        // bundles; 4th: mapping name; 5th: base64 state ("-" when the app will
-        // push it over the control channel, which is the normal case because a
-        // command line cannot carry a megabyte of state); 6th/7th: sample rate
-        // and block size to instantiate at.
-        const int hostIndex = args.indexOf("--plugin-host");
-        if (hostIndex >= 0 && hostIndex + 1 < args.size()) {
-            const int uniqueId = (hostIndex + 2 < args.size())
-                                     ? args[hostIndex + 2].unquoted().getIntValue()
-                                     : 0;
-            // Order: path, uniqueId, mapping name, state, sampleRate, blockSize.
-            // The mapping name is read positionally and never empty, so a host
-            // always finds its audio channel.
-            const juce::String mappingName = (hostIndex + 3 < args.size())
-                                                 ? args[hostIndex + 3].unquoted()
-                                                 : juce::String{};
-            juce::String state = (hostIndex + 4 < args.size())
-                                     ? args[hostIndex + 4].unquoted()
-                                     : juce::String{};
-            if (state == "-") state = {};
-            const double sampleRate = (hostIndex + 5 < args.size())
-                                          ? args[hostIndex + 5].unquoted().getDoubleValue()
-                                          : 48000.0;
-            const int blockSize = (hostIndex + 6 < args.size())
-                                      ? args[hostIndex + 6].unquoted().getIntValue()
-                                      : 256;
+        // PluginProcessHost, which owns the argument layout (HostLaunch).
+        const auto launch = pluginHostIpc::HostLaunch::parse(args);
+        if (launch.isValid()) {
             const int code = RestrictedHost::runHost(
-                juce::File(args[hostIndex + 1].unquoted()), uniqueId, state, mappingName,
-                sampleRate > 0.0 ? sampleRate : 48000.0, blockSize > 0 ? blockSize : 256);
+                launch.pluginFile, launch.uniqueId, launch.state, launch.channelName,
+                launch.sampleRate, launch.blockSize);
             ::exit(code);
             return;
         }
@@ -272,7 +250,7 @@ public:
         // process so the main window never loads a plugin binary while it is
         // starting up (see PluginHost::scanFile). No window, no audio, and no
         // run log: a crash here is recorded by the handler above.
-        const int scanIndex = args.indexOf("--scan-plugin");
+        const int scanIndex = args.indexOf(pluginHostIpc::kScanSwitch);
         if (scanIndex >= 0) {
             juce::String scanError;
             const auto descriptions =

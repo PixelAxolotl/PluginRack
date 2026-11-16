@@ -64,10 +64,9 @@ bool PluginProcessHost::start(const juce::File& file, int pluginUniqueId, double
     // The saved state is NOT passed here: base64 state can reach 1 MiB and
     // Windows caps a command line at 32767 characters. It travels as the first
     // setState control request once the child reports HOSTREADY.
-    const juce::StringArray arguments {
-        executable.getFullPathName(), "--plugin-host", file.getFullPathName(),
-        juce::String(pluginUniqueId), sharedName, "-", juce::String(sampleRate, 3),
-        juce::String(blockSize)};
+    const juce::StringArray arguments =
+        pluginHostIpc::HostLaunch{file, pluginUniqueId, sharedName, {}, sampleRate, blockSize}
+            .toArguments(executable.getFullPathName());
     child = std::make_unique<juce::ChildProcess>();
     if (!child->start(arguments, juce::ChildProcess::wantStdOut)) {
         error = "The plugin host process could not start. No plugin was loaded.";
@@ -97,7 +96,8 @@ bool PluginProcessHost::openChannel(const juce::File& file) {
                                  + juce::String(static_cast<int>(audioSection.error())) + ")");
         return false;
     }
-    if (!paramSection.create((sharedName + "-param").toWideCharPointer(),
+    if (!paramSection.create(
+            pluginHostIpc::paramSectionNameFor(sharedName).toWideCharPointer(),
                              sizeof(pluginHostIpc::ParamSection))) {
         juce::Logger::writeToLog("plugin: param channel '" + sharedName + "' unavailable (err "
                                  + juce::String(static_cast<int>(paramSection.error())) + ")");
@@ -142,7 +142,7 @@ bool PluginProcessHost::openChannel(const juce::File& file) {
 }
 
 bool PluginProcessHost::openControlChannel() {
-    if (!controlSection.create((sharedName + "-ctl").toWideCharPointer(),
+    if (!controlSection.create(pluginHostIpc::controlSectionNameFor(sharedName).toWideCharPointer(),
                                sizeof(pluginHostIpc::ControlSection))) {
         juce::Logger::writeToLog("plugin: control channel '" + sharedName + "' unavailable (err "
                                  + juce::String(static_cast<int>(controlSection.error())) + ")");

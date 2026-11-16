@@ -85,4 +85,66 @@ inline juce::String controlResponseEventNameFor(const juce::String& channelName)
     return channelName + "-ctl-rsp";
 }
 
+// Shared-section names, derived the same way as the events: the app creates
+// them, the host opens them, and a name can never drift between the two.
+inline juce::String paramSectionNameFor(const juce::String& channelName) {
+    return channelName + "-param";
+}
+
+inline juce::String controlSectionNameFor(const juce::String& channelName) {
+    return channelName + "-ctl";
+}
+
+// Command-line protocol. The app builds these arguments (PluginProcessHost),
+// the host process parses them (Main), and both need the same switches and
+// positions, so the layout lives here rather than in either side's code.
+inline constexpr const char* kHostSwitch = "--plugin-host";
+inline constexpr const char* kScanSwitch = "--scan-plugin";
+
+struct HostLaunch {
+    juce::File pluginFile;
+    int uniqueId = 0;
+    juce::String channelName;
+    juce::String state; // empty: the app pushes it over the control channel
+    double sampleRate = 48000.0;
+    int blockSize = 256;
+
+    // Order: file, unique id, channel name, state, sample rate, block size.
+    // The channel name is never empty, so the host always finds its sections.
+    // State travels as "-" because a megabyte of base64 does not fit on a
+    // Windows command line (32767 characters).
+    juce::StringArray toArguments(const juce::String& executablePath) const {
+        return {executablePath,
+                kHostSwitch,
+                pluginFile.getFullPathName(),
+                juce::String(uniqueId),
+                channelName,
+                state.isEmpty() ? juce::String("-") : state,
+                juce::String(sampleRate, 3),
+                juce::String(blockSize)};
+    }
+
+    static HostLaunch parse(const juce::StringArray& args) {
+        HostLaunch launch;
+        const int index = args.indexOf(kHostSwitch);
+        if (index < 0) return launch;
+
+        const auto at = [&args](int i) {
+            return i < args.size() ? args[i].unquoted() : juce::String{};
+        };
+        launch.pluginFile = juce::File(at(index + 1));
+        launch.uniqueId = at(index + 2).getIntValue();
+        launch.channelName = at(index + 3);
+        launch.state = at(index + 4);
+        if (launch.state == "-") launch.state = {};
+        const double rate = at(index + 5).getDoubleValue();
+        if (rate > 0.0) launch.sampleRate = rate;
+        const int block = at(index + 6).getIntValue();
+        if (block > 0) launch.blockSize = block;
+        return launch;
+    }
+
+    bool isValid() const { return pluginFile.getFullPathName().isNotEmpty(); }
+};
+
 } // namespace pluginHostIpc

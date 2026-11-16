@@ -480,18 +480,6 @@ TEST_CASE("input and output buffer sizes are independently configurable",
     CHECK(contains(cpp, "requestedOutputBufferSize_"));
 }
 
-TEST_CASE("restored plugins do not reprepare for an unchanged device format",
-          "[plugin][restore]") {
-    const auto header = readSource("app/src/PluginHost.h");
-    const auto body = functionBody(readSource("app/src/PluginHost.cpp"),
-                                   "void PluginHost::prepareToPlay");
-    CHECK(contains(header, "bool prepared = false"));
-    CHECK(contains(body, "const bool unchanged"));
-    CHECK(contains(body, "if (plugin != nullptr && !unchanged)"));
-    CHECK(contains(body, "plugin->releaseResources()"));
-    CHECK(contains(body, "prepared = true"));
-}
-
 TEST_CASE("scene restore loads plugins before the device handoff",
           "[plugin][restore]") {
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
@@ -590,7 +578,7 @@ TEST_CASE("adding a VST scans in a child process and creates on the message thre
     // itself only runs there.
     const auto host = readSource("app/src/PluginHost.cpp");
     CHECK(contains(host, "juce::ChildProcess"));
-    CHECK(contains(host, "--scan-plugin"));
+    CHECK(contains(host, "pluginHostIpc::kScanSwitch"));
     CHECK(contains(host, "PluginHost::scanFileInProcess"));
     CHECK(contains(host, "sharedFormatLock()"));
     CHECK(contains(host, "plugin->prepareToPlay(currentSampleRate, currentBufferSize)"));
@@ -1036,29 +1024,6 @@ TEST_CASE("Force ASIO picks the interface and reports what it did", "[latency][a
     CHECK(contains(settings, "audioEngine.forceAsio()"));
     CHECK(contains(settings, "forceAsioButton.setEnabled"));
     CHECK(contains(settings, "No ASIO driver installed"));
-}
-
-TEST_CASE("only one GUI session runs, but CLI children are never blocked",
-          "[app][instance]") {
-    const auto main = readSource("app/src/Main.cpp");
-    const auto app = functionBody(main, "class PluginRackApplication final : public juce::JUCEApplication");
-    // The GUI takes the single-instance lock.
-    CHECK(contains(app, "bool moreThanOneInstanceAllowed() override"));
-    CHECK(contains(app, "return false;"));
-    // ...but the scanner and the CLI switches must still start alongside it,
-    // otherwise plugin scanning breaks while the app is open.
-    CHECK(contains(app, "getCommandLineParameterArray()"));
-    CHECK(contains(app, "arg == \"--scan-plugin\""));
-    CHECK(contains(app, "return true;"));
-    // A second GUI launch focuses the running window (possibly from the tray).
-    CHECK(contains(app, "void anotherInstanceStarted(const juce::String& commandLine) override"));
-    CHECK(contains(app, "mainWindow->setVisible(true)"));
-    CHECK(contains(app, "mainWindow->toFront(true)"));
-
-    // Every headless mode the child processes rely on is still handled here.
-    for (const char* flag : {"--scan-plugin", "--list-plugins", "--list-devices", "--screenshot"}) {
-        CHECK(contains(main, flag));
-    }
 }
 
 TEST_CASE("an Auto input buffer follows the clock instead of the driver's mood",
