@@ -31,6 +31,7 @@ target_sources(pluginrack_app PRIVATE
     src/DeviceControl.cpp
     src/DeviceControl.h
     src/DeviceMenu.cpp
+    src/EffectEdits.h
     src/InsertHost.h
     src/InsertMiniView.cpp
     src/InsertMiniView.h

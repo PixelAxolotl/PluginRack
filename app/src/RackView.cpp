@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "EffectEdits.h"
 #include "MultibandCurveComponent.h"
 #include "NativeThumbnail.h"
 
@@ -1849,10 +1850,7 @@ void RackView::focusMultiband() {
             auto* currentChannel = safe->currentChannel();
             if (currentChannel == nullptr) return;
             auto effects = currentChannel->multibandEffects;
-            for (auto& e : effects) if (e.id == effect.id) {
-                const bool bp = e.bypassed; e = effect;
-                if (!bypassChanged) e.bypassed = bp;
-            }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelMultiband(currentChannel->id, effects);
         }, channel->multibandRtaOffsetDb, channel->multibandRtaWeighting, liveRateHz);
     window->applySpectrumOffset = [safe](float offsetDb) {
@@ -1900,10 +1898,7 @@ void RackView::focusDeEsser() {
             auto* currentChannel = safe->currentChannel();
             if (currentChannel == nullptr) return;
             auto effects = currentChannel->deEsserEffects;
-            for (auto& e : effects) if (e.id == effect.id) {
-                const bool bp = e.bypassed; e = effect;
-                if (!bypassChanged) e.bypassed = bp;
-            }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelDeEssers(currentChannel->id, effects);
         }, channel->deEsserRtaOffsetDb, channel->deEsserRtaWeighting, liveRateHz);
     window->applySpectrumOffset = [safe](float offsetDb) {
@@ -1950,10 +1945,7 @@ void RackView::focusLimiter() {
             auto* currentChannel = safe->currentChannel();
             if (currentChannel == nullptr) return;
             auto effects = currentChannel->limiterEffects;
-            for (auto& e : effects) if (e.id == effect.id) {
-                const bool bp = e.bypassed; e = effect;
-                if (!bypassChanged) e.bypassed = bp;
-            }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelLimiters(currentChannel->id, effects);
         });
     channel->limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
@@ -2022,16 +2014,9 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
                 auto* channel = safe->currentChannel();
                 if (channel == nullptr) return;
                 auto effects = channel->effects;
-                const auto found = findEffectById(effects, effect.id);
-                if (found != effects.end()) {
-                    const bool bypassed = found->bypassed;
-                    *found = effect;
-                    // Knob edits keep whatever the strip's bypass says; only
-                    // the panel's own switch may change it.
-                    if (!bypassChanged) found->bypassed = bypassed;
-                    safe->audioEngine.setChannelEffects(channel->id, effects);
-                    safe->refreshDynamicsButtons();
-                }
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setChannelEffects(channel->id, effects);
+                safe->refreshDynamicsButtons();
             },
             gateIt != ch->effects.end() ? &*gateIt : nullptr);
         // The Dynamics RTA reads the compressor/gate output (dynamicsTap),
@@ -2056,14 +2041,9 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
                 auto* output = safe->currentOutput();
                 if (output == nullptr) return;
                 auto effects = output->effects;
-                const auto found = findEffectById(effects, effect.id);
-                if (found != effects.end()) {
-                    const bool bypassed = found->bypassed;
-                    *found = effect;
-                    if (!bypassChanged) found->bypassed = bypassed;
-                    safe->audioEngine.setOutputEffects(output->id, effects);
-                    safe->refreshDynamicsButtons();
-                }
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setOutputEffects(output->id, effects);
+                safe->refreshDynamicsButtons();
             },
             gateIt != out->effects.end() ? &*gateIt : nullptr);
         window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
@@ -2733,12 +2713,12 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         if (selectedIsOutput) {
             if (auto* output = currentOutput()) {
                 auto effects = output->multibandEffects;
-                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                effectedit::setBypass(effects, item.id, bypassed);
                 audioEngine.setOutputMultiband(output->id, effects);
             }
         } else if (auto* channel = currentChannel()) {
             auto effects = channel->multibandEffects;
-            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            effectedit::setBypass(effects, item.id, bypassed);
             audioEngine.setChannelMultiband(channel->id, effects);
         }
         if (multibandWindow != nullptr) multibandWindow->setBypassed(bypassed);
@@ -2746,12 +2726,12 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         if (selectedIsOutput) {
             if (auto* output = currentOutput()) {
                 auto effects = output->deEsserEffects;
-                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                effectedit::setBypass(effects, item.id, bypassed);
                 audioEngine.setOutputDeEssers(output->id, effects);
             }
         } else if (auto* channel = currentChannel()) {
             auto effects = channel->deEsserEffects;
-            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            effectedit::setBypass(effects, item.id, bypassed);
             audioEngine.setChannelDeEssers(channel->id, effects);
         }
         if (deEsserWindow != nullptr) deEsserWindow->setBypassed(bypassed);
@@ -2759,12 +2739,12 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         if (selectedIsOutput) {
             if (auto* output = currentOutput()) {
                 auto effects = output->limiterEffects;
-                for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+                effectedit::setBypass(effects, item.id, bypassed);
                 audioEngine.setOutputLimiters(output->id, effects);
             }
         } else if (auto* channel = currentChannel()) {
             auto effects = channel->limiterEffects;
-            for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+            effectedit::setBypass(effects, item.id, bypassed);
             audioEngine.setChannelLimiters(channel->id, effects);
         }
         if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
@@ -2786,8 +2766,7 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         }
         if (ownerId == 0) return;
 
-        for (auto& effect : effects)
-            if (effect.id == targetId) effect.bypassed = bypassed;
+        effectedit::setBypass(effects, targetId, bypassed);
         if (selectedIsOutput) audioEngine.setOutputEffects(ownerId, effects);
         else audioEngine.setChannelEffects(ownerId, effects);
 

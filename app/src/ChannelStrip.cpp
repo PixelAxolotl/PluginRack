@@ -1,5 +1,7 @@
 #include "ChannelStrip.h"
 
+#include "EffectEdits.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -215,7 +217,7 @@ void ChannelStrip::openMultibandWindow() {
         [safe](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->channel.multibandEffects;
-            for (auto& e : effects) if (e.id == effect.id) { const bool bp = e.bypassed; e = effect; if (!bypassChanged) e.bypassed = bp; }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelMultiband(safe->channel.id, effects);
             safe->refreshInserts();
         }, channel.multibandRtaOffsetDb, channel.multibandRtaWeighting, liveRateHz);
@@ -243,7 +245,7 @@ void ChannelStrip::openDeEsserWindow() {
         [safe](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->channel.deEsserEffects;
-            for (auto& e : effects) if (e.id == effect.id) { const bool bp = e.bypassed; e = effect; if (!bypassChanged) e.bypassed = bp; }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelDeEssers(safe->channel.id, effects);
             safe->refreshInserts();
         }, channel.deEsserRtaOffsetDb, channel.deEsserRtaWeighting, liveRateHz);
@@ -270,7 +272,7 @@ void ChannelStrip::openLimiterWindow() {
         [safe](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->channel.limiterEffects;
-            for (auto& e : effects) if (e.id == effect.id) { const bool bp = e.bypassed; e = effect; if (!bypassChanged) e.bypassed = bp; }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setChannelLimiters(safe->channel.id, effects);
             safe->refreshInserts();
         });
@@ -302,17 +304,9 @@ void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
         [safe](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->channel.effects;
-            const auto found = std::find_if(effects.begin(), effects.end(),
-                                            [&effect](const auto& candidate) {
-                                                return candidate.id == effect.id;
-                                            });
-            if (found != effects.end()) {
-                const bool bypassed = found->bypassed;
-                *found = effect;
-                if (!bypassChanged) found->bypassed = bypassed;
-                safe->audioEngine.setChannelEffects(safe->channel.id, effects);
-                safe->refreshDynamicsButtons();
-            }
+            effectedit::applyEdit(effects, effect, bypassChanged);
+            safe->audioEngine.setChannelEffects(safe->channel.id, effects);
+            safe->refreshDynamicsButtons();
         },
         gateIt != channel.effects.end() ? &*gateIt : nullptr);
     dynamicsWindow->onClose = [safe] {
@@ -875,28 +869,27 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     }
     if (item.type == pluginrack::ChainItemType::Multiband) {
         auto effects = channel.multibandEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setChannelMultiband(channel.id, effects);
         if (multibandWindow != nullptr) multibandWindow->setBypassed(bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::DeEsser) {
         auto effects = channel.deEsserEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setChannelDeEssers(channel.id, effects);
         if (deEsserWindow != nullptr) deEsserWindow->setBypassed(bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Limiter) {
         auto effects = channel.limiterEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setChannelLimiters(channel.id, effects);
         if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
         return;
     }
     auto effects = channel.effects;
-    for (auto& effect : effects)
-        if (effect.id == item.id) effect.bypassed = bypassed;
+    effectedit::setBypass(effects, item.id, bypassed);
     audioEngine.setChannelEffects(channel.id, effects);
     // An open dynamics panel mirrors the gate row; a chain-row toggle has to
     // reach it or the panel keeps showing the old switch state.

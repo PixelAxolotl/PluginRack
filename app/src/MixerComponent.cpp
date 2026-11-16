@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "DeEsserWindow.h"
+#include "EffectEdits.h"
 #include "LimiterWindow.h"
 #include "MultibandWindow.h"
 
@@ -179,12 +180,7 @@ void MixerComponent::OutputStrip::openMultibandWindow() {
         [safe](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->output.multibandEffects;
-            for (auto& e : effects)
-                if (e.id == effect.id) {
-                    const bool bp = e.bypassed;
-                    e = effect;
-                    if (!bypassChanged) e.bypassed = bp;
-                }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setOutputMultiband(safe->output.id, effects);
             safe->refreshInserts();
         },
@@ -226,12 +222,7 @@ void MixerComponent::OutputStrip::openDeEsserWindow() {
         [safe](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->output.deEsserEffects;
-            for (auto& e : effects)
-                if (e.id == effect.id) {
-                    const bool bp = e.bypassed;
-                    e = effect;
-                    if (!bypassChanged) e.bypassed = bp;
-                }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setOutputDeEssers(safe->output.id, effects);
             safe->refreshInserts();
         },
@@ -272,12 +263,7 @@ void MixerComponent::OutputStrip::openLimiterWindow() {
         [safe](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->output.limiterEffects;
-            for (auto& e : effects)
-                if (e.id == effect.id) {
-                    const bool bp = e.bypassed;
-                    e = effect;
-                    if (!bypassChanged) e.bypassed = bp;
-                }
+            effectedit::applyEdit(effects, effect, bypassChanged);
             safe->audioEngine.setOutputLimiters(safe->output.id, effects);
             safe->refreshInserts();
         });
@@ -313,17 +299,9 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
         [safe, outputId](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
             auto effects = safe->output.effects;
-            const auto found = std::find_if(effects.begin(), effects.end(),
-                                            [&effect](const auto& candidate) {
-                                                return candidate.id == effect.id;
-                                            });
-            if (found != effects.end()) {
-                const bool bypassed = found->bypassed;
-                *found = effect;
-                if (!bypassChanged) found->bypassed = bypassed;
-                safe->audioEngine.setOutputEffects(outputId, effects);
-                safe->refreshDynamicsButtons();
-            }
+            effectedit::applyEdit(effects, effect, bypassChanged);
+            safe->audioEngine.setOutputEffects(outputId, effects);
+            safe->refreshDynamicsButtons();
         },
         gateIt != output.effects.end() ? &*gateIt : nullptr);
     dynamicsWindow->onClose = [safe] {
@@ -749,25 +727,24 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
     }
     if (item.type == pluginrack::ChainItemType::Multiband) {
         auto effects = output.multibandEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputMultiband(output.id, effects);
         return;
     }
     if (item.type == pluginrack::ChainItemType::DeEsser) {
         auto effects = output.deEsserEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputDeEssers(output.id, effects);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Limiter) {
         auto effects = output.limiterEffects;
-        for (auto& e : effects) if (e.id == item.id) e.bypassed = bypassed;
+        effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputLimiters(output.id, effects);
         return;
     }
     auto effects = output.effects;
-    for (auto& effect : effects)
-        if (effect.id == item.id) effect.bypassed = bypassed;
+    effectedit::setBypass(effects, item.id, bypassed);
     audioEngine.setOutputEffects(output.id, effects);
     // Keep an open dynamics panel's gate row in step with the chain row.
     refreshDynamicsButtons();
