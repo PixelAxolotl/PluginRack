@@ -63,6 +63,65 @@ void from_json(const nlohmann::json& j, ChannelLayout& layout) {
     }
 }
 
+void to_json(nlohmann::json& j, SideChainSource source) {
+    switch (source) {
+        case SideChainSource::None: j = "None"; break;
+        case SideChainSource::Channel: j = "Channel"; break;
+        case SideChainSource::Output: j = "Output"; break;
+        case SideChainSource::Bus: j = "Bus"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, SideChainSource& source) {
+    const std::string name = j.get<std::string>();
+    if (name == "None") {
+        source = SideChainSource::None;
+    } else if (name == "Channel") {
+        source = SideChainSource::Channel;
+    } else if (name == "Output") {
+        source = SideChainSource::Output;
+    } else if (name == "Bus") {
+        source = SideChainSource::Bus;
+    } else {
+        throw nlohmann::json::other_error::create(504, "unknown SideChainSource '" + name + "'", &j);
+    }
+}
+
+void to_json(nlohmann::json& j, SideChainTap tap) {
+    switch (tap) {
+        case SideChainTap::PreInsert: j = "PreInsert"; break;
+        case SideChainTap::PostFader: j = "PostFader"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, SideChainTap& tap) {
+    const std::string name = j.get<std::string>();
+    if (name == "PreInsert") {
+        tap = SideChainTap::PreInsert;
+    } else if (name == "PostFader") {
+        tap = SideChainTap::PostFader;
+    } else {
+        throw nlohmann::json::other_error::create(505, "unknown SideChainTap '" + name + "'", &j);
+    }
+}
+
+void to_json(nlohmann::json& j, const AuxBus& bus) {
+    j = nlohmann::json{
+        {"id", bus.id},
+        {"name", bus.name},
+        {"gainDb", bus.gainDb},
+        {"sourceChannelIds", bus.sourceChannelIds},
+    };
+}
+
+void from_json(const nlohmann::json& j, AuxBus& bus) {
+    bus = AuxBus{};
+    j.at("id").get_to(bus.id);
+    bus.name = j.value("name", std::string{});
+    bus.gainDb = j.value("gainDb", 0.0f);
+    bus.sourceChannelIds = j.value("sourceChannelIds", std::vector<std::uint32_t>{});
+}
+
 void to_json(nlohmann::json& j, EqType type) {
     switch (type) {
         case EqType::HighPass: j = "HighPass"; break;
@@ -263,6 +322,18 @@ void to_json(nlohmann::json& j, const InsertSlot& slot) {
     if (slot.pluginUniqueId != 0) {
         j["pluginUniqueId"] = slot.pluginUniqueId;
     }
+    // Optional: absent unless the insert uses a side chain, so scenes without
+    // one stay byte-for-byte compatible with pre-v8 saves.
+    if (slot.sideChainSource != SideChainSource::None) {
+        j["sideChainSource"] = slot.sideChainSource;
+        j["sideChainSourceId"] = slot.sideChainSourceId;
+        if (slot.sideChainTap != SideChainTap::PostFader) {
+            j["sideChainTap"] = slot.sideChainTap;
+        }
+        if (slot.sideChainGainDb != 0.0f) {
+            j["sideChainGainDb"] = slot.sideChainGainDb;
+        }
+    }
 }
 
 void from_json(const nlohmann::json& j, InsertSlot& slot) {
@@ -273,6 +344,15 @@ void from_json(const nlohmann::json& j, InsertSlot& slot) {
     slot.pluginUniqueId = j.value("pluginUniqueId", 0);
     slot.bypassed = j.value("bypassed", false);
     slot.pluginState = j.value("pluginState", std::string{});
+    // Absent keys keep the pre-v8 behaviour (no side chain).
+    if (j.contains("sideChainSource")) {
+        j.at("sideChainSource").get_to(slot.sideChainSource);
+    }
+    slot.sideChainSourceId = j.value("sideChainSourceId", 0u);
+    if (j.contains("sideChainTap")) {
+        j.at("sideChainTap").get_to(slot.sideChainTap);
+    }
+    slot.sideChainGainDb = j.value("sideChainGainDb", 0.0f);
 }
 
 void to_json(nlohmann::json& j, ChainItemType type) {
@@ -563,6 +643,9 @@ std::string toJson(const Scene& scene) {
         {"outputs", scene.outputs},
         {"routes", scene.routes},
     };
+    // Only written when non-empty so pre-v8 scenes without aux buses keep the
+    // same JSON shape.
+    if (!scene.auxBuses.empty()) j["auxBuses"] = scene.auxBuses;
     if (scene.audio.has_value()) j["audio"] = *scene.audio;
     return j.dump();
 }
@@ -572,9 +655,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 7) {
+        if (schemaVersion < 1 || schemaVersion > 8) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 to 7");
+                                    ", expected 1 to 8");
             return result;
         }
         Scene scene;
@@ -590,6 +673,30 @@ SceneLoadResult fromJson(std::string_view text) {
         }
         if (j.contains("routes")) {
             j.at("routes").get_to(scene.routes);
+        }
+        if (j.contains("auxBuses")) {
+            j.at("auxBuses").get_to(scene.auxBuses);
+        }
+        // v8 fields are opt-in: a pre-v8 save never carries side-chain routing,
+        // even if a hand-edited file contains the keys.
+        if (schemaVersion < 8) {
+            scene.auxBuses.clear();
+            for (auto& channel : scene.channels) {
+                for (auto& slot : channel.inserts) {
+                    slot.sideChainSource = SideChainSource::None;
+                    slot.sideChainSourceId = 0;
+                    slot.sideChainTap = SideChainTap::PostFader;
+                    slot.sideChainGainDb = 0.0f;
+                }
+            }
+            for (auto& output : scene.outputs) {
+                for (auto& slot : output.inserts) {
+                    slot.sideChainSource = SideChainSource::None;
+                    slot.sideChainSourceId = 0;
+                    slot.sideChainTap = SideChainTap::PostFader;
+                    slot.sideChainGainDb = 0.0f;
+                }
+            }
         }
         if (j.contains("audio")) {
             pluginrack::AudioSettings settings;

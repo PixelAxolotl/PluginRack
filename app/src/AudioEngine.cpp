@@ -289,6 +289,10 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
         for (auto& channel : channels) {
             channel->buffer.setSize(2, maxBlockFrames_, false, true, true);
             channel->buffer.clear();
+            channel->preInsertTap.setSize(2, maxBlockFrames_, false, true, true);
+            channel->preInsertTap.clear();
+            channel->postFaderTap.setSize(2, maxBlockFrames_, false, true, true);
+            channel->postFaderTap.clear();
             // EqEngine::prepare only stores the rate/size and recomputes cached
             // coefficients; bands set via setChannelEq and the delay set via
             // setChannelEqDelay survive a rate change.
@@ -304,6 +308,8 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
                 }
             }
             for (auto& insert : channel->inserts) {
+                insert->sideChainBuffer.setSize(2, maxBlockFrames_, false, true, true);
+                insert->sideChainBuffer.clear();
                 hosts.push_back(&insert->pluginHost);
             }
             meters.observeChannel(channel->id, 0.0f);
@@ -311,6 +317,10 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
         for (auto& output : outputs) {
             output->buffer.setSize(2, maxBlockFrames_, false, true, true);
             output->buffer.clear();
+            output->preInsertTap.setSize(2, maxBlockFrames_, false, true, true);
+            output->preInsertTap.clear();
+            output->postFaderTap.setSize(2, maxBlockFrames_, false, true, true);
+            output->postFaderTap.clear();
             output->eq.prepare(currentSampleRate, maxBlockFrames_);
             if (output->effectProcessors.size() != output->effects.size()) {
                 output->effectProcessors.clear();
@@ -323,9 +333,15 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
                 }
             }
             for (auto& insert : output->inserts) {
+                insert->sideChainBuffer.setSize(2, maxBlockFrames_, false, true, true);
+                insert->sideChainBuffer.clear();
                 hosts.push_back(&insert->pluginHost);
             }
             meters.observeOutput(output->id, 0.0f);
+        }
+        for (auto& bus : auxBuses) {
+            bus->buffer.setSize(2, maxBlockFrames_, false, true, true);
+            bus->buffer.clear();
         }
     }
     for (auto* host : hosts) {
@@ -497,6 +513,75 @@ void AudioEngine::render(int frames) {
         output->buffer.clear(0, frames);
     }
 
+    // Side-chain aux buses are summed from each contributing channel's
+    // post-fader tap. That tap is the previous block's final strip signal, so
+    // a bus never depends on where in this block its sources are rendered.
+    for (auto& bus : auxBuses) {
+        if (bus == nullptr) continue;
+        bus->buffer.clear(0, frames);
+        const float busGain = decibelsToGain(bus->gainDb.get());
+        for (const auto sourceId : bus->sourceChannelIds) {
+            const auto source = std::find_if(channels.begin(), channels.end(), [sourceId](const auto& c) {
+                return c->id == sourceId;
+            });
+            if (source == channels.end() || (*source)->postFaderTap.getNumSamples() < frames) continue;
+            const auto& tap = (*source)->postFaderTap;
+            bus->buffer.addFrom(0, 0, tap, 0, 0, frames, busGain);
+            const int rightTap = (*source)->layout == pluginrack::ChannelLayout::Mono ? 0 : 1;
+            bus->buffer.addFrom(1, 0, tap, rightTap, 0, frames, busGain);
+        }
+    }
+
+    // Resolve one insert's side-chain source into its preallocated
+    // sideChainBuffer slice. Called once per insert per render slice, before
+    // that insert runs, so the source buffers are all stable snapshots.
+    const auto fillSideChain = [&](InsertSlot& insert, int start, int count) {
+        if (insert.sideChainBuffer.getNumSamples() < start + count) return;
+        insert.sideChainBuffer.clear(start, count);
+        if (insert.sideChainSource == pluginrack::SideChainSource::None
+            || insert.sideChainSourceId == 0) {
+            return;
+        }
+        const juce::AudioBuffer<float>* source = nullptr;
+        bool mono = false;
+        if (insert.sideChainSource == pluginrack::SideChainSource::Channel) {
+            const auto found = std::find_if(channels.begin(), channels.end(), [&insert](const auto& c) {
+                return c->id == insert.sideChainSourceId;
+            });
+            if (found != channels.end() && *found != nullptr) {
+                source = insert.sideChainTap == pluginrack::SideChainTap::PreInsert
+                             ? &(*found)->preInsertTap
+                             : &(*found)->postFaderTap;
+                mono = (*found)->layout == pluginrack::ChannelLayout::Mono;
+            }
+        } else if (insert.sideChainSource == pluginrack::SideChainSource::Output) {
+            const auto found = std::find_if(outputs.begin(), outputs.end(), [&insert](const auto& o) {
+                return o->id == insert.sideChainSourceId;
+            });
+            if (found != outputs.end() && *found != nullptr) {
+                source = insert.sideChainTap == pluginrack::SideChainTap::PreInsert
+                             ? &(*found)->preInsertTap
+                             : &(*found)->postFaderTap;
+                mono = (*found)->layout == pluginrack::ChannelLayout::Mono;
+            }
+        } else if (insert.sideChainSource == pluginrack::SideChainSource::Bus) {
+            const auto found = std::find_if(auxBuses.begin(), auxBuses.end(), [&insert](const auto& b) {
+                return b != nullptr && b->id == insert.sideChainSourceId;
+            });
+            if (found != auxBuses.end()) source = &(*found)->buffer;
+        }
+        if (source == nullptr || source->getNumSamples() < start + count) return;
+        const float gain = decibelsToGain(insert.sideChainGainDb.get());
+        insert.sideChainBuffer.copyFrom(0, start, *source, 0, start, count);
+        // A mono source feeds both side-chain legs; that is the documented
+        // behaviour for mono strips and mono aux sources.
+        insert.sideChainBuffer.copyFrom(1, start, *source, mono ? 0 : 1, start, count);
+        if (gain != 1.0f) {
+            insert.sideChainBuffer.applyGain(0, start, count, gain);
+            insert.sideChainBuffer.applyGain(1, start, count, gain);
+        }
+    };
+
     meters.advance(frames, currentSampleRate);
     bool anySolo = false;
     for (const auto& channel : channels) {
@@ -528,6 +613,10 @@ void AudioEngine::render(int frames) {
                 const float trim = decibelsToGain(channel->trimDb.get());
                 channel->buffer.applyGain(0, start, count, trim);
                 channel->buffer.applyGain(1, start, count, trim);
+                if (channel->preInsertTap.getNumSamples() >= start + count) {
+                    channel->preInsertTap.copyFrom(0, start, channel->buffer, 0, start, count);
+                    channel->preInsertTap.copyFrom(1, start, channel->buffer, 1, start, count);
+                }
                 channel->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 for (const auto& item : channel->chain) {
                     if (item.type == pluginrack::ChainItemType::Eq) {
@@ -560,8 +649,12 @@ void AudioEngine::render(int frames) {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
                         if (insert != channel->inserts.end()) {
+                            fillSideChain(**insert, start, count);
                             crash_context::setCurrentRender((*insert)->crashLabel);
-                            (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            (*insert)->pluginHost.processBlock(
+                                block, (*insert)->bypassed.get(),
+                                (*insert)->sideChainBuffer.getReadPointer(0) + start,
+                                (*insert)->sideChainBuffer.getReadPointer(1) + start, count);
                             crash_context::clearCurrentRender();
                             // Fault containment: mirror the child's death/wedge
                             // into the slot so the UI and reload path can see it.
@@ -609,6 +702,10 @@ void AudioEngine::render(int frames) {
         const float theta = (channel->pan.get() + 1.0f) * juce::MathConstants<float>::pi / 4.0f;
         channel->buffer.applyGain(0, 0, frames, gain * std::cos(theta));
         channel->buffer.applyGain(1, 0, frames, gain * std::sin(theta));
+        if (channel->postFaderTap.getNumSamples() >= frames) {
+            channel->postFaderTap.copyFrom(0, 0, channel->buffer, 0, 0, frames);
+            channel->postFaderTap.copyFrom(1, 0, channel->buffer, 1, 0, frames);
+        }
 
         const float peakL = channel->buffer.getMagnitude(0, 0, frames);
         const float peakR = channel->buffer.getMagnitude(1, 0, frames);
@@ -661,6 +758,10 @@ void AudioEngine::render(int frames) {
                 // Same per-plugin taps as Channel: each built-in's RTA reads
                 // its own output, so the EQ's curve never leaks into a later
                 // plugin's RTA and each preview is the plugin's own signal.
+                if (output->preInsertTap.getNumSamples() >= start + count) {
+                    output->preInsertTap.copyFrom(0, start, output->buffer, 0, start, count);
+                    output->preInsertTap.copyFrom(1, start, output->buffer, 1, start, count);
+                }
                 output->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 for (const auto& item : output->chain) {
                     if (item.type == pluginrack::ChainItemType::Eq) {
@@ -693,8 +794,12 @@ void AudioEngine::render(int frames) {
                         auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
                         if (insert != output->inserts.end()) {
+                            fillSideChain(**insert, start, count);
                             crash_context::setCurrentRender((*insert)->crashLabel);
-                            (*insert)->pluginHost.processBlock(block, (*insert)->bypassed.get());
+                            (*insert)->pluginHost.processBlock(
+                                block, (*insert)->bypassed.get(),
+                                (*insert)->sideChainBuffer.getReadPointer(0) + start,
+                                (*insert)->sideChainBuffer.getReadPointer(1) + start, count);
                             crash_context::clearCurrentRender();
                             const auto status = (*insert)->pluginHost.childHostStatus();
                             if (status.enabled && status.failed) {
@@ -754,6 +859,10 @@ void AudioEngine::render(int frames) {
         }
         if (output->muted.get()) {
             output->buffer.clear(0, frames);
+        }
+        if (output->postFaderTap.getNumSamples() >= frames) {
+            output->postFaderTap.copyFrom(0, 0, output->buffer, 0, 0, frames);
+            output->postFaderTap.copyFrom(1, 0, output->buffer, 1, 0, frames);
         }
         const float peakL = output->buffer.getMagnitude(0, 0, frames);
         const float peakR = output->buffer.getMagnitude(1, 0, frames);
@@ -1416,6 +1525,64 @@ void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t inser
     }
 }
 
+void AudioEngine::setPluginSideChain(std::uint32_t channelId, std::uint32_t insertId,
+                                     pluginrack::SideChainSource source, std::uint32_t sourceId,
+                                     pluginrack::SideChainTap tap, float gainDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* insert = findInsert(channelId, insertId)) {
+        insert->sideChainSource = source;
+        insert->sideChainSourceId = source == pluginrack::SideChainSource::None ? 0 : sourceId;
+        insert->sideChainTap = tap;
+        insert->sideChainGainDb = juce::jlimit(-60.0f, 12.0f, gainDb);
+    }
+}
+
+std::uint32_t AudioEngine::addAuxBus(const juce::String& name,
+                                     const std::vector<std::uint32_t>& sourceChannelIds) {
+    const juce::ScopedLock lock(stateLock);
+    auto bus = std::make_unique<AuxBus>();
+    bus->id = nextAuxBusId++;
+    bus->name = name.isNotEmpty() ? name : ("Bus " + juce::String(bus->id));
+    bus->sourceChannelIds = sourceChannelIds;
+    bus->buffer.setSize(2, maxBlockFrames_, false, true, true);
+    bus->buffer.clear();
+    const std::uint32_t id = bus->id;
+    auxBuses.push_back(std::move(bus));
+    return id;
+}
+
+void AudioEngine::removeAuxBus(std::uint32_t busId) {
+    const juce::ScopedLock lock(stateLock);
+    auxBuses.erase(std::remove_if(auxBuses.begin(), auxBuses.end(),
+                                  [busId](const auto& bus) { return bus->id == busId; }),
+                   auxBuses.end());
+    // Inserts naming the removed bus fall back to no side chain instead of
+    // pointing at an id that no longer exists.
+    const auto clearBusSource = [busId](auto& inserts) {
+        for (auto& insert : inserts) {
+            if (insert->sideChainSource == pluginrack::SideChainSource::Bus &&
+                insert->sideChainSourceId == busId) {
+                insert->sideChainSource = pluginrack::SideChainSource::None;
+                insert->sideChainSourceId = 0;
+            }
+        }
+    };
+    for (auto& channel : channels) clearBusSource(channel->inserts);
+    for (auto& output : outputs) clearBusSource(output->inserts);
+}
+
+void AudioEngine::setAuxBus(std::uint32_t busId, const juce::String& name, float gainDb,
+                            const std::vector<std::uint32_t>& sourceChannelIds) {
+    const juce::ScopedLock lock(stateLock);
+    for (auto& bus : auxBuses) {
+        if (bus->id != busId) continue;
+        if (name.isNotEmpty()) bus->name = name;
+        bus->gainDb = juce::jlimit(-60.0f, 12.0f, gainDb);
+        bus->sourceChannelIds = sourceChannelIds;
+        return;
+    }
+}
+
 bool AudioEngine::reloadInsert(std::uint32_t channelId, std::uint32_t insertId) {
     InsertSlot* insert = findInsert(channelId, insertId);
     bool isOutput = false;
@@ -1573,6 +1740,18 @@ void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t 
         insert->bypassed = bypassed;
         insert->pluginHost.refreshLatencyCache();
         insert->latencySamples = insert->pluginHost.getLatencySamples();
+    }
+}
+
+void AudioEngine::setOutputPluginSideChain(std::uint32_t outputId, std::uint32_t insertId,
+                                           pluginrack::SideChainSource source, std::uint32_t sourceId,
+                                           pluginrack::SideChainTap tap, float gainDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* insert = findOutputInsert(outputId, insertId)) {
+        insert->sideChainSource = source;
+        insert->sideChainSourceId = source == pluginrack::SideChainSource::None ? 0 : sourceId;
+        insert->sideChainTap = tap;
+        insert->sideChainGainDb = juce::jlimit(-60.0f, 12.0f, gainDb);
     }
 }
 
@@ -2000,6 +2179,10 @@ const std::vector<std::unique_ptr<AudioEngine::Output>>& AudioEngine::getOutputs
     return outputs;
 }
 
+const std::vector<std::unique_ptr<AudioEngine::AuxBus>>& AudioEngine::getAuxBuses() const {
+    return auxBuses;
+}
+
 const std::vector<std::unique_ptr<AudioEngine::Route>>& AudioEngine::getRoutes() const {
     return routes;
 }
@@ -2049,6 +2232,10 @@ std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
         slot.pluginName = insert->pluginName.toStdString();
         slot.pluginUniqueId = insert->pluginUniqueId;
         slot.bypassed = insert->bypassed.get();
+        slot.sideChainSource = insert->sideChainSource;
+        slot.sideChainSourceId = insert->sideChainSourceId;
+        slot.sideChainTap = insert->sideChainTap;
+        slot.sideChainGainDb = insert->sideChainGainDb.get();
         // A failed insert has no live instance to ask for state; write back
         // the blob the scene supplied.
         slot.pluginState = insert->savedPluginState.toStdString();
@@ -2108,6 +2295,14 @@ pluginrack::Scene AudioEngine::makeScene() const {
                 savedRoute.sendGainDbR = rightDb;
             }
             scene.routes.push_back(std::move(savedRoute));
+        }
+        for (const auto& bus : auxBuses) {
+            pluginrack::AuxBus savedBus;
+            savedBus.id = bus->id;
+            savedBus.name = bus->name.toStdString();
+            savedBus.gainDb = bus->gainDb.get();
+            savedBus.sourceChannelIds = bus->sourceChannelIds;
+            scene.auxBuses.push_back(std::move(savedBus));
         }
 
         // The tuning the session runs with travels with the save, so loading it
@@ -2223,6 +2418,10 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         }
         channel->buffer.setSize(2, bufferSize);
         channel->buffer.clear();
+        channel->preInsertTap.setSize(2, bufferSize);
+        channel->preInsertTap.clear();
+        channel->postFaderTap.setSize(2, bufferSize);
+        channel->postFaderTap.clear();
         // EQ bands are scene state; rebuild coefficients here on the message
         // thread before the strip goes live (never in render). The delay line
         // is sized here for the same reason.
@@ -2275,6 +2474,12 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            insert->sideChainSource = savedInsert.sideChainSource;
+            insert->sideChainSourceId = savedInsert.sideChainSourceId;
+            insert->sideChainTap = savedInsert.sideChainTap;
+            insert->sideChainGainDb = savedInsert.sideChainGainDb;
+            insert->sideChainBuffer.setSize(2, bufferSize);
+            insert->sideChainBuffer.clear();
             // Keep the blob until a live instance can speak for itself. If the
             // plugin is missing, a later save writes this back instead of an
             // empty state that would erase the user's settings for good.
@@ -2311,6 +2516,10 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->muted = savedOutput.muted;
         output->buffer.setSize(2, bufferSize);
         output->buffer.clear();
+        output->preInsertTap.setSize(2, bufferSize);
+        output->preInsertTap.clear();
+        output->postFaderTap.setSize(2, bufferSize);
+        output->postFaderTap.clear();
         output->eqBands = savedOutput.eqBands;
         output->eqDelayMs = savedOutput.eqDelayMs;
         if (savedOutput.colourHue > 0.0f) {
@@ -2355,6 +2564,12 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            insert->sideChainSource = savedInsert.sideChainSource;
+            insert->sideChainSourceId = savedInsert.sideChainSourceId;
+            insert->sideChainTap = savedInsert.sideChainTap;
+            insert->sideChainGainDb = savedInsert.sideChainGainDb;
+            insert->sideChainBuffer.setSize(2, bufferSize);
+            insert->sideChainBuffer.clear();
             // Same rule as channels: hold the saved blob while the plugin is
             // not loaded, so a save cannot blank it.
             insert->savedPluginState = juce::String(savedInsert.pluginState);
@@ -2387,6 +2602,19 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         route->sendGainDbL = savedRoute.sendGainDb;
         route->sendGainDbR = savedRoute.sendGainDbR.value_or(savedRoute.sendGainDb);
         restoredRoutes.push_back(std::move(route));
+    }
+    auto& restoredAuxBuses = job.auxBuses;
+    std::uint32_t maxAuxBusId = 0;
+    for (const auto& savedBus : scene.auxBuses) {
+        auto bus = std::make_unique<AuxBus>();
+        bus->id = savedBus.id;
+        bus->name = savedBus.name;
+        bus->gainDb = savedBus.gainDb;
+        bus->sourceChannelIds = savedBus.sourceChannelIds;
+        bus->buffer.setSize(2, bufferSize);
+        bus->buffer.clear();
+        maxAuxBusId = juce::jmax(maxAuxBusId, bus->id + 1);
+        restoredAuxBuses.push_back(std::move(bus));
     }
 
     // Resolve the device assignments now, while the scene is in hand: the
@@ -2480,6 +2708,7 @@ juce::String AudioEngine::commitSceneRestore() {
     // stateLock while render() falls back to the silence path.
     std::vector<std::unique_ptr<Channel>> oldChannels;
     std::vector<std::unique_ptr<Output>> oldOutputs;
+    std::vector<std::unique_ptr<AuxBus>> oldAuxBuses;
     std::vector<std::unique_ptr<Route>> oldRoutes;
     std::map<juce::String, SharedInputCapture> retiredCaptures;
     std::vector<OutputPlayback*> oldPlaybacks;
@@ -2502,8 +2731,10 @@ juce::String AudioEngine::commitSceneRestore() {
         oldChannels = std::move(channels);
         oldOutputs = std::move(outputs);
         oldRoutes = std::move(routes);
+        oldAuxBuses = std::move(auxBuses);
         channels = std::move(job.channels);
         outputs = std::move(job.outputs);
+        auxBuses = std::move(job.auxBuses);
         routes = std::move(job.routes);
         meters.setTargets(job.channelIds.data(), job.channelIds.size(),
                           job.outputIds.data(), job.outputIds.size());
@@ -2519,6 +2750,9 @@ juce::String AudioEngine::commitSceneRestore() {
         nextInsertId = juce::jmax(nextInsertId, job.maxInsertId);
         nextChannelId = juce::jmax(nextChannelId, job.maxChannelId);
         nextOutputId = juce::jmax(nextOutputId, job.maxOutputId);
+        for (const auto& bus : auxBuses) {
+            nextAuxBusId = juce::jmax(nextAuxBusId, bus->id + 1);
+        }
         // Collect captures no live channel references so their device close
         // runs after the lock is released (see retiredCaptures.clear()).
         for (auto it = inputCaptures_.begin(); it != inputCaptures_.end();) {
@@ -2539,6 +2773,7 @@ juce::String AudioEngine::commitSceneRestore() {
         }
     }
     oldRoutes.clear();
+    oldAuxBuses.clear();
     oldOutputs.clear();
     oldChannels.clear();
     retiredCaptures.clear();

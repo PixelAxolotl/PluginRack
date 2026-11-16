@@ -42,6 +42,10 @@ public:
         juce::String path;
         juce::String name;
         juce::String error;
+        // 2 when a side-chain input bus was enabled at instantiate time, 0
+        // when the plugin offers none or refused it. processBlock uses this
+        // to decide whether a four-channel composite is legal.
+        int sideChainChannels = 0;
     };
 
     PluginHost();
@@ -101,6 +105,11 @@ public:
     // visible plugin with dead meters and every edit inaudible, so this class
     // never hands a block to another process.
     void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed = false);
+    // Side-chained render: channels 2 and 3 of the composite are the side-chain
+    // input. A plugin without an enabled side-chain bus ignores the pointers
+    // and renders the main stereo block, so the caller can always pass them.
+    void processBlock(juce::AudioBuffer<float>& buffer, bool bypassed, const float* sideChainL,
+                      const float* sideChainR, int sideChainFrames);
 
     // --- Fault containment: child-process DSP ------------------------------
     // Off unless loadChildHost() is called. Once a slot is published its
@@ -190,6 +199,11 @@ private:
     std::atomic<std::shared_ptr<PluginProcessHost>> childHost_{};
     std::atomic<int> rendererMode_{0}; // 0 = in-process, 1 = child (fix 1)
     juce::AudioBuffer<float> childScratch_;
+    // Four-channel working buffer for the side-chained in-process render: 0/1
+    // are the main block, 2/3 the side-chain. Allocated once in the
+    // constructor like childScratch_, never on the audio thread.
+    juce::AudioBuffer<float> sideChainComposite_;
+    std::atomic<int> sideChainChannels_{0};
     std::atomic<double> playSampleRate_{48000.0};
     std::atomic<int> playBufferSize_{256};
     std::atomic<int> childBlockDeadlineMs_{10};

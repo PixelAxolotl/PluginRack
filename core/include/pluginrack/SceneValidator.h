@@ -19,6 +19,8 @@ enum class SceneErrorCode {
     UnknownOutputInRoute,
     UnknownChainItem,
     UnknownWatchedDevice,
+    DuplicateAuxBusId,
+    UnknownSideChainSourceId,
     UnsupportedSchemaVersion,
     ValueOutOfRange,
     NoChannels,

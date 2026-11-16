@@ -50,6 +50,15 @@ public:
         int pluginUniqueId = 0;
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
+        // Side-chain routing (schema 8). Written on the message thread while
+        // stateLock is held; render() reads them under the same lock.
+        pluginrack::SideChainSource sideChainSource = pluginrack::SideChainSource::None;
+        std::uint32_t sideChainSourceId = 0;
+        pluginrack::SideChainTap sideChainTap = pluginrack::SideChainTap::PostFader;
+        juce::Atomic<float> sideChainGainDb{0.0f};
+        // Preallocated in prepareToPlayImpl, 2 x maxBlockFrames. The render
+        // loop fills it from the selected source before the plugin runs.
+        juce::AudioBuffer<float> sideChainBuffer;
         int latencySamples = 0;
         // State blob from the scene while the plugin could not be loaded (for
         // example a missing bundle). A save must write it back unchanged
@@ -126,6 +135,13 @@ public:
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
+        // Side-chain taps, preallocated 2 x maxBlockFrames in
+        // prepareToPlayImpl. preInsertTap is the signal entering the chain
+        // (post-trim); postFaderTap is the final strip signal after fader,
+        // pan and mute. Other inserts copy from these, so no insert touches
+        // the live strip buffer while it renders.
+        juce::AudioBuffer<float> preInsertTap;
+        juce::AudioBuffer<float> postFaderTap;
         // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
         // and keep output bit-identical to the pre-EQ engine. eq/eqBands are
@@ -207,6 +223,10 @@ public:
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
+        // Side-chain taps, same rules as Channel: preInsertTap is the mixed
+        // signal entering the output chain, postFaderTap the final output.
+        juce::AudioBuffer<float> preInsertTap;
+        juce::AudioBuffer<float> postFaderTap;
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
@@ -243,6 +263,19 @@ public:
         // copied here so diagnostics never touch the playback object.
         juce::String outputDeviceType;
         std::unique_ptr<OutputPlayback> output;
+    };
+
+    // One dedicated side-chain bus. Channels listed in sourceChannelIds are
+    // summed (post-fader, with their own gain already applied) into `buffer`,
+    // which any insert can then name as its side-chain source. Buffers are
+    // preallocated in prepareToPlayImpl; gain/name/sources are message-thread
+    // state written under stateLock.
+    struct AuxBus {
+        std::uint32_t id = 0;
+        juce::String name;
+        juce::Atomic<float> gainDb{0.0f};
+        std::vector<std::uint32_t> sourceChannelIds;
+        juce::AudioBuffer<float> buffer;
     };
 
     struct Route {
@@ -484,6 +517,18 @@ public:
                         std::function<void(juce::String)> done);
     void removePlugin(std::uint32_t channelId, std::uint32_t insertId);
     void setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed);
+    // Side-chain routing for one insert (schema 8). Takes stateLock, like the
+    // other setters; the render thread reads the same fields under it.
+    void setPluginSideChain(std::uint32_t channelId, std::uint32_t insertId,
+                            pluginrack::SideChainSource source, std::uint32_t sourceId,
+                            pluginrack::SideChainTap tap, float gainDb);
+    // Dedicated aux buses: created and edited by the UI, mixed into `buffer` on
+    // the render thread, then readable as any insert's side-chain source.
+    std::uint32_t addAuxBus(const juce::String& name,
+                            const std::vector<std::uint32_t>& sourceChannelIds);
+    void removeAuxBus(std::uint32_t busId);
+    void setAuxBus(std::uint32_t busId, const juce::String& name, float gainDb,
+                   const std::vector<std::uint32_t>& sourceChannelIds);
     // Fault containment: re-spawn the child host for a failed insert (Reload).
     // Clears `failed` only on a successful HOSTREADY. Message thread only.
     bool reloadInsert(std::uint32_t channelId, std::uint32_t insertId);
@@ -505,6 +550,9 @@ public:
     HighestLatencyInsert getHighestLatencyInsert(std::uint32_t channelId) const;
     void removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId);
     void setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed);
+    void setOutputPluginSideChain(std::uint32_t outputId, std::uint32_t insertId,
+                                  pluginrack::SideChainSource source, std::uint32_t sourceId,
+                                  pluginrack::SideChainTap tap, float gainDb);
     void moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item, int targetIndex);
     // Appends a built-in effect not currently in the strip's chain, so picking
     // a removed built-in from the plugin menu restores it. No-op if present.
@@ -580,6 +628,7 @@ public:
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
+    const std::vector<std::unique_ptr<AuxBus>>& getAuxBuses() const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
     Channel* getChannelById(std::uint32_t channelId) {
@@ -704,6 +753,7 @@ private:
     struct SceneRestoreJob {
         std::vector<std::unique_ptr<Channel>> channels;
         std::vector<std::unique_ptr<Output>> outputs;
+        std::vector<std::unique_ptr<AuxBus>> auxBuses;
         std::vector<std::unique_ptr<Route>> routes;
         std::vector<std::uint32_t> channelIds;
         std::vector<std::uint32_t> outputIds;
@@ -817,12 +867,14 @@ private:
     std::vector<std::unique_ptr<InsertSlot>> retiredInserts_;
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
+    std::vector<std::unique_ptr<AuxBus>> auxBuses;
     std::vector<std::unique_ptr<Route>> routes;
     std::map<juce::String, SharedInputCapture> inputCaptures_;
     pluginrack::MeterBank meters;
     mutable juce::CriticalSection stateLock;
     std::uint32_t nextChannelId = 1;
     std::uint32_t nextOutputId = 1;
+    std::uint32_t nextAuxBusId = 1;
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;

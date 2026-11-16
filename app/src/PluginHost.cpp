@@ -227,6 +227,7 @@ PluginHost::PluginHost() {
     // message-thread prepare and corrupted the heap (0xC0000374 at device open
     // with the child host enabled). 8192 frames stereo is 64 KB per insert.
     childScratch_.setSize(2, pluginHostIpc::kMaxBlockFrames, false, true, true);
+    sideChainComposite_.setSize(4, pluginHostIpc::kMaxBlockFrames, false, true, true);
 }
 
 PluginHost::~PluginHost() {
@@ -730,26 +731,50 @@ PluginHost::LoadedPlugin PluginHost::instantiate(const juce::PluginDescription& 
         return loaded;
     }
 
-    // The host supplies one stereo audio block. Auxiliary and sidechain
-    // buses must be disabled explicitly; leaving them active makes some VST3
-    // processors interpret the two-channel block with the wrong bus offsets.
-    if (!candidate->disableNonMainBuses()) {
-        loaded.error = "The selected VST3 could not disable its auxiliary buses.";
-        return loaded;
-    }
-
     auto layout = candidate->getBusesLayout();
     if (layout.inputBuses.isEmpty() || layout.outputBuses.isEmpty()) {
         loaded.error = "The selected plugin is not an audio effect with input and output buses.";
         return loaded;
     }
 
+    // Main I/O stays stereo. The plugin's first auxiliary *input* bus becomes
+    // the side-chain; every other auxiliary bus is disabled. Leaving them all
+    // active makes some VST3 processors interpret the two-channel block with
+    // the wrong bus offsets, so the fallback is the old all-disabled layout.
     layout.inputBuses.getReference(0) = juce::AudioChannelSet::stereo();
     layout.outputBuses.getReference(0) = juce::AudioChannelSet::stereo();
-    if (!candidate->setBusesLayout(layout)) {
-        loaded.error = "The selected plugin does not support stereo input and output.";
-        return loaded;
+    bool enabledSideChain = false;
+    for (int bus = 1; bus < layout.inputBuses.size(); ++bus) {
+        auto* busInfo = candidate->getBus(true, bus);
+        auto target = busInfo != nullptr ? busInfo->getDefaultLayout()
+                                         : juce::AudioChannelSet::stereo();
+        if (!enabledSideChain && !target.isDisabled() && target.size() >= 1) {
+            // A mono aux bus is widened to stereo so the engine can always
+            // hand the plugin a two-channel side-chain.
+            layout.inputBuses.getReference(bus) =
+                target.size() >= 2 ? target : juce::AudioChannelSet::stereo();
+            enabledSideChain = true;
+        } else {
+            layout.inputBuses.getReference(bus) = juce::AudioChannelSet::disabled();
+        }
     }
+    for (int bus = 1; bus < layout.outputBuses.size(); ++bus) {
+        layout.outputBuses.getReference(bus) = juce::AudioChannelSet::disabled();
+    }
+    if (!candidate->setBusesLayout(layout)) {
+        // Some plugins advertise an aux input but refuse it alongside a stereo
+        // main bus. Retry with every aux bus disabled; only a plugin that also
+        // refuses that is a load failure.
+        enabledSideChain = false;
+        for (int bus = 1; bus < layout.inputBuses.size(); ++bus) {
+            layout.inputBuses.getReference(bus) = juce::AudioChannelSet::disabled();
+        }
+        if (!candidate->setBusesLayout(layout)) {
+            loaded.error = "The selected plugin does not support stereo input and output.";
+            return loaded;
+        }
+    }
+    loaded.sideChainChannels = enabledSideChain ? 2 : 0;
 
     candidate->setRateAndBufferSizeDetails(sampleRate, bufferSize);
     // Apply saved state before activation: that is the host flow plugins see
@@ -817,6 +842,7 @@ void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase
     }
     pluginPath = loaded.path;
     pluginName = loaded.name;
+    sideChainChannels_.store(loaded.sideChainChannels, std::memory_order_relaxed);
     plugin = loaded.instance;
     const auto prepareStart = juce::Time::getMillisecondCounterHiRes();
     pluginprepare::prepareInstance(*plugin, currentSampleRate, currentBufferSize);
@@ -884,6 +910,12 @@ void PluginHost::releaseResources() {
 }
 
 void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
+    processBlock(buffer, bypassed, nullptr, nullptr, 0);
+}
+
+void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
+                              const float* sideChainL, const float* sideChainR,
+                              int sideChainFrames) {
     if (bypassed) {
         return;
     }
@@ -941,6 +973,26 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed) {
     // host, in which case the branch above owns rendering and this path is only
     // ever used by slots that never had a child.
     midiBuffer.clear();
+    const int frames = buffer.getNumSamples();
+    const int channels = buffer.getNumChannels();
+    const int sideChannels = sideChainChannels_.load(std::memory_order_relaxed);
+    if (sideChannels >= 2 && sideChainL != nullptr && sideChainR != nullptr && frames > 0
+        && channels > 0 && sideChainFrames >= frames
+        && frames <= sideChainComposite_.getNumSamples()) {
+        // A side-chained render needs one contiguous four-channel buffer:
+        // 0/1 are the main block, 2/3 the side-chain input.
+        sideChainComposite_.copyFrom(0, 0, buffer, 0, 0, frames);
+        sideChainComposite_.copyFrom(1, 0, buffer, juce::jmin(1, channels - 1), 0, frames);
+        sideChainComposite_.copyFrom(2, 0, sideChainL, frames);
+        sideChainComposite_.copyFrom(3, 0, sideChainR, frames);
+        juce::AudioBuffer<float> composite(sideChainComposite_.getArrayOfWritePointers(), 4, 0,
+                                           frames);
+        plugin->processBlock(composite, midiBuffer);
+        for (int channel = 0; channel < channels; ++channel) {
+            buffer.copyFrom(channel, 0, sideChainComposite_, juce::jmin(channel, 1), 0, frames);
+        }
+        return;
+    }
     plugin->processBlock(buffer, midiBuffer);
 }
 

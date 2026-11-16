@@ -427,6 +427,105 @@ std::vector<SceneError> validate(const Scene& scene) {
         validateStrip("output", output, errors);
     }
 
+    // Aux buses (schema 8). Their source channels are checked here because the
+    // channel id set is complete by now; inserts referencing a bus are checked
+    // in the second pass below.
+    std::unordered_set<std::uint32_t> auxIds;
+    auxIds.reserve(scene.auxBuses.size() * 2 + 1);
+    for (const AuxBus& bus : scene.auxBuses) {
+        if (bus.id == 0) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, 0, "aux bus id must not be zero"});
+        } else if (!auxIds.insert(bus.id).second) {
+            errors.push_back({SceneErrorCode::DuplicateAuxBusId, bus.id,
+                              "duplicate aux bus id " + std::to_string(bus.id)});
+        }
+        if (!std::isfinite(bus.gainDb) || bus.gainDb < kMinGainDb || bus.gainDb > kMaxGainDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, bus.id,
+                              "aux bus " + std::to_string(bus.id) +
+                                  " gainDb out of range [-60, 12]"});
+        }
+        for (const std::uint32_t sourceId : bus.sourceChannelIds) {
+            if (!channelIds.contains(sourceId)) {
+                errors.push_back({SceneErrorCode::UnknownSideChainSourceId, bus.id,
+                                  "aux bus " + std::to_string(bus.id) +
+                                      " references unknown channel " + std::to_string(sourceId)});
+            }
+        }
+    }
+
+    // Side-chain routing is validated in a second pass so an insert may point
+    // at a strip or bus declared later in the file.
+    const auto checkInsertSideChains = [&](const char* kind, const Strip& strip) {
+        for (const InsertSlot& slot : strip.inserts) {
+            if (slot.sideChainSource == SideChainSource::None) {
+                if (slot.sideChainSourceId != 0) {
+                    errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                      std::string(kind) + " " + std::to_string(strip.id) +
+                                          " insert " + std::to_string(slot.id) +
+                                          " has a side-chain source id but source None"});
+                }
+                continue;
+            }
+            if (slot.sideChainSourceId == 0) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                  std::string(kind) + " " + std::to_string(strip.id) +
+                                      " insert " + std::to_string(slot.id) +
+                                      " side-chain source id must not be zero"});
+                continue;
+            }
+            switch (slot.sideChainSource) {
+                case SideChainSource::Channel:
+                    if (!channelIds.contains(slot.sideChainSourceId)) {
+                        errors.push_back({SceneErrorCode::UnknownSideChainSourceId, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain references unknown channel " +
+                                              std::to_string(slot.sideChainSourceId)});
+                    } else if (strip.id == slot.sideChainSourceId) {
+                        errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain taps its own channel (feedback loop)"});
+                    }
+                    break;
+                case SideChainSource::Output:
+                    if (!outputIds.contains(slot.sideChainSourceId)) {
+                        errors.push_back({SceneErrorCode::UnknownSideChainSourceId, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain references unknown output " +
+                                              std::to_string(slot.sideChainSourceId)});
+                    } else if (strip.id == slot.sideChainSourceId) {
+                        errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain taps its own output (feedback loop)"});
+                    }
+                    break;
+                case SideChainSource::Bus:
+                    if (!auxIds.contains(slot.sideChainSourceId)) {
+                        errors.push_back({SceneErrorCode::UnknownSideChainSourceId, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain references unknown aux bus " +
+                                              std::to_string(slot.sideChainSourceId)});
+                    }
+                    break;
+                case SideChainSource::None:
+                    break;
+            }
+            if (!std::isfinite(slot.sideChainGainDb) || slot.sideChainGainDb < kMinGainDb ||
+                slot.sideChainGainDb > kMaxGainDb) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                  std::string(kind) + " " + std::to_string(strip.id) + " insert " +
+                                      std::to_string(slot.id) +
+                                      " side-chain gainDb out of range [-60, 12]"});
+            }
+        }
+    };
+    for (const Channel& channel : scene.channels) checkInsertSideChains("channel", channel);
+    for (const Output& output : scene.outputs) checkInsertSideChains("output", output);
+
     std::unordered_set<std::uint64_t> routePairs;
     routePairs.reserve(scene.routes.size() * 2 + 1);
     for (const Route& route : scene.routes) {

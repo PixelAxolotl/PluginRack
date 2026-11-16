@@ -17,7 +17,18 @@ namespace pluginrack {
 // Bumped only when an older file must be read differently. The writer stamps
 // this value, the reader compares against it, and the validator rejects
 // anything newer, so the number lives in one place.
-inline constexpr int kSchemaVersion = 7;
+inline constexpr int kSchemaVersion = 8;
+
+// Where an insert's side-chain input is fed from. None keeps the pre-v8
+// behaviour (the plugin's side-chain bus is disabled). Channel and Output
+// reference a live strip by id, Bus references one of the scene's AuxBus
+// entries, which mix a set of channels with their own gain.
+enum class SideChainSource { None, Channel, Output, Bus };
+
+// Which point of the source strip is tapped. PreInsert is the raw input before
+// the strip's own chain runs; PostFader is the fully processed signal after
+// gain/pan. Both are saved so a session reopens with the same trigger.
+enum class SideChainTap { PreInsert, PostFader };
 
 struct InsertSlot {
     std::uint32_t id = 0;
@@ -35,8 +46,27 @@ struct InsertSlot {
     // it on save and feeds it back to the plugin when the slot is rebuilt.
     // Empty means the plugin keeps its defaults.
     std::string pluginState;
+    // Side-chain routing (schema 8). Defaults reproduce the old behaviour, so
+    // scenes written before v8 load with the side-chain bus disabled.
+    SideChainSource sideChainSource = SideChainSource::None;
+    std::uint32_t sideChainSourceId = 0;
+    SideChainTap sideChainTap = SideChainTap::PostFader;
+    float sideChainGainDb = 0.0f;
 
     bool operator==(const InsertSlot&) const = default;
+};
+
+// A dedicated side-chain mix bus. Channels listed in sourceChannelIds are
+// summed into this bus, scaled by gainDb, and any insert can select it as its
+// side-chain source. Aux buses are scene state; their audio buffers are
+// runtime-only and live in the engine.
+struct AuxBus {
+    std::uint32_t id = 0;
+    std::string name;
+    float gainDb = 0.0f;
+    std::vector<std::uint32_t> sourceChannelIds;
+
+    bool operator==(const AuxBus&) const = default;
 };
 
 enum class ChainItemType { Eq, Dynamics, Insert, Multiband, DeEsser, Limiter };
@@ -192,6 +222,9 @@ struct Scene {
     std::vector<Channel> channels;
     std::vector<Output> outputs;
     std::vector<Route> routes;
+    // Dedicated side-chain mix buses (schema 8). Absent in older scenes, which
+    // therefore load with no aux buses.
+    std::vector<AuxBus> auxBuses;
     // Absent in scenes written before schema 4; loading one then leaves the
     // live tuning alone instead of resetting it to the defaults.
     std::optional<AudioSettings> audio;
