@@ -982,6 +982,12 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
     midiBuffer.clear();
     const int frames = buffer.getNumSamples();
     const int channels = buffer.getNumChannels();
+    // A block larger than the one this instance was prepared for overruns the
+    // plugin's internal buffers. The device-reopen path keeps the render
+    // ceiling below the prepared size, but stay dry if a callback slips through.
+    if (prepared && currentBufferSize > 0 && frames > currentBufferSize) {
+        return;
+    }
     const int sideChannels = sideChainChannels_.load(std::memory_order_relaxed);
     // A VST3 with an active side-chain bus has four input channels. JUCE maps
     // the plugin's buses straight onto the buffer we hand it, so an undersized

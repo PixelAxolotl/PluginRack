@@ -881,6 +881,11 @@ private:
     int requestedInputBufferSize_ = 0;
     int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
+    // Ceiling the audio thread may render at. Lowered before a device reopen
+    // and raised only after every plugin has been re-prepared, so a callback
+    // that lands mid-reprepare can never hand a plugin more frames than it
+    // allocated for. Guarded by stateLock.
+    int renderBlockFrames_ = 256;
     std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
     std::atomic<std::uint64_t> partialRenders_{0};

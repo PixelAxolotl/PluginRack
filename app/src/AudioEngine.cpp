@@ -275,10 +275,17 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
     // reopen. The audio thread only skips a plugin whose own try-lock is busy
     // instead of dropping every output block.
     std::vector<PluginHost*> hosts;
+    const int newBlock = juce::jmax(1, maxBlockFrames);
+    double prepareRate = 48000.0;
     {
         const juce::ScopedLock lock(stateLock);
-        maxBlockFrames_ = juce::jmax(1, maxBlockFrames);
-        currentBufferSize = maxBlockFrames_;
+        // Lower the render ceiling before touching the plugins: a shrinking
+        // block must not stay renderable at the old size while they are being
+        // re-prepared for the new one.
+        renderBlockFrames_ = juce::jmin(renderBlockFrames_, newBlock);
+        maxBlockFrames_ = newBlock;
+        currentBufferSize = newBlock;
+        prepareRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
         // The clock has negotiated. Settle every capture's read delay on the
         // real block now, so the value cannot depend on which device finished
         // probing first at load.
@@ -344,8 +351,16 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
             bus->buffer.clear();
         }
     }
+    // Prepare before raising the ceiling: until every host has allocated for
+    // the new block the audio thread must keep rendering at the old, smaller
+    // size. Handing a plugin more frames than it prepared for corrupts its
+    // internal buffers and faults inside its own DSP.
     for (auto* host : hosts) {
-        host->prepareToPlay(currentSampleRate, currentBufferSize);
+        host->prepareToPlay(prepareRate, newBlock);
+    }
+    {
+        const juce::ScopedLock lock(stateLock);
+        renderBlockFrames_ = newBlock;
     }
     // The render block size may have changed (device reload); reopen any
     // capture whose ring was sized for a smaller block. Unchanged captures
@@ -467,8 +482,10 @@ void AudioEngine::render(int frames) {
         return;
     }
 
-    // Oversized block: silence it, count once, skip processing.
-    if (maxBlockFrames_ > 0 && frames > maxBlockFrames_) {
+    // Oversized block: silence it, count once, skip processing. The ceiling is
+    // renderBlockFrames_, which only rises once the plugins are prepared for
+    // the new device block.
+    if (renderBlockFrames_ > 0 && frames > renderBlockFrames_) {
         oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
         pushSilenceToOutputsLocked(frames);
         recordRenderTelemetry(frames, elapsedNanos(),
@@ -2399,6 +2416,9 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
                          ? currentSampleRate
                          : (scene.sampleRate > 0.0 ? scene.sampleRate : 48000.0);
         bufferSize = currentBufferSize > 0 ? currentBufferSize : 512;
+        // A live scene load can happen while the engine is already rendering
+        // at the device block; never prepare below the render ceiling.
+        bufferSize = juce::jmax(bufferSize, maxBlockFrames_);
         for (const auto& c : channels) savedInputDevices[c->id] = c->inputDeviceName;
         for (const auto& o : outputs) savedOutputDevices[o->id] = o->outputDeviceName;
     }
