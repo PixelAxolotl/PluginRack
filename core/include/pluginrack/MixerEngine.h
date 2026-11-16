@@ -76,34 +76,37 @@ private:
         float sendGainR = 0.0f;
     };
 
-    // Mutex and EQ state grouped behind one pointer so MixerEngine stays
+    // One strip's built-in processing, in the order the scene asked for.
+    // Every effect family lives in its own vector because the processors
+    // differ; `steps` is the one list that says what runs when.
+    struct Step {
+        ChainItemType type = ChainItemType::Insert;
+        std::size_t index = 0;
+    };
+
+    struct StripDsp {
+        EqEngine eq;
+        bool eqEnabled = false;
+        std::vector<DynamicsProcessor> dynamics;
+        std::vector<MultibandProcessor> multiband;
+        std::vector<DeEsserProcessor> deEssers;
+        std::vector<LimiterProcessor> limiters;
+        std::vector<Step> steps;
+    };
+
+    // Mutex and DSP state grouped behind one pointer so MixerEngine stays
     // move-constructible (the class is returned by value from prepare
     // helpers); exactly one owner sees the mutex, render() and the four
     // setters are its only users.
-    struct EqState {
+    struct DspState {
         std::mutex mutex;
-        std::vector<EqEngine> channelEqs;
-        std::vector<EqEngine> outputEqs;
-        std::vector<char> channelEqEnabled;
-        std::vector<char> outputEqEnabled;
-        std::vector<std::vector<DynamicsProcessor>> channelEffects;
-        std::vector<std::vector<MultibandProcessor>> channelMultiband;
-        std::vector<std::vector<DeEsserProcessor>> channelDeEssers;
-        std::vector<std::vector<LimiterProcessor>> channelLimiters;
-        std::vector<std::vector<MultibandProcessor>> outputMultiband;
-        std::vector<std::vector<DeEsserProcessor>> outputDeEssers;
-        std::vector<std::vector<LimiterProcessor>> outputLimiters;
-        std::vector<std::vector<MultibandEffect>> channelMultibandFx;
-        std::vector<std::vector<DeEsserEffect>> channelDeEsserFx;
-        std::vector<std::vector<LimiterEffect>> channelLimiterFx;
-        std::vector<std::vector<MultibandEffect>> outputMultibandFx;
-        std::vector<std::vector<DeEsserEffect>> outputDeEsserFx;
-        std::vector<std::vector<LimiterEffect>> outputLimiterFx;
-        std::vector<char> channelChainMode;
-        std::vector<std::vector<ChainItem>> channelChains;
-        std::vector<std::vector<ChainItem>> outputChains;
-        std::vector<std::vector<DynamicsProcessor>> outputEffects;
+        std::vector<StripDsp> channels;
+        std::vector<StripDsp> outputs;
     };
+
+    template <typename StripScene>
+    static StripDsp buildStrip(const StripScene& source, double sampleRate, int maxFrames);
+    static void processStrip(StripDsp& strip, float* left, float* right, int frames);
 
     std::vector<ChannelCache> channels_;
     std::vector<RouteCache> routes_;
@@ -114,7 +117,7 @@ private:
     std::vector<float> accumulators_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
     std::vector<std::unique_ptr<InsertChain>> outputInsertChains_;
-    std::unique_ptr<EqState> eqState_;
+    std::unique_ptr<DspState> dsp_;
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;

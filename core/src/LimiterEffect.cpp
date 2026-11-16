@@ -1,15 +1,16 @@
 #include "pluginrack/LimiterEffect.h"
 
+#include "pluginrack/DspMath.h"
+
 #include <algorithm>
 #include <cmath>
 
 namespace pluginrack {
 namespace {
-float dbToGain(float db) noexcept { return std::pow(10.0f, db / 20.0f); }
-float gainToDb(float gain) noexcept { return 20.0f * std::log10(std::max(gain, 1.0e-8f)); }
-float smoothing(double rate, float ms) noexcept {
-    return 1.0f - std::exp(-1.0f / (static_cast<float>(rate) * std::max(ms, 0.1f) * 0.001f));
-}
+
+// Peak meter release, as a one-pole time constant in milliseconds.
+constexpr float kPeakDecayMs = 21.0f;
+
 } // namespace
 
 LimiterEffect makeDefaultLimiterEffect(std::uint32_t id) {
@@ -60,59 +61,37 @@ void LimiterProcessor::ensureDelay() {
 
 void LimiterProcessor::process(float* left, float* right, int frames) noexcept {
     if (left == nullptr || right == nullptr || frames <= 0 || effect_.bypassed) return;
-    ensureDelay();
-    const float inputGain = dbToGain(std::clamp(effect_.inputGainDb, -48.0f, 48.0f));
-    const float ceilingGain = dbToGain(std::clamp(effect_.ceilingDb, -12.0f, 0.0f));
-    const float release = smoothing(sampleRate_, std::clamp(effect_.releaseMs, 1.0f, 2000.0f));
+    if (delayCapacity_ <= 0) ensureDelay();
+    const float inputGain = dsp::dbToGain(std::clamp(effect_.inputGainDb, -48.0f, 48.0f));
+    const float ceilingGain = dsp::dbToGain(std::clamp(effect_.ceilingDb, -12.0f, 0.0f));
+    const float release = dsp::smoothingCoeff(sampleRate_, std::clamp(effect_.releaseMs, 1.0f, 2000.0f));
+    const float peakDecay = 1.0f - dsp::smoothingCoeff(sampleRate_, kPeakDecayMs);
     const int la = lookaheadSamples();
     const int cap = delayCapacity_;
-    // Two passes: first compute the gain envelope over the block using the
-    // delay-line lookahead, then apply. Process in place with stored input.
-    // Detector works ahead: gain for sample i uses input i+la.
+    // The detector reads the newest sample while the output leaves through
+    // the delay line, so a gain change lands exactly la samples early.
     for (int i = 0; i < frames; ++i) {
         const float inL = left[i] * inputGain;
         const float inR = right[i] * inputGain;
-        if (cap > 0) {
-            delayL_[static_cast<std::size_t>(delayWrite_)] = inL;
-            delayR_[static_cast<std::size_t>(delayWrite_)] = inR;
-        }
-        // Lookahead tap: written la samples ago (or current when la==0).
-        float detL, detR;
-        if (cap > 0 && la > 0) {
-            const int idx = static_cast<int>((static_cast<long long>(delayWrite_) - la) % (cap < 0 ? 1 : cap));
-            const int read = (idx + cap) % cap;
-            detL = delayL_[static_cast<std::size_t>(read)];
-            detR = delayR_[static_cast<std::size_t>(read)];
-        } else { detL = inL; detR = inR; }
-        const float level = std::max(std::fabs(detL), std::fabs(detR));
+        delayL_[static_cast<std::size_t>(delayWrite_)] = inL;
+        delayR_[static_cast<std::size_t>(delayWrite_)] = inR;
+        int read = delayWrite_ - la;
+        if (read < 0) read += cap;
+        delayWrite_ = (delayWrite_ + 1) % cap;
+        const float delayedL = la > 0 ? delayL_[static_cast<std::size_t>(read)] : inL;
+        const float delayedR = la > 0 ? delayR_[static_cast<std::size_t>(read)] : inR;
+        const float level = std::max(std::fabs(inL), std::fabs(inR));
         const float needed = level > ceilingGain && level > 1.0e-8f ? ceilingGain / level : 1.0f;
         const float targetGain = std::min(1.0f, needed);
         // Attack instantly (lookahead gives the warning), release slowly.
         if (targetGain < gain_) gain_ = targetGain;
         else gain_ += (targetGain - gain_) * release;
-        const float outL = cap > 0 && la > 0 ? (delayL_[static_cast<std::size_t>(delayWrite_)])
-                                              : inL;
-        const float outR = cap > 0 && la > 0 ? (delayR_[static_cast<std::size_t>(delayWrite_)])
-                                              : inR;
-        // When la>0 the read above used the delay line before write completed;
-        // the sample stored at delayWrite_ is this sample, so delayed output
-        // for the block start equals the earliest stored sample. To keep the
-        // implementation exact: delayed output = detL/detR paths are in sync
-        // because delayWrite_ advanced this iteration. Simpler: use inL/inR
-        // delayed by la through the circular buffer read.
-        float delayedL = inL, delayedR = inR;
-        if (cap > 0 && la > 0) {
-            delayedL = detL; delayedR = detR;
-        }
-        (void)outL; (void)outR;
         const float finalL = delayedL * gain_;
         const float finalR = delayedR * gain_;
         left[i] = finalL; right[i] = finalR;
-        reductionDb_ = -gainToDb(std::max(gain_, 1.0e-8f));
-        const float outPeak = std::max(std::fabs(finalL), std::fabs(finalR));
-        peakEnv_ = std::max(outPeak, peakEnv_ * 0.999f);
-        peakDb_ = gainToDb(peakEnv_);
-        delayWrite_ = (delayWrite_ + 1) % cap;
+        reductionDb_ = -dsp::gainToDb(gain_);
+        peakEnv_ = std::max(std::max(std::fabs(finalL), std::fabs(finalR)), peakEnv_ * peakDecay);
+        peakDb_ = dsp::gainToDb(peakEnv_);
     }
 }
 

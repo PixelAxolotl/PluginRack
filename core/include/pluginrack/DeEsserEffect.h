@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "pluginrack/DspMath.h"
+
 namespace pluginrack {
 
 enum class DeEsserMode { Split = 0, Wideband = 1 };
@@ -42,10 +44,8 @@ public:
 private:
     double sampleRate_ = 48000.0;
     DeEsserEffect effect_;
-    float b0_ = 1.0f, b1_ = 0.0f, b2_ = 0.0f, a1_ = 0.0f, a2_ = 0.0f;
+    dsp::Biquad band_;
     float s1L_ = 0.0f, s2L_ = 0.0f, s1R_ = 0.0f, s2R_ = 0.0f;
-    float detB0_ = 1.0f, detB1_ = 0.0f, detB2_ = 0.0f, detA1_ = 0.0f, detA2_ = 0.0f;
-    float detS1L_ = 0.0f, detS2L_ = 0.0f, detS1R_ = 0.0f, detS2R_ = 0.0f;
     float envelope_ = 0.0f;
     float gain_ = 1.0f;
     float reductionDb_ = 0.0f;

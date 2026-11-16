@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 
 #include "pluginrack/SampleScrub.h"
@@ -47,9 +48,21 @@ void flushNonFinite(float* left, float* right, int frames) noexcept {
     }
 }
 
+// Chain items name their effect by id; the processor vectors are built in
+// scene order, so the id is also the position to run.
+template <typename Effect>
+std::optional<std::size_t> findByEffectId(const std::vector<Effect>& effects, std::uint32_t id) {
+    for (std::size_t i = 0; i < effects.size(); ++i) {
+        if (effects[i].id == id) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
-MixerEngine::MixerEngine() : eqState_(std::make_unique<EqState>()) {}
+MixerEngine::MixerEngine() : dsp_(std::make_unique<DspState>()) {}
 
 void MixerEngine::setPluginFactory(IPluginFactory* factory) noexcept {
     pluginFactory_ = factory;
@@ -143,82 +156,14 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         }
     }
 
-    eqState_ = std::make_unique<EqState>();
-    eqState_->channelEqs.reserve(scene.channels.size());
-    eqState_->channelEqEnabled.reserve(scene.channels.size());
+    dsp_ = std::make_unique<DspState>();
+    dsp_->channels.reserve(scene.channels.size());
     for (const Channel& channel : scene.channels) {
-        EqEngine eq;
-        eq.prepare(scene.sampleRate, maxFrames);
-        eq.setBands(channel.eqBands);
-        eq.setDelayMs(channel.eqDelayMs);
-        eqState_->channelEqs.push_back(std::move(eq));
-        eqState_->channelEqEnabled.push_back(channel.eqEnabled ? 1 : 0);
+        dsp_->channels.push_back(buildStrip(channel, scene.sampleRate, maxFrames));
     }
-    eqState_->outputEqs.reserve(scene.outputs.size());
-    eqState_->outputEqEnabled.reserve(scene.outputs.size());
-    eqState_->channelEffects.reserve(scene.channels.size());
+    dsp_->outputs.reserve(scene.outputs.size());
     for (const Output& output : scene.outputs) {
-        EqEngine eq;
-        eq.prepare(scene.sampleRate, maxFrames);
-        eq.setBands(output.eqBands);
-        eq.setDelayMs(output.eqDelayMs);
-        eqState_->outputEqs.push_back(std::move(eq));
-        eqState_->outputEqEnabled.push_back(output.eqEnabled ? 1 : 0);
-    }
-    eqState_->outputEffects.reserve(scene.outputs.size());
-    for (const Channel& channel : scene.channels) {
-        std::vector<DynamicsProcessor> processors;
-        processors.reserve(channel.effects.size());
-        for (const auto& effect : channel.effects) {
-            DynamicsProcessor processor;
-            processor.prepare(scene.sampleRate);
-            processor.setEffect(effect);
-            processors.push_back(std::move(processor));
-        }
-        eqState_->channelEffects.push_back(std::move(processors));
-    }
-    for (const Output& output : scene.outputs) {
-        std::vector<DynamicsProcessor> processors;
-        processors.reserve(output.effects.size());
-        for (const auto& effect : output.effects) {
-            DynamicsProcessor processor;
-            processor.prepare(scene.sampleRate);
-            processor.setEffect(effect);
-            processors.push_back(std::move(processor));
-        }
-        eqState_->outputEffects.push_back(std::move(processors));
-    }
-
-    // New built-ins run in chain order when a chain is present; otherwise
-    // they append after the Dynamics effects, mirroring the live engine.
-    const auto buildNew = [&](const std::vector<MultibandEffect>& mbs, const std::vector<DeEsserEffect>& des, const std::vector<LimiterEffect>& lims, const std::vector<ChainItem>& chain, auto& mbOut, auto& deOut, auto& liOut, auto& mbFxOut, auto& deFxOut, auto& liFxOut) {
-        mbOut.reserve(mbs.size()); deOut.reserve(des.size()); liOut.reserve(lims.size());
-        for (const auto& e2 : mbs) { MultibandProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); mbOut.push_back(std::move(pr)); mbFxOut.push_back(e2); }
-        for (const auto& e2 : des) { DeEsserProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); deOut.push_back(std::move(pr)); deFxOut.push_back(e2); }
-        for (const auto& e2 : lims) { LimiterProcessor pr; pr.prepare(scene.sampleRate); pr.setEffect(e2); liOut.push_back(std::move(pr)); liFxOut.push_back(e2); }
-        (void)chain;
-    };
-    eqState_->channelMultiband.clear(); eqState_->channelDeEssers.clear(); eqState_->channelLimiters.clear();
-    eqState_->outputMultiband.clear(); eqState_->outputDeEssers.clear(); eqState_->outputLimiters.clear();
-    eqState_->channelMultibandFx.clear(); eqState_->channelDeEsserFx.clear(); eqState_->channelLimiterFx.clear();
-    eqState_->outputMultibandFx.clear(); eqState_->outputDeEsserFx.clear(); eqState_->outputLimiterFx.clear();
-    eqState_->channelChains.clear(); eqState_->outputChains.clear();
-    for (const Channel& channel : scene.channels) {
-        std::vector<MultibandProcessor> m; std::vector<DeEsserProcessor> d; std::vector<LimiterProcessor> l;
-        std::vector<MultibandEffect> mf; std::vector<DeEsserEffect> df; std::vector<LimiterEffect> lf;
-        buildNew(channel.multibandEffects, channel.deEsserEffects, channel.limiterEffects, channel.chain, m, d, l, mf, df, lf);
-        eqState_->channelMultiband.push_back(std::move(m)); eqState_->channelDeEssers.push_back(std::move(d)); eqState_->channelLimiters.push_back(std::move(l));
-        eqState_->channelMultibandFx.push_back(std::move(mf)); eqState_->channelDeEsserFx.push_back(std::move(df)); eqState_->channelLimiterFx.push_back(std::move(lf));
-        eqState_->channelChains.push_back(channel.chain);
-        eqState_->channelChainMode.push_back(channel.chain.empty() ? 0 : 1);
-    }
-    for (const Output& output : scene.outputs) {
-        std::vector<MultibandProcessor> m; std::vector<DeEsserProcessor> d; std::vector<LimiterProcessor> l;
-        std::vector<MultibandEffect> mf; std::vector<DeEsserEffect> df; std::vector<LimiterEffect> lf;
-        buildNew(output.multibandEffects, output.deEsserEffects, output.limiterEffects, output.chain, m, d, l, mf, df, lf);
-        eqState_->outputMultiband.push_back(std::move(m)); eqState_->outputDeEssers.push_back(std::move(d)); eqState_->outputLimiters.push_back(std::move(l));
-        eqState_->outputMultibandFx.push_back(std::move(mf)); eqState_->outputDeEsserFx.push_back(std::move(df)); eqState_->outputLimiterFx.push_back(std::move(lf));
-        eqState_->outputChains.push_back(output.chain);
+        dsp_->outputs.push_back(buildStrip(output, scene.sampleRate, maxFrames));
     }
 
     stoppedChannels_.assign(channels_.size(), 0);
@@ -257,53 +202,173 @@ bool MixerEngine::prepare(const Scene& scene, const SceneAvailability& availabil
     return true;
 }
 
+template <typename StripScene>
+MixerEngine::StripDsp MixerEngine::buildStrip(const StripScene& source, double sampleRate, int maxFrames) {
+    StripDsp strip;
+    strip.eq.prepare(sampleRate, maxFrames);
+    strip.eq.setBands(source.eqBands);
+    strip.eq.setDelayMs(source.eqDelayMs);
+    strip.eqEnabled = source.eqEnabled;
+
+    strip.dynamics.reserve(source.effects.size());
+    for (const DynamicsEffect& effect : source.effects) {
+        DynamicsProcessor processor;
+        processor.prepare(sampleRate);
+        processor.setEffect(effect);
+        strip.dynamics.push_back(std::move(processor));
+    }
+    strip.multiband.reserve(source.multibandEffects.size());
+    for (const MultibandEffect& effect : source.multibandEffects) {
+        MultibandProcessor processor;
+        processor.prepare(sampleRate, maxFrames);
+        processor.setEffect(effect);
+        strip.multiband.push_back(std::move(processor));
+    }
+    strip.deEssers.reserve(source.deEsserEffects.size());
+    for (const DeEsserEffect& effect : source.deEsserEffects) {
+        DeEsserProcessor processor;
+        processor.prepare(sampleRate);
+        processor.setEffect(effect);
+        strip.deEssers.push_back(std::move(processor));
+    }
+    strip.limiters.reserve(source.limiterEffects.size());
+    for (const LimiterEffect& effect : source.limiterEffects) {
+        LimiterProcessor processor;
+        processor.prepare(sampleRate);
+        processor.setEffect(effect);
+        strip.limiters.push_back(std::move(processor));
+    }
+
+    // Resolve the running order once. The scene's chain names effects by id;
+    // anything the chain leaves out still runs, appended in the historical
+    // Dynamics -> Multiband -> DeEsser -> Limiter order so old scenes render
+    // exactly as before. EQ runs before the chain and inserts render through
+    // their own InsertChain, so both are skipped here.
+    std::vector<char> usedDynamics(source.effects.size(), 0);
+    std::vector<char> usedMultiband(source.multibandEffects.size(), 0);
+    std::vector<char> usedDeEssers(source.deEsserEffects.size(), 0);
+    std::vector<char> usedLimiters(source.limiterEffects.size(), 0);
+    for (const ChainItem& item : source.chain) {
+        switch (item.type) {
+        case ChainItemType::Dynamics:
+            if (const auto index = findByEffectId(source.effects, item.id)) {
+                usedDynamics[*index] = 1;
+                strip.steps.push_back({item.type, *index});
+            }
+            break;
+        case ChainItemType::Multiband:
+            if (const auto index = findByEffectId(source.multibandEffects, item.id)) {
+                usedMultiband[*index] = 1;
+                strip.steps.push_back({item.type, *index});
+            }
+            break;
+        case ChainItemType::DeEsser:
+            if (const auto index = findByEffectId(source.deEsserEffects, item.id)) {
+                usedDeEssers[*index] = 1;
+                strip.steps.push_back({item.type, *index});
+            }
+            break;
+        case ChainItemType::Limiter:
+            if (const auto index = findByEffectId(source.limiterEffects, item.id)) {
+                usedLimiters[*index] = 1;
+                strip.steps.push_back({item.type, *index});
+            }
+            break;
+        case ChainItemType::Eq:
+        case ChainItemType::Insert:
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < usedDynamics.size(); ++i) {
+        if (usedDynamics[i] == 0) strip.steps.push_back({ChainItemType::Dynamics, i});
+    }
+    for (std::size_t i = 0; i < usedMultiband.size(); ++i) {
+        if (usedMultiband[i] == 0) strip.steps.push_back({ChainItemType::Multiband, i});
+    }
+    for (std::size_t i = 0; i < usedDeEssers.size(); ++i) {
+        if (usedDeEssers[i] == 0) strip.steps.push_back({ChainItemType::DeEsser, i});
+    }
+    for (std::size_t i = 0; i < usedLimiters.size(); ++i) {
+        if (usedLimiters[i] == 0) strip.steps.push_back({ChainItemType::Limiter, i});
+    }
+    return strip;
+}
+
+void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int frames) {
+    if (strip.eqEnabled) {
+        flushNonFinite(left, right, frames);
+        strip.eq.process(left, right, frames);
+    }
+    for (const Step& step : strip.steps) {
+        switch (step.type) {
+        case ChainItemType::Dynamics:
+            if (step.index < strip.dynamics.size()) strip.dynamics[step.index].process(left, right, frames);
+            break;
+        case ChainItemType::Multiband:
+            if (step.index < strip.multiband.size()) strip.multiband[step.index].process(left, right, frames);
+            break;
+        case ChainItemType::DeEsser:
+            if (step.index < strip.deEssers.size()) strip.deEssers[step.index].process(left, right, frames);
+            break;
+        case ChainItemType::Limiter:
+            if (step.index < strip.limiters.size()) strip.limiters[step.index].process(left, right, frames);
+            break;
+        case ChainItemType::Eq:
+        case ChainItemType::Insert:
+            break;
+        }
+    }
+}
+
 void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {
-    if (eqState_ == nullptr) {
+    if (dsp_ == nullptr) {
         return;
     }
-    std::scoped_lock lock(eqState_->mutex);
-    if (ch < 0 || static_cast<std::size_t>(ch) >= eqState_->channelEqs.size()) {
+    std::scoped_lock lock(dsp_->mutex);
+    if (ch < 0 || static_cast<std::size_t>(ch) >= dsp_->channels.size()) {
         return;
     }
-    eqState_->channelEqs[static_cast<std::size_t>(ch)].setBands(bands);
+    dsp_->channels[static_cast<std::size_t>(ch)].eq.setBands(bands);
 }
 
 void MixerEngine::setOutputEq(int out, const std::vector<EqBand>& bands) {
-    if (eqState_ == nullptr) {
+    if (dsp_ == nullptr) {
         return;
     }
-    std::scoped_lock lock(eqState_->mutex);
-    if (out < 0 || static_cast<std::size_t>(out) >= eqState_->outputEqs.size()) {
+    std::scoped_lock lock(dsp_->mutex);
+    if (out < 0 || static_cast<std::size_t>(out) >= dsp_->outputs.size()) {
         return;
     }
-    eqState_->outputEqs[static_cast<std::size_t>(out)].setBands(bands);
+    dsp_->outputs[static_cast<std::size_t>(out)].eq.setBands(bands);
 }
 
 void MixerEngine::setChannelEqBypassed(int ch, bool bypassed) {
-    if (eqState_ == nullptr) {
+    if (dsp_ == nullptr) {
         return;
     }
-    std::scoped_lock lock(eqState_->mutex);
-    if (ch < 0 || static_cast<std::size_t>(ch) >= eqState_->channelEqEnabled.size()) {
+    std::scoped_lock lock(dsp_->mutex);
+    if (ch < 0 || static_cast<std::size_t>(ch) >= dsp_->channels.size()) {
         return;
     }
-    eqState_->channelEqEnabled[static_cast<std::size_t>(ch)] = bypassed ? 0 : 1;
+    StripDsp& strip = dsp_->channels[static_cast<std::size_t>(ch)];
+    strip.eqEnabled = !bypassed;
     if (bypassed) {
-        eqState_->channelEqs[static_cast<std::size_t>(ch)].reset();
+        strip.eq.reset();
     }
 }
 
 void MixerEngine::setOutputEqBypassed(int out, bool bypassed) {
-    if (eqState_ == nullptr) {
+    if (dsp_ == nullptr) {
         return;
     }
-    std::scoped_lock lock(eqState_->mutex);
-    if (out < 0 || static_cast<std::size_t>(out) >= eqState_->outputEqEnabled.size()) {
+    std::scoped_lock lock(dsp_->mutex);
+    if (out < 0 || static_cast<std::size_t>(out) >= dsp_->outputs.size()) {
         return;
     }
-    eqState_->outputEqEnabled[static_cast<std::size_t>(out)] = bypassed ? 0 : 1;
+    StripDsp& strip = dsp_->outputs[static_cast<std::size_t>(out)];
+    strip.eqEnabled = !bypassed;
     if (bypassed) {
-        eqState_->outputEqs[static_cast<std::size_t>(out)].reset();
+        strip.eq.reset();
     }
 }
 
@@ -375,25 +440,12 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchRight[i] = 0.0f;
             }
         }
-        // Channel EQ is pre-fader and runs before inserts and gain/pan.
-        // Bypassed strips skip process() entirely, keeping the output
-        // bit-identical to the pre-EQ engine. The lock only spans flag
-        // read + process() so bypass/band swaps never race a live filter.
-        if (eqState_ != nullptr) {
-            std::scoped_lock lock(eqState_->mutex);
-            const std::size_t n = eqState_->channelEqEnabled.size();
-            if (c < n && eqState_->channelEqEnabled[c] != 0 &&
-                c < eqState_->channelEqs.size()) {
-                flushNonFinite(scratchLeft, scratchRight, frames);
-                eqState_->channelEqs[c].process(scratchLeft, scratchRight, frames);
-            }
-            if (c < eqState_->channelEffects.size()) {
-                for (auto& effect : eqState_->channelEffects[c])
-                    effect.process(scratchLeft, scratchRight, frames);
-            }
-            if (c < eqState_->channelMultiband.size()) { for (auto& e : eqState_->channelMultiband[c]) e.process(scratchLeft, scratchRight, frames); }
-            if (c < eqState_->channelDeEssers.size()) { for (auto& e : eqState_->channelDeEssers[c]) e.process(scratchLeft, scratchRight, frames); }
-            if (c < eqState_->channelLimiters.size()) { for (auto& e : eqState_->channelLimiters[c]) e.process(scratchLeft, scratchRight, frames); }
+        // The strip's EQ and built-in chain are pre-fader and run before
+        // inserts and gain/pan. The lock only spans the run so bypass and
+        // band swaps never race a live filter.
+        if (dsp_ != nullptr && c < dsp_->channels.size()) {
+            std::scoped_lock lock(dsp_->mutex);
+            processStrip(dsp_->channels[c], scratchLeft, scratchRight, frames);
         }
         // The built-in chain is an insert too: quarantine anything it emitted
         // before the VST chain and the fader see it.
@@ -467,25 +519,16 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
 
     // Output EQ is pre-master-write and runs before the output insert
     // chains, mirroring the channel tap. Bypassed outputs are untouched.
-    if (eqState_ != nullptr) {
-        std::scoped_lock lock(eqState_->mutex);
+    if (dsp_ != nullptr) {
+        std::scoped_lock lock(dsp_->mutex);
         for (std::size_t o = 0; o < numOutputs; ++o) {
             const int frames = clampFrames(outputBlocks[o].numFrames, maxFrames);
             float* accLeft =
                 accumulators_.data() + (o * 2) * static_cast<std::size_t>(maxFrames);
             float* accRight = accLeft + maxFrames;
-            if (o < eqState_->outputEqEnabled.size() &&
-                eqState_->outputEqEnabled[o] != 0 && o < eqState_->outputEqs.size()) {
-                flushNonFinite(accLeft, accRight, frames);
-                eqState_->outputEqs[o].process(accLeft, accRight, frames);
+            if (o < dsp_->outputs.size()) {
+                processStrip(dsp_->outputs[o], accLeft, accRight, frames);
             }
-            if (o < eqState_->outputEffects.size()) {
-                for (auto& effect : eqState_->outputEffects[o])
-                    effect.process(accLeft, accRight, frames);
-            }
-            if (o < eqState_->outputMultiband.size()) { for (auto& e : eqState_->outputMultiband[o]) e.process(accLeft, accRight, frames); }
-            if (o < eqState_->outputDeEssers.size()) { for (auto& e : eqState_->outputDeEssers[o]) e.process(accLeft, accRight, frames); }
-            if (o < eqState_->outputLimiters.size()) { for (auto& e : eqState_->outputLimiters[o]) e.process(accLeft, accRight, frames); }
             if (scrubEnabled_) {
                 scrubbedSamples_ += static_cast<std::uint64_t>(
                     scrubNonFinite(accLeft, accRight, frames));

@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "pluginrack/DspMath.h"
+
 namespace pluginrack {
 
 // Filter types for the fixed seven-band channel EQ (RBJ cookbook biquads).
@@ -55,15 +57,14 @@ public:
 private:
     static constexpr int kNumBands = 7;
 
-    struct Biquad {
-        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+    struct BandFilter {
+        dsp::Biquad coeffs;
         float s1L = 0.0f, s2L = 0.0f;
         float s1R = 0.0f, s2R = 0.0f;
     };
 
     void rebuild();
-    static void computeCoeffs(const EqBand& band, double sampleRate, Biquad& out) noexcept;
-    static void applyChannel(float* buf, int n, Biquad& f, float& s1, float& s2) noexcept;
+    static void computeCoeffs(const EqBand& band, double sampleRate, BandFilter& out) noexcept;
 
     bool delayActive() const noexcept;
     void ensureDelayLine();
@@ -72,7 +73,7 @@ private:
     double sampleRate_ = 0.0; // 0.0 until prepared; process() is a no-op before
     int maxBlock_ = 0;
     std::vector<EqBand> bands_;
-    Biquad filters_[kNumBands];
+    BandFilter filters_[kNumBands];
     int activeMask_ = 0;
 
     // Delay state: one write cursor shared by both channels, read taps

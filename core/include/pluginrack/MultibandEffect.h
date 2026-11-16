@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "pluginrack/DspMath.h"
+
 namespace pluginrack {
 
 enum class MultibandMode { Compress, Expand };
@@ -37,7 +39,8 @@ float multibandStaticGainDb(float levelDb, const MultibandBand& band);
 
 class MultibandProcessor {
 public:
-    void prepare(double sampleRate);
+    // Reserve every buffer the render path needs; call from the message thread.
+    void prepare(double sampleRate, int maxBlockFrames = 0);
     void setEffect(const MultibandEffect& effect);
     void process(float* left, float* right, int frames) noexcept;
     void reset() noexcept;
@@ -51,6 +54,8 @@ private:
     MultibandEffect effect_;
     std::vector<BiquadState> lpStates_;
     std::vector<BiquadState> hpStates_;
+    std::vector<dsp::Biquad> lpCoeffs_;
+    std::vector<dsp::Biquad> hpCoeffs_;
     std::vector<Envelope> envelopes_;
     std::vector<float> reductions_;
     std::vector<float> bufL_;
@@ -65,7 +70,7 @@ private:
     int activeSolo_ = -1;
     bool prepared_ = false;
     void rebuild();
-    void ensureScratch(int frames);
+    void reserveScratch(int frames);
 };
 
 } // namespace pluginrack
