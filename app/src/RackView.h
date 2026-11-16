@@ -20,6 +20,7 @@
 #include "LevelMeter.h"
 #include "NativeThumbnail.h"
 #include "PluginKnobWatcher.h"
+#include "SideChainBar.h"
 #include "StripDialog.h"
 #include "Theme.h"
 #include "TouchSlideBar.h"
@@ -106,6 +107,9 @@ private:
     void refreshSlots();
     int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
+    // Shows the side-chain strip for the focused VST insert, or hides it when
+    // a built-in panel owns the bay.
+    void updateSideChainBar();
     // Scales the docked plugin editor to fit the bay and centres it in it.
     void layoutDockedEditor();
     // Scales the docked editor so one axis fills the bay and the other fits,
@@ -254,6 +258,10 @@ private:
     juce::Label chainMarker;
 
     // Center editor
+    // Side-chain routing strip pinned above the docked editor: it edits the
+    // focused VST insert's source, tap point and trim.
+    SideChainBar sideChainBar;
+    bool sideChainBarVisible = false;
     juce::Viewport editorViewport;
     juce::Component editorHolder;
     juce::Label noEditorLabel;

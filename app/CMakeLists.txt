@@ -86,6 +86,8 @@ target_sources(pluginrack_app PRIVATE
     src/SavesView.h
     src/SceneBridge.cpp
     src/SceneBridge.h
+    src/SideChainBar.cpp
+    src/SideChainBar.h
     src/SettingsView.cpp
     src/SettingsView.h
     src/SliderTouch.cpp

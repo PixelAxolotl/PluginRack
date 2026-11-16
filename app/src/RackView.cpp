@@ -16,7 +16,7 @@ constexpr int kSlotInset = 4;
 constexpr int kLevelFrames = 512;
 } // namespace
 
-RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
+RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engine) {
     nameLabel.setJustificationType(juce::Justification::centredLeft);
     nameLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     nameLabel.setColour(juce::Label::textColourId, theme::text());
@@ -211,6 +211,8 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine) {
     editorViewport.setViewedComponent(&editorHolder, false);
     editorViewport.setScrollBarsShown(true, true);
     addAndMakeVisible(editorViewport);
+
+    addChildComponent(sideChainBar);
 
     outputHeader.setText("Output", juce::dontSendNotification);
     outputHeader.setJustificationType(juce::Justification::centredLeft);
@@ -754,6 +756,9 @@ void RackView::refreshSlots() {
     } else {
         chainMarker.setVisible(false);
     }
+    // Strip and bus lists change with the scene, so the side-chain bar re-reads
+    // them whenever the cards are rebuilt.
+    if (sideChainBarVisible) sideChainBar.refresh();
     startMiniTimer();
 }
 
@@ -1512,6 +1517,19 @@ void RackView::refreshEditor() {
     // Docking a native plugin UI is the slow part of adding one (some editors
     // take ~1-2.5 s to attach), so it is reported in the run log.
     juce::Logger::writeToLog("rack: editor docked " + dockElapsed() + " ms");
+}
+
+void RackView::updateSideChainBar() {
+    // Built-in panels (EQ, dynamics, multiband, ...) fill the bay themselves;
+    // the strip belongs to a docked plugin editor only.
+    auto* focus = focusedInsertId != 0 ? findInsert(focusedInsertId) : nullptr;
+    const bool stripExists = currentChannel() != nullptr || currentOutput() != nullptr;
+    const bool show = focus != nullptr && stripExists && !eqFocused && !dynamicsFocused
+                      && focusedEffectWindow == nullptr;
+    sideChainBarVisible = show;
+    sideChainBar.setVisible(show);
+    if (!show) return;
+    sideChainBar.setTarget(focus, selectedIsOutput, static_cast<std::uint32_t>(selectedId));
 }
 
 void RackView::layoutDockedEditor() {
@@ -2364,8 +2382,14 @@ void RackView::resized() {
 
     // Keep embedded editors inside the framed center bay. The viewport and
     // its child editors paint opaque surfaces, so using the panel bounds
-    // directly would cover the panel outline.
-    const auto editorArea = centerArea.reduced(2);
+    // directly would cover the panel outline. A focused VST insert also gets
+    // the side-chain strip pinned above its editor.
+    updateSideChainBar();
+    auto editorArea = centerArea.reduced(2);
+    if (sideChainBarVisible) {
+        sideChainBar.setBounds(editorArea.removeFromTop(SideChainBar::kHeight));
+        editorArea.removeFromTop(4);
+    }
     editorViewport.setBounds(editorArea);
     const int vw = juce::jmax(0, editorViewport.getWidth());
     const int vh = juce::jmax(0, editorViewport.getHeight());
