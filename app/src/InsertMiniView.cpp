@@ -10,6 +10,25 @@ namespace {
 constexpr int kGaugeWidth = 10;
 constexpr int kGaugeCaptionHeight = 10;
 constexpr float kMaxReductionDb = 24.0f;
+
+// Live gain-reduction column shared by the de-esser, limiter and dynamics
+// cards: an empty track with a fill rising from the bottom, captioned "GR".
+void paintReductionGauge(juce::Graphics& g, juce::Rectangle<int> gauge,
+                         juce::Rectangle<int> caption, float reductionDb,
+                         juce::Colour fillColour) {
+    g.setColour(theme::bg().darker(0.3f));
+    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
+    const float fill = juce::jlimit(0.0f, 1.0f, reductionDb / kMaxReductionDb);
+    if (fill > 0.0f) {
+        auto filled = gauge.toFloat();
+        filled.setHeight(filled.getHeight() * fill);
+        g.setColour(fillColour);
+        g.fillRoundedRectangle(filled, 2.0f);
+    }
+    g.setColour(theme::dim());
+    g.setFont(juce::Font(juce::FontOptions(8.0f)));
+    g.drawText("GR", caption, juce::Justification::centred, false);
+}
 // Transfer curves are drawn over this input range, matching the range the
 // dynamics panel's own axes cover.
 constexpr float kMinTransferDb = -60.0f;
@@ -326,18 +345,7 @@ void InsertMiniView::paintDeEsser(juce::Graphics& g) {
     const float thresholdY = TraceGraphComponent::miniTraceDb(deEsser.thresholdDb, graph);
     g.setColour(theme::cyan().withAlpha(0.65f));
     g.drawHorizontalLine(juce::roundToInt(thresholdY), graph.getX(), graph.getRight());
-    g.setColour(theme::bg().darker(0.3f));
-    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
-    const float fill = juce::jlimit(0.0f, 1.0f, deEsserGainReductionDb / kMaxReductionDb);
-    if (fill > 0.0f) {
-        auto filled = gauge.toFloat();
-        filled.setHeight(filled.getHeight() * fill);
-        g.setColour(theme::red());
-        g.fillRoundedRectangle(filled, 2.0f);
-    }
-    g.setColour(theme::dim());
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
-    g.drawText("GR", gaugeCaption, juce::Justification::centred, false);
+    paintReductionGauge(g, gauge, gaugeCaption, deEsserGainReductionDb, theme::red());
 }
 
 void InsertMiniView::paintLimiter(juce::Graphics& g) {
@@ -359,18 +367,7 @@ void InsertMiniView::paintLimiter(juce::Graphics& g) {
         g.setColour(theme::text());
         g.fillEllipse(x - 2.0f, y - 2.0f, 4.0f, 4.0f);
     }
-    g.setColour(theme::bg().darker(0.3f));
-    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
-    const float fill = juce::jlimit(0.0f, 1.0f, -gainDb / kMaxReductionDb);
-    if (fill > 0.0f) {
-        auto filled = gauge.toFloat();
-        filled.setHeight(filled.getHeight() * fill);
-        g.setColour(theme::red());
-        g.fillRoundedRectangle(filled, 2.0f);
-    }
-    g.setColour(theme::dim());
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
-    g.drawText("GR", gaugeCaption, juce::Justification::centred, false);
+    paintReductionGauge(g, gauge, gaugeCaption, -gainDb, theme::red());
 }
 
 void InsertMiniView::paintDynamics(juce::Graphics& g) {
@@ -453,18 +450,7 @@ void InsertMiniView::paintDynamics(juce::Graphics& g) {
         g.fillEllipse(dot);
     }
 
-    g.setColour(theme::bg().darker(0.3f));
-    g.fillRoundedRectangle(gauge.toFloat(), 2.0f);
-    const float fill = juce::jlimit(0.0f, 1.0f, -gainDb / kMaxReductionDb);
-    if (fill > 0.0f) {
-        auto filled = gauge.toFloat();
-        filled.setHeight(filled.getHeight() * fill);
-        g.setColour(theme::amber());
-        g.fillRoundedRectangle(filled, 2.0f);
-    }
-    g.setColour(theme::dim());
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
-    g.drawText("GR", gaugeCaption, juce::Justification::centred, false);
+    paintReductionGauge(g, gauge, gaugeCaption, -gainDb, theme::amber());
 }
 
 MiniSpectrum::MiniSpectrum()
