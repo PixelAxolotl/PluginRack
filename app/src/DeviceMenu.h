@@ -5,10 +5,8 @@
 #include <functional>
 
 namespace DeviceMenu {
-void showInputMenu(juce::Component& target, const juce::String& current,
-                   const juce::StringArray& devices,
-                   std::function<void(juce::String)> onChoose);
-void showOutputMenu(juce::Component& target, const juce::String& current,
+// The list is the same for both directions; only the header differs.
+void showDeviceMenu(bool forInput, juce::Component& target, const juce::String& current,
                     const juce::StringArray& devices,
                     std::function<void(juce::String)> onChoose);
 }

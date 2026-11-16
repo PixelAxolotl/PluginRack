@@ -34,7 +34,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     addAndMakeVisible(removeOutputButton);
 
     deviceControl.setOnClick([this] {
-        DeviceMenu::showOutputMenu(deviceControl,
+        DeviceMenu::showDeviceMenu(false, deviceControl,
                                    audioEngine.getOutputDeviceState(output.id).deviceName,
                                    audioEngine.getAvailableOutputDevices(),
                                    [this](juce::String chosen) {

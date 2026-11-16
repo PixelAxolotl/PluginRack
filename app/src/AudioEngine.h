@@ -298,7 +298,6 @@ public:
     ~AudioEngine();
 
     void prepareToPlay(int maxBlockFrames);
-    void openDefaultDevices();
     // Assigns the default output/input and opens them on the startup worker
     // instead of blocking the message thread (see openStripsDevicesAsync).
     void openDefaultDevicesAsync();

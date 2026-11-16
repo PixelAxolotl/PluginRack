@@ -4,6 +4,13 @@
 #include "DeviceNames.h"
 
 namespace {
+// The text area both paint() and mouseDown() measure: the click target must
+// follow the drawing, or a layout tweak silently moves the rename zone.
+juce::Rectangle<int> contentArea(const juce::Component& c) {
+    const bool narrow = c.getWidth() < 110;
+    return c.getLocalBounds().reduced(narrow ? 5 : 8, 4);
+}
+
 juce::String compactDeviceName(const juce::String& name) {
     if (isSystemDefaultName(name)) return "Default";
     if (isSilentDeviceName(name)) return "None";
@@ -44,7 +51,7 @@ void DeviceControl::paint(juce::Graphics& g) {
     }
 
     const bool narrow = getWidth() < 110;
-    auto area = getLocalBounds().reduced(narrow ? 5 : 8, 4);
+    auto area = contentArea(*this);
     // right side: dot + chevron
     auto right = area.removeFromRight(26);
     {
@@ -61,7 +68,7 @@ void DeviceControl::paint(juce::Graphics& g) {
     {
         juce::Colour dot = theme::dim(); // none
         if (error.isNotEmpty()) dot = theme::red();
-        else if (deviceName.isNotEmpty() && !deviceName.startsWith("None")) dot = theme::green();
+        else if (deviceName.isNotEmpty() && !isSilentDeviceName(deviceName)) dot = theme::green();
         auto dr = right.removeFromLeft(8).toFloat();
         auto dotR = juce::Rectangle<float>(dr.getX() + (dr.getWidth() - 6.0f) / 2.0f,
                                            dr.getCentreY() - 3.0f, 6.0f, 6.0f);
@@ -114,8 +121,7 @@ void DeviceControl::mouseDown(const juce::MouseEvent& e) {
     // The old code opened the menu on every mouseDown, which ate the first
     // click of a double-click rename.
     const auto pos = e.getPosition();
-    const bool narrow = getWidth() < 110;
-    auto area = getLocalBounds().reduced(narrow ? 5 : 8, 4);
+    const auto area = contentArea(*this);
     const int titleH = area.getHeight() / 2;
     if (pos.y < area.getY() + titleH) {
         if (onRename) onRename();
@@ -128,7 +134,6 @@ void DeviceControl::mouseDoubleClick(const juce::MouseEvent&) {
     // One action per double-click: the tooltip promises rename, and a strip
     // that also navigates on the same gesture would do both at once.
     if (onRename) onRename();
-    else if (onDoubleClick) onDoubleClick();
 }
 
 bool DeviceControl::keyPressed(const juce::KeyPress& key) {

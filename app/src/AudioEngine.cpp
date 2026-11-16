@@ -69,11 +69,11 @@ constexpr int kClockRetryDelayMs = 150;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
 
-// Compact label for the clock description: the registered device type names
-// ("Windows Audio (Low Latency Mode)") are too long for the toolbar. The shared
-// helper keeps the strips and the budget wording identical.
-juce::String shortDeviceTypeTag(const juce::String& type) {
-    return deviceBackendTag(type);
+// A single-client driver reports its own bare wording ("No such device");
+// the engine's own message adds the endpoint after a colon. Both mean the same
+// refusal, so the retry predicate has to accept either spelling.
+bool isNoSuchDeviceError(const juce::String& message) {
+    return message.containsIgnoreCase("No such device");
 }
 
 // The persisted mode is the type the opener actually selected, not the
@@ -253,15 +253,6 @@ AudioEngine::~AudioEngine() {
     prepareAliveToken_->store(false, std::memory_order_release);
     stopInternalClock();
     stopDeviceOpenThread();
-}
-
-void AudioEngine::openDefaultDevices() {
-    if (!outputs.empty()) {
-        setOutputDevice(outputs.front()->id, systemDefaultDeviceName());
-    }
-    if (!channels.empty()) {
-        setChannelInputDevice(channels.front()->id, systemDefaultDeviceName());
-    }
 }
 
 void AudioEngine::openDefaultDevicesAsync() {
@@ -2973,7 +2964,8 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // still forces a fresh probe instead of being pinned to the old answer.
     const bool cachedSharedMode = cachedCap.has_value()
         && cachedCap->outputChannels > 0
-        && (cachedCap->mode == "shared" || cachedCap->mode == "sharedLowLatency");
+        && (cachedCap->mode == pluginrack::deviceModeId(pluginrack::DeviceBackend::Shared)
+            || cachedCap->mode == pluginrack::deviceModeId(pluginrack::DeviceBackend::SharedLowLatency));
     if (preferExclusive && cachedSharedMode
         && !modeCacheBypass_.load(std::memory_order_relaxed)) {
         preferExclusive = false;
@@ -3108,8 +3100,6 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         } else {
             prepareToPlayImpl(newBuf, true);
         }
-    } else {
-        // ensure clock id remains; if no clock, maybe set? handled by isClock true when none
     }
 
     if (openErr.isEmpty()) {
@@ -3214,7 +3204,8 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
     for (auto& output : outputs) {
         if (output->outputDeviceName.isNotEmpty() &&
             !isSilentDeviceName(output->outputDeviceName)) {
-            const auto e = setOutputDevice(output->id, output->outputDeviceName);
+            const auto e = setOutputDeviceImpl(output->id, output->outputDeviceName,
+                                                currentSampleRate);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }
     }
@@ -3223,7 +3214,7 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
         for (auto& output : outputs) {
             if (output->outputDeviceName.isNotEmpty() &&
                 !isSilentDeviceName(output->outputDeviceName)) {
-                setOutputDevice(output->id, output->outputDeviceName);
+                setOutputDeviceImpl(output->id, output->outputDeviceName, currentSampleRate);
             }
         }
         return "The output device refused the new buffer size; kept the previous one.\n"
@@ -3360,7 +3351,7 @@ juce::String AudioEngine::getClockDescription() const {
             auto desc = o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
                       + juce::String(currentBufferSize) + " smp";
             if (o->outputDeviceType.isNotEmpty())
-                desc += " [" + shortDeviceTypeTag(o->outputDeviceType) + "]";
+                desc += " [" + deviceBackendTag(o->outputDeviceType) + "]";
             return desc;
         }
     }
@@ -4407,7 +4398,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
              ++attempt) {
             // Only a driver-busy refusal is worth retrying; a rejected buffer
             // size or a missing endpoint would fail the same way again.
-            if (outputResults.front().indexOf("No such device") < 0) break;
+            if (!isNoSuchDeviceError(outputResults.front())) break;
             juce::Thread::sleep(kClockRetryDelayMs);
             const auto status = "output \"" + outputsWanted.front().label + "\" - "
                               + outputsWanted.front().name + " (retry "
@@ -4432,7 +4423,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         // in stopDeviceOpenThread() while this worker waits for it to dispatch
         // the reopen.
         if (!shouldExit() && outputResults.front().isNotEmpty()
-            && outputResults.front().indexOf("No such device") >= 0
+            && isNoSuchDeviceError(outputResults.front())
             && !juce::MessageManager::existsAndIsCurrentThread()) {
             struct ClockReopen {
                 std::uint32_t id = 0;

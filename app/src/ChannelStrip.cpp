@@ -52,7 +52,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     deviceControl.setOnClick([this] {
         const auto current = audioEngine.getChannelDeviceState(channel.id);
-        DeviceMenu::showInputMenu(deviceControl, current.deviceName,
+        DeviceMenu::showDeviceMenu(true, deviceControl, current.deviceName,
                                   audioEngine.getAvailableInputDevices(),
                                   [this](juce::String chosen) {
             const std::uint32_t channelId = channel.id;

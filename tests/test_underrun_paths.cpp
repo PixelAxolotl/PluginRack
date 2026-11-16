@@ -881,7 +881,7 @@ TEST_CASE("an ASIO open failure explains the single-client rule", "[latency][dev
     const auto open = functionBody(device, "juce::String openWithPreferredType");
     // The most common ASIO failure is a second client on a driver that only
     // accepts one; the raw driver error does not say that.
-    CHECK(contains(open, "chosenTypeName == deviceTypeName(pluginrack::DeviceTypeNames::asio)"));
+    CHECK(contains(open, "pluginrack::deviceBackendOf(chosenTypeName.toStdString()) == pluginrack::DeviceBackend::Asio"));
     CHECK(contains(open, "ASIO interfaces accept one client"));
     // ASIO must still be reachable end to end.
     CHECK(contains(device, "createAudioIODeviceType_ASIO"));
@@ -974,7 +974,7 @@ TEST_CASE("the audio backend is visible on the strips and in the budget",
     // The engine exposes it and the Settings clock line prints it.
     const auto engine = readSource("app/src/AudioEngine.cpp");
     CHECK(contains(engine, "getActiveDeviceType()"));
-    CHECK(contains(engine, "shortDeviceTypeTag(o->outputDeviceType)"));
+    CHECK(contains(engine, "deviceBackendTag(o->outputDeviceType)"));
     const auto budget = readSource("app/src/LatencyBudgetView.h");
     CHECK(contains(budget, "deviceBackendTag(report_.clockDeviceType)"));
 }

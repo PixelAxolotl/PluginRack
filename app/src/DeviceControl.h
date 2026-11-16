@@ -19,10 +19,6 @@ public:
     void setOnClick(std::function<void()> cb) { onClick = std::move(cb); }
     void setOnRename(std::function<void()> cb) { onRename = std::move(cb); }
 
-    juce::String getTitle() const { return title; }
-    juce::String getDeviceName() const { return deviceName; }
-    juce::String getError() const { return error; }
-
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDoubleClick(const juce::MouseEvent&) override;
@@ -39,7 +35,6 @@ private:
     juce::String backendType;
     juce::String error;
     std::function<void()> onClick;
-    std::function<void()> onDoubleClick;
     std::function<void()> onRename;
     bool hovered = false;
     bool pressed = false;

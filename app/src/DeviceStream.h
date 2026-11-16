@@ -47,21 +47,6 @@ public:
                       // reach the read delay, which stays tied to the real
                       // render block or it turns straight into input latency.
                       int capacityReserveFrames = 0);
-    juce::String open(const juce::String& preferredDeviceName,
-                      double engineSampleRate,
-                      juce::String& errorOut,
-                      int requestedBufferSize = 0)
-    {
-        return open(preferredDeviceName, engineSampleRate, 2, errorOut, requestedBufferSize);
-    }
-    // Stereo passthrough for callers that do not select physical channels
-    // yet (until AudioEngine passes per-channel mappings).
-    juce::String open(const juce::String& preferredDeviceName,
-                      double engineSampleRate,
-                      juce::String& errorOut)
-    {
-        return open(preferredDeviceName, engineSampleRate, 2, errorOut);
-    }
     void close();
 
     double getSampleRate() const { return sampleRate; }
@@ -142,12 +127,6 @@ public:
     // sharing this capture get the same window instead of consuming it twice.
     bool pull(juce::AudioBuffer<float>& dest, int frames,
               const std::vector<int>& physicalChannels, std::uint64_t epoch);
-    bool pull(juce::AudioBuffer<float>& dest, int frames, std::uint64_t epoch)
-    {
-        static const std::vector<int> stereoPassthrough{0, 1};
-        return pull(dest, frames, stereoPassthrough, epoch);
-    }
-
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext& context) override;
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;

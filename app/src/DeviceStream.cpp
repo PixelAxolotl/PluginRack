@@ -293,7 +293,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     }
     if (err.isNotEmpty()) {
         manager.closeAudioDevice();
-        if (chosenTypeName == deviceTypeName(pluginrack::DeviceTypeNames::asio)) {
+        if (pluginrack::deviceBackendOf(chosenTypeName.toStdString()) == pluginrack::DeviceBackend::Asio) {
             // ASIO drivers are single-client. Once the clock holds the
             // interface, any second PluginRack stream (or another application)
             // asking for it fails, and the raw driver error never says why.
@@ -1080,7 +1080,7 @@ void OutputPlayback::pushSilence(int frames) {
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
     if (b1 + b2 != frames) return;
-    const int fade = juce::jmin(64, frames);
+    const int fade = juce::jmin(kDeclickSamples, frames);
     for (int ch = 0; ch < 2; ++ch) {
         float* dst = storage.getWritePointer(ch);
         const float start = lastPushedSample[ch];

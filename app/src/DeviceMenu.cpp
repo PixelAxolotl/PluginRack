@@ -28,19 +28,12 @@ void buildMenu(juce::PopupMenu& menu, const juce::String& header,
 }
 
 namespace DeviceMenu {
-void showInputMenu(juce::Component& target, const juce::String& current,
-                   const juce::StringArray& devices,
-                   std::function<void(juce::String)> onChoose) {
-    juce::PopupMenu menu;
-    buildMenu(menu, "INPUT DEVICES", current, devices, std::move(onChoose));
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(target).withMinimumWidth(240));
-}
-
-void showOutputMenu(juce::Component& target, const juce::String& current,
+void showDeviceMenu(bool forInput, juce::Component& target, const juce::String& current,
                     const juce::StringArray& devices,
                     std::function<void(juce::String)> onChoose) {
     juce::PopupMenu menu;
-    buildMenu(menu, "OUTPUT DEVICES", current, devices, std::move(onChoose));
+    buildMenu(menu, forInput ? "INPUT DEVICES" : "OUTPUT DEVICES", current, devices,
+              std::move(onChoose));
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(target).withMinimumWidth(240));
 }
 }
