@@ -2,6 +2,7 @@
 
 #include "CrashContext.h"
 #include "DeviceBackend.h"
+#include "DeviceNames.h"
 #include "Theme.h"
 
 #include <pluginrack/AsioDeviceMatch.h>
@@ -79,10 +80,8 @@ juce::String shortDeviceTypeTag(const juce::String& type) {
 // direction: the next launch uses it to skip a mode this endpoint already
 // refused while keeping the cache advisory.
 juce::String deviceModeName(const juce::String& deviceType) {
-    if (deviceType.containsIgnoreCase("exclusive")) return "exclusive";
-    if (deviceType.containsIgnoreCase("low latency")) return "sharedLowLatency";
-    if (deviceType.equalsIgnoreCase("ASIO")) return "asio";
-    return "shared";
+    const auto id = pluginrack::deviceModeId(pluginrack::deviceBackendOf(deviceType.toRawUTF8()));
+    return id.empty() ? juce::String("shared") : juce::String(id.data(), static_cast<int>(id.size()));
 }
 
 // The JUCE patch reads this on the opener thread. Writing it on every apply
@@ -258,18 +257,18 @@ AudioEngine::~AudioEngine() {
 
 void AudioEngine::openDefaultDevices() {
     if (!outputs.empty()) {
-        setOutputDevice(outputs.front()->id, "System Default");
+        setOutputDevice(outputs.front()->id, systemDefaultDeviceName());
     }
     if (!channels.empty()) {
-        setChannelInputDevice(channels.front()->id, "System Default");
+        setChannelInputDevice(channels.front()->id, systemDefaultDeviceName());
     }
 }
 
 void AudioEngine::openDefaultDevicesAsync() {
     {
         const juce::ScopedLock lock(stateLock);
-        if (!outputs.empty()) outputs.front()->outputDeviceName = "System Default";
-        if (!channels.empty()) channels.front()->inputDeviceName = "System Default";
+        if (!outputs.empty()) outputs.front()->outputDeviceName = systemDefaultDeviceName();
+        if (!channels.empty()) channels.front()->inputDeviceName = systemDefaultDeviceName();
     }
     openStripsDevicesAsync();
 }
@@ -1635,7 +1634,7 @@ void AudioEngine::setChannelLayout(std::uint32_t channelId, pluginrack::ChannelL
     }
     // Re-assign the device so the shared capture is re-opened (or widened)
     // for the new layout; silent channels keep nothing to reopen.
-    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
+    if (!isSilentDeviceName(deviceName)) {
         setChannelInputDevice(channelId, deviceName);
     }
 }
@@ -1651,7 +1650,7 @@ void AudioEngine::setChannelInputChannels(std::uint32_t channelId, const std::ve
         channel->inputChannels = inputChannels;
         deviceName = channel->inputDeviceName;
     }
-    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
+    if (!isSilentDeviceName(deviceName)) {
         setChannelInputDevice(channelId, deviceName);
     }
 }
@@ -1666,7 +1665,7 @@ void AudioEngine::setChannelMapping(std::uint32_t channelId, pluginrack::Channel
         channel->inputChannels = inputChannels;
         deviceName = channel->inputDeviceName;
     }
-    if (deviceName.isNotEmpty() && deviceName != "None - silent") {
+    if (!isSilentDeviceName(deviceName)) {
         setChannelInputDevice(channelId, deviceName);
     }
 }
@@ -2543,7 +2542,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         for (const auto& [id, name] : desiredInputDevices) {
             if (auto* channel = findChannel(id)) {
                 channel->inputDeviceName = name;
-                channel->sourceDeviceId = name == "None - silent" ? std::string{}
+                channel->sourceDeviceId = isSilentDeviceName(name) ? std::string{}
                                                                  : name.toStdString();
                 channel->inputError.clear();
             }
@@ -2551,7 +2550,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         for (const auto& [id, name] : desiredOutputDevices) {
             if (auto* output = findOutput(id)) {
                 // setOutputDevice treats the silent choice as "no device".
-                output->outputDeviceName = name == "None - silent" ? juce::String{} : name;
+                output->outputDeviceName = isSilentDeviceName(name) ? juce::String{} : name;
                 output->outputError.clear();
             }
         }
@@ -2580,12 +2579,12 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         return "The channel no longer exists.";
     }
 
-    if (deviceName == "None - silent" || deviceName.isEmpty()) {
+    if (isSilentDeviceName(deviceName)) {
         const juce::ScopedLock sl(stateLock);
         channel->input.reset();
         channel->duplexInput = false;
         channel->duplexInputChannels = 0;
-        channel->inputDeviceName = "None - silent";
+        channel->inputDeviceName = silentDeviceName();
         channel->sourceDeviceId.clear();
         channel->inputError.clear();
         pruneUnusedCaptures();
@@ -2728,7 +2727,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         }
     }
     const auto openStartMs = juce::Time::getMillisecondCounterHiRes();
-    auto openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
+    auto openErr = capture->open(isSystemDefaultName(deviceName) ? juce::String() : deviceName,
                                  requestedRate, needed, err, bufferRequest,
                                  renderBlockFrames,
                                  useLowLatencyInput ? 1 : 2,
@@ -2737,7 +2736,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     if (openErr.isNotEmpty() && requestedInputBufferSize_ == 0 && bufferRequest > 0) {
         // This device will not follow the engine's period. Its own default is
         // still valid, just less predictable; better than a silent strip.
-        openErr = capture->open(deviceName == "System Default" ? juce::String() : deviceName,
+        openErr = capture->open(isSystemDefaultName(deviceName) ? juce::String() : deviceName,
                                 requestedRate, needed, err, 0,
                                 renderBlockFrames,
                                 useLowLatencyInput ? 1 : 2,
@@ -2797,7 +2796,7 @@ void AudioEngine::prepareInputs() {
         const juce::ScopedLock lock(stateLock);
         for (const auto& channel : channels) {
             if (channel->inputDeviceName.isNotEmpty()
-                && channel->inputDeviceName != "None - silent") {
+                && !isSilentDeviceName(channel->inputDeviceName)) {
                 wanted.emplace_back(channel->id, channel->inputDeviceName);
             }
         }
@@ -2866,7 +2865,7 @@ int AudioEngine::retargetInputsToClockDevice(
     const juce::String& clockDevice,
     std::vector<std::pair<std::uint32_t, juce::String>>* previous) {
     const juce::StringArray asio = DeviceEnumeration::asioDevices();
-    if (asio.isEmpty() || clockDevice.isEmpty() || clockDevice == "None - silent") return 0;
+    if (asio.isEmpty() || clockDevice.isEmpty() || isSilentDeviceName(clockDevice)) return 0;
 
     std::vector<std::string> names;
     names.reserve(static_cast<std::size_t>(asio.size()));
@@ -2925,7 +2924,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
         }
     }
 
-    if (deviceName == "None - silent" || deviceName.isEmpty()) {
+    if (isSilentDeviceName(deviceName)) {
         bool wasClock = false;
         OutputPlayback* retiredPlayback = nullptr;
         {
@@ -2991,7 +2990,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     }
 
     juce::String err;
-    const auto openName = deviceName == "System Default" ? juce::String() : deviceName;
+    const auto openName = isSystemDefaultName(deviceName) ? juce::String() : deviceName;
     // The endpoint's last successful open is advisory: the mode below can skip
     // a probe this endpoint already refused, and the buffer hint below starts
     // from the negotiated size. A refusal always falls through to the live
@@ -3237,7 +3236,7 @@ juce::String AudioEngine::setInputBufferSize(int size) {
     juce::String firstError;
     for (auto& channel : channels) {
         if (channel->inputDeviceName.isNotEmpty() &&
-            channel->inputDeviceName != "None - silent") {
+            !isSilentDeviceName(channel->inputDeviceName)) {
             const auto e = setChannelInputDeviceImpl(channel->id, channel->inputDeviceName,
                                                      /*forceReopen=*/true);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
@@ -3249,7 +3248,7 @@ juce::String AudioEngine::setInputBufferSize(int size) {
         requestedInputBufferSize_ = previous;
         for (auto& channel : channels) {
             if (channel->inputDeviceName.isNotEmpty() &&
-                channel->inputDeviceName != "None - silent") {
+                !isSilentDeviceName(channel->inputDeviceName)) {
                 setChannelInputDeviceImpl(channel->id, channel->inputDeviceName,
                                           /*forceReopen=*/true);
             }
@@ -3267,7 +3266,7 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
     juce::String firstError;
     for (auto& output : outputs) {
         if (output->outputDeviceName.isNotEmpty() &&
-            output->outputDeviceName != "None - silent") {
+            !isSilentDeviceName(output->outputDeviceName)) {
             const auto e = setOutputDevice(output->id, output->outputDeviceName);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }
@@ -3276,7 +3275,7 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
         requestedOutputBufferSize_ = previous;
         for (auto& output : outputs) {
             if (output->outputDeviceName.isNotEmpty() &&
-                output->outputDeviceName != "None - silent") {
+                !isSilentDeviceName(output->outputDeviceName)) {
                 setOutputDevice(output->id, output->outputDeviceName);
             }
         }
@@ -3405,7 +3404,7 @@ juce::String AudioEngine::getClockDescription() const {
     }
     for (const auto& o : outputs) {
         if (o->id == clockOutputId) {
-            const auto device = o->outputDeviceName.isEmpty() ? juce::String("System Default")
+            const auto device = isSilentDeviceName(o->outputDeviceName) ? systemDefaultDeviceName()
                                                               : o->outputDeviceName;
             const auto khzValue = currentSampleRate / 1000.0;
             const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
@@ -3469,7 +3468,7 @@ juce::String AudioEngine::forceAsio() {    const auto asio = DeviceEnumeration::
         {
             const juce::ScopedLock lock(stateLock);
             for (const auto& c : channels) {
-                if (c->inputDeviceName.isNotEmpty() && c->inputDeviceName != "None - silent")
+                if (c->inputDeviceName.isNotEmpty() && !isSilentDeviceName(c->inputDeviceName))
                     inputNames.push_back(c->inputDeviceName.toStdString());
             }
         }
@@ -3523,7 +3522,7 @@ bool AudioEngine::refreshDeviceAvailability() {
     // strip as missing in that case.
     const auto markMissing = [](juce::String& error, const juce::String& name,
                                 const juce::StringArray& present, bool listUsable) {
-        if (!listUsable || name.isEmpty() || name == "None - silent" || name == "System Default")
+        if (!listUsable || isSilentDeviceName(name) || isSystemDefaultName(name))
             return false;
         if (error.isNotEmpty()) return false; // a real open error already explains it
         if (present.indexOf(name, true) >= 0) return false;
@@ -4250,7 +4249,7 @@ std::vector<AudioEngine::ReloadableDevice> AudioEngine::getReloadableDevices() c
     const juce::ScopedLock lock(stateLock);
     for (const auto& output : outputs) {
         if (output->outputDeviceName.isNotEmpty()
-            && output->outputDeviceName != "None - silent") {
+            && !isSilentDeviceName(output->outputDeviceName)) {
             devices.push_back({"Output  " + output->name + "  -  " + output->outputDeviceName,
                                output->outputDeviceName, output->id, false});
         }
@@ -4258,7 +4257,7 @@ std::vector<AudioEngine::ReloadableDevice> AudioEngine::getReloadableDevices() c
     std::set<juce::String> seenInputs;
     for (const auto& channel : channels) {
         if (channel->inputDeviceName.isNotEmpty()
-            && channel->inputDeviceName != "None - silent"
+            && !isSilentDeviceName(channel->inputDeviceName)
             && seenInputs.insert(channel->inputDeviceName).second) {
             devices.push_back({"Input  " + channel->name + "  -  " + channel->inputDeviceName,
                                channel->inputDeviceName, channel->id, true});
@@ -4332,7 +4331,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         const juce::ScopedLock lock(stateLock);
         for (const auto& output : outputs) {
             if (output->outputDeviceName.isNotEmpty()
-                && output->outputDeviceName != "None - silent") {
+                && !isSilentDeviceName(output->outputDeviceName)) {
                 outputsWanted.push_back({output->id, output->outputDeviceName, output->name});
             }
         }
@@ -4340,8 +4339,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
                   [](const Request& a, const Request& b) { return a.id < b.id; });
         std::set<juce::String> seenInputs;
         for (const auto& channel : channels) {
-            if (channel->inputDeviceName.isEmpty()
-                || channel->inputDeviceName == "None - silent") {
+            if (isSilentDeviceName(channel->inputDeviceName)) {
                 continue;
             }
             // Channels sharing one device share one capture: open it once.
@@ -4384,7 +4382,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
                 return asioNames.contains(request.name);
             });
         const bool defaultMayBeAsio =
-            !asioNames.isEmpty() && clockName == "System Default";
+            !asioNames.isEmpty() && isSystemDefaultName(clockName);
         const bool inputSharesClock = std::any_of(
             inputsWanted.begin(), inputsWanted.end(),
             [&clockName](const Request& request) { return request.name == clockName; });
@@ -4562,7 +4560,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
 }
 
 void AudioEngine::releaseDeviceInputsForClock(const juce::String& deviceName) {
-    if (deviceName.isEmpty() || deviceName == "None - silent") return;
+    if (isSilentDeviceName(deviceName)) return;
     std::shared_ptr<InputCapture> previous;
     {
         const juce::ScopedLock lock(stateLock);

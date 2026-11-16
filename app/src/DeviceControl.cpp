@@ -1,13 +1,12 @@
-﻿#include "DeviceControl.h"
+#include "DeviceControl.h"
 
 #include "DeviceBackend.h"
+#include "DeviceNames.h"
 
 namespace {
-const juce::String kSystemDefault = "System Default";
-
 juce::String compactDeviceName(const juce::String& name) {
-    if (name == kSystemDefault) return "Default";
-    if (name.startsWith("None")) return "None";
+    if (isSystemDefaultName(name)) return "Default";
+    if (isSilentDeviceName(name)) return "None";
     auto trimmed = name;
     const int paren = trimmed.indexOfChar('(');
     if (paren > 1) trimmed = trimmed.substring(0, paren).trim();

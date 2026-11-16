@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <pluginrack/DeviceNames.h>
 #include <pluginrack/InputFollowPolicy.h>
 
 namespace {
@@ -16,7 +17,7 @@ TEST_CASE("an input on the same interface follows the clock onto ASIO",
     const std::vector<std::pair<std::uint32_t, std::string>> inputs{
         {1, "Speakers (Focusrite USB Audio)"},
         {2, "Microphone (MOTU Audio Interface)"},
-        {3, "None - silent"},
+        {3, std::string(pluginrack::kSilentDevice)},
         {4, ""},
     };
     const auto moved = pluginrack::inputsToRetargetForClock(inputs, "Focusrite USB ASIO", kAsio);
@@ -70,10 +71,18 @@ TEST_CASE("two different interfaces never make the clock guess",
     CHECK(pluginrack::asioClockFromInputs({"KoordASIO", "MOTU Audio ASIO"}, kAsio)
           == "MOTU Audio ASIO");
     CHECK(pluginrack::asioClockFromInputs({}, kAsio).empty());
-    CHECK(pluginrack::asioClockFromInputs({"None - silent"}, kAsio).empty());
+    CHECK(pluginrack::asioClockFromInputs({std::string(pluginrack::kSilentDevice)}, kAsio).empty());
 }
 
 TEST_CASE("no ASIO driver means no clock move", "[latency][asio][duplex]") {
     CHECK(pluginrack::asioClockFromInputs({"KoordASIO"}, {}).empty());
 }
 
+TEST_CASE("an unassigned or silent endpoint never follows the clock", "[device][names]") {
+    CHECK(pluginrack::isSilentDevice(""));
+    CHECK(pluginrack::isSilentDevice(pluginrack::kSilentDevice));
+    CHECK_FALSE(pluginrack::isSilentDevice("Speakers"));
+    CHECK(pluginrack::isSystemDefaultDevice(pluginrack::kSystemDefaultDevice));
+    CHECK_FALSE(pluginrack::isSystemDefaultDevice(""));
+    CHECK_FALSE(pluginrack::isSystemDefaultDevice("Speakers"));
+}

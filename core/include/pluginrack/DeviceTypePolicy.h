@@ -61,4 +61,47 @@ inline std::vector<std::string_view> deviceTypeOrder(StreamRole role,
     return order;
 }
 
+// Short label for the settings page, the strips and the latency budget; these
+// answer "am I on ASIO or WASAPI right now?" without the long registered name.
+enum class DeviceBackend {
+    Shared,
+    SharedLowLatency,
+    Exclusive,
+    Asio,
+    Unknown,
+};
+
+inline DeviceBackend deviceBackendOf(std::string_view typeName) {
+    if (typeName == DeviceTypeNames::asio) return DeviceBackend::Asio;
+    if (typeName == DeviceTypeNames::exclusive) return DeviceBackend::Exclusive;
+    if (typeName == DeviceTypeNames::sharedLowLatency) return DeviceBackend::SharedLowLatency;
+    if (typeName == DeviceTypeNames::shared) return DeviceBackend::Shared;
+    return DeviceBackend::Unknown;
+}
+
+// Empty for an unknown type, so the caller can show the name it was given.
+inline std::string_view deviceBackendTag(DeviceBackend backend) {
+    switch (backend) {
+        case DeviceBackend::Asio: return "ASIO";
+        case DeviceBackend::SharedLowLatency: return "WASAPI LL";
+        case DeviceBackend::Exclusive: return "WASAPI excl";
+        case DeviceBackend::Shared: return "WASAPI";
+        case DeviceBackend::Unknown: break;
+    }
+    return {};
+}
+
+// The mode id persisted with a device: the opener compares it against the mode
+// it selected, so these strings are a file format.
+inline std::string_view deviceModeId(DeviceBackend backend) {
+    switch (backend) {
+        case DeviceBackend::Asio: return "asio";
+        case DeviceBackend::SharedLowLatency: return "sharedLowLatency";
+        case DeviceBackend::Exclusive: return "exclusive";
+        case DeviceBackend::Shared: return "shared";
+        case DeviceBackend::Unknown: break;
+    }
+    return {};
+}
+
 } // namespace pluginrack

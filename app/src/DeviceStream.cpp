@@ -13,6 +13,21 @@
 #include <vector>
 
 namespace {
+// Every declick ramp the streams apply is this length, so the fade in, the
+// fade out and the resume ramp stay in step.
+constexpr int kDeclickSamples = 64;
+
+// Ramp gain at step (0-based) of length samples, rising from near silence to
+// near unity. Both ends stop one step short of 0 and 1 so a block boundary
+// never starts or ends on a hard sample.
+float fadeInGain(int step, int length) {
+    return (float)(step + 1) / (float)(length + 1);
+}
+
+float fadeOutGain(int step, int length) {
+    return 1.0f - fadeInGain(step, length);
+}
+
 juce::String formatKhz(double rate) {
     double k = rate / 1000.0;
     if (std::abs(k - std::round(k)) < 0.001) {
@@ -25,12 +40,10 @@ juce::String formatKhz(double rate) {
 // WASAPI is deliberately tried first: the low-latency and exclusive modes are
 // useful fallbacks, but forcing either one on every endpoint made the beta
 // tuning path driver-dependent and prone to dropouts.
-// ASIO (only when this build has JUCE_ASIO) is tried last. "Windows Audio
-// (Exclusive Mode)" is JUCE's exact registered name.
-const juce::String kTypeLowLatency = "Windows Audio (Low Latency Mode)";
-const juce::String kTypeExclusive = "Windows Audio (Exclusive Mode)";
-const juce::String kTypeShared = "Windows Audio";
-const juce::String kTypeAsio = "ASIO";
+// ASIO (only when this build has JUCE_ASIO) is tried last.
+juce::String deviceTypeName(std::string_view name) {
+    return juce::String(name.data(), static_cast<int>(name.size()));
+}
 
 // Whether this build can reach an ASIO driver at all. Asking the policy to
 // order a type we cannot create would just spend a failed probe.
@@ -61,19 +74,26 @@ void rememberBufferFor(const juce::String& deviceName, int bufferSize) {
     bufferCache[deviceName] = bufferSize;
 }
 
-std::unique_ptr<juce::AudioIODeviceType> createTypeInstance(const juce::String& typeName) {
-    if (typeName == kTypeLowLatency)
-        return std::unique_ptr<juce::AudioIODeviceType>(
-            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::sharedLowLatency));
-    if (typeName == kTypeExclusive)
-        return std::unique_ptr<juce::AudioIODeviceType>(
-            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::exclusive));
-    if (typeName == kTypeShared)
-        return std::unique_ptr<juce::AudioIODeviceType>(
-            juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::shared));
-    if (typeName == kTypeAsio)
-        return std::unique_ptr<juce::AudioIODeviceType>(
-            juce::AudioIODeviceType::createAudioIODeviceType_ASIO()); // null unless JUCE_ASIO
+std::unique_ptr<juce::AudioIODeviceType> createTypeInstance(const juce::String& name) {
+    switch (pluginrack::deviceBackendOf(name.toRawUTF8())) {
+        case pluginrack::DeviceBackend::SharedLowLatency:
+            return std::unique_ptr<juce::AudioIODeviceType>(
+                juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(
+                    juce::WASAPIDeviceMode::sharedLowLatency));
+        case pluginrack::DeviceBackend::Exclusive:
+            return std::unique_ptr<juce::AudioIODeviceType>(
+                juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(
+                    juce::WASAPIDeviceMode::exclusive));
+        case pluginrack::DeviceBackend::Shared:
+            return std::unique_ptr<juce::AudioIODeviceType>(
+                juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(
+                    juce::WASAPIDeviceMode::shared));
+        case pluginrack::DeviceBackend::Asio:
+            return std::unique_ptr<juce::AudioIODeviceType>(
+                juce::AudioIODeviceType::createAudioIODeviceType_ASIO()); // null unless JUCE_ASIO
+        case pluginrack::DeviceBackend::Unknown:
+            break;
+    }
     return {};
 }
 
@@ -126,7 +146,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     // first while captures and extra outputs stay on shareable types.
     juce::StringArray typeOrder;
     for (const auto name : pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable()))
-        typeOrder.add(juce::String(name.data(), static_cast<int>(name.size())));
+        typeOrder.add(deviceTypeName(name));
 
     juce::AudioIODeviceType* chosenType = nullptr;
     juce::String chosenTypeName;
@@ -273,7 +293,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     }
     if (err.isNotEmpty()) {
         manager.closeAudioDevice();
-        if (chosenTypeName == kTypeAsio) {
+        if (chosenTypeName == deviceTypeName(pluginrack::DeviceTypeNames::asio)) {
             // ASIO drivers are single-client. Once the clock holds the
             // interface, any second PluginRack stream (or another application)
             // asking for it fails, and the raw driver error never says why.
@@ -688,14 +708,12 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
             const float last = n > 0 ? out[n - 1] : lastPlayed_[i];
             const int gap = frames - n;
             for (int s = 0; s < gap; ++s) {
-                const float t = 1.0f -
-                                (float)(s + 1) / (float)(gap + 1);
-                out[n + s] = last * t;
+                out[n + s] = last * fadeOutGain(s, gap);
             }
         } else if (applyFadeIn) {
-            const int fade = juce::jmin(64, frames);
+            const int fade = juce::jmin(kDeclickSamples, frames);
             for (int s = 0; s < fade; ++s) {
-                out[s] *= (float)(s + 1) / (float)(fade + 1);
+                out[s] *= fadeInGain(s, fade);
             }
         }
         lastPlayed_[i] = out[frames - 1];
@@ -985,7 +1003,7 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     const int total = b1 + b2;
     if (total != frames) return;
     const int srcChans = juce::jmax(1, src.getNumChannels());
-    const int fade = pushFadeInPending ? juce::jmin(64, frames) : 0;
+    const int fade = pushFadeInPending ? juce::jmin(kDeclickSamples, frames) : 0;
 
     for (int ch = 0; ch < 2; ++ch) {
         const int srcCh = juce::jmin(ch, srcChans - 1);
@@ -1006,13 +1024,13 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
             for (int i = 0; i < b1; ++i, ++seen) {
                 if (seen < fade) {
                     dst[writeHandle.startIndex1 + i] *=
-                        (float)(seen + 1) / (float)(fade + 1);
+                        fadeInGain(seen, fade);
                 }
             }
             for (int i = 0; i < b2; ++i, ++seen) {
                 if (seen < fade) {
                     dst[writeHandle.startIndex2 + i] *=
-                        (float)(seen + 1) / (float)(fade + 1);
+                        fadeInGain(seen, fade);
                 }
             }
         }
@@ -1068,15 +1086,11 @@ void OutputPlayback::pushSilence(int frames) {
         const float start = lastPushedSample[ch];
         int seen = 0;
         for (int i = 0; i < b1; ++i, ++seen) {
-            const float gain = seen < fade
-                ? 1.0f - (float)(seen + 1) / (float)(fade + 1)
-                : 0.0f;
+            const float gain = seen < fade ? fadeOutGain(seen, fade) : 0.0f;
             dst[writeHandle.startIndex1 + i] = start * gain;
         }
         for (int i = 0; i < b2; ++i, ++seen) {
-            const float gain = seen < fade
-                ? 1.0f - (float)(seen + 1) / (float)(fade + 1)
-                : 0.0f;
+            const float gain = seen < fade ? fadeOutGain(seen, fade) : 0.0f;
             dst[writeHandle.startIndex2 + i] = start * gain;
         }
         lastPushedSample[ch] = 0.0f;
@@ -1117,7 +1131,7 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
         if (ready > target) {
             auto stale = fifo->read(ready - target);
             juce::ignoreUnused(stale);
-            deviceFadeInRemaining = 64;
+            deviceFadeInRemaining = kDeclickSamples;
             lowWatermarkActive = false;
         }
     }
@@ -1188,7 +1202,7 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
                                       std::memory_order_relaxed);
         // Fade the short tail to silence; the next complete block fades back
         // in instead of starting at an arbitrary amplitude.
-        deviceFadeInRemaining = 64;
+        deviceFadeInRemaining = kDeclickSamples;
         // A zero target assumes the render hook always pushes exactly one
         // device block before this read. If that assumption ever fails, buy
         // one block of margin back rather than glitching on every callback.
@@ -1202,7 +1216,7 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
     const bool exactRead = !shortRead && std::abs(readRatio - 1.0) < 1.0e-12
                         && sourceFrames == numSamples;
     const int fadeIn = shortRead ? 0 : juce::jmin(deviceFadeInRemaining, numSamples);
-    const int fadeDone = 64 - deviceFadeInRemaining;
+    const int fadeDone = kDeclickSamples - deviceFadeInRemaining;
     const auto sampleAt = [this, &readHandle, b1](int channel, int index) noexcept {
         return index < b1
             ? this->storage.getReadPointer(channel)[readHandle.startIndex1 + index]
@@ -1236,15 +1250,13 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
             const float last = produced > 0 ? out[produced - 1] : 0.0f;
             const int gap = numSamples - produced;
             for (int i = 0; i < gap; ++i) {
-                out[produced + i] =
-                    last * (1.0f - (float)(i + 1) / (float)(gap + 1));
+                out[produced + i] = last * fadeOutGain(i, gap);
             }
         } else if (fadeIn > 0) {
-            // Continue the same 64-sample ramp across small device blocks so
-            // the gain does not restart at every block boundary.
-            constexpr int kFadeLength = 64;
+            // Continue the same ramp across small device blocks so the gain
+            // does not restart at every block boundary.
             for (int i = 0; i < fadeIn; ++i) {
-                out[i] *= (float)(fadeDone + i + 1) / (float)(kFadeLength + 1);
+                out[i] *= fadeInGain(fadeDone + i, kDeclickSamples);
             }
         }
     }

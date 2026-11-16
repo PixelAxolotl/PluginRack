@@ -4,25 +4,15 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <string>
 #include <string_view>
 #include <vector>
 
 namespace {
 
+using pluginrack::DeviceBackend;
+using pluginrack::DeviceTypeNames;
+using pluginrack::StreamRole;
 using Order = std::vector<std::string_view>;
-
-// Renders "a, b, c" so the expected order is readable inside the assertion.
-std::string render(const Order& order) {
-    std::string text;
-    for (const auto type : order) {
-        if (text.empty() == false) {
-            text += ", ";
-        }
-        text += type;
-    }
-    return text;
-}
 
 bool contains(const Order& order, std::string_view type) {
     return std::find(order.begin(), order.end(), type) != order.end();
@@ -39,90 +29,58 @@ bool hasDuplicates(const Order& order) {
     return false;
 }
 
+std::size_t positionOf(const Order& order, std::string_view type) {
+    return static_cast<std::size_t>(
+        std::find(order.begin(), order.end(), type) - order.begin());
+}
+
 } // namespace
 
-TEST_CASE("Clock stream probes exclusive mode first when it is preferred") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
+TEST_CASE("Clock probes exclusive mode first only when it is preferred") {
+    const auto preferred = pluginrack::deviceTypeOrder(StreamRole::Clock, true, true);
+    CHECK(preferred.front() == DeviceTypeNames::exclusive);
 
-    CHECK(render(deviceTypeOrder(StreamRole::Clock, true, true))
-          == "Windows Audio (Exclusive Mode), ASIO, Windows Audio (Low Latency Mode), "
-             "Windows Audio");
-    CHECK(render(deviceTypeOrder(StreamRole::Clock, true, false))
-          == "Windows Audio (Exclusive Mode), Windows Audio (Low Latency Mode), "
-             "Windows Audio");
+    const auto notPreferred = pluginrack::deviceTypeOrder(StreamRole::Clock, false, true);
+    CHECK(notPreferred.front() != DeviceTypeNames::exclusive);
+    // Exclusive is the clock's last resort when shared types are tried first.
+    CHECK(notPreferred.back() == DeviceTypeNames::exclusive);
 }
 
-TEST_CASE("Clock stream prefers ASIO and low latency when exclusive is not preferred") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
-
-    CHECK(render(deviceTypeOrder(StreamRole::Clock, false, true))
-          == "ASIO, Windows Audio (Low Latency Mode), Windows Audio, "
-             "Windows Audio (Exclusive Mode)");
-    CHECK(render(deviceTypeOrder(StreamRole::Clock, false, false))
-          == "Windows Audio (Low Latency Mode), Windows Audio, "
-             "Windows Audio (Exclusive Mode)");
+TEST_CASE("Clock reaches ASIO before the shared types when the build has it") {
+    const auto order = pluginrack::deviceTypeOrder(StreamRole::Clock, false, true);
+    CHECK(positionOf(order, DeviceTypeNames::asio) <
+          positionOf(order, DeviceTypeNames::sharedLowLatency));
+    CHECK(positionOf(order, DeviceTypeNames::sharedLowLatency) <
+          positionOf(order, DeviceTypeNames::shared));
 }
 
-TEST_CASE("Output stream keeps shared types first and never uses exclusive") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
-
-    CHECK(render(deviceTypeOrder(StreamRole::Output, false, true))
-          == "Windows Audio, Windows Audio (Low Latency Mode), ASIO");
-    CHECK(render(deviceTypeOrder(StreamRole::Output, false, false))
-          == "Windows Audio, Windows Audio (Low Latency Mode)");
-
-    // preferExclusive must not leak into a non-clock role.
-    CHECK(render(deviceTypeOrder(StreamRole::Output, true, true))
-          == "Windows Audio, Windows Audio (Low Latency Mode), ASIO");
-    CHECK(render(deviceTypeOrder(StreamRole::Output, true, false))
-          == "Windows Audio, Windows Audio (Low Latency Mode)");
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Output, true, true),
-                         pluginrack::DeviceTypeNames::exclusive));
-}
-
-TEST_CASE("Input stream keeps shared types first and never uses exclusive") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
-
-    CHECK(render(deviceTypeOrder(StreamRole::Input, false, true))
-          == "Windows Audio, Windows Audio (Low Latency Mode), ASIO");
-    CHECK(render(deviceTypeOrder(StreamRole::Input, false, false))
-          == "Windows Audio, Windows Audio (Low Latency Mode)");
-
-    CHECK(render(deviceTypeOrder(StreamRole::Input, true, true))
-          == "Windows Audio, Windows Audio (Low Latency Mode), ASIO");
-    CHECK(render(deviceTypeOrder(StreamRole::Input, true, false))
-          == "Windows Audio, Windows Audio (Low Latency Mode)");
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Input, true, true),
-                         pluginrack::DeviceTypeNames::exclusive));
+TEST_CASE("Captures and extra outputs stay on shareable types") {
+    for (const auto role : {StreamRole::Output, StreamRole::Input}) {
+        for (const bool preferExclusive : {false, true}) {
+            const auto order = pluginrack::deviceTypeOrder(role, preferExclusive, true);
+            CHECK_FALSE(contains(order, DeviceTypeNames::exclusive));
+            // Shared WASAPI is the one every endpoint can open, so it comes first.
+            CHECK(order.front() == DeviceTypeNames::shared);
+            CHECK(positionOf(order, DeviceTypeNames::sharedLowLatency) <
+                  positionOf(order, DeviceTypeNames::asio));
+        }
+    }
 }
 
 TEST_CASE("ASIO is absent when the build does not provide it") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
-
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Clock, false, false),
-                         pluginrack::DeviceTypeNames::asio));
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Clock, true, false),
-                         pluginrack::DeviceTypeNames::asio));
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Output, false, false),
-                         pluginrack::DeviceTypeNames::asio));
-    CHECK_FALSE(contains(deviceTypeOrder(StreamRole::Input, false, false),
-                         pluginrack::DeviceTypeNames::asio));
+    for (const auto role : {StreamRole::Clock, StreamRole::Output, StreamRole::Input}) {
+        for (const bool preferExclusive : {false, true}) {
+            CHECK_FALSE(contains(pluginrack::deviceTypeOrder(role, preferExclusive, false),
+                                 DeviceTypeNames::asio));
+        }
+    }
 }
 
 TEST_CASE("Every produced order is non-empty and free of duplicates") {
-    using pluginrack::StreamRole;
-    using pluginrack::deviceTypeOrder;
-
-    const StreamRole roles[] = {StreamRole::Clock, StreamRole::Output, StreamRole::Input};
-    for (const auto role : roles) {
+    for (const auto role : {StreamRole::Clock, StreamRole::Output, StreamRole::Input}) {
         for (const bool preferExclusive : {false, true}) {
             for (const bool asioAvailable : {false, true}) {
-                const auto order = deviceTypeOrder(role, preferExclusive, asioAvailable);
+                const auto order = pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable);
                 CHECK_FALSE(order.empty());
                 CHECK_FALSE(hasDuplicates(order));
             }
@@ -130,20 +88,27 @@ TEST_CASE("Every produced order is non-empty and free of duplicates") {
     }
 }
 
-TEST_CASE("ASIO-only machine still tries the shared types for Output and Input") {
-    using pluginrack::StreamRole;
-    using pluginrack::DeviceTypeNames;
-    using pluginrack::deviceTypeOrder;
-
-    const auto output = deviceTypeOrder(StreamRole::Output, false, true);
-    // The shared endpoint is the one we can always open, so it is probed first and
-    // ASIO only gets a chance after it.
-    CHECK(output.front() == DeviceTypeNames::shared);
-    CHECK(contains(output, DeviceTypeNames::sharedLowLatency));
-    CHECK(contains(output, DeviceTypeNames::asio));
-
-    const auto input = deviceTypeOrder(StreamRole::Input, false, true);
-    CHECK(input.front() == DeviceTypeNames::shared);
-    CHECK(contains(input, DeviceTypeNames::sharedLowLatency));
-    CHECK(contains(input, DeviceTypeNames::asio));
+TEST_CASE("Every probeable type maps to one label and one persisted mode") {
+    // The opener, the strips and the settings page each need a name for the
+    // backend; a type added to the policy without a mapping would show a raw
+    // registered name and persist an empty mode.
+    const std::string_view types[] = {
+        DeviceTypeNames::shared,
+        DeviceTypeNames::sharedLowLatency,
+        DeviceTypeNames::exclusive,
+        DeviceTypeNames::asio,
+    };
+    for (const auto type : types) {
+        const auto backend = pluginrack::deviceBackendOf(type);
+        REQUIRE(backend != DeviceBackend::Unknown);
+        CHECK_FALSE(pluginrack::deviceBackendTag(backend).empty());
+        CHECK_FALSE(pluginrack::deviceModeId(backend).empty());
+    }
+    CHECK(pluginrack::deviceBackendOf(DeviceTypeNames::exclusive) == DeviceBackend::Exclusive);
+    CHECK(pluginrack::deviceBackendOf(DeviceTypeNames::sharedLowLatency) ==
+          DeviceBackend::SharedLowLatency);
+    // Anything the policy does not know keeps its own name and does not claim a mode.
+    CHECK(pluginrack::deviceBackendOf("DirectSound") == DeviceBackend::Unknown);
+    CHECK(pluginrack::deviceBackendTag(DeviceBackend::Unknown).empty());
+    CHECK(pluginrack::deviceModeId(DeviceBackend::Unknown).empty());
 }

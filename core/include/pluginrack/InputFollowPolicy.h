@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <pluginrack/AsioDeviceMatch.h>
+#include <pluginrack/DeviceNames.h>
 
 namespace pluginrack {
 
@@ -27,7 +28,7 @@ inline std::vector<std::uint32_t> inputsToRetargetForClock(
     if (clockDevice.empty()) return moved;
 
     for (const auto& [id, deviceName] : inputs) {
-        if (deviceName.empty() || deviceName == "None - silent") continue;
+        if (isSilentDevice(deviceName)) continue;
         if (deviceName == clockDevice) continue;
         if (bestAsioDeviceMatch(deviceName, asioDevices) == clockDevice) moved.push_back(id);
     }
@@ -42,7 +43,7 @@ inline std::string asioClockFromInputs(const std::vector<std::string>& inputDevi
                                        const std::vector<std::string>& asioDevices) {
     std::string found;
     for (const auto& device : inputDevices) {
-        if (device.empty() || device == "None - silent") continue;
+        if (isSilentDevice(device)) continue;
         const auto match = bestAsioDeviceMatch(device, asioDevices);
         if (match.empty()) continue;
         if (match == device) {

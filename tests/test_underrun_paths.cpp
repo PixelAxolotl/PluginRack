@@ -104,9 +104,9 @@ TEST_CASE("OutputPlayback fades short reads instead of repeating a block",
         "void OutputPlayback::audioDeviceIOCallbackWithContext");
     // The shortfall fades to silence and the next block fades back in; a
     // repeated block would step at both seams.
-    CHECK(contains(body, "deviceFadeInRemaining = 64"));
-    CHECK(contains(body, "last * (1.0f -"));
-    CHECK(contains(body, "out[i] *= "));
+    CHECK(contains(body, "deviceFadeInRemaining = kDeclickSamples"));
+    CHECK(contains(body, "last * fadeOutGain("));
+    CHECK(contains(body, "out[i] *= fadeInGain("));
     CHECK_FALSE(contains(body, "lastOutputBlock"));
     // Low watermarks count one event per starvation episode, not per block.
     CHECK(contains(body, "if (!lowWatermarkActive)"));
@@ -893,7 +893,7 @@ TEST_CASE("an ASIO open failure explains the single-client rule", "[latency][dev
     const auto open = functionBody(device, "juce::String openWithPreferredType");
     // The most common ASIO failure is a second client on a driver that only
     // accepts one; the raw driver error does not say that.
-    CHECK(contains(open, "if (chosenTypeName == kTypeAsio)"));
+    CHECK(contains(open, "chosenTypeName == deviceTypeName(pluginrack::DeviceTypeNames::asio)"));
     CHECK(contains(open, "ASIO interfaces accept one client"));
     // ASIO must still be reachable end to end.
     CHECK(contains(device, "createAudioIODeviceType_ASIO"));
@@ -965,8 +965,8 @@ TEST_CASE("a refused duplex open falls back to the split path", "[latency][duple
 TEST_CASE("the audio backend is visible on the strips and in the budget",
           "[latency][ui]") {
     const auto helper = readSource("app/src/DeviceBackend.h");
-    CHECK(contains(helper, "\"ASIO\""));
-    CHECK(contains(helper, "\"WASAPI\""));
+    CHECK(contains(helper, "pluginrack::deviceBackendTag("));
+    CHECK(contains(helper, "pluginrack::deviceBackendOf("));
     CHECK(contains(helper, "deviceBackendIsAsio"));
 
     // Per-strip tag: the device line must name the backend, not only the device.
@@ -1258,7 +1258,7 @@ TEST_CASE("WASAPI opens inputs in parallel while an ASIO clock stays serialized"
     CHECK(contains(pass, "const bool anyAsioOutput = std::any_of("));
     CHECK(contains(pass, "asioNames.contains(request.name)"));
     CHECK(contains(pass, "const bool defaultMayBeAsio ="));
-    CHECK(contains(pass, "clockName == \"System Default\""));
+    CHECK(contains(pass, "isSystemDefaultName(clockName)"));
     CHECK(contains(pass, "serializeForClock = anyAsioOutput || defaultMayBeAsio || inputSharesClock"));
     // The parallel launch is inside the gate and before the clock join.
     const auto parallelGate = pass.find("if (!serializeForClock) {");
@@ -1325,10 +1325,8 @@ TEST_CASE("a cached shared mode skips the exclusive probe", "[device][cache]") {
     CHECK_FALSE(contains(record, "\"input\" : \"output\""));
 
     const auto mode = functionBody(engine, "juce::String deviceModeName");
-    CHECK(contains(mode, "\"exclusive\""));
-    CHECK(contains(mode, "\"sharedLowLatency\""));
-    CHECK(contains(mode, "\"asio\""));
-    CHECK(contains(mode, "\"shared\""));
+    CHECK(contains(mode, "pluginrack::deviceModeId("));
+    CHECK(contains(mode, "pluginrack::deviceBackendOf("));
 }
 
 TEST_CASE("scene v6 hardening switches are opt-in and persisted",

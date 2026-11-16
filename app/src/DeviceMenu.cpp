@@ -1,8 +1,10 @@
 #include "DeviceMenu.h"
 
+#include "DeviceNames.h"
+
 namespace {
-const juce::String kSystemDefault = "System Default";
-const juce::String kNone = "None - silent";
+const juce::String kSystemDefault = systemDefaultDeviceName();
+const juce::String kNone = silentDeviceName();
 
 void buildMenu(juce::PopupMenu& menu, const juce::String& header,
                const juce::String& current, const juce::StringArray& devices,
