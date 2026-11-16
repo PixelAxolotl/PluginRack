@@ -143,6 +143,12 @@ void validateLimiters(const char* kind, std::uint32_t id, const std::vector<Limi
         if (!std::isfinite(e.inputGainDb) || e.inputGainDb < -48.0f || e.inputGainDb > 48.0f || !std::isfinite(e.ceilingDb) || e.ceilingDb < -12.0f || e.ceilingDb > 0.0f || !std::isfinite(e.lookaheadMs) || e.lookaheadMs < 0.0f || e.lookaheadMs > 10.0f || !std::isfinite(e.releaseMs) || e.releaseMs < 1.0f || e.releaseMs > 2000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid limiter parameters"});
     }
 }
+void validateFeedbackSuppressors(const char* kind, std::uint32_t id, const std::vector<FeedbackSuppressorEffect>& effects, std::vector<SceneError>& errors) {
+    if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " feedbackSuppressorEffects too many"});
+    for (const auto& e : effects) {
+        if (!std::isfinite(e.strength) || e.strength < 0.0f || e.strength > 1.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid feedback suppressor parameters"});
+    }
+}
 
 void validateInserts(const char* kind, std::uint32_t id,
                      const std::vector<InsertSlot>& inserts,
@@ -206,6 +212,7 @@ void validateChain(const char* kind, std::uint32_t id, const std::vector<ChainIt
             case ChainItemType::Multiband:
             case ChainItemType::DeEsser:
             case ChainItemType::Limiter:
+            case ChainItemType::FeedbackSuppressor:
                 // Deliberately not checked against the strip's effects: scenes
                 // written by earlier builds carry rows such as a stale
                 // `Dynamics 2` next to effects 1 and 3, and the mixer tolerates
@@ -325,6 +332,7 @@ void validateStrip(const char* kind, const Strip& strip, std::vector<SceneError>
     validateMultiband(kind, strip.id, strip.multibandEffects, errors);
     validateDeEssers(kind, strip.id, strip.deEsserEffects, errors);
     validateLimiters(kind, strip.id, strip.limiterEffects, errors);
+    validateFeedbackSuppressors(kind, strip.id, strip.feedbackSuppressorEffects, errors);
     validateChain(kind, strip.id, strip.chain, strip.inserts, errors);
     validateRtaSettings(kind, strip.id, strip.eqRtaOffsetDb, strip.eqRtaWeighting,
                         errors);

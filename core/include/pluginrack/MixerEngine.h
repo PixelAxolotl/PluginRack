@@ -14,6 +14,7 @@
 #include "pluginrack/MultibandEffect.h"
 #include "pluginrack/DeEsserEffect.h"
 #include "pluginrack/LimiterEffect.h"
+#include "pluginrack/FeedbackSuppressorEffect.h"
 #include "pluginrack/InsertChain.h"
 #include "pluginrack/Meters.h"
 #include "pluginrack/PluginHost.h"
@@ -91,6 +92,7 @@ private:
         std::vector<MultibandProcessor> multiband;
         std::vector<DeEsserProcessor> deEssers;
         std::vector<LimiterProcessor> limiters;
+        std::vector<FeedbackSuppressorProcessor> feedbackSuppressors;
         std::vector<Step> steps;
     };
 

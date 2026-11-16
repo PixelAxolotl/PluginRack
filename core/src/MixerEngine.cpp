@@ -237,6 +237,13 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
         processor.setEffect(effect);
         strip.limiters.push_back(std::move(processor));
     }
+    strip.feedbackSuppressors.reserve(source.feedbackSuppressorEffects.size());
+    for (const FeedbackSuppressorEffect& effect : source.feedbackSuppressorEffects) {
+        FeedbackSuppressorProcessor processor;
+        processor.prepare(sampleRate);
+        processor.setEffect(effect);
+        strip.feedbackSuppressors.push_back(std::move(processor));
+    }
 
     // Resolve the running order once. The scene's chain names effects by id;
     // anything the chain leaves out still runs, appended in the historical
@@ -247,6 +254,7 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     std::vector<char> usedMultiband(source.multibandEffects.size(), 0);
     std::vector<char> usedDeEssers(source.deEsserEffects.size(), 0);
     std::vector<char> usedLimiters(source.limiterEffects.size(), 0);
+    std::vector<char> usedFeedbackSuppressors(source.feedbackSuppressorEffects.size(), 0);
     for (const ChainItem& item : source.chain) {
         switch (item.type) {
         case ChainItemType::Dynamics:
@@ -273,6 +281,12 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
                 strip.steps.push_back({item.type, *index});
             }
             break;
+        case ChainItemType::FeedbackSuppressor:
+            if (const auto index = findByEffectId(source.feedbackSuppressorEffects, item.id)) {
+                usedFeedbackSuppressors[*index] = 1;
+                strip.steps.push_back({item.type, *index});
+            }
+            break;
         case ChainItemType::Eq:
         case ChainItemType::Insert:
             break;
@@ -289,6 +303,9 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     }
     for (std::size_t i = 0; i < usedLimiters.size(); ++i) {
         if (usedLimiters[i] == 0) strip.steps.push_back({ChainItemType::Limiter, i});
+    }
+    for (std::size_t i = 0; i < usedFeedbackSuppressors.size(); ++i) {
+        if (usedFeedbackSuppressors[i] == 0) strip.steps.push_back({ChainItemType::FeedbackSuppressor, i});
     }
     return strip;
 }
@@ -311,6 +328,9 @@ void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int f
             break;
         case ChainItemType::Limiter:
             if (step.index < strip.limiters.size()) strip.limiters[step.index].process(left, right, frames);
+            break;
+        case ChainItemType::FeedbackSuppressor:
+            if (step.index < strip.feedbackSuppressors.size()) strip.feedbackSuppressors[step.index].process(left, right, frames);
             break;
         case ChainItemType::Eq:
         case ChainItemType::Insert:

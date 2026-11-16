@@ -648,17 +648,19 @@ void RackView::refreshSlots() {
             slot->setMiniView(std::move(mini));
             slot->setSelected(eqFocused);
             eqCard = slot;
-        } else if (item.type == pluginrack::ChainItemType::Multiband || item.type == pluginrack::ChainItemType::DeEsser || item.type == pluginrack::ChainItemType::Limiter) {
-            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : "Limiter";
+        } else if (item.type == pluginrack::ChainItemType::Multiband || item.type == pluginrack::ChainItemType::DeEsser || item.type == pluginrack::ChainItemType::Limiter || item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : item.type == pluginrack::ChainItemType::Limiter ? "Limiter" : "Feedback Suppressor";
             bool bp = false;
             if (auto* ch = currentChannel()) {
                 if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : ch->multibandEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : ch->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : ch->limiterEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) for (auto& e : ch->feedbackSuppressorEffects) if (e.id==item.id) bp=e.bypassed;
             } else if (auto* out = currentOutput()) {
                 if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : out->multibandEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : out->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : out->limiterEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) for (auto& e : out->feedbackSuppressorEffects) if (e.id==item.id) bp=e.bypassed;
             }
             slot->setBuiltIn(item, name, bp);
             if (item.type == pluginrack::ChainItemType::Multiband) {
@@ -2754,6 +2756,18 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
             audioEngine.setChannelLimiters(channel->id, effects);
         }
         if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
+    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->feedbackSuppressorEffects;
+                effectedit::setBypass(effects, item.id, bypassed);
+                audioEngine.setOutputFeedbackSuppressors(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->feedbackSuppressorEffects;
+            effectedit::setBypass(effects, item.id, bypassed);
+            audioEngine.setChannelFeedbackSuppressors(channel->id, effects);
+        }
     } else {
         // Resolve like the card does: a scene keeps the effect ids it was
         // saved with, which can differ from the chain row's id.
@@ -2810,11 +2824,13 @@ void RackView::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
             if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(output->multibandEffects.begin(), output->multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->multibandEffects; fx.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setOutputMultiband(output->id, fx); }
             if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(output->deEsserEffects.begin(), output->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setOutputDeEssers(output->id, fx); }
             if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(output->limiterEffects.begin(), output->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setOutputLimiters(output->id, fx); }
+            if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(output->feedbackSuppressorEffects.begin(), output->feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->feedbackSuppressorEffects; fx.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setOutputFeedbackSuppressors(output->id, fx); }
         }
     } else if (auto* channel = currentChannel()) {
         if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(channel->multibandEffects.begin(), channel->multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->multibandEffects; fx.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setChannelMultiband(channel->id, fx); }
         if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(channel->deEsserEffects.begin(), channel->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setChannelDeEssers(channel->id, fx); }
         if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(channel->limiterEffects.begin(), channel->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setChannelLimiters(channel->id, fx); }
+        if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(channel->feedbackSuppressorEffects.begin(), channel->feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->feedbackSuppressorEffects; fx.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setChannelFeedbackSuppressors(channel->id, fx); }
     }
     if (item.type == pluginrack::ChainItemType::Dynamics) {
         if (const auto* effects = currentEffects()) {

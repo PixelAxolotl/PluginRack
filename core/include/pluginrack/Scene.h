@@ -10,6 +10,7 @@
 #include "pluginrack/MultibandEffect.h"
 #include "pluginrack/DeEsserEffect.h"
 #include "pluginrack/LimiterEffect.h"
+#include "pluginrack/FeedbackSuppressorEffect.h"
 #include "pluginrack/Types.h"
 
 namespace pluginrack {
@@ -69,7 +70,7 @@ struct AuxBus {
     bool operator==(const AuxBus&) const = default;
 };
 
-enum class ChainItemType { Eq, Dynamics, Insert, Multiband, DeEsser, Limiter };
+enum class ChainItemType { Eq, Dynamics, Insert, Multiband, DeEsser, Limiter, FeedbackSuppressor };
 
 struct ChainItem {
     ChainItemType type = ChainItemType::Insert;
@@ -93,6 +94,7 @@ struct Strip {
     std::vector<MultibandEffect> multibandEffects;
     std::vector<DeEsserEffect> deEsserEffects;
     std::vector<LimiterEffect> limiterEffects;
+    std::vector<FeedbackSuppressorEffect> feedbackSuppressorEffects;
     float multibandRtaOffsetDb = 0.0f;
     int multibandRtaWeighting = 0;
     float deEsserRtaOffsetDb = 0.0f;

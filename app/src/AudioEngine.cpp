@@ -666,6 +666,9 @@ void AudioEngine::render(int frames) {
                         auto f = std::find_if(channel->limiterEffects.begin(), channel->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->limiterEffects.begin()); if (i < channel->limiterProcessors.size()) channel->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+                    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+                        auto f = std::find_if(channel->feedbackSuppressorEffects.begin(), channel->feedbackSuppressorEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                        if (f != channel->feedbackSuppressorEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->feedbackSuppressorEffects.begin()); if (i < channel->feedbackSuppressorProcessors.size()) channel->feedbackSuppressorProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                     } else {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
@@ -713,6 +716,7 @@ void AudioEngine::render(int frames) {
                 processNewMissing(channel->chain, channel->multibandEffects, channel->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(channel->chain, channel->deEsserEffects, channel->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
+processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
                 channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(channel->buffer, start, count);
             }
@@ -853,6 +857,7 @@ void AudioEngine::render(int frames) {
                 processNewMissing(output->chain, output->multibandEffects, output->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(output->chain, output->deEsserEffects, output->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(output->chain, output->limiterEffects, output->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
+processNewMissing(output->chain, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
                 output->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(output->buffer, start, count);
             }
@@ -1222,6 +1227,7 @@ void AudioEngine::addChannel() {
     for (const auto& e : channel->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->multibandProcessors.push_back(std::move(pr)); }
     for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
     for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
+for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->feedbackSuppressorProcessors.push_back(std::move(pr)); }
     for (const auto& output : outputs) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -1264,6 +1270,7 @@ void AudioEngine::addOutput() {
     for (const auto& e : output->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->multibandProcessors.push_back(std::move(pr)); }
     for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
     for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
+for (const auto& e : output->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->feedbackSuppressorProcessors.push_back(std::move(pr)); }
     for (const auto& channel : channels) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -2177,6 +2184,18 @@ void AudioEngine::setOutputLimiters(std::uint32_t outputId, const std::vector<pl
     if (output == nullptr) return;
     syncNewEffects(output, effects, output->limiterEffects, output->limiterProcessors, currentSampleRate);
 }
+void AudioEngine::setChannelFeedbackSuppressors(std::uint32_t channelId, const std::vector<pluginrack::FeedbackSuppressorEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    syncNewEffects(channel, effects, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, currentSampleRate);
+}
+void AudioEngine::setOutputFeedbackSuppressors(std::uint32_t outputId, const std::vector<pluginrack::FeedbackSuppressorEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    syncNewEffects(output, effects, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, currentSampleRate);
+}
 
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
@@ -2516,9 +2535,11 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         channel->multibandEffects = savedChannel.multibandEffects;
         channel->deEsserEffects = savedChannel.deEsserEffects;
         channel->limiterEffects = savedChannel.limiterEffects;
+        channel->feedbackSuppressorEffects = savedChannel.feedbackSuppressorEffects;
         for (const auto& e : channel->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->multibandProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
+        for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->feedbackSuppressorProcessors.push_back(std::move(pr)); }
         // An empty saved chain is a real empty state (no effects loaded).
         // Scenes without per-strip ordering predate this field; their effects
         // still run via processEffectsMissingFromChain, so a missing chain
@@ -2610,9 +2631,11 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->multibandEffects = savedOutput.multibandEffects;
         output->deEsserEffects = savedOutput.deEsserEffects;
         output->limiterEffects = savedOutput.limiterEffects;
+        output->feedbackSuppressorEffects = savedOutput.feedbackSuppressorEffects;
         for (const auto& e : output->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->multibandProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
+        for (const auto& e : output->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->feedbackSuppressorProcessors.push_back(std::move(pr)); }
         output->chain = savedOutput.chain;
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());

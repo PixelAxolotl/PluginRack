@@ -599,6 +599,9 @@ void ChannelStrip::refreshInserts() {
         } else if (item.type == pluginrack::ChainItemType::Limiter) {
             const auto it = std::find_if(channel.limiterEffects.begin(), channel.limiterEffects.end(), [id=item.id](const auto& e){return e.id==id;});
             slots[r]->setBuiltIn(item, "Limiter", it!=channel.limiterEffects.end() && it->bypassed);
+        } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+            const auto it = std::find_if(channel.feedbackSuppressorEffects.begin(), channel.feedbackSuppressorEffects.end(), [id=item.id](const auto& e){return e.id==id;});
+            slots[r]->setBuiltIn(item, "Feedback Suppressor", it!=channel.feedbackSuppressorEffects.end() && it->bypassed);
         } else {
             const auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
                                          [id = item.id](const auto& effect) { return effect.id == id; });
@@ -873,6 +876,12 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
         return;
     }
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        auto effects = channel.feedbackSuppressorEffects;
+        effectedit::setBypass(effects, item.id, bypassed);
+        audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
+        return;
+    }
     auto effects = channel.effects;
     effectedit::setBypass(effects, item.id, bypassed);
     audioEngine.setChannelEffects(channel.id, effects);
@@ -890,6 +899,8 @@ void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {
         openDeEsserWindow();
     else if (item.type == pluginrack::ChainItemType::Limiter)
         openLimiterWindow();
+    else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor)
+        ; // no editor window in first version
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
@@ -909,6 +920,9 @@ void ChannelStrip::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
     }
     if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(channel.limiterEffects.begin(), channel.limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) {
         auto effects = channel.limiterEffects; effects.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setChannelLimiters(channel.id, effects);
+    }
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(channel.feedbackSuppressorEffects.begin(), channel.feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) {
+        auto effects = channel.feedbackSuppressorEffects; effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
     }
     // Comp/Gate is one object: picking it restores the partner row too, so
     // the card comes back whole instead of one effect at a time.

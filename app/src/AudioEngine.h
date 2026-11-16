@@ -23,6 +23,7 @@
 #include <pluginrack/MultibandEffect.h>
 #include <pluginrack/DeEsserEffect.h>
 #include <pluginrack/LimiterEffect.h>
+#include <pluginrack/FeedbackSuppressorEffect.h>
 
 #include "PluginHost.h"
 #include "DeviceStream.h"
@@ -177,6 +178,8 @@ public:
         std::vector<pluginrack::DeEsserProcessor> deEsserProcessors;
         std::vector<pluginrack::LimiterEffect> limiterEffects;
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
+        std::vector<pluginrack::FeedbackSuppressorEffect> feedbackSuppressorEffects;
+        std::vector<pluginrack::FeedbackSuppressorProcessor> feedbackSuppressorProcessors;
         juce::Atomic<bool> eqBypassed{true};
         // One tap per built-in, each written at its own point in the chain:
         // eqTap after the EQ, dynamicsTap after Comp/Gate, multibandTap
@@ -251,6 +254,8 @@ public:
         std::vector<pluginrack::DeEsserProcessor> deEsserProcessors;
         std::vector<pluginrack::LimiterEffect> limiterEffects;
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
+        std::vector<pluginrack::FeedbackSuppressorEffect> feedbackSuppressorEffects;
+        std::vector<pluginrack::FeedbackSuppressorProcessor> feedbackSuppressorProcessors;
         juce::Atomic<bool> eqBypassed{true};
         // One tap per built-in, same rule as Channel.
         AnalyzerTap eqTap;
@@ -628,6 +633,10 @@ public:
                             const std::vector<pluginrack::LimiterEffect>& effects);
     void setOutputLimiters(std::uint32_t outputId,
                            const std::vector<pluginrack::LimiterEffect>& effects);
+    void setChannelFeedbackSuppressors(std::uint32_t channelId,
+                                      const std::vector<pluginrack::FeedbackSuppressorEffect>& effects);
+    void setOutputFeedbackSuppressors(std::uint32_t outputId,
+                                     const std::vector<pluginrack::FeedbackSuppressorEffect>& effects);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

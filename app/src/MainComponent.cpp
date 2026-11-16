@@ -604,6 +604,7 @@ void MainComponent::showMenu() {
                                                     audioEngine.setChannelMultiband(c->id, pluginrack::defaultMultibandEffects());
                                                     audioEngine.setChannelDeEssers(c->id, pluginrack::defaultDeEsserEffects());
                                                     audioEngine.setChannelLimiters(c->id, pluginrack::defaultLimiterEffects());
+audioEngine.setChannelFeedbackSuppressors(c->id, pluginrack::defaultFeedbackSuppressorEffects());
                                                     audioEngine.setChannelChain(c->id, AudioEngine::defaultChain());
                                                     audioEngine.setChannelGain(c->id, 0.0f);
                                                     audioEngine.setChannelTrim(c->id, 0.0f);
@@ -632,6 +633,7 @@ void MainComponent::showMenu() {
                                                     audioEngine.setOutputMultiband(outputId, pluginrack::defaultMultibandEffects());
                                                     audioEngine.setOutputDeEssers(outputId, pluginrack::defaultDeEsserEffects());
                                                     audioEngine.setOutputLimiters(outputId, pluginrack::defaultLimiterEffects());
+audioEngine.setOutputFeedbackSuppressors(outputId, pluginrack::defaultFeedbackSuppressorEffects());
                                                     audioEngine.setOutputChain(outputId, AudioEngine::defaultChain());
                                                     audioEngine.setOutputGain(outputId, 0.0f);
                                                     audioEngine.setOutputMuted(outputId, false);

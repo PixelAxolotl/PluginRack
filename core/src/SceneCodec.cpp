@@ -269,6 +269,18 @@ void from_json(const nlohmann::json& j, LimiterEffect& effect) {
     effect.releaseMs = j.value("releaseMs", effect.releaseMs);
 }
 
+void to_json(nlohmann::json& j, const FeedbackSuppressorEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed},
+                       {"strength", effect.strength}};
+}
+
+void from_json(const nlohmann::json& j, FeedbackSuppressorEffect& effect) {
+    effect = FeedbackSuppressorEffect{};
+    effect.id = j.value("id", 1u);
+    effect.bypassed = j.value("bypassed", false);
+    effect.strength = j.value("strength", effect.strength);
+}
+
 void to_json(nlohmann::json& j, DynamicsEffectType type) {
     switch (type) {
         case DynamicsEffectType::Compressor: j = "Compressor"; break;
@@ -363,6 +375,7 @@ void to_json(nlohmann::json& j, ChainItemType type) {
         case ChainItemType::Multiband: j = "Multiband"; break;
         case ChainItemType::DeEsser: j = "DeEsser"; break;
         case ChainItemType::Limiter: j = "Limiter"; break;
+        case ChainItemType::FeedbackSuppressor: j = "FeedbackSuppressor"; break;
     }
 }
 
@@ -374,6 +387,7 @@ void from_json(const nlohmann::json& j, ChainItemType& type) {
     else if (name == "Multiband") type = ChainItemType::Multiband;
     else if (name == "DeEsser") type = ChainItemType::DeEsser;
     else if (name == "Limiter") type = ChainItemType::Limiter;
+    else if (name == "FeedbackSuppressor") type = ChainItemType::FeedbackSuppressor;
     else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
 }
 
@@ -431,6 +445,7 @@ void to_json(nlohmann::json& j, const Strip& strip) {
         {"multibandEffects", strip.multibandEffects},
         {"deEsserEffects", strip.deEsserEffects},
         {"limiterEffects", strip.limiterEffects},
+        {"feedbackSuppressorEffects", strip.feedbackSuppressorEffects},
         {"multibandRtaOffsetDb", strip.multibandRtaOffsetDb},
         {"multibandRtaWeighting", strip.multibandRtaWeighting},
         {"deEsserRtaOffsetDb", strip.deEsserRtaOffsetDb},
@@ -470,6 +485,7 @@ void from_json(const nlohmann::json& j, Strip& strip) {
     if (j.contains("multibandEffects")) j.at("multibandEffects").get_to(strip.multibandEffects);
     if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(strip.deEsserEffects);
     if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(strip.limiterEffects);
+    if (j.contains("feedbackSuppressorEffects")) j.at("feedbackSuppressorEffects").get_to(strip.feedbackSuppressorEffects);
     strip.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
     strip.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
     strip.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);

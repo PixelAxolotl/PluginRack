@@ -584,12 +584,14 @@ void MixerComponent::OutputStrip::refreshInserts() {
             slots[r]->setBuiltIn(item, "EQ", output.eqBypassed.get());
         } else if (item.type == pluginrack::ChainItemType::Multiband ||
                    item.type == pluginrack::ChainItemType::DeEsser ||
-                   item.type == pluginrack::ChainItemType::Limiter) {
-            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : "Limiter";
+                   item.type == pluginrack::ChainItemType::Limiter ||
+                   item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : item.type == pluginrack::ChainItemType::Limiter ? "Limiter" : "Feedback Suppressor";
             bool bp = false;
             if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : output.multibandEffects) if (e.id==item.id) bp=e.bypassed;
             if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : output.deEsserEffects) if (e.id==item.id) bp=e.bypassed;
             if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : output.limiterEffects) if (e.id==item.id) bp=e.bypassed;
+            if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) for (auto& e : output.feedbackSuppressorEffects) if (e.id==item.id) bp=e.bypassed;
             slots[r]->setBuiltIn(item, name, bp);
         } else {
             const auto it = std::find_if(output.effects.begin(), output.effects.end(),
@@ -737,6 +739,12 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
         audioEngine.setOutputLimiters(output.id, effects);
         return;
     }
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        auto effects = output.feedbackSuppressorEffects;
+        effectedit::setBypass(effects, item.id, bypassed);
+        audioEngine.setOutputFeedbackSuppressors(output.id, effects);
+        return;
+    }
     auto effects = output.effects;
     effectedit::setBypass(effects, item.id, bypassed);
     audioEngine.setOutputEffects(output.id, effects);
@@ -763,6 +771,7 @@ void MixerComponent::OutputStrip::insertBuiltIn(pluginrack::ChainItem item, int 
     if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(output.multibandEffects.begin(), output.multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.multibandEffects; effects.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setOutputMultiband(output.id, effects); }
     if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(output.deEsserEffects.begin(), output.deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.deEsserEffects; effects.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setOutputDeEssers(output.id, effects); }
     if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(output.limiterEffects.begin(), output.limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.limiterEffects; effects.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setOutputLimiters(output.id, effects); }
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(output.feedbackSuppressorEffects.begin(), output.feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto effects = output.feedbackSuppressorEffects; effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setOutputFeedbackSuppressors(output.id, effects); }
     if (item.type == pluginrack::ChainItemType::Dynamics) {
         for (const auto& effect : output.effects)
             if (effect.id != item.id)
