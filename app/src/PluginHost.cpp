@@ -1,5 +1,8 @@
 #include "PluginHost.h"
 
+#include "AppPaths.h"
+#include "PluginPrepare.h"
+
 #include <algorithm>
 #include <climits>
 #include <cstring>
@@ -126,10 +129,7 @@ juce::String currentLoadingPlugin() {
 }
 
 juce::File blockedListFile() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("plugins")
-        .getChildFile("blocked-plugin-loads.txt");
+    return appPaths::file("plugins/blocked-plugin-loads.txt");
 }
 
 bool isBlocked(const juce::File& file) {
@@ -168,10 +168,7 @@ int clearBlocked() {
 namespace PluginFaultGuard {
 
 juce::File faultsFile() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("plugins")
-        .getChildFile("faults.json");
+    return appPaths::file("plugins/faults.json");
 }
 
 bool record(const juce::String& path, int exitCode, std::uint32_t insertId) {
@@ -822,7 +819,7 @@ void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase
     pluginName = loaded.name;
     plugin = loaded.instance;
     const auto prepareStart = juce::Time::getMillisecondCounterHiRes();
-    plugin->prepareToPlay(currentSampleRate, currentBufferSize);
+    pluginprepare::prepareInstance(*plugin, currentSampleRate, currentBufferSize);
     prepared = true;
     cachedLatencySamples_.store(plugin->getLatencySamples(), std::memory_order_relaxed);
     juce::Logger::writeToLog("plugin: prepare "
@@ -872,11 +869,7 @@ void PluginHost::prepareToPlay(double sampleRate, int samplesPerBlock) {
     currentSampleRate = sampleRate;
     currentBufferSize = samplesPerBlock;
     if (plugin != nullptr && !unchanged) {
-        if (prepared) {
-            plugin->releaseResources();
-        }
-        plugin->setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
-        plugin->prepareToPlay(sampleRate, samplesPerBlock);
+        pluginprepare::prepareInstance(*plugin, sampleRate, samplesPerBlock);
         prepared = true;
     }
     cachedLatencySamples_.store(plugin != nullptr ? plugin->getLatencySamples() : 0,

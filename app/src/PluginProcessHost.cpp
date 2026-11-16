@@ -1,21 +1,8 @@
 #include "PluginProcessHost.h"
 
 #include <windows.h>
-#include <appmodel.h>
-
-#include <UserEnv.h>
 
 namespace {
-
-// Best effort: create the AppContainer profile once. "Already exists" is a
-// success: the profile is a per-user identity, not a per-run resource. The
-// child still runs with the user token (see the fault containment spec §6), so
-// this is profile preparation only, not a sandbox.
-bool ensureAppContainer() {
-    const HRESULT hr = CreateAppContainerProfile(
-        L"PixelAxolotl.PluginRack.PluginHost", nullptr, nullptr, nullptr, 0, nullptr);
-    return SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
-}
 
 juce::String exitCodeText(int code) {
     return "0x" + juce::String::toHexString(code).paddedLeft('0', 8).toUpperCase();
@@ -38,7 +25,6 @@ PluginProcessHost::~PluginProcessHost() {
 
 bool PluginProcessHost::start(const juce::File& file, int pluginUniqueId, double sampleRate,
                               int blockSize, juce::String& error) {
-    (void) ensureAppContainer();
     static std::atomic<bool> tokenNoticeLogged{false};
     if (!tokenNoticeLogged.exchange(true, std::memory_order_relaxed)) {
         juce::Logger::writeToLog("plugin: child hosts run with the normal user token "
@@ -113,11 +99,7 @@ bool PluginProcessHost::openChannel(const juce::File& file) {
     auto* block = static_cast<pluginHostIpc::SharedAudioBlock*>(audioSection.data());
     block->sequence = 0;
     block->responseSequence = 0;
-    block->writeSequence = 0;
-    block->readSequence = 0;
-    block->ackSequence = 0;
     block->blockSequence = 0;
-    block->lastSequence = 0;
     block->numFrames = 0;
     block->bufferSize = 0;
     block->sampleRate = 0.0;
@@ -180,8 +162,7 @@ bool PluginProcessHost::waitReady(int timeoutMs, juce::String& error) {
     for (;;) {
         const auto state = control->hostReady.load(std::memory_order_acquire);
         if (state == pluginHostIpc::kHostReadyLoaded) {
-            ready = true;
-            return true;
+                    return true;
         }
         if (state == pluginHostIpc::kHostReadyFailed) {
             error = "The plugin host could not load '" + juce::File(pluginPath).getFileName()
@@ -339,7 +320,6 @@ bool PluginProcessHost::submitBlock(const juce::AudioBuffer<float>& input, int n
         block->interleave[i * 2 + 1] = right[i];
     }
     block->blockSequence = block->blockSequence + 1; // even: committed
-    block->writeSequence = block->writeSequence + 1;
     const auto next = previous + 1;
     block->sequence = next;
     lastSubmitted = next;
@@ -463,5 +443,4 @@ void PluginProcessHost::killAndReap() {
     controlRequestEvent.close();
     controlResponseEvent.close();
     launched = false;
-    ready = false;
 }

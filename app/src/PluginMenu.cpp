@@ -281,6 +281,11 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
 namespace PluginMenu {
 
 void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::File&, int)> onChoose) {
+    showAddPluginMenu(anchor, std::move(onChoose), {});
+}
+
+void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::File&, int)> onChoose,
+                       BuiltInCallback onBuiltIn) {
     auto& library = PluginLibrary::getInstance();
     // First click after launch: the cache is loaded, but a library that was
     // never scanned still needs one so the menu has something to show.
@@ -289,22 +294,7 @@ void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::F
     const juce::Component::SafePointer<juce::Component> safeAnchor(&anchor);
 
     juce::PopupMenu menu;
-    buildAddPluginMenu(menu, safeAnchor, onChoose);
-
-    menu.showMenuAsync(juce::PopupMenu::Options()
-                           .withTargetComponent(anchor)
-                           .withMinimumWidth(260));
-}
-
-void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::File&, int)> onChoose,
-                       BuiltInCallback onBuiltIn) {
-    auto& library = PluginLibrary::getInstance();
-    if (!library.hasScanned() && !library.isScanning()) library.beginBackgroundScan();
-
-    const juce::Component::SafePointer<juce::Component> safeAnchor(&anchor);
-
-    juce::PopupMenu menu;
-    buildAddPluginMenu(menu, safeAnchor, onChoose, onBuiltIn);
+    buildAddPluginMenu(menu, safeAnchor, std::move(onChoose), std::move(onBuiltIn));
 
     menu.showMenuAsync(juce::PopupMenu::Options()
                            .withTargetComponent(anchor)

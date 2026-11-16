@@ -36,11 +36,7 @@ constexpr int kMaxBlockFrames = 8192;
 struct SharedAudioBlock {
     volatile std::uint64_t sequence = 0;         // app request counter
     volatile std::uint64_t responseSequence = 0; // host ack == sequence it answered
-    volatile std::uint64_t writeSequence = 0;    // app payload version
-    volatile std::uint64_t readSequence = 0;     // host last-read version
-    volatile std::uint64_t ackSequence = 0;      // host last-processed version
     volatile std::uint64_t blockSequence = 0;    // even=stable, odd=writer active
-    volatile std::uint64_t lastSequence = 0;     // host's last seen sequence
     int numFrames = 0;
     int bufferSize = 0;
     double sampleRate = 0.0;

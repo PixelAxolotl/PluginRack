@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 
+#include "AppPaths.h"
 #include "CrashContext.h"
 #include "DeviceBackend.h"
 #include "DeviceNames.h"
@@ -189,10 +190,7 @@ struct BriefTryLock {
 // Advisory capability cache. It never decides whether a device can open; it
 // only remembers what a successful probe cost and negotiated.
 juce::File deviceCacheFile() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("devices")
-        .getChildFile("device-cache.json");
+    return appPaths::file("devices/device-cache.json");
 }
 }
 

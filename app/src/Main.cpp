@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 
 #include "AppLogos.h"
+#include "AppPaths.h"
 #include "ConsoleLookAndFeel.h"
 #include "CrashContext.h"
 #include "DeviceStream.h"
@@ -33,9 +34,7 @@ namespace {
 // with the PDB this build ships next to the exe, llvm-symbolizer turns those
 // into function names and source lines.
 juce::File pluginRackLogDirectory() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("logs");
+    return appPaths::file("logs");
 }
 
 // Every line carries the milliseconds since the run started, so a stall shows
@@ -207,11 +206,7 @@ public:
     // and only the GUI takes it.
     bool moreThanOneInstanceAllowed() override {
         for (const auto& arg : juce::JUCEApplicationBase::getCommandLineParameterArray()) {
-            if (arg == pluginHostIpc::kScanSwitch || arg == "--list-devices"
-                || arg == "--list-plugins" || arg == pluginHostIpc::kHostSwitch
-                || arg == "--test-crash-report"
-                || arg == "--test-child-host" || arg == "--test-child-null")
-                return true;
+            if (arg.startsWith("--")) return true;
         }
         return false;
     }

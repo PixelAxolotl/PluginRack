@@ -1,5 +1,7 @@
 #include "SceneBridge.h"
 
+#include "AppPaths.h"
+
 #include <pluginrack/SceneCodec.h>
 #include <pluginrack/SceneValidator.h>
 
@@ -8,9 +10,7 @@ constexpr juce::int64 kMaxSceneFileBytes = 8 * 1024 * 1024;
 constexpr int kMaxSaveNameLength = 64;
 
 std::vector<juce::File> lastSceneCandidates() {
-    const auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                         .getChildFile("PluginRack")
-                         .getChildFile("scenes");
+    const auto dir = appPaths::file("scenes");
     return {
         dir.getChildFile("last.json"),
         dir.getChildFile("autosave.json"),
@@ -100,9 +100,7 @@ bool isValidSaveName(const juce::String& name) {
 }
 
 juce::File SceneBridge::getScenesDirectory() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("scenes");
+    return appPaths::file("scenes");
 }
 
 juce::File SceneBridge::getSceneFile() {

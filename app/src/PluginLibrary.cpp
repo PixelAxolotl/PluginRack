@@ -1,5 +1,6 @@
 #include "PluginLibrary.h"
 
+#include "AppPaths.h"
 #include "PluginHost.h"
 
 #include <algorithm>
@@ -106,10 +107,7 @@ PluginLibrary& PluginLibrary::getInstance() {
 }
 
 juce::File PluginLibrary::cacheFile() {
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("PluginRack")
-        .getChildFile("plugins")
-        .getChildFile("plugin-library.xml");
+    return appPaths::file("plugins/plugin-library.xml");
 }
 
 juce::String PluginLibrary::vendorNameFor(const juce::PluginDescription& description) {

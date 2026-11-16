@@ -2,6 +2,7 @@
 
 #include "PluginHost.h"
 #include "PluginHostIpc.h"
+#include "PluginPrepare.h"
 
 #include <atomic>
 #include <thread>
@@ -247,9 +248,7 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                     // reseed internal state in prepareToPlay must be given the
                     // same lifecycle here or they render differently - the null
                     // test caught exactly that with a compressor.
-                    plugin->releaseResources();
-                    plugin->setRateAndBufferSizeDetails(rate, frames);
-                    plugin->prepareToPlay(rate, frames);
+                    pluginprepare::prepareInstance(*plugin, rate, frames);
                     currentRate = rate;
                     currentBufferSize = frames;
                     block->latencySamples = plugin->getLatencySamples();
@@ -328,9 +327,7 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
         const double rate = block->sampleRate > 0.0 ? block->sampleRate : currentRate;
         const int framesPerBlock = block->bufferSize > 0 ? block->bufferSize : currentBufferSize;
         if (rate != currentRate || framesPerBlock != currentBufferSize) {
-            plugin->releaseResources();
-            plugin->setRateAndBufferSizeDetails(rate, framesPerBlock);
-            plugin->prepareToPlay(rate, framesPerBlock);
+            pluginprepare::prepareInstance(*plugin, rate, framesPerBlock);
             currentRate = rate;
             currentBufferSize = framesPerBlock;
             block->latencySamples = plugin->getLatencySamples();
@@ -345,12 +342,10 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
             }
             const auto after = block->blockSequence;
             if (before != after || (before % 2) == 1) {
-                // Torn: ack anyway, otherwise the app (which only submits after
-                // an ack) would stop feeding this host forever. The app's own
-                // torn guard rejects the payload and plays dry.
-                block->readSequence = seq;
+                // Torn: ack anyway (below), otherwise the app, which only
+                // submits after an ack, would stop feeding this host forever.
+                // The app's own torn guard rejects the payload and plays dry.
             } else {
-                block->readSequence = seq;
                 juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), 2, 0, frames);
                 const auto peakInL = blockPeak(view, 0, frames);
                 const auto peakInR = blockPeak(view, 1, frames);
@@ -371,7 +366,6 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
             }
         }
 
-        block->ackSequence = seq;
         block->responseSequence = seq;
         lastSequence = seq;
         // Wake the app's audio thread; it waits on this event instead of

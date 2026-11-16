@@ -137,7 +137,7 @@ void InsertMiniView::setGainReduction(const std::vector<float>& newReductionsDb)
 
 void InsertMiniView::setDeEsserGainReduction(float reductionDb) {
     if (kind != Kind::DeEsser) return;
-    const float clamped = juce::jlimit(0.0f, 24.0f, reductionDb);
+    const float clamped = juce::jlimit(0.0f, kMaxReductionDb, reductionDb);
     if (juce::approximatelyEqual(clamped, deEsserGainReductionDb)) return;
     deEsserGainReductionDb = clamped;
     updateTraceVectors();

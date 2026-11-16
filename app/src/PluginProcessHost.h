@@ -123,7 +123,6 @@ private:
     std::uint64_t lastSubmitted = 0;
     juce::CriticalSection controlLock_;
     bool launched = false;
-    bool ready = false;
     juce::String lastKnownState_;
 
     std::atomic<bool> hostDead{false};

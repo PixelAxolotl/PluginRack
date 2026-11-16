@@ -581,7 +581,7 @@ TEST_CASE("adding a VST scans in a child process and creates on the message thre
     CHECK(contains(host, "pluginHostIpc::kScanSwitch"));
     CHECK(contains(host, "PluginHost::scanFileInProcess"));
     CHECK(contains(host, "sharedFormatLock()"));
-    CHECK(contains(host, "plugin->prepareToPlay(currentSampleRate, currentBufferSize)"));
+    CHECK(contains(host, "pluginprepare::prepareInstance(*plugin, currentSampleRate, currentBufferSize)"));
 
     const auto rack = readSource("app/src/RackView.cpp");
     const auto insert = functionBody(rack, "juce::String RackView::insertPlugin");
