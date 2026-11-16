@@ -829,7 +829,9 @@ void RackView::releaseMiniTap() {
 }
 
 void RackView::startMiniTimer() {
-    const bool hasMinis = eqCard != nullptr || dynamicsCard != nullptr || !vstCards.empty();
+    const bool hasMinis = eqCard != nullptr || dynamicsCard != nullptr
+        || multibandCard != nullptr || deEsserCard != nullptr || limiterCard != nullptr
+        || !vstCards.empty();
     if (!hasMinis) {
         stopTimer();
         releaseMiniTap();
@@ -2083,26 +2085,6 @@ void RackView::closeDynamicsWindow() {
     showDockedEditor();
 }
 
-void RackView::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
-    if (auto* ch = currentChannel()) {
-        auto effects = ch->effects;
-        const auto found = std::find_if(effects.begin(), effects.end(),
-                                        [type](const auto& effect) { return effect.type == type; });
-        if (found == effects.end()) return;
-        found->bypassed = !found->bypassed;
-        audioEngine.setChannelEffects(ch->id, effects);
-    } else if (auto* out = currentOutput()) {
-        auto effects = out->effects;
-        const auto found = std::find_if(effects.begin(), effects.end(),
-                                        [type](const auto& effect) { return effect.type == type; });
-        if (found == effects.end()) return;
-        found->bypassed = !found->bypassed;
-        audioEngine.setOutputEffects(out->id, effects);
-    } else {
-        return;
-    }
-    refreshDynamicsButtons();
-}
 
 void RackView::refreshDynamicsButtons() {
     // No standalone buttons left: the Dynamics card carries the bypass

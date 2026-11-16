@@ -78,7 +78,6 @@ ToolbarComponent::ToolbarComponent() {
     addAndMakeVisible(latencyLabel);
     addAndMakeVisible(errorButton);
     addAndMakeVisible(saveButton);
-    addAndMakeVisible(savesButton);
     addAndMakeVisible(menuButton);
 
     updateNavToggles();
@@ -576,6 +575,9 @@ void MainComponent::showMenu() {
                                                     audioEngine.setChannelDeEsserRtaOffset(c->id, 0.0f);
                                                     audioEngine.setChannelDeEsserRtaWeighting(c->id, 0);
                                                     audioEngine.setChannelEffects(c->id, pluginrack::defaultDynamicsEffects());
+                                                    audioEngine.setChannelMultiband(c->id, pluginrack::defaultMultibandEffects());
+                                                    audioEngine.setChannelDeEssers(c->id, pluginrack::defaultDeEsserEffects());
+                                                    audioEngine.setChannelLimiters(c->id, pluginrack::defaultLimiterEffects());
                                                     audioEngine.setChannelChain(c->id, AudioEngine::defaultChain());
                                                     audioEngine.setChannelGain(c->id, 0.0f);
                                                     audioEngine.setChannelTrim(c->id, 0.0f);
@@ -601,6 +603,9 @@ void MainComponent::showMenu() {
                                                     audioEngine.setOutputDeEsserRtaOffset(outputId, 0.0f);
                                                     audioEngine.setOutputDeEsserRtaWeighting(outputId, 0);
                                                     audioEngine.setOutputEffects(outputId, pluginrack::defaultDynamicsEffects());
+                                                    audioEngine.setOutputMultiband(outputId, pluginrack::defaultMultibandEffects());
+                                                    audioEngine.setOutputDeEssers(outputId, pluginrack::defaultDeEsserEffects());
+                                                    audioEngine.setOutputLimiters(outputId, pluginrack::defaultLimiterEffects());
                                                     audioEngine.setOutputChain(outputId, AudioEngine::defaultChain());
                                                     audioEngine.setOutputGain(outputId, 0.0f);
                                                     audioEngine.setOutputMuted(outputId, false);
@@ -734,7 +739,8 @@ juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool open
     // the engine's startup worker when openDevicesNow is false. The flag
     // serialises overlapping menu/Saves loads and resets on every path;
     // dialogs stay on the message thread too.
-    if (sceneLoading_.exchange(true)) return {};
+    if (sceneLoading_.exchange(true))
+        return "A scene is already loading. Please try again in a moment.";
     if (audioEngine.isOpeningDevices()) {
         sceneLoading_.store(false);
         showError("Audio is still starting up. Please try again in a moment.");

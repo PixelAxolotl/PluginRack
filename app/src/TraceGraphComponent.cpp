@@ -12,9 +12,12 @@ constexpr float kMaxDb = analyzer::kMaxDb;
 constexpr double kMinFrequency = analyzer::kMinFrequencyHz;
 constexpr double kMaxFrequency = analyzer::kMaxFrequencyHz;
 
-constexpr std::array<double, analyzer::kLabelFrequenciesHz.size()> kGridFrequencies{
-    20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0
-};
+constexpr auto kGridFrequencies = [] {
+    std::array<double, analyzer::kLabelFrequenciesHz.size()> marks{};
+    for (std::size_t i = 0; i < marks.size(); ++i)
+        marks[i] = static_cast<double>(analyzer::kLabelFrequenciesHz[i]);
+    return marks;
+}();
 
 juce::String frequencyText(double hz) {
     if (hz >= 1000.0)
@@ -119,11 +122,11 @@ void drawFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Rectangle
     }
 }
 
-void drawFrequencyTrace(juce::Graphics& g,
-                        const std::vector<float>& values,
-                        juce::Rectangle<float> graph,
-                        juce::Colour colour,
-                        bool fill) {
+void drawSeriesTrace(juce::Graphics& g,
+                     const std::vector<float>& values,
+                     juce::Rectangle<float> graph,
+                     juce::Colour colour,
+                     bool fill) {
     if (values.empty()) return;
     juce::Path path;
     for (std::size_t i = 0; i < values.size(); ++i) {
@@ -171,31 +174,6 @@ void TraceGraphComponent::drawSpectrum(juce::Graphics& g,
     g.strokePath(path, juce::PathStrokeType(1.8f));
 }
 
-void drawTimeTrace(juce::Graphics& g,
-                   const std::vector<float>& values,
-                   juce::Rectangle<float> graph,
-                   juce::Colour colour,
-                   bool fill) {
-    if (values.empty()) return;
-    juce::Path path;
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        const auto x = graph.getX() + graph.getWidth()
-            * static_cast<float>(i) / static_cast<float>(std::max<std::size_t>(1, values.size() - 1));
-        const auto y = dbToY(values[i], graph);
-        if (i == 0) path.startNewSubPath(x, y);
-        else path.lineTo(x, y);
-    }
-    if (fill) {
-        path.lineTo(graph.getRight(), graph.getBottom());
-        path.lineTo(graph.getX(), graph.getBottom());
-        path.closeSubPath();
-        g.setColour(colour.withAlpha(0.10f));
-        g.fillPath(path);
-    }
-    g.setColour(colour.withAlpha(0.9f));
-    g.strokePath(path, juce::PathStrokeType(1.8f));
-}
-
 juce::Rectangle<float> TraceGraphComponent::miniGraphBounds(juce::Rectangle<int> bounds) {
     // Full-width previews with guaranteed-cleared labels: the graph spans
     // the card edge to edge horizontally (only the 2px card border), with
@@ -211,16 +189,12 @@ float TraceGraphComponent::miniTraceDb(float db, juce::Rectangle<float> graph) {
     return dbToY(db, graph);
 }
 
-juce::Colour TraceGraphComponent::miniTraceColour(float, float) {
-    return theme::amber();
-}
-
 void TraceGraphComponent::drawMiniTrace(juce::Graphics& g,
                                           juce::Rectangle<float> graph,
                                           const std::vector<float>& values,
                                           juce::Colour colour,
                                           bool fill) {
-    drawFrequencyTrace(g, values, graph, colour, fill);
+    drawSeriesTrace(g, values, graph, colour, fill);
 }
 
 void drawLegend(juce::Graphics& g,
@@ -298,10 +272,10 @@ void TraceGraphComponent::drawFrequency(
     const std::function<void(juce::Graphics&, juce::Rectangle<float>)>& overlay) {
     const auto graph = graphBounds(bounds.toNearestInt());
     drawFrame(g, bounds, graph, true);
-    drawFrequencyTrace(g, data.targetDb, graph, theme::cyan(), true);
+    drawSeriesTrace(g, data.targetDb, graph, theme::cyan(), true);
     drawSpectrum(g, graph, data.activityDb, data.spectrumSampleRateHz,
                  data.spectrumDisplayOffsetDb, data.spectrumWeighting);
-    drawFrequencyTrace(g, data.reductionDb, graph, theme::green(), false);
+    drawSeriesTrace(g, data.reductionDb, graph, theme::green(), false);
     if (overlay) overlay(g, graph);
 }
 
@@ -312,9 +286,9 @@ void TraceGraphComponent::drawTime(
     const std::function<void(juce::Graphics&, juce::Rectangle<float>)>& overlay) {
     const auto graph = graphBounds(bounds.toNearestInt());
     drawFrame(g, bounds, graph, false);
-    drawTimeTrace(g, data.inputDb, graph, theme::amber(), true);
-    drawTimeTrace(g, data.outputDb, graph, theme::blue(), false);
-    drawTimeTrace(g, data.reductionDb, graph, theme::red(), false);
+    drawSeriesTrace(g, data.inputDb, graph, theme::amber(), true);
+    drawSeriesTrace(g, data.outputDb, graph, theme::blue(), false);
+    drawSeriesTrace(g, data.reductionDb, graph, theme::red(), false);
     if (overlay) overlay(g, graph);
     drawLegend(g, bounds, {{"INPUT", theme::amber()}, {"GAIN REDUCTION", theme::red()}, {"OUTPUT", theme::blue()}});
 }

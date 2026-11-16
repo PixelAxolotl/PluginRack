@@ -61,7 +61,6 @@ public:
     static juce::Rectangle<float> graphBounds(juce::Rectangle<int> bounds);
     static juce::Rectangle<float> miniGraphBounds(juce::Rectangle<int> bounds);
     static float miniTraceDb(float db, juce::Rectangle<float> graph);
-    static juce::Colour miniTraceColour(float inputDb, float gainDb);
     static void drawMiniTrace(juce::Graphics& g,
                               juce::Rectangle<float> graph,
                               const std::vector<float>& values,

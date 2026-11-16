@@ -3,7 +3,6 @@
 namespace {
 constexpr int kRowH = 64;
 constexpr int kLabelW = 190;
-constexpr int kTopPad = 54;
 constexpr int kSidePad = 28;
 
 // Dashed bezier: JUCE strokes are solid-only, so approximate the dash by
@@ -215,7 +214,7 @@ void PatchesView::rebuild() {
             const float gain = audioEngine.getSendGainL(channels[static_cast<std::size_t>(ci)]->id,
                                                         outs[static_cast<std::size_t>(oi)]->id);
             if (gain <= -59.0f) continue;
-            cables.push_back({ci, oi, theme::stripColour(outs[static_cast<std::size_t>(oi)]->colourHue), gain});
+            cables.push_back({ci, oi, theme::stripColour(outs[static_cast<std::size_t>(oi)]->colourHue)});
         }
     }
 

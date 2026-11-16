@@ -65,7 +65,6 @@ private:
         void openMultibandWindow();
         void openDeEsserWindow();
         void openLimiterWindow();
-        void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
         void refreshDynamicsButtons();
     
         // IInsertHost

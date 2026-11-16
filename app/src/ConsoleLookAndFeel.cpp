@@ -1,5 +1,6 @@
 #include "ConsoleLookAndFeel.h"
 
+#include "LevelMeter.h"
 #include "Theme.h"
 
 ConsoleLookAndFeel::ConsoleLookAndFeel() {
@@ -130,7 +131,8 @@ void ConsoleLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w
     // Ticks sit on the same dB marks the meter labels beside the fader, so the
     // two scales cannot drift apart.
     for (const int db : theme::metrics::kDbMarks) {
-        const float proportion = 1.0f - (float)(db + 60) / 72.0f;
+        const float proportion = 1.0f - (float)(db - LevelMeter::kMinDb)
+            / (LevelMeter::kMaxDb - LevelMeter::kMinDb);
         const float tickY = trackTop + (trackBottom - trackTop) * proportion;
         const float tickWidth = db == 0 ? 10.0f : 6.0f;
         g.drawHorizontalLine(juce::roundToInt(tickY), centreX - tickWidth,

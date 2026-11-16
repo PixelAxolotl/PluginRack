@@ -34,7 +34,6 @@ public:
     void closeEqWindow();
     void closeAllEffectWindows();
     void openDynamicsWindow(pluginrack::DynamicsEffectType type);
-    void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
     void openMultibandWindow();
     void openDeEsserWindow();
     void openLimiterWindow();

@@ -137,7 +137,6 @@ private:
     void focusLimiter();
     void focusDynamics(pluginrack::DynamicsEffectType type);
     void closeDynamicsWindow();
-    void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
     void refreshDynamicsButtons();
     void renameSelectedChain();
     void refreshOutputButtons();

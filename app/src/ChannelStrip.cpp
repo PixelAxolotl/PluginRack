@@ -6,7 +6,6 @@
 #include <cmath>
 
 namespace {
-constexpr int kStripWidth = 148;
 }
 
 ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engine)
@@ -428,16 +427,6 @@ void ChannelStrip::closeAllEffectWindows() {
 }
 
 
-
-void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
-    auto effects = channel.effects;
-    const auto found = std::find_if(effects.begin(), effects.end(),
-                                    [type](const auto& effect) { return effect.type == type; });
-    if (found == effects.end()) return;
-    found->bypassed = !found->bypassed;
-    audioEngine.setChannelEffects(channel.id, effects);
-    refreshDynamicsButtons();
-}
 
 void ChannelStrip::refreshDynamicsButtons() {
     // No standalone buttons left: still syncs an open Dynamics window.

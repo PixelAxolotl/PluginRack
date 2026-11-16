@@ -391,16 +391,6 @@ void MixerComponent::OutputStrip::closeEqWindow() {
 
 
 
-void MixerComponent::OutputStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
-    auto effects = output.effects;
-    const auto found = std::find_if(effects.begin(), effects.end(),
-                                    [type](const auto& effect) { return effect.type == type; });
-    if (found == effects.end()) return;
-    found->bypassed = !found->bypassed;
-    audioEngine.setOutputEffects(output.id, effects);
-    refreshDynamicsButtons();
-}
-
 void MixerComponent::OutputStrip::refreshDynamicsButtons() {
     // No standalone buttons left: still syncs an open Dynamics window.
     if (dynamicsWindow == nullptr) return;
@@ -888,7 +878,7 @@ void MixerComponent::resized() {
     area.removeFromTop(4);
 
     if (showInputs && showOutputs) {
-        const int masterW = juce::jlimit(0, area.getWidth(), 3 * (148 + 6) + 24);
+        const int masterW = juce::jlimit(0, area.getWidth(), 3 * theme::ui::kStripStep + 24);
         masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
         area.removeFromRight(6);
         inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
@@ -906,15 +896,16 @@ void MixerComponent::resized() {
 }
 
 void MixerComponent::layoutChannelStrips(juce::Rectangle<int> viewportBounds) {
-    const int stripW = 148 + 6;
-    const int contentW = juce::jmax(viewportBounds.getWidth(), (int)strips.size() * stripW + 8);
+    const int contentW = juce::jmax(viewportBounds.getWidth(),
+                                    (int)strips.size() * theme::ui::kStripStep + 8);
     int stripH = viewportBounds.getHeight();
     if (contentW > channelViewport.getWidth()) {
         stripH = juce::jmax(0, stripH - channelViewport.getScrollBarThickness());
     }
     stripContent.setSize(juce::jmax(0, contentW), juce::jmax(0, stripH));
     for (int i = 0; i < (int)strips.size(); ++i) {
-        strips[i]->setBounds(i * stripW + 4, 0, 148, stripH);
+        strips[i]->setBounds(i * theme::ui::kStripStep + theme::ui::kStripInset, 0,
+                             theme::ui::kStripW, stripH);
     }
 }
 
@@ -922,9 +913,7 @@ void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
     masterHeader.setBounds(panelBounds.removeFromTop(theme::ui::kSectionH));
     masterViewport.setBounds(panelBounds);
     // Same width as the input strips: both sides read as one console.
-    const int outW = 148;
-    const int outGap = 6;
-    const int contentW = (int)outputStrips.size() * (outW + outGap) + 8;
+    const int contentW = (int)outputStrips.size() * theme::ui::kStripStep + 8;
     int masterH = masterViewport.getHeight();
     if (contentW > masterViewport.getWidth()) {
         masterH = juce::jmax(0, masterH - masterViewport.getScrollBarThickness());
@@ -932,7 +921,8 @@ void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
     masterContent.setSize(juce::jmax(0, juce::jmax(masterViewport.getWidth(), contentW)),
                           juce::jmax(0, masterH));
     for (int i = 0; i < (int)outputStrips.size(); ++i) {
-        outputStrips[i]->setBounds(i * (outW + outGap) + 4, 0, outW, masterH);
+        outputStrips[i]->setBounds(i * theme::ui::kStripStep + theme::ui::kStripInset, 0,
+                                   theme::ui::kStripW, masterH);
     }
 }
 
@@ -992,13 +982,14 @@ int MixerComponent::moveTargetIndex(int insertionIndex, int sourceIndex, int cou
 void MixerComponent::updateChannelDrag(juce::Point<int> screenPosition) {
     const int count = strips.size();
     if (count <= 0) return;
-    constexpr int stripWidth = 148 + 6; // strip + gutter, as layoutChannelStrips
-    constexpr int stripInset = 4;
     const auto local = stripContent.getLocalPoint(nullptr, screenPosition);
     // Nearest boundary between strips: 0 = before the first, count = after last.
-    const int index = juce::jlimit(0, count, (local.x - stripInset + stripWidth / 2) / stripWidth);
+    const int index = juce::jlimit(
+        0, count,
+        (local.x - theme::ui::kStripInset + theme::ui::kStripStep / 2) / theme::ui::kStripStep);
     channelInsertIndex = index;
-    stripContent.dropMarkerX = insertionBarX(index, stripInset, stripWidth, stripWidth - 148);
+    stripContent.dropMarkerX = insertionBarX(index, theme::ui::kStripInset, theme::ui::kStripStep,
+                                             theme::ui::kStripGap);
     stripContent.repaint();
 }
 
@@ -1024,12 +1015,13 @@ void MixerComponent::finishChannelDrag(std::uint32_t channelId, int sourceIndex)
 void MixerComponent::updateOutputDrag(juce::Point<int> screenPosition) {
     const int count = outputStrips.size();
     if (count <= 0) return;
-    constexpr int outWidth = 148 + 6; // strip + gutter, as layoutOutputStrips
-    constexpr int outInset = 4;
     const auto local = masterContent.getLocalPoint(nullptr, screenPosition);
-    const int index = juce::jlimit(0, count, (local.x - outInset + outWidth / 2) / outWidth);
+    const int index = juce::jlimit(
+        0, count,
+        (local.x - theme::ui::kStripInset + theme::ui::kStripStep / 2) / theme::ui::kStripStep);
     outputInsertIndex = index;
-    masterContent.dropMarkerX = insertionBarX(index, outInset, outWidth, outWidth - 148);
+    masterContent.dropMarkerX = insertionBarX(index, theme::ui::kStripInset, theme::ui::kStripStep,
+                                              theme::ui::kStripGap);
     masterContent.repaint();
 }
 

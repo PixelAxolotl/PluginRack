@@ -61,7 +61,6 @@ private:
         int fromIndex = 0;
         int toIndex = 0;
         juce::Colour colour;
-        float gainDb = -60.0f;
     };
     std::vector<Cable> cables;
     Selection selection;
