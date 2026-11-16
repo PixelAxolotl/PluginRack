@@ -90,6 +90,6 @@ TEST_CASE("the audio path publishes a label around every plugin render",
     // the report says nothing useful.
     CHECK(countOf(engine, "makeCrashLabel(") >= 4);
 
-    CHECK(main.find("crash_context::currentRender()") != std::string::npos);
+    CHECK(main.find("crash_context::currentRenderLabel()") != std::string::npos);
     CHECK(main.find("\"rendering: \"") != std::string::npos);
 }

@@ -13,8 +13,11 @@
 #include "SliderTouch.h"
 
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 
 #if JUCE_WINDOWS
@@ -54,46 +57,110 @@ private:
     double startMs = 0.0;
 };
 
-void writeCrashReport(void* exceptionInfo) {
-    juce::String text;
-    text << "PluginRack crash\n"
-         << "when: " << juce::Time::getCurrentTime().toString(true, true, true, true) << "\n"
-         << "build: " << __DATE__ << " " << __TIME__ << "\n";
+// The crash handler runs while the heap may already be corrupt, so it must not
+// allocate before the report is on disk. The directory is resolved once at
+// startup and the report is built in a fixed buffer on the stack.
+wchar_t gCrashDirectory[32768] = {};
 
-   #if JUCE_WINDOWS
-    if (auto* info = static_cast<EXCEPTION_POINTERS*>(exceptionInfo)) {
-        if (auto* record = info->ExceptionRecord) {
-            text << "exception: 0x"
-                 << juce::String::toHexString((juce::int64) record->ExceptionCode)
-                 << "\n";
+struct CrashText {
+    char data[16384] = {};
+    size_t used = 0;
+
+    void add(const char* format, ...) {
+        if (used >= sizeof(data) - 1) return;
+        va_list args;
+        va_start(args, format);
+        const int written = _vsnprintf_s(data + used, sizeof(data) - used, _TRUNCATE,
+                                         format, args);
+        va_end(args);
+        if (written > 0) used += static_cast<size_t>(written);
+        else used = sizeof(data) - 1;
+    }
+};
+
+void writeAll(HANDLE file, const char* text, size_t size) {
+    while (size > 0) {
+        DWORD written = 0;
+        if (!::WriteFile(file, text, static_cast<DWORD>(size), &written, nullptr)
+            || written == 0) {
+            return;
+        }
+        text += written;
+        size -= written;
+    }
+}
+
+void writeAll(HANDLE file, const char* text) {
+    writeAll(file, text, std::strlen(text));
+}
+
+void writeCrashReport(void* exceptionInfo) {
+    SYSTEMTIME now{};
+    ::GetLocalTime(&now);
+
+    // Cheap and allocation-free facts go first, straight to the file. The
+    // backtrace and the plugin path can allocate, so they are appended only
+    // after the header is already durable.
+    wchar_t path[MAX_PATH * 2] = {};
+    if (gCrashDirectory[0] != L'\0') {
+        ::CreateDirectoryW(gCrashDirectory, nullptr);
+        swprintf_s(path, L"%s\\crash-%04u%02u%02u-%02u%02u%02u.txt", gCrashDirectory,
+                   now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    } else {
+        wchar_t temp[MAX_PATH] = {};
+        const DWORD length = ::GetTempPathW(MAX_PATH, temp);
+        if (length > 0 && length < MAX_PATH) {
+            swprintf_s(path, L"%scrash-%04u%02u%02u-%02u%02u%02u.txt", temp, now.wYear,
+                       now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
         }
     }
-   #endif
+    if (path[0] == L'\0') return;
+
+    HANDLE file = ::CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    CrashText text;
+    text.add("PluginRack crash\nwhen: %04u-%02u-%02u %02u:%02u:%02u\nbuild: %s %s\n",
+             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+             __DATE__, __TIME__);
+
+    if (auto* info = static_cast<EXCEPTION_POINTERS*>(exceptionInfo)) {
+        if (auto* record = info->ExceptionRecord) {
+            text.add("exception: 0x%08lX\nfault address: 0x%p\n",
+                     static_cast<unsigned long>(record->ExceptionCode),
+                     record->ExceptionAddress);
+        }
+    }
+    writeAll(file, text.data, text.used);
+
+    // Which insert was rendering on the faulting thread. Without this a crash
+    // inside a plugin names a module and an offset and nothing else, which is
+    // how a fault gets blamed on the wrong plugin.
+    if (const char* rendering = crash_context::currentRenderLabel()) {
+        writeAll(file, "rendering: ");
+        writeAll(file, rendering);
+        writeAll(file, "\n");
+    }
 
     // A plugin that faults in its own code can only be identified after the
     // fact: record which file was in flight and refuse to load it next time.
     const auto loadingPlugin = PluginLoadGuard::currentLoadingPlugin();
     if (loadingPlugin.isNotEmpty()) {
-        text << "plugin: " << loadingPlugin << "\n";
-        PluginLoadGuard::block(juce::File(loadingPlugin));
-    }
-
-    // Which insert was rendering on the faulting thread. Without this a crash
-    // inside a plugin names a module and an offset and nothing else, which is
-    // how a fault gets blamed on the wrong plugin.
-    const auto rendering = crash_context::currentRender();
-    if (!rendering.empty()) {
-        text << "rendering: " << juce::String(rendering) << "\n";
+        writeAll(file, "plugin: ");
+        writeAll(file, loadingPlugin.toRawUTF8());
+        writeAll(file, "\n");
     }
 
     const auto backtrace = juce::SystemStats::getStackBacktrace();
-    text << "stack:\n" << backtrace << "\n";
-    std::cerr << text.toStdString() << std::endl;
+    writeAll(file, "stack:\n");
+    writeAll(file, backtrace.toRawUTF8());
+    writeAll(file, "\n");
+    ::CloseHandle(file);
 
-    const auto dir = pluginRackLogDirectory();
-    dir.createDirectory();
-    const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S");
-    dir.getChildFile("crash-" + stamp + ".txt").replaceWithText(text);
+    // Blocking the plugin rewrites a text file, so it runs last: a second fault
+    // there cannot cost us the report that is already on disk.
+    if (loadingPlugin.isNotEmpty()) PluginLoadGuard::block(juce::File(loadingPlugin));
 }
 
 } // namespace
@@ -226,6 +293,13 @@ public:
     void initialise(const juce::String& commandLine) override {
         juce::SystemStats::setApplicationCrashHandler(&writeCrashReport);
 
+        // Resolve the crash-report directory before any plugin or device code
+        // runs, so the handler never has to build a path after a fault.
+        const auto logDirectory = pluginRackLogDirectory();
+        logDirectory.createDirectory();
+        wcsncpy_s(gCrashDirectory, logDirectory.getFullPathName().toWideCharPointer(),
+                  _TRUNCATE);
+
         juce::StringArray args;
         args.addTokens(commandLine, true);
 
@@ -265,7 +339,6 @@ public:
             return;
         }
 
-        pluginRackLogDirectory().createDirectory();
         fileLogger = std::make_unique<TimestampedLogger>(
             pluginRackLogDirectory().getChildFile("PluginRack.log"), "PluginRack started");
         juce::Logger::setCurrentLogger(fileLogger.get());

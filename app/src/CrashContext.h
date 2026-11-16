@@ -79,6 +79,12 @@ inline std::string currentRender() {
     return label != nullptr ? std::string(label) : std::string();
 }
 
+// Crash handler path: the same label without copying it, so the report can be
+// written even when the heap is no longer usable.
+inline const char* currentRenderLabel() noexcept {
+    return detail::currentSlot();
+}
+
 // Test hook: how many distinct labels the registry holds.
 inline std::size_t labelCount() {
     const std::lock_guard<std::mutex> lock(detail::registryMutex());
