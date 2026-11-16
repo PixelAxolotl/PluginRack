@@ -29,7 +29,6 @@ namespace pluginHostIpc {
 // --- Parameter ring -------------------------------------------------------
 
 constexpr std::uint32_t kParamFlagGestureActive = 1u << 0; // live edit in progress
-constexpr std::uint32_t kParamFlagGestureEnd = 1u << 1;    // last message of a gesture
 
 struct ParamMsg {
     std::uint32_t id = 0;
@@ -56,7 +55,6 @@ struct ParamRing {
 
 struct ParamSection {
     ParamRing toHost; // editor/app → child
-    ParamRing toApp;  // child → editor/app (phase 2)
 };
 
 inline bool paramRingPush(ParamRing& ring, ParamMsg msg) {

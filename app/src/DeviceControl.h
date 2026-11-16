@@ -17,7 +17,6 @@ public:
     void setBackendType(const juce::String& type) { backendType = type; updateTooltip(); repaint(); }
     void setError(const juce::String& e) { error = e; updateTooltip(); repaint(); }
     void setOnClick(std::function<void()> cb) { onClick = std::move(cb); }
-    void setOnDoubleClick(std::function<void()> cb) { onDoubleClick = std::move(cb); }
     void setOnRename(std::function<void()> cb) { onRename = std::move(cb); }
 
     juce::String getTitle() const { return title; }

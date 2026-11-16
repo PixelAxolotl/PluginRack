@@ -457,7 +457,6 @@ void AudioEngine::render(int frames) {
         pushSilenceToOutputs(frames);
         recordRenderTelemetry(frames, elapsedNanos(),
                               pluginrack::AudioTelemetry::flagRenderMiss, 0);
-        outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
 
@@ -467,7 +466,6 @@ void AudioEngine::render(int frames) {
         pushSilenceToOutputsLocked(frames);
         recordRenderTelemetry(frames, elapsedNanos(),
                               pluginrack::AudioTelemetry::flagOversized, 0);
-        outputSampleCounter_ += (std::uint64_t)frames;
         return;
     }
 
@@ -861,8 +859,6 @@ void AudioEngine::render(int frames) {
                                    std::memory_order_relaxed);
     }
     recordRenderTelemetry(frames, elapsedNanos(), renderFlags, clockFillFrames);
-
-    outputSampleCounter_ += (std::uint64_t)frames;
 }
 
 void AudioEngine::pullDuplexInput(Channel& channel, int frames) const {
@@ -1725,9 +1721,7 @@ void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<plugin
     const juce::ScopedLock lock(stateLock);
     if (auto* channel = findChannel(channelId)) {
         channel->eqBands = bands;
-        channel->eqDirty = true;
         channel->eq.setBands(channel->eqBands);
-        channel->eqDirty = false;
     }
 }
 
@@ -1806,9 +1800,7 @@ void AudioEngine::setOutputEq(std::uint32_t outputId,
     const juce::ScopedLock lock(stateLock);
     if (auto* output = findOutput(outputId)) {
         output->eqBands = bands;
-        output->eqDirty = true;
         output->eq.setBands(output->eqBands);
-        output->eqDirty = false;
     }
 }
 
@@ -2220,9 +2212,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         channel->deEsserRtaWeighting = savedChannel.deEsserRtaWeighting;
         channel->eqBypassed = !savedChannel.eqEnabled;
         channel->eq.prepare(sampleRate, bufferSize);
-        channel->eqDirty = true;
         channel->eq.setBands(channel->eqBands);
-        channel->eqDirty = false;
         channel->eq.setDelayMs(channel->eqDelayMs);
         channel->eq.setPhaseFlip(channel->eqPhaseFlip.get());
         channel->effects = savedChannel.effects;
@@ -2319,9 +2309,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         output->deEsserRtaWeighting = savedOutput.deEsserRtaWeighting;
         output->eqBypassed = !savedOutput.eqEnabled;
         output->eq.prepare(sampleRate, bufferSize);
-        output->eqDirty = true;
         output->eq.setBands(output->eqBands);
-        output->eqDirty = false;
         output->eq.setDelayMs(output->eqDelayMs);
         output->eq.setPhaseFlip(output->eqPhaseFlip.get());
         output->effects = savedOutput.effects;
@@ -3186,7 +3174,6 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
 juce::String AudioEngine::setDeviceBufferSize(int size) {
     const auto inputError = setInputBufferSize(size);
     const auto outputError = setOutputBufferSize(size);
-    if (inputError.isEmpty() && outputError.isEmpty()) requestedBufferSize_ = size;
     return inputError.isNotEmpty() ? inputError : outputError;
 }
 
@@ -3830,18 +3817,6 @@ AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint
         }
     }
     return result;
-}
-
-bool AudioEngine::openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice) {
-    fullDuplex_ = false;
-    if (inputDevice.isEmpty() || outputDevice.isEmpty()) return false;
-    if (inputDevice != outputDevice) return false;
-    // The current stream model still owns input and output callbacks
-    // separately. Treating that as a shared full-duplex device was misleading:
-    // it made the beta option promise one hardware clock without actually
-    // sharing an AudioDeviceManager. Same-device input gets the safer
-    // one-block starting delay through FullDuplexInput instead.
-    return false;
 }
 
 float AudioEngine::decibelsToGain(float gainDb) {

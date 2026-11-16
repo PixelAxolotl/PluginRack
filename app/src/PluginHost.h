@@ -113,8 +113,7 @@ public:
         bool enabled = false;
         bool failed = false;
         int exitCode = 0;
-        int missedBlocks = 0;
-    };
+        };
 
     // Spawns the child, waits for HOSTREADY, pushes the saved state and the
     // current format. Worker thread only (it waits for the plugin to load).
@@ -142,7 +141,6 @@ public:
     }
     // Renderer mode is fixed for the life of the slot (spec §3.2). 0 = in-process, 1 = child.
     int rendererMode() const { return rendererMode_.load(std::memory_order_acquire); }
-    void setRendererMode(int mode) { rendererMode_.store(mode, std::memory_order_release); }
     ChildHostStatus childHostStatus() const;
     int childProcessId() const;
     PluginProcessHost::Peaks childPeaks() const;
@@ -197,7 +195,6 @@ private:
     std::atomic<int> childBlockDeadlineMs_{10};
     std::atomic<int> childConsecutiveMisses_{0};
     std::atomic<bool> childFailed_{false};
-    mutable juce::String childLastKnownState_;
 
     void noteChildMiss();
 

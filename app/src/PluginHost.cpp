@@ -263,14 +263,13 @@ juce::String PluginHost::getStateAsBase64() const {
         juce::String childError;
         const auto live = host->getState(kChildControlTimeoutMs, childError);
         if (live.isNotEmpty()) {
-            childLastKnownState_ = live;
             return live;
         }
         if (childError.isNotEmpty()) {
             juce::Logger::writeToLog("plugin: child state fetch failed (" + childError
                                      + "); using the last known state");
         }
-        return childLastKnownState_;
+        return host->lastKnownState();
     }
 
     const juce::ScopedLock lock(pluginLock);
@@ -345,7 +344,6 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
         return false;
     }
 
-    childLastKnownState_ = stateBase64;
     childFailed_.store(false, std::memory_order_relaxed);
     childConsecutiveMisses_.store(0, std::memory_order_relaxed);
     playSampleRate_.store(sampleRate, std::memory_order_relaxed);
@@ -383,7 +381,6 @@ PluginHost::ChildHostStatus PluginHost::childHostStatus() const {
     if (host == nullptr) return status;
     status.enabled = true;
     status.exitCode = host->exitCode();
-    status.missedBlocks = host->missedBlocks();
     status.failed =
         childFailed_.load(std::memory_order_acquire) || host->isDead();
     return status;

@@ -81,13 +81,10 @@ public:
 
     bool isAlive() const;
     bool isDead() const;
-    bool isReady() const { return ready; }
     int exitCode() const;
     int childProcessId() const;
     // Last state the child reported, used when a live fetch times out.
     const juce::String& lastKnownState() const { return lastKnownState_; }
-    int missedBlocks() const { return missedBlocks_.load(std::memory_order_relaxed); }
-    void noteMissedBlock() { missedBlocks_.fetch_add(1, std::memory_order_relaxed); }
 
     // Peaks the child wrote for the last block it acked.
     Peaks peaks() const;
@@ -129,7 +126,6 @@ private:
     bool ready = false;
     juce::String lastKnownState_;
 
-    std::atomic<int> missedBlocks_{0};
     std::atomic<bool> hostDead{false};
     std::atomic<bool> stopWatcher{false};
     std::thread watcher;

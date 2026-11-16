@@ -118,8 +118,8 @@ public:
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
         // and keep output bit-identical to the pre-EQ engine. eq/eqBands are
         // touched only under stateLock (render holds it; setters take it),
-        // mirroring core's EqState mutex; eqBypassed/eqDirty are atomics so the
-        // UI can read them without the lock.
+        // mirroring core's EqState mutex; eqBypassed is an atomic so the UI can
+        // read it without the lock.
         pluginrack::EqEngine eq;
         std::vector<pluginrack::EqBand> eqBands{pluginrack::defaultEqBands()};
         // Post-EQ delay (0..EqEngine::kMaxDelayMs ms); message-thread state
@@ -147,7 +147,6 @@ public:
         std::vector<pluginrack::LimiterEffect> limiterEffects;
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         juce::Atomic<bool> eqBypassed{true};
-        juce::Atomic<bool> eqDirty{false};
         // One tap per built-in, each written at its own point in the chain:
         // eqTap after the EQ, dynamicsTap after Comp/Gate, multibandTap
         // after Multiband, deEsserTap after De-esser, limiterTap after
@@ -218,7 +217,6 @@ public:
         std::vector<pluginrack::LimiterEffect> limiterEffects;
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         juce::Atomic<bool> eqBypassed{true};
-        juce::Atomic<bool> eqDirty{false};
         // One tap per built-in, same rule as Channel.
         AnalyzerTap eqTap;
         AnalyzerTap dynamicsTap;
@@ -440,8 +438,6 @@ public:
     juce::String setDeviceBufferSize(int size);
     juce::String setInputBufferSize(int size);
     juce::String setOutputBufferSize(int size);
-    bool openFullDuplexIfPossible(const juce::String& inputDevice, const juce::String& outputDevice);
-    bool isFullDuplex() const { return fullDuplex_; }
     juce::String getClockDescription() const;
     // The device name behind the clock output; empty when no output owns the
     // clock. I/O uses it to name the stream the measurement travels through.
@@ -758,7 +754,6 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
-    int requestedBufferSize_ = 0;
     int requestedInputBufferSize_ = 0;
     int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
@@ -787,7 +782,6 @@ private:
     // use it to read one window per block instead of consuming it per channel.
     std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
-    bool fullDuplex_ = false;
     std::unique_ptr<InternalClock> internalClock_;
     bool clockFailoverActive_ = false;
     mutable juce::CriticalSection deviceCacheLock_;
@@ -862,7 +856,6 @@ private:
     // Which capture listens for the return. Written by startLatencyMeasurement
     // under stateLock and read by render(), which also holds it.
     juce::String latencyListenDevice_;
-    std::uint64_t outputSampleCounter_ = 0;
 
     void resetLatencyMeasurementLocked();
 

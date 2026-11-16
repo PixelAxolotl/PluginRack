@@ -31,9 +31,7 @@ public:
     static constexpr std::int64_t kDefaultMaxAgeMs =
         30LL * 24LL * 60LL * 60LL * 1000LL; // 30 days
 
-    bool empty() const noexcept { return endpoints_.empty(); }
     std::size_t size() const noexcept { return endpoints_.size(); }
-    void clear() noexcept { endpoints_.clear(); }
 
     void put(const std::string& endpoint, const EndpointCapabilities& capabilities) {
         endpoints_[endpoint] = capabilities;
