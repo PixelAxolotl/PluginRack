@@ -147,6 +147,12 @@ void EqEngine::rebuild() {
             continue; // band skipped entirely: process() never touches it
         }
         computeCoeffs(band, sampleRate_, filters_[i]);
+        // A finite setting can still compute a non-finite coefficient (see
+        // the shelf radicand). Running that band would emit NaN forever, and
+        // the input-side scrub never sees it.
+        if (!dsp::isFinite(filters_[i].coeffs)) {
+            continue;
+        }
         activeMask_ |= 1 << i;
     }
 }

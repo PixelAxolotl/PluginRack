@@ -600,3 +600,33 @@ TEST_CASE("watched devices must reference an existing strip") {
         REQUIRE(pluginrack::validate(scene).empty());
     }
 }
+
+TEST_CASE("de-esser envelope times are range-checked") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::DeEsserEffect deEsser;
+    deEsser.releaseMs = 1.0e9f;
+    scene.channels.front().deEsserEffects.push_back(deEsser);
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}
+
+TEST_CASE("multiband band gains are range-checked") {
+    pluginrack::Scene scene = makeValidScene();
+    auto effect = pluginrack::makeDefaultMultibandEffect();
+    effect.bands.front().makeupDb = 100.0f;
+    scene.channels.front().multibandEffects.push_back(effect);
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}
+
+TEST_CASE("multiband bands need exactly one fewer crossover") {
+    pluginrack::Scene scene = makeValidScene();
+    auto effect = pluginrack::makeDefaultMultibandEffect();
+    effect.crossovers.clear();
+    scene.channels.front().multibandEffects.push_back(effect);
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::ValueOutOfRange);
+}

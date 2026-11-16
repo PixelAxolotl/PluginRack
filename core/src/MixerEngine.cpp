@@ -601,6 +601,16 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 }
             }
         }
+        // A wide device (the WASAPI probe cap defaults to 8 channels) also
+        // receives channels this stereo mix never writes. Clear them: leaving
+        // the host buffer's old contents there plays unrelated audio.
+        for (int c = 2; c < output.numChannels; ++c) {
+            if (output.channels[c] != nullptr) {
+                for (int i = 0; i < frames; ++i) {
+                    output.channels[c][i] = 0.0f;
+                }
+            }
+        }
     }
 }
 

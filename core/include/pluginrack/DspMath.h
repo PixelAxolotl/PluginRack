@@ -41,6 +41,11 @@ struct Biquad {
     float a2 = 0.0f;
 };
 
+inline bool isFinite(const Biquad& c) noexcept {
+    return std::isfinite(c.b0) && std::isfinite(c.b1) && std::isfinite(c.b2) &&
+           std::isfinite(c.a1) && std::isfinite(c.a2);
+}
+
 inline void flushState(float& s) noexcept {
     if (!std::isfinite(s) || (s < kDenormalFloor && s > -kDenormalFloor)) {
         s = 0.0f;
@@ -135,7 +140,12 @@ inline Biquad lowShelf(double freqHz, double q, double gainDb, double sampleRate
     const double w = 2.0 * kPi * f / sampleRateHz;
     const double cosW = std::cos(w);
     const double a = std::pow(10.0, gainDb / 40.0);
-    const double alpha = std::sin(w) * 0.5 * std::sqrt((a + 1.0 / a) * (1.0 / (clampQ(q) * clampQ(q)) - 1.0) + 2.0);
+    // RBJ shelf slope S, not a bell Q: S above 1 makes the radicand negative
+    // (Q 3 and +12 dB is a normal user setting), so clamp the slope and the
+    // radicand. A NaN here poisons every sample the strip outputs.
+    const double slope = std::min(clampQ(q), 1.0);
+    const double alpha = std::sin(w) * 0.5 *
+        std::sqrt(std::max(0.0, (a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0));
     const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;
     return normalise(a * ((a + 1.0) + (a - 1.0) * cosW + twoSqrtAAlpha),
                      -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW),
@@ -151,7 +161,10 @@ inline Biquad highShelf(double freqHz, double q, double gainDb, double sampleRat
     const double w = 2.0 * kPi * f / sampleRateHz;
     const double cosW = std::cos(w);
     const double a = std::pow(10.0, gainDb / 40.0);
-    const double alpha = std::sin(w) * 0.5 * std::sqrt((a + 1.0 / a) * (1.0 / (clampQ(q) * clampQ(q)) - 1.0) + 2.0);
+    // Same shelf-slope rule as lowShelf.
+    const double slope = std::min(clampQ(q), 1.0);
+    const double alpha = std::sin(w) * 0.5 *
+        std::sqrt(std::max(0.0, (a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0));
     const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;
     return normalise(a * ((a + 1.0) - (a - 1.0) * cosW + twoSqrtAAlpha),
                      2.0 * a * ((a - 1.0) - (a + 1.0) * cosW),

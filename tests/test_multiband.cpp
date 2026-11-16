@@ -68,3 +68,22 @@ TEST_CASE("multiband effect settings serialize") {
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->channels.front().multibandEffects.front().id == 3);
 }
+
+TEST_CASE("multiband reserves scratch for every crossover") {
+    // prepare() runs before setEffect(), so the scratch was sized for the
+    // default empty crossover list. A six-band effect then wrote past the
+    // buffers on the audio thread.
+    auto effect = pluginrack::makeDefaultMultibandEffect();
+    effect.bands.resize(6);
+    effect.crossovers = {200.0f, 800.0f, 3000.0f, 8000.0f, 12000.0f};
+
+    MultibandProcessor p;
+    p.prepare(48000.0, 256);
+    p.setEffect(effect);
+
+    std::vector<float> L(256, 0.25f), R(256, 0.25f);
+    p.process(L.data(), R.data(), 256);
+    REQUIRE(std::isfinite(L.back()));
+    REQUIRE(std::isfinite(R.back()));
+    REQUIRE(p.gainReductionDb().size() == 6);
+}

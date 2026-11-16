@@ -339,3 +339,35 @@ TEST_CASE("eq delay change mid-stream glides without blowing up") {
     }
     REQUIRE(e.delayMs() == Catch::Approx(500.0f));
 }
+
+TEST_CASE("extreme shelf settings stay finite") {
+    // LowShelf with Q 3 and +12 dB used to push the RBJ radicand negative and
+    // emit NaN coefficients, which the whole strip then rendered forever.
+    EqEngine e;
+    e.prepare(48000.0, 512);
+    auto bands = defaultEqBands();
+    for (auto& band : bands) {
+        band.enabled = false;
+        band.solo = false;
+    }
+    bands[1].enabled = true;
+    bands[1].type = EqType::LowShelf;
+    bands[1].gainDb = 12.0f;
+    bands[1].q = 3.0f;
+    bands[4].enabled = true;
+    bands[4].type = EqType::HighShelf;
+    bands[4].gainDb = 12.0f;
+    bands[4].q = 3.0f;
+    e.setBands(bands);
+
+    constexpr int kFrames = 512;
+    std::vector<float> L(static_cast<std::size_t>(kFrames), 0.5f);
+    std::vector<float> R(static_cast<std::size_t>(kFrames), 0.5f);
+    e.process(L.data(), R.data(), kFrames);
+
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(std::isfinite(L[static_cast<std::size_t>(i)]));
+        REQUIRE(std::isfinite(R[static_cast<std::size_t>(i)]));
+        REQUIRE(std::fabs(L[static_cast<std::size_t>(i)]) < 8.0f);
+    }
+}

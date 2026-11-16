@@ -87,8 +87,14 @@ void MultibandProcessor::rebuild() {
 
 void MultibandProcessor::reserveScratch(int frames) {
     if (frames <= 0 || static_cast<int>(bufL_.size()) >= frames) return;
+    // prepare() runs before setEffect(), when crossovers is still empty.
+    // Allocate for the largest band count the validator allows (6 bands = 5
+    // crossovers), or process() writes past these buffers once the real
+    // effect arrives.
+    constexpr std::size_t kMaxCrossovers = 5;
     const std::size_t n = static_cast<std::size_t>(frames);
-    const std::size_t xovers = static_cast<std::size_t>(std::max(static_cast<int>(effect_.crossovers.size()), 1));
+    const std::size_t xovers = std::max(kMaxCrossovers,
+                                        effect_.crossovers.size());
     bufL_.assign(n, 0.0f); bufR_.assign(n, 0.0f);
     outL_.assign(n, 0.0f); outR_.assign(n, 0.0f);
     lpL_.assign(n * xovers, 0.0f);

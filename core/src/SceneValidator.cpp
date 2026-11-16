@@ -115,18 +115,26 @@ void validateMultiband(const char* kind, std::uint32_t id, const std::vector<Mul
     if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multibandEffects too many"});
     for (const auto& e : effects) {
         if (e.bands.empty() || e.bands.size() > 6) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband band count out of range [1,6]"});
-        if (!e.crossovers.empty() && e.crossovers.size() + 1 != e.bands.size()) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossover count mismatch"});
+        // Always exactly bands - 1 crossovers. An empty list with 4 bands
+        // reads as "active" in the scene/UI but MultibandProcessor refuses to
+        // prepare it, so it would silently do nothing.
+        if (e.crossovers.size() + 1 != e.bands.size()) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossover count mismatch"});
         for (std::size_t i = 1; i < e.crossovers.size(); ++i) if (!(e.crossovers[i] > e.crossovers[i-1])) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossovers not ascending"});
         for (float f : e.crossovers) if (!std::isfinite(f) || f < 20.0f || f > 20000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " multiband crossover out of range"});
         for (const auto& b : e.bands) {
-            if (!std::isfinite(b.thresholdDb) || b.thresholdDb < -60.0f || b.thresholdDb > 0.0f || !std::isfinite(b.ratio) || b.ratio < 1.0f || b.ratio > 80.0f || !std::isfinite(b.attackMs) || b.attackMs <= 0.0f || b.attackMs > 200.0f || !std::isfinite(b.releaseMs) || b.releaseMs <= 0.0f || b.releaseMs > 1000.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid multiband band parameters"});
+            if (!std::isfinite(b.thresholdDb) || b.thresholdDb < -60.0f || b.thresholdDb > 0.0f || !std::isfinite(b.ratio) || b.ratio < 1.0f || b.ratio > 80.0f || !std::isfinite(b.attackMs) || b.attackMs <= 0.0f || b.attackMs > 200.0f || !std::isfinite(b.releaseMs) || b.releaseMs <= 0.0f || b.releaseMs > 1000.0f ||
+                !std::isfinite(b.makeupDb) || b.makeupDb < kMinDynamicsMakeupDb || b.makeupDb > kMaxDynamicsMakeupDb ||
+                !std::isfinite(b.inputGainDb) || b.inputGainDb < kMinDynamicsInputGainDb || b.inputGainDb > kMaxDynamicsInputGainDb ||
+                !std::isfinite(b.kneeDb) || b.kneeDb < kMinDynamicsKneeDb || b.kneeDb > kMaxDynamicsKneeDb) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid multiband band parameters"});
         }
     }
 }
 void validateDeEssers(const char* kind, std::uint32_t id, const std::vector<DeEsserEffect>& effects, std::vector<SceneError>& errors) {
     if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " deEsserEffects too many"});
     for (const auto& e : effects) {
-        if (!std::isfinite(e.freqHz) || e.freqHz < 100.0f || e.freqHz > 16000.0f || !std::isfinite(e.q) || e.q < 0.1f || e.q > 20.0f || !std::isfinite(e.thresholdDb) || e.thresholdDb < -60.0f || e.thresholdDb > 0.0f || !std::isfinite(e.rangeDb) || e.rangeDb < 0.0f || e.rangeDb > 36.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid deesser parameters"});
+        if (!std::isfinite(e.freqHz) || e.freqHz < 100.0f || e.freqHz > 16000.0f || !std::isfinite(e.q) || e.q < 0.1f || e.q > 20.0f || !std::isfinite(e.thresholdDb) || e.thresholdDb < -60.0f || e.thresholdDb > 0.0f || !std::isfinite(e.rangeDb) || e.rangeDb < 0.0f || e.rangeDb > 36.0f ||
+            !std::isfinite(e.attackMs) || e.attackMs <= 0.0f || e.attackMs > kMaxDynamicsAttackMs ||
+            !std::isfinite(e.releaseMs) || e.releaseMs <= 0.0f || e.releaseMs > kMaxDynamicsReleaseMs) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid deesser parameters"});
     }
 }
 void validateLimiters(const char* kind, std::uint32_t id, const std::vector<LimiterEffect>& effects, std::vector<SceneError>& errors) {
