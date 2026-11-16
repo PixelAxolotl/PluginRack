@@ -665,8 +665,8 @@ TEST_CASE("scenes are validated after loading, not only before saving", "[app][s
 TEST_CASE("scene and plugin inputs are bounded before native code runs", "[app][security]") {
     const auto bridge = readSource("app/src/SceneBridge.cpp");
     const auto helper = functionBody(bridge, "std::optional<pluginrack::Scene> loadValidatedScene");
-    CHECK(contains(bridge, "fileSize > kMaxSceneFileBytes"));
-    CHECK(contains(bridge, "kMaxSceneFileBytes"));
+    CHECK(contains(bridge, "fileSize > pluginrack::kMaxSceneFileBytes"));
+    CHECK(contains(bridge, "pluginrack::kMaxSceneFileBytes"));
     CHECK(contains(helper, "loadFileAsString"));
 
     const auto host = readSource("app/src/PluginHost.cpp");

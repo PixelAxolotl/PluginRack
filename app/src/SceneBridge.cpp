@@ -3,10 +3,10 @@
 #include "AppPaths.h"
 
 #include <pluginrack/SceneCodec.h>
+#include <pluginrack/SceneLimits.h>
 #include <pluginrack/SceneValidator.h>
 
 namespace {
-constexpr juce::int64 kMaxSceneFileBytes = 8 * 1024 * 1024;
 constexpr int kMaxSaveNameLength = 64;
 
 std::vector<juce::File> lastSceneCandidates() {
@@ -38,7 +38,7 @@ std::optional<pluginrack::Scene> loadValidatedScene(const juce::File& file,
                                                     juce::String& errorMessage) {
     errorMessage.clear();
     const auto fileSize = file.getSize();
-    if (fileSize < 0 || fileSize > kMaxSceneFileBytes) {
+    if (fileSize < 0 || fileSize > pluginrack::kMaxSceneFileBytes) {
         errorMessage = "The saved scene is too large.";
         return std::nullopt;
     }

@@ -226,15 +226,3 @@ TEST_CASE("reset forgets the learned floor") {
     CHECK(controller.target() == 160);
 }
 
-TEST_CASE("the controller is deterministic for identical event sequences") {
-    auto run = []() {
-        auto controller = makeController(fastConfig(), 256);
-        int last = 0;
-        for (int ms = 0; ms < 2000; ++ms) {
-            const bool underrun = (ms % 137) == 0;
-            const int fillError = (ms % 11) == 0 ? 128 : 4;
-            last = controller.onBlock(controller.target(), underrun, false, fillError, 1.0);
-        }
-        return last;
-    };
-}

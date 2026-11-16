@@ -7,10 +7,12 @@
 
 #include <cstdint>
 
+#include <pluginrack/SceneLimits.h>
+
 namespace render_limits {
 
-// Same as the GUI scene loader limit (8 MiB).
-constexpr std::int64_t kMaxSceneFileBytes = 8 * 1024 * 1024;
+// Same as the GUI scene loader limit.
+constexpr std::int64_t kMaxSceneFileBytes = pluginrack::kMaxSceneFileBytes;
 // One hour of audio is already generous for a sine test render.
 constexpr double kMaxSeconds = 3600.0;
 // Total float samples across all outputs: 2^30 floats is ~4 GiB, still large.

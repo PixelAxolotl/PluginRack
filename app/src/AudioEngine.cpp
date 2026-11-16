@@ -8,6 +8,7 @@
 
 #include <pluginrack/AsioDeviceMatch.h>
 #include <pluginrack/AudioDeviceProbe.h>
+#include <pluginrack/ChainOrder.h>
 #include <pluginrack/ClockFailover.h>
 #include <pluginrack/InputBufferPolicy.h>
 #include <pluginrack/InputFollowPolicy.h>
@@ -1387,12 +1388,7 @@ void AudioEngine::moveChannelChainItem(std::uint32_t channelId, pluginrack::Chai
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
     auto& chain = channel->chain;
-    const auto it = std::find(chain.begin(), chain.end(), item);
-    if (it == chain.end()) return;
-    const auto value = *it;
-    chain.erase(it);
-    const auto index = juce::jlimit(0, static_cast<int>(chain.size()), targetIndex);
-    chain.insert(chain.begin() + index, value);
+    pluginrack::moveChainItem(chain, item, targetIndex);
 }
 
 void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t insertId, bool bypassed) {
@@ -1552,12 +1548,7 @@ void AudioEngine::moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainI
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
     auto& chain = output->chain;
-    const auto it = std::find(chain.begin(), chain.end(), item);
-    if (it == chain.end()) return;
-    const auto value = *it;
-    chain.erase(it);
-    const auto index = juce::jlimit(0, static_cast<int>(chain.size()), targetIndex);
-    chain.insert(chain.begin() + index, value);
+    pluginrack::moveChainItem(chain, item, targetIndex);
 }
 
 void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t insertId, bool bypassed) {

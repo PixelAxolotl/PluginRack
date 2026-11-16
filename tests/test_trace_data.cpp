@@ -45,6 +45,16 @@ TEST_CASE("deesser reduction trace is centered on detector frequency") {
     const auto peak = std::min_element(trace.begin(), trace.end());
     REQUIRE(*peak < -8.0f);
     REQUIRE(std::isfinite(*peak));
+
+    // The dip has to sit on the detector frequency, not merely exist: the
+    // trace is log-spaced over 20 Hz..20 kHz, so the minimum's bin maps back
+    // to a frequency and both ends of the graph must stay well above it.
+    const auto bin = static_cast<double>(std::distance(trace.begin(), peak));
+    const double position = bin / static_cast<double>(trace.size() - 1);
+    const double dipHz = 20.0 * std::pow(1000.0, position);
+    CHECK(dipHz == Catch::Approx(static_cast<double>(effect.freqHz)).epsilon(0.10));
+    CHECK(trace.front() > *peak + 3.0f);
+    CHECK(trace.back() > *peak + 3.0f);
 }
 
 TEST_CASE("trace shaping clamps non-finite and mismatched input") {

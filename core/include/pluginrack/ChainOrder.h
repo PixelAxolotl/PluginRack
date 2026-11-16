@@ -119,6 +119,18 @@ inline int chainInsertAfterIndex(const std::vector<ChainItem>& chain, ChainItem 
     return anchorAfterErase + 1;
 }
 
+// Moves one chain card to targetIndex, clamping like the engine always has.
+// Used by the engine's move setters and by the tests, so a divergence between
+// the planned index and the applied index cannot hide.
+inline void moveChainItem(std::vector<ChainItem>& chain, ChainItem item, int targetIndex) {
+    const auto it = std::find(chain.begin(), chain.end(), item);
+    if (it == chain.end()) return;
+    const auto value = *it;
+    chain.erase(it);
+    const int index = std::clamp(targetIndex, 0, static_cast<int>(chain.size()));
+    chain.insert(chain.begin() + index, value);
+}
+
 // The engine calls one card move needs, in order. `chain` is taken by value:
 // every planned move is applied to that copy, so each returned index is exactly
 // what the engine will see when it applies the same steps.
@@ -138,9 +150,7 @@ inline std::vector<ChainMove> planChainCardMoves(std::vector<ChainItem> chain,
         const int current = static_cast<int>(std::distance(chain.begin(), found));
         const int index = std::clamp(target, 0, static_cast<int>(chain.size()));
         if (index == current) continue;
-        const auto value = *found;
-        chain.erase(found);
-        chain.insert(chain.begin() + index, value);
+        moveChainItem(chain, cardItems[k], index);
         moves.push_back({ cardItems[k], index });
     }
     return moves;

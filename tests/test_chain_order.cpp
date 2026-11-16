@@ -26,14 +26,11 @@ std::vector<ChainItem> freshChain() {
     return {eqItem(), compItem(), gateItem(), vstItem(10), vstItem(11)};
 }
 
-// Applies planned moves exactly the way the engine does: erase, then insert.
+// Applies planned moves the way the engine does, through the same function.
 void applyMoves(std::vector<ChainItem>& chain, const std::vector<ChainMove>& moves) {
     for (const auto& move : moves) {
-        const auto it = std::find(chain.begin(), chain.end(), move.item);
-        REQUIRE(it != chain.end());
-        const auto value = *it;
-        chain.erase(it);
-        chain.insert(chain.begin() + move.targetIndex, value);
+        REQUIRE(std::find(chain.begin(), chain.end(), move.item) != chain.end());
+        pluginrack::moveChainItem(chain, move.item, move.targetIndex);
     }
 }
 

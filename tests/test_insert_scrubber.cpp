@@ -178,7 +178,9 @@ TEST_CASE("audio callbacks run with flush-to-zero and denormals-are-zero",
     REQUIRE(inputStart != std::string::npos);
     REQUIRE(outputStart != std::string::npos);
     INFO("input callback disables denormals");
-    CHECK(device.find("juce::ScopedNoDenormals", inputStart) != std::string::npos);
+    const auto inputLimit = outputStart > inputStart ? static_cast<std::size_t>(outputStart)
+                                                     : std::string::npos;
+    CHECK(device.find("juce::ScopedNoDenormals", inputStart) < inputLimit);
     INFO("output callback disables denormals");
     CHECK(device.find("juce::ScopedNoDenormals", outputStart) != std::string::npos);
 }
