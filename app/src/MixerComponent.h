@@ -61,7 +61,6 @@ private:
         void openEqWindow();
         void closeEqWindow();
         void closeAllEffectWindows();
-        void refreshEqButton();
         void openDynamicsWindow(pluginrack::DynamicsEffectType type);
         void openMultibandWindow();
         void openDeEsserWindow();

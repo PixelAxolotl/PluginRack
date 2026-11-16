@@ -407,7 +407,6 @@ void RackView::refreshHeader() {
         meter->setStereo(out->layout != pluginrack::ChannelLayout::Mono);
     }
     if (meter != nullptr) addAndMakeVisible(*meter);
-    refreshEqButton();
 }
 
 void RackView::rebuildInputCombos(int count) {
@@ -1702,7 +1701,6 @@ void RackView::focusEq() {
         hideDockedEditor();
         if (eqWindow->getParentComponent() != &editorHolder)
             editorHolder.addAndMakeVisible(eqWindow);
-        refreshEqButton();
         resized();
         return;
     }
@@ -1715,7 +1713,6 @@ void RackView::focusEq() {
                 if (safe == nullptr) return;
                 safe->audioEngine.setChannelEqBypassed(safe->selectedChainId(), false);
                 safe->audioEngine.setChannelEq(safe->selectedChainId(), bands);
-                safe->refreshEqButton();
             },
             liveRateHz, true, ch->eqRtaOffsetDb, ch->eqRtaWeighting);
         window->applySpectrumOffset = [safe](float offsetDb) {
@@ -1745,7 +1742,6 @@ void RackView::focusEq() {
             const auto channelId = safe->selectedChainId();
             safe->audioEngine.setChannelEqBypassed(channelId, false);
             safe->audioEngine.setChannelEqDelay(channelId, delayMs);
-            safe->refreshEqButton();
         };
         eqWindow = window;
         eqFocused = true;
@@ -1755,7 +1751,6 @@ void RackView::focusEq() {
             if (safe == nullptr) return;
             safe->closeEqWindow();
         };
-        refreshEqButton();
         resized();
     } else if (auto* out = currentOutput()) {
         const std::uint32_t outputId = (std::uint32_t)selectedId;
@@ -1773,7 +1768,6 @@ void RackView::focusEq() {
                         break;
                     }
                 }
-                safe->refreshEqButton();
             },
             liveRateHz, true, out->eqRtaOffsetDb, out->eqRtaWeighting);
         window->applySpectrumOffset = [safe, outputId](float offsetDb) {
@@ -1819,7 +1813,6 @@ void RackView::focusEq() {
                     break;
                 }
             }
-            safe->refreshEqButton();
         };
         eqWindow = window;
         eqFocused = true;
@@ -1829,7 +1822,6 @@ void RackView::focusEq() {
             if (safe == nullptr) return;
             safe->closeEqWindow();
         };
-        refreshEqButton();
         resized();
     }
 }
@@ -1841,7 +1833,6 @@ void RackView::closeEqWindow() {
     eqFocused = false;
     editorHolder.removeChildComponent(doomed);
     delete doomed;
-    refreshEqButton();
     if (focusedEffectWindow == nullptr) showDockedEditor();
 }
 
@@ -2002,11 +1993,7 @@ void RackView::focusLimiter() {
     resized();
 }
 
-void RackView::refreshEqButton() {
-    // No standalone button left: the insert cards carry the bypass state.
-    // Kept so callers do not need to change; the card refresh happens in
-    // refreshSlots() and the timer tick.
-}
+
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {

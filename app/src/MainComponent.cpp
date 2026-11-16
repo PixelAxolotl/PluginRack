@@ -181,36 +181,6 @@ void ToolbarComponent::resized() {
     clockBounds = area;
 }
 
-ViewRouter::PlaceholderView::PlaceholderView(const juce::String& title, const juce::String& subtitle) {
-    titleLabel.setText(title, juce::dontSendNotification);
-    titleLabel.setJustificationType(juce::Justification::centred);
-    titleLabel.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
-    titleLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(titleLabel);
-
-    subtitleLabel.setJustificationType(juce::Justification::centred);
-    subtitleLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
-    subtitleLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(subtitleLabel);
-
-    setSubtitle(subtitle);
-}
-
-void ViewRouter::PlaceholderView::setSubtitle(const juce::String& subtitle) {
-    subtitleLabel.setText(subtitle, juce::dontSendNotification);
-}
-
-void ViewRouter::PlaceholderView::paint(juce::Graphics& g) {
-    g.fillAll(theme::bg());
-}
-
-void ViewRouter::PlaceholderView::resized() {
-    auto area = getLocalBounds().reduced(24);
-    titleLabel.setBounds(area.removeFromTop(30));
-    area.removeFromTop(4);
-    subtitleLabel.setBounds(area.removeFromTop(22));
-}
-
 ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
@@ -737,96 +707,6 @@ void MainComponent::saveSceneAs() {
         }
         delete w;
     }), true);
-}
-
-void MainComponent::showSavesMenu() {
-    juce::PopupMenu menu;
-    menu.addItem("Save As...", [this] { saveSceneAs(); });
-
-    const auto names = SceneBridge::getSaveNames();
-    if (!names.isEmpty()) {
-        juce::PopupMenu loadMenu;
-        for (const auto& name : names) {
-            loadMenu.addItem(name, [this, name] {
-                juce::String error;
-                const auto saved = SceneBridge::loadNamed(name, error);
-                if (error.isNotEmpty()) { showError(error); return; }
-                if (!saved.has_value()) return;
-                const auto pluginErrors = applyScene(*saved);
-                if (pluginErrors.isNotEmpty())
-                    showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
-                else
-                    activeSaveName_ = name;
-            });
-        }
-        menu.addSubMenu("Load Save", loadMenu);
-
-        juce::PopupMenu defaultMenu;
-        for (const auto& name : names) {
-            defaultMenu.addItem(name, [name] { SceneBridge::setDefaultSaveName(name); });
-        }
-        defaultMenu.addItem("Clear Default", [] { SceneBridge::setDefaultSaveName({}); });
-        menu.addSubMenu("Set Default Save", defaultMenu);
-
-        juce::PopupMenu deleteMenu;
-        for (const auto& name : names) {
-            deleteMenu.addItem(name, [this, name] {
-                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "PluginRack",
-                    "Delete save '" + name + "'?", "Delete", "Cancel", nullptr,
-                    juce::ModalCallbackFunction::create([name](int result) {
-                        if (result == 1) SceneBridge::deleteSave(name);
-                    }));
-            });
-        }
-        menu.addSubMenu("Delete Save", deleteMenu);
-
-        juce::PopupMenu renameMenu;
-        for (const auto& name : names) {
-            renameMenu.addItem(name, [this, name] {
-                auto* w = new juce::AlertWindow("Rename Save", "New name for '" + name + "'.", juce::MessageBoxIconType::QuestionIcon);
-                w->addTextEditor("name", name, "New name");
-                w->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
-                w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-                juce::Component::SafePointer<MainComponent> safe(this);
-                w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w, name](int result) {
-                    if (result == 1 && safe != nullptr) {
-                        const auto error = SceneBridge::renameSave(name, w->getTextEditorContents("name"));
-                        if (error.isNotEmpty()) safe->showError(error);
-                    }
-                    delete w;
-                }), true);
-            });
-        }
-        menu.addSubMenu("Rename Save", renameMenu);
-
-        juce::PopupMenu moveMenu;
-        for (const auto& name : names) {
-            moveMenu.addItem(name, [this, name] {
-                fileChooser = std::make_unique<juce::FileChooser>("Choose destination folder");
-                juce::Component::SafePointer<MainComponent> safe(this);
-                fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                    [safe, name](const juce::FileChooser& chooser) {
-                        if (safe == nullptr) return;
-                        const auto result = chooser.getResult();
-                        if (result == juce::File()) return;
-                        const auto error = SceneBridge::moveSave(name, result);
-                        if (error.isNotEmpty()) safe->showError(error);
-                    });
-            });
-        }
-        menu.addSubMenu("Move Save", moveMenu);
-    } else {
-        menu.addItem("No saves yet", false, false, [] {});
-    }
-
-    menu.addSeparator();
-    menu.addItem("Open Saves Folder", [this] {
-        const auto dir = SceneBridge::getScenesDirectory();
-        dir.createDirectory();
-        dir.startAsProcess();
-    });
-
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(toolbar.getMenuTarget()));
 }
 
 void MainComponent::loadScene(bool showMissingMessage) {

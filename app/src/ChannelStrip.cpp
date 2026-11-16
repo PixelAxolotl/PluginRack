@@ -356,7 +356,6 @@ void ChannelStrip::openEqWindow() {
             if (safe == nullptr) return;
             safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
             safe->audioEngine.setChannelEq(safe->channel.id, bands);
-            safe->refreshEqButton();
         },
         liveRateHz, false, channel.eqRtaOffsetDb, channel.eqRtaWeighting);
     window->applySpectrumOffset = [safe](float offsetDb) {
@@ -391,7 +390,6 @@ void ChannelStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
         safe->audioEngine.setChannelEqDelay(safe->channel.id, delayMs);
-        safe->refreshEqButton();
     };
     // Phase flip: seeded from the strip, persisted through the engine.
     // Editing engages the EQ like a band drag does.
@@ -400,14 +398,12 @@ void ChannelStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
         safe->audioEngine.setChannelEqPhaseFlip(safe->channel.id, flipped);
-        safe->refreshEqButton();
     };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
         safe->closeEqWindow();
     };
-    refreshEqButton();
 }
 
 void ChannelStrip::closeEqWindow() {
@@ -415,7 +411,6 @@ void ChannelStrip::closeEqWindow() {
     auto* doomed = eqWindow;
     eqWindow = nullptr;
     delete doomed;
-    refreshEqButton();
 }
 
 void ChannelStrip::closeAllEffectWindows() {
@@ -442,9 +437,7 @@ void ChannelStrip::closeAllEffectWindows() {
     }
 }
 
-void ChannelStrip::refreshEqButton() {
-    // No standalone button left: the insert cards carry the bypass state.
-}
+
 
 void ChannelStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
     auto effects = channel.effects;

@@ -102,20 +102,6 @@ public:
     void releaseOrphanedEditor() { rackView.releaseOrphanedDockedEditor(); }
 
 private:
-    class PlaceholderView final : public juce::Component {
-    public:
-        PlaceholderView(const juce::String& title, const juce::String& subtitle);
-        void setSubtitle(const juce::String& subtitle);
-        void paint(juce::Graphics& g) override;
-        void resized() override;
-
-    private:
-        juce::Label titleLabel;
-        juce::Label subtitleLabel;
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlaceholderView)
-    };
-
     AudioEngine& audioEngine;
     MixerComponent& mixerView;
     RackView rackView;
@@ -159,7 +145,6 @@ private:
     // swap itself is brief). openDevicesNow=false defers the stream opens to
     // the engine's startup worker so the UI is not blocked by slow drivers.
     juce::String applyScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
-    void showSavesMenu();
     void showMenu();
     void showAudioErrors();
     void showSnapshotPlaceholder();

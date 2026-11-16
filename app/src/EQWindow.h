@@ -65,8 +65,7 @@ private:
 //
 // The window owns no engine reference: initialBands is a snapshot taken at
 // open time (same semantics as the title), and every edit funnels through
-// applyBands, which the owner wires to setChannelEq/setOutputEq plus
-// refreshEqButton so the strip's amber state tracks in-window changes.
+// applyBands, which the owner wires to setChannelEq/setOutputEq.
 // The Delay knob is per-EQ, not per-band: it routes through applyDelayMs to
 // the owner's setChannelEqDelay/setOutputEqDelay (0..1000 ms).
 // sampleRateHz is the owner's live device rate at open, injected into the

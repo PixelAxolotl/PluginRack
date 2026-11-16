@@ -369,7 +369,6 @@ void MixerComponent::OutputStrip::openEqWindow() {
                     break;
                 }
             }
-            safe->refreshEqButton();
         },
         liveRateHz, false, output.eqRtaOffsetDb, output.eqRtaWeighting);
     window->applySpectrumOffset = [safe, outputId](float offsetDb) {
@@ -419,7 +418,6 @@ void MixerComponent::OutputStrip::openEqWindow() {
                 break;
             }
         }
-        safe->refreshEqButton();
     };
     // Phase flip, same contract as the channel strip.
     window->setPhaseFlip(output.eqPhaseFlip.get());
@@ -433,14 +431,12 @@ void MixerComponent::OutputStrip::openEqWindow() {
                 break;
             }
         }
-        safe->refreshEqButton();
     };
     eqWindow = window;
     window->onCloseRequest = [safe] {
         if (safe == nullptr) return;
         safe->closeEqWindow();
     };
-    refreshEqButton();
 }
 
 void MixerComponent::OutputStrip::closeEqWindow() {
@@ -448,12 +444,9 @@ void MixerComponent::OutputStrip::closeEqWindow() {
     auto* doomed = eqWindow;
     eqWindow = nullptr;
     delete doomed;
-    refreshEqButton();
 }
 
-void MixerComponent::OutputStrip::refreshEqButton() {
-    // No standalone button left: the insert cards carry the bypass state.
-}
+
 
 void MixerComponent::OutputStrip::toggleDynamicsBypass(pluginrack::DynamicsEffectType type) {
     auto effects = output.effects;
@@ -594,7 +587,6 @@ void MixerComponent::OutputStrip::refresh() {
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     meter.setStereo(!mono);
     flipButton.setToggleState(output.flipped.get());
-    refreshEqButton();
 }
 
 void MixerComponent::OutputStrip::refreshInserts() {

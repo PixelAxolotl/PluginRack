@@ -140,7 +140,6 @@ private:
     void toggleDynamicsBypass(pluginrack::DynamicsEffectType type);
     void refreshDynamicsButtons();
     void renameSelectedChain();
-    void refreshEqButton();
     void refreshOutputButtons();
     void refreshSourceList();
     // Card thumbnails: the timer refreshes the focused VST's snapshot and the
