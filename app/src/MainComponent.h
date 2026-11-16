@@ -86,11 +86,19 @@ public:
     // Fired when the Saves view loads a save, so the host can mark it as
     // the active save the toolbar Save button overwrites.
     std::function<void(const juce::String&)> onSaveLoaded;
+    // A save was renamed (old, new) or deleted (old, {}). The host keeps the
+    // toolbar's active save name pointing at a file that still exists.
+    std::function<void(const juce::String&, const juce::String&)> onSaveIdentityChanged;
     // Wired by MainComponent to its synchronous scene apply. The Saves view
     // parses save files but never touches the engine: restoreScene mutates
     // plugins and JUCE components that belong to the message thread, so the
     // load request round-trips through the host.
-    std::function<juce::String(const pluginrack::Scene&)> onRestoreRequested;
+    // onRestoreRequested starts a staged restore and returns an immediate
+    // error, or {} when the load started; the completion receives the plugin
+    // load errors once the commit lands.
+    std::function<juce::String(const pluginrack::Scene&,
+                               std::function<void(const juce::String&)>)>
+        onRestoreRequested;
 
     // MainComponent calls this before engine strip mutation: every rack editor
     // is backed by a strip's plugin instance, and an editor whose processor
@@ -139,12 +147,20 @@ public:
 private:
     void saveScene();
     void saveSceneAs();
+    // True while a staged restore owns the rig: a save then would capture the
+    // half-replaced strips, so the caller shows the message and stops.
+    bool refuseSaveWhileRestoring();
     void loadScene(bool showMissingMessage);
-    // Applies a parsed scene on the message thread and returns plugin load
-    // errors. Guarded by sceneLoading_; callers run it directly (the strip
-    // swap itself is brief). openDevicesNow=false defers the stream opens to
-    // the engine's startup worker so the UI is not blocked by slow drivers.
+    // Applies a parsed scene synchronously and returns plugin load errors.
+    // Diagnostics and tests use this blocking form; the UI goes through
+    // applySceneAsync below so slow plugins do not freeze the window.
     juce::String applyScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
+    // Staged variant for user-initiated loads: the engine instantiates one
+    // plugin per message-loop turn and calls onFinished when the swap lands.
+    // Returns an immediate error when a load is already running or audio is
+    // still starting up.
+    juce::String applySceneAsync(const pluginrack::Scene& scene, bool openDevicesNow,
+                                 std::function<void(const juce::String&)> onFinished);
     void showMenu();
     void showAudioErrors();
     void showSnapshotPlaceholder();

@@ -27,7 +27,7 @@
 #include "PluginHost.h"
 #include "DeviceStream.h"
 
-class AudioEngine {
+class AudioEngine : private juce::Timer {
 public:
     // Global VST insert budget: every input and output strip shares this one
     // constant, so the UI's add-row and the engine's refusal can never drift
@@ -51,6 +51,11 @@ public:
         PluginHost pluginHost;
         juce::Atomic<bool> bypassed{false};
         int latencySamples = 0;
+        // State blob from the scene while the plugin could not be loaded (for
+        // example a missing bundle). A save must write it back unchanged
+        // instead of recording the empty state of the missing instance.
+        // Cleared once a live instance owns the state.
+        juce::String savedPluginState;
         // Stable text the audio thread publishes while it renders this insert,
         // so a crash inside the plugin names it (see CrashContext.h). Assigned
         // when the insert is created; never freed.
@@ -661,9 +666,70 @@ public:
     // Returns plugin/device load errors, empty on full success.
     juce::String restoreScene(const pluginrack::Scene& scene, bool openDevicesNow = true);
 
+    // Staged restore for the UI: prepares the strips exactly like restoreScene,
+    // then instantiates one insert per message-loop turn and finally commits
+    // the swap. A scene with slow plugins therefore keeps repainting and can
+    // report progress, instead of freezing the window until the last plugin
+    // answers. Returns an error when a restore is already active or devices are
+    // still opening; on success onFinished runs once, on the message thread,
+    // with the same plugin errors restoreScene returns.
+    juce::String beginSceneRestore(const pluginrack::Scene& scene, bool openDevicesNow,
+                                   std::function<void(juce::String)> onFinished);
+    bool isSceneRestoreActive() const noexcept {
+        return restoreActive_.load(std::memory_order_acquire);
+    }
+    int getSceneRestoreDone() const noexcept {
+        return restoreDone_.load(std::memory_order_relaxed);
+    }
+    int getSceneRestoreTotal() const noexcept {
+        return restoreTotal_.load(std::memory_order_relaxed);
+    }
+
 private:
     class DeviceOpenThread;
     class InternalClock;
+
+    // One plugin still waiting to be instantiated by the staged restore.
+    struct PendingInsertLoad {
+        InsertSlot* insert = nullptr;
+        juce::String ownerName;
+        juce::String pluginState;
+        int pluginUniqueId = 0;
+    };
+
+    // Everything a staged restore owns between begin and commit. Prepared
+    // strips stay private to the engine; the live rig only changes hands in
+    // commitSceneRestore(), which is the same brief swap restoreScene always
+    // performed.
+    struct SceneRestoreJob {
+        std::vector<std::unique_ptr<Channel>> channels;
+        std::vector<std::unique_ptr<Output>> outputs;
+        std::vector<std::unique_ptr<Route>> routes;
+        std::vector<std::uint32_t> channelIds;
+        std::vector<std::uint32_t> outputIds;
+        std::vector<PendingInsertLoad> pending;
+        std::map<std::uint32_t, juce::String> desiredInputDevices;
+        std::map<std::uint32_t, juce::String> desiredOutputDevices;
+        juce::String errors;
+        double sampleRate = 0.0;
+        int bufferSize = 0;
+        std::uint32_t maxInsertId = 0;
+        std::uint32_t maxChannelId = 0;
+        std::uint32_t maxOutputId = 0;
+        bool openDevicesNow = false;
+        std::function<void(juce::String)> onFinished;
+    };
+
+    juce::String prepareSceneRestore(const pluginrack::Scene& scene, bool openDevicesNow);
+    bool loadNextPendingInsert();
+    juce::String commitSceneRestore();
+    void abortSceneRestore();
+    void timerCallback() override;
+
+    std::unique_ptr<SceneRestoreJob> restoreJob_;
+    std::atomic<bool> restoreActive_{false};
+    std::atomic<int> restoreDone_{0};
+    std::atomic<int> restoreTotal_{0};
 
     Channel* findChannel(std::uint32_t channelId);
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);

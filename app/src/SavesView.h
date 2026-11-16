@@ -11,15 +11,20 @@
 
 class SavesView final : public juce::Component {
 public:
-    // onRestore applies a parsed scene to the engine and returns plugin
-    // load errors. It runs synchronously on the message thread inside the
-    // host: SavesView never touches the engine itself, because restoreScene
-    // instantiates plugins and destroys JUCE components that must not be
-    // mutated off that thread.
+    // onRestore starts a staged restore and returns an immediate error; the
+    // completion it receives gets the plugin load errors once the engine has
+    // committed the new strips. All of it runs on the message thread: the
+    // engine instantiates plugins and destroys JUCE components, which must
+    // not happen off that thread.
     // onLoaded tells the host which save is now active, so the toolbar Save
     // button overwrites it instead of asking for a new name.
-    explicit SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestore,
-                       std::function<void(const juce::String&)> onLoaded = {});
+    // onSaveIdentityChanged reports a rename (old, new) or a delete (old, {})
+    // so the host can keep the toolbar's active save name in step.
+    explicit SavesView(std::function<juce::String(const pluginrack::Scene&, std::function<void(const juce::String&)>)>
+                           onRestore,
+                       std::function<void(const juce::String&)> onLoaded = {},
+                       std::function<void(const juce::String&, const juce::String&)>
+                           onSaveIdentityChanged = {});
     ~SavesView() override;
 
     void rebuild();
@@ -34,6 +39,7 @@ private:
         void setDefaultActive(bool isDefault);
         void setSelected(bool isSelected);
         void setLoadEnabled(bool enabled);
+        void setActionsEnabled(bool enabled);
 
         void resized() override;
         void paint(juce::Graphics& g) override;
@@ -66,8 +72,10 @@ private:
     void promptRename(const juce::String& oldName);
     void confirmDelete(const juce::String& name);
 
-    std::function<juce::String(const pluginrack::Scene&)> onRestore;
+    std::function<juce::String(const pluginrack::Scene&, std::function<void(const juce::String&)>)>
+        onRestore;
     std::function<void(const juce::String&)> onLoaded;
+    std::function<void(const juce::String&, const juce::String&)> onSaveIdentityChanged;
 
     juce::Label titleLabel;
     juce::Label statusLabel;

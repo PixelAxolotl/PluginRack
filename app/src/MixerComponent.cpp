@@ -39,13 +39,20 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
                                    audioEngine.getAvailableOutputDevices(),
                                    [this](juce::String chosen) {
             const std::uint32_t outputId = output.id;
-            juce::Thread::launch([this, outputId, chosen] {
-                const auto err = audioEngine.setOutputDevice(outputId, chosen);
-                juce::MessageManager::callAsync([this, err] {
-                    const auto deviceState = audioEngine.getOutputDeviceState(output.id);
-                    deviceControl.setDeviceName(deviceState.deviceName);
-                    deviceControl.setBackendType(deviceState.deviceType);
-                    deviceControl.setError(deviceState.error);
+            // The strip is rebuilt (and the engine Output freed) on every
+            // structure change, while a device open can take seconds. The
+            // worker only touches the engine, which outlives the strips; the
+            // UI half re-checks the strip is still alive before touching it.
+            auto* engine = &audioEngine;
+            juce::Component::SafePointer<OutputStrip> safe(this);
+            juce::Thread::launch([engine, outputId, chosen, safe] {
+                const auto err = engine->setOutputDevice(outputId, chosen);
+                juce::MessageManager::callAsync([safe, outputId, err] {
+                    if (safe == nullptr) return;
+                    const auto deviceState = safe->audioEngine.getOutputDeviceState(outputId);
+                    safe->deviceControl.setDeviceName(deviceState.deviceName);
+                    safe->deviceControl.setBackendType(deviceState.deviceType);
+                    safe->deviceControl.setError(deviceState.error);
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }

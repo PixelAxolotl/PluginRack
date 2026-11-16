@@ -159,6 +159,10 @@ juce::String SceneBridge::save(const pluginrack::Scene& scene, const juce::File&
 }
 
 juce::String SceneBridge::saveNamed(const pluginrack::Scene& scene, const juce::String& name) {
+    // "Mix" and "Mix.json" both sanitize to Mix.json, so the second save
+    // would overwrite the first without a word.
+    if (name.trim().endsWithIgnoreCase(".json"))
+        return "The .json extension is added automatically. Please choose a name without it.";
     const auto clean = sanitizeSaveName(name);
     if (clean.isEmpty()) return "Please enter a save name.";
     if (clean.length() > kMaxSaveNameLength)
@@ -205,6 +209,8 @@ bool SceneBridge::deleteSave(const juce::String& name) {
 }
 
 juce::String SceneBridge::renameSave(const juce::String& oldName, const juce::String& newName) {
+    if (newName.trim().endsWithIgnoreCase(".json"))
+        return "The .json extension is added automatically. Please choose a name without it.";
     const auto oldClean = sanitizeSaveName(oldName);
     const auto newClean = sanitizeSaveName(newName);
     if (oldClean.isEmpty() || newClean.isEmpty()) return "Please enter a valid name.";

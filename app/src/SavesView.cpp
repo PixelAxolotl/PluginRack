@@ -51,6 +51,12 @@ void SavesView::SaveRowComponent::setLoadEnabled(bool enabled) {
     loadButton.setEnabled(enabled);
 }
 
+void SavesView::SaveRowComponent::setActionsEnabled(bool enabled) {
+    defButton.setEnabled(enabled);
+    renameButton.setEnabled(enabled);
+    deleteButton.setEnabled(enabled);
+}
+
 void SavesView::SaveRowComponent::resized() {
     auto area = getLocalBounds().reduced(12, 8);
     deleteButton.setBounds(area.removeFromRight(70));
@@ -81,9 +87,14 @@ void SavesView::SaveRowComponent::mouseUp(const juce::MouseEvent& event) {
     if (event.mouseWasClicked() && onSelect) onSelect();
 }
 
-SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&)> onRestoreIn,
-                   std::function<void(const juce::String&)> onLoadedIn)
-    : onRestore(std::move(onRestoreIn)), onLoaded(std::move(onLoadedIn)) {
+SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&, std::function<void(const juce::String&)>)>
+                         onRestoreIn,
+                   std::function<void(const juce::String&)> onLoadedIn,
+                   std::function<void(const juce::String&, const juce::String&)>
+                       onSaveIdentityChangedIn)
+    : onRestore(std::move(onRestoreIn))
+    , onLoaded(std::move(onLoadedIn))
+    , onSaveIdentityChanged(std::move(onSaveIdentityChangedIn)) {
     titleLabel.setText("Saves", juce::dontSendNotification);
     titleLabel.setFont(theme::ui::titleFont());
     titleLabel.setColour(juce::Label::textColourId, theme::text());
@@ -128,6 +139,7 @@ void SavesView::rebuild() {
         row->onRename = [this, name] { promptRename(name); };
         row->onDelete = [this, name] { confirmDelete(name); };
         row->setLoadEnabled(!loading_.load());
+        row->setActionsEnabled(!loading_.load());
         content.addAndMakeVisible(row.get());
         rows.push_back(std::move(row));
     }
@@ -155,15 +167,16 @@ void SavesView::updateSelection() {
 
 void SavesView::setLoading(bool isLoading) {
     statusLabel.setText(isLoading ? "Loading..." : juce::String(), juce::dontSendNotification);
-    for (auto& row : rows) row->setLoadEnabled(!isLoading);
+    for (auto& row : rows) {
+        row->setLoadEnabled(!isLoading);
+        row->setActionsEnabled(!isLoading);
+    }
 }
 
 void SavesView::loadSave(const juce::String& name) {
-    // restoreScene instantiates plugins and destroys JUCE components with
-    // its old strips, so it must run on the message thread. The host's
-    // callback applies the parsed scene there; the engine parks the audio
-    // clock around the strip swap, which keeps the synchronous load brief.
-    // loading_ serialises row clicks and resets on every exit path.
+    // The host starts a staged restore: it returns an immediate error, or runs
+    // the completion once the engine has committed the new strips. loading_
+    // keeps the rows disabled until then.
     if (loading_.exchange(true)) return;
     juce::String error;
     const auto saved = SceneBridge::loadNamed(name, error);
@@ -177,14 +190,28 @@ void SavesView::loadSave(const juce::String& name) {
         return;
     }
     setLoading(true);
-    const juce::String pluginErrors = onRestore ? onRestore(*saved) : juce::String();
-    loading_.store(false);
-    setLoading(false);
-    if (pluginErrors.isNotEmpty())
+    juce::Component::SafePointer<SavesView> safe(this);
+    auto onFinished = [safe, name](const juce::String& pluginErrors) {
+        if (safe == nullptr) return;
+        safe->loading_.store(false);
+        safe->setLoading(false);
+        if (pluginErrors.isNotEmpty())
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack",
+                "The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
+        else if (safe->onLoaded)
+            safe->onLoaded(name);
+    };
+    if (!onRestore) {
+        onFinished({});
+        return;
+    }
+    const auto startError = onRestore(*saved, onFinished);
+    if (startError.isNotEmpty()) {
+        loading_.store(false);
+        setLoading(false);
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack",
-            "The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
-    else if (onLoaded)
-        onLoaded(name);
+                                               startError);
+    }
 }
 
 void SavesView::promptRename(const juce::String& oldName) {
@@ -195,11 +222,16 @@ void SavesView::promptRename(const juce::String& oldName) {
     juce::Component::SafePointer<SavesView> safe(this);
     w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w, oldName](int result) {
         if (result == 1 && safe != nullptr) {
-            const auto error = SceneBridge::renameSave(oldName, w->getTextEditorContents("name"));
-            if (error.isNotEmpty())
+            const auto newName = w->getTextEditorContents("name");
+            const auto error = SceneBridge::renameSave(oldName, newName);
+            if (error.isNotEmpty()) {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", error);
-            else
+            } else {
+                if (safe->onSaveIdentityChanged)
+                    safe->onSaveIdentityChanged(
+                        oldName, SceneBridge::getSaveFile(newName).getFileNameWithoutExtension());
                 safe->rebuild();
+            }
         }
         delete w;
     }), true);
@@ -211,7 +243,8 @@ void SavesView::confirmDelete(const juce::String& name) {
         "Delete save '" + name + "'?", "Delete", "Cancel", nullptr,
         juce::ModalCallbackFunction::create([safe, name](int result) {
             if (result == 1 && safe != nullptr) {
-                (void)SceneBridge::deleteSave(name);
+                if (SceneBridge::deleteSave(name) && safe->onSaveIdentityChanged)
+                    safe->onSaveIdentityChanged(name, {});
                 safe->rebuild();
             }
         }));

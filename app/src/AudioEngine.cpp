@@ -249,6 +249,7 @@ AudioEngine::AudioEngine() {
 }
 
 AudioEngine::~AudioEngine() {
+    abortSceneRestore();
     prepareAliveToken_->store(false, std::memory_order_release);
     stopInternalClock();
     stopDeviceOpenThread();
@@ -570,8 +571,16 @@ void AudioEngine::render(int frames) {
                                 (*insert)->failExitCode = status.exitCode;
                                 if (!(*insert)->faultRecorded.get()) {
                                     (*insert)->faultRecorded = true;
-                                    PluginFaultGuard::record((*insert)->pluginPath, status.exitCode,
-                                                            (*insert)->id);
+                                    // faults.json is disk I/O. Never do it on
+                                    // the audio thread, still less under
+                                    // stateLock: one dead child would stall
+                                    // every strip's render.
+                                    const juce::String faultPath = (*insert)->pluginPath;
+                                    const int faultExit = status.exitCode;
+                                    const auto faultId = (*insert)->id;
+                                    juce::MessageManager::callAsync([faultPath, faultExit, faultId] {
+                                        PluginFaultGuard::record(faultPath, faultExit, faultId);
+                                    });
                                 }
                             }
                         }
@@ -693,8 +702,16 @@ void AudioEngine::render(int frames) {
                                 (*insert)->failExitCode = status.exitCode;
                                 if (!(*insert)->faultRecorded.get()) {
                                     (*insert)->faultRecorded = true;
-                                    PluginFaultGuard::record((*insert)->pluginPath, status.exitCode,
-                                                            (*insert)->id);
+                                    // faults.json is disk I/O. Never do it on
+                                    // the audio thread, still less under
+                                    // stateLock: one dead child would stall
+                                    // every strip's render.
+                                    const juce::String faultPath = (*insert)->pluginPath;
+                                    const int faultExit = status.exitCode;
+                                    const auto faultId = (*insert)->id;
+                                    juce::MessageManager::callAsync([faultPath, faultExit, faultId] {
+                                        PluginFaultGuard::record(faultPath, faultExit, faultId);
+                                    });
                                 }
                             }
                         }
@@ -2032,6 +2049,9 @@ std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
         slot.pluginName = insert->pluginName.toStdString();
         slot.pluginUniqueId = insert->pluginUniqueId;
         slot.bypassed = insert->bypassed.get();
+        // A failed insert has no live instance to ask for state; write back
+        // the blob the scene supplied.
+        slot.pluginState = insert->savedPluginState.toStdString();
         saved.push_back(std::move(slot));
         hosts.push_back(&insert->pluginHost);
     }
@@ -2100,23 +2120,56 @@ pluginrack::Scene AudioEngine::makeScene() const {
     // enters plugin code.
     for (std::size_t c = 0; c < channelHosts.size(); ++c) {
         for (std::size_t i = 0; i < channelHosts[c].size(); ++i) {
-            scene.channels[c].inserts[i].pluginState =
-                channelHosts[c][i]->getStateAsBase64().toStdString();
+            // Only a live instance can describe its state. For a failed insert
+            // keep the saved blob (already copied by copyInserts).
+            if (channelHosts[c][i]->hasPlugin())
+                scene.channels[c].inserts[i].pluginState =
+                    channelHosts[c][i]->getStateAsBase64().toStdString();
         }
     }
     for (std::size_t o = 0; o < outputHosts.size(); ++o) {
         for (std::size_t i = 0; i < outputHosts[o].size(); ++i) {
-            scene.outputs[o].inserts[i].pluginState =
-                outputHosts[o][i]->getStateAsBase64().toStdString();
+            if (outputHosts[o][i]->hasPlugin())
+                scene.outputs[o].inserts[i].pluginState =
+                    outputHosts[o][i]->getStateAsBase64().toStdString();
         }
     }
     return scene;
 }
 
 juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool openDevicesNow) {
+    // Diagnostics and tests keep the blocking contract: the same staged
+    // machinery, drained without returning to the message loop.
+    if (restoreActive_.load(std::memory_order_acquire)) {
+        return "A scene is already loading. Please try again in a moment.";
+    }
+    auto error = prepareSceneRestore(scene, openDevicesNow);
+    if (error.isNotEmpty()) return error;
+    while (loadNextPendingInsert()) {
+    }
+    return commitSceneRestore();
+}
+
+juce::String AudioEngine::beginSceneRestore(const pluginrack::Scene& scene, bool openDevicesNow,
+                                            std::function<void(juce::String)> onFinished) {
+    if (restoreActive_.load(std::memory_order_acquire)) {
+        return "A scene is already loading. Please try again in a moment.";
+    }
+    auto error = prepareSceneRestore(scene, openDevicesNow);
+    if (error.isNotEmpty()) return error;
+    restoreJob_->onFinished = std::move(onFinished);
+    restoreActive_.store(true, std::memory_order_release);
+    startTimer(1);
+    return {};
+}
+
+juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bool openDevicesNow) {
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Please try again in a moment.";
     }
+    restoreJob_ = std::make_unique<SceneRestoreJob>();
+    auto& job = *restoreJob_;
+    job.openDevicesNow = openDevicesNow;
     // Tuning first: the stream open below must already use the saved buffer
     // sizes and modes. Scenes written before schema 4 carry no tuning block,
     // and loading one leaves the live settings alone.
@@ -2136,18 +2189,19 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         for (const auto& o : outputs) savedOutputDevices[o->id] = o->outputDeviceName;
     }
 
-    std::vector<std::unique_ptr<Channel>> restoredChannels;
-    std::vector<std::unique_ptr<Output>> restoredOutputs;
-    std::vector<std::unique_ptr<Route>> restoredRoutes;
-    std::vector<std::uint32_t> restoredChannelIds;
-    std::vector<std::uint32_t> restoredOutputIds;
-    juce::String loadErrors;
+    auto& restoredChannels = job.channels;
+    auto& restoredOutputs = job.outputs;
+    auto& restoredRoutes = job.routes;
+    auto& restoredChannelIds = job.channelIds;
+    auto& restoredOutputIds = job.outputIds;
     // Highest ids seen while building: applied to the next-id counters under
     // stateLock together with the vector swap below, so the counters and
     // the strips they number advance as one committed step.
-    std::uint32_t maxInsertId = 0;
-    std::uint32_t maxChannelId = 0;
-    std::uint32_t maxOutputId = 0;
+    auto& maxInsertId = job.maxInsertId;
+    auto& maxChannelId = job.maxChannelId;
+    auto& maxOutputId = job.maxOutputId;
+    job.sampleRate = sampleRate;
+    job.bufferSize = bufferSize;
 
     for (const auto& savedChannel : scene.channels) {
         auto channel = std::make_unique<Channel>();
@@ -2221,31 +2275,18 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            // Keep the blob until a live instance can speak for itself. If the
+            // plugin is missing, a later save writes this back instead of an
+            // empty state that would erase the user's settings for good.
+            insert->savedPluginState = juce::String(savedInsert.pluginState);
             insert->crashLabel = makeCrashLabel(channel->name, insert->id, insert->pluginName,
                                                 insert->pluginPath);
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            // Scene restore still instantiates here, on the message thread:
-            // log it so a slow plugin is visible in the run log.
-            juce::Logger::writeToLog("scene: instantiating "
-                                     + juce::File(insert->pluginPath).getFileName());
-            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
-                                                             juce::String(savedInsert.pluginState),
-                                                             savedInsert.pluginUniqueId);
-            if (error.isNotEmpty()) {
-                loadErrors += channel->name + ": " + error + "\n";
-            }
-            insert->latencySamples = insert->pluginHost.getLatencySamples();
-            if (getChildProcessDsp()) {
-                juce::String childError;
-                const bool ok = insert->pluginHost.loadChildHost(
-                    juce::File(insert->pluginPath), savedInsert.pluginUniqueId,
-                    juce::String(savedInsert.pluginState), sampleRate, bufferSize, 20000,
-                    childError);
-                juce::Logger::writeToLog(ok
-                                             ? "plugin: child host ready for " + insert->pluginName
-                                             : "plugin: child host unavailable for " + insert->pluginName
-                                                   + " (" + childError + ")");
-            }
+            // Instantiation is staged: the timer loads one insert per turn, so
+            // a slow plugin stalls one short turn instead of the whole restore.
+            job.pending.push_back({insert.get(), channel->name,
+                                   juce::String(savedInsert.pluginState),
+                                   savedInsert.pluginUniqueId});
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             channel->inserts.push_back(std::move(insert));
             if (std::none_of(channel->chain.begin(), channel->chain.end(),
@@ -2314,29 +2355,17 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             insert->pluginName = savedInsert.pluginName;
             insert->pluginUniqueId = savedInsert.pluginUniqueId;
             insert->bypassed = savedInsert.bypassed;
+            // Same rule as channels: hold the saved blob while the plugin is
+            // not loaded, so a save cannot blank it.
+            insert->savedPluginState = juce::String(savedInsert.pluginState);
             insert->crashLabel = makeCrashLabel(output->name, insert->id, insert->pluginName,
                                                 insert->pluginPath);
             insert->pluginHost.prepareToPlay(sampleRate, bufferSize);
-            juce::Logger::writeToLog("scene: instantiating "
-                                     + juce::File(insert->pluginPath).getFileName());
-            const auto error = insert->pluginHost.loadPlugin(juce::File(insert->pluginPath),
-                                                             juce::String(savedInsert.pluginState),
-                                                             savedInsert.pluginUniqueId);
-            if (error.isNotEmpty()) {
-                loadErrors += output->name + ": " + error + "\n";
-            }
-            insert->latencySamples = insert->pluginHost.getLatencySamples();
-            if (getChildProcessDsp()) {
-                juce::String childError;
-                const bool ok = insert->pluginHost.loadChildHost(
-                    juce::File(insert->pluginPath), savedInsert.pluginUniqueId,
-                    juce::String(savedInsert.pluginState), sampleRate, bufferSize, 20000,
-                    childError);
-                juce::Logger::writeToLog(ok
-                                             ? "plugin: child host ready for " + insert->pluginName
-                                             : "plugin: child host unavailable for " + insert->pluginName
-                                                   + " (" + childError + ")");
-            }
+            // Instantiation is staged: the timer loads one insert per turn, so
+            // a slow plugin stalls one short turn instead of the whole restore.
+            job.pending.push_back({insert.get(), output->name,
+                                   juce::String(savedInsert.pluginState),
+                                   savedInsert.pluginUniqueId});
             maxInsertId = juce::jmax(maxInsertId, insert->id + 1);
             output->inserts.push_back(std::move(insert));
             if (std::none_of(output->chain.begin(), output->chain.end(),
@@ -2359,6 +2388,76 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         route->sendGainDbR = savedRoute.sendGainDbR.value_or(savedRoute.sendGainDb);
         restoredRoutes.push_back(std::move(route));
     }
+
+    // Resolve the device assignments now, while the scene is in hand: the
+    // commit runs after several message-loop turns, and the caller's scene may
+    // be gone by then.
+    for (const auto& savedChannel : scene.channels) {
+        const juce::String sceneDevice(savedChannel.sourceDeviceId);
+        if (sceneDevice.isNotEmpty()) {
+            job.desiredInputDevices[savedChannel.id] = sceneDevice;
+            continue;
+        }
+        const auto live = savedInputDevices.find(savedChannel.id);
+        if (live != savedInputDevices.end() && live->second.isNotEmpty()) {
+            job.desiredInputDevices[savedChannel.id] = live->second;
+        }
+    }
+    for (const auto& savedOutput : scene.outputs) {
+        const juce::String sceneDevice(savedOutput.deviceId);
+        if (sceneDevice.isNotEmpty()) {
+            job.desiredOutputDevices[savedOutput.id] = sceneDevice;
+            continue;
+        }
+        const auto live = savedOutputDevices.find(savedOutput.id);
+        if (live != savedOutputDevices.end() && live->second.isNotEmpty()) {
+            job.desiredOutputDevices[savedOutput.id] = live->second;
+        }
+    }
+    // Progress is published only once every insert is queued.
+    restoreDone_.store(0, std::memory_order_relaxed);
+    restoreTotal_.store(static_cast<int>(job.pending.size()), std::memory_order_relaxed);
+    return {};
+}
+
+bool AudioEngine::loadNextPendingInsert() {
+    if (restoreJob_ == nullptr || restoreJob_->pending.empty()) return false;
+    auto& job = *restoreJob_;
+    const PendingInsertLoad load = std::move(job.pending.front());
+    job.pending.erase(job.pending.begin());
+    const auto total = restoreTotal_.load(std::memory_order_relaxed);
+    const auto done = total - static_cast<int>(job.pending.size());
+    // The run log still names each plugin, so a slow one stays visible.
+    juce::Logger::writeToLog("scene: instantiating "
+                             + juce::File(load.insert->pluginPath).getFileName() + " ("
+                             + juce::String(done) + " of " + juce::String(total) + ")");
+    const auto error = load.insert->pluginHost.loadPlugin(
+        juce::File(load.insert->pluginPath), load.pluginState, load.pluginUniqueId);
+    if (error.isNotEmpty()) {
+        job.errors += load.ownerName + ": " + error + "\n";
+    } else {
+        // The live instance now owns the state; savedPluginState is only the
+        // fallback for an insert that never loaded.
+        load.insert->savedPluginState.clear();
+    }
+    load.insert->latencySamples = load.insert->pluginHost.getLatencySamples();
+    if (getChildProcessDsp()) {
+        juce::String childError;
+        const bool ok = load.insert->pluginHost.loadChildHost(
+            juce::File(load.insert->pluginPath), load.pluginUniqueId, load.pluginState,
+            job.sampleRate, job.bufferSize, 20000, childError);
+        juce::Logger::writeToLog(ok
+                                     ? "plugin: child host ready for " + load.insert->pluginName
+                                     : "plugin: child host unavailable for "
+                                           + load.insert->pluginName + " (" + childError + ")");
+    }
+    restoreDone_.store(done, std::memory_order_relaxed);
+    return true;
+}
+
+juce::String AudioEngine::commitSceneRestore() {
+    if (restoreJob_ == nullptr) return {};
+    auto& job = *restoreJob_;
 
     // Park the clock render hook before the swap so no device callback can
     // enter render() while the strips below change hands, and so the old
@@ -2386,14 +2485,28 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
     std::vector<OutputPlayback*> oldPlaybacks;
     {
         const juce::ScopedLock lock(stateLock);
+        // The staged window can outlive a clock reopen (for example a settings
+        // Apply while the inserts load), so the strips may have been sized for
+        // the old block. render() indexes them by the live block; size them to
+        // the current maximum before they become visible.
+        const int restoreFrames = juce::jmax(1, maxBlockFrames_);
+        const double restoreRate = currentSampleRate > 0.0 ? currentSampleRate : job.sampleRate;
+        for (auto& channel : job.channels) {
+            channel->buffer.setSize(2, restoreFrames, false, false, false);
+            channel->eq.prepare(restoreRate, restoreFrames);
+        }
+        for (auto& output : job.outputs) {
+            output->buffer.setSize(2, restoreFrames, false, false, false);
+            output->eq.prepare(restoreRate, restoreFrames);
+        }
         oldChannels = std::move(channels);
         oldOutputs = std::move(outputs);
         oldRoutes = std::move(routes);
-        channels = std::move(restoredChannels);
-        outputs = std::move(restoredOutputs);
-        routes = std::move(restoredRoutes);
-        meters.setTargets(restoredChannelIds.data(), restoredChannelIds.size(),
-                          restoredOutputIds.data(), restoredOutputIds.size());
+        channels = std::move(job.channels);
+        outputs = std::move(job.outputs);
+        routes = std::move(job.routes);
+        meters.setTargets(job.channelIds.data(), job.channelIds.size(),
+                          job.outputIds.data(), job.outputIds.size());
         // Keep the old playbacks alive for the lock-free silence snapshot,
         // but close their devices once the lock is released.
         for (auto& output : oldOutputs) {
@@ -2403,9 +2516,9 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
             }
         }
         publishRenderOutputsLocked();
-        nextInsertId = juce::jmax(nextInsertId, maxInsertId);
-        nextChannelId = juce::jmax(nextChannelId, maxChannelId);
-        nextOutputId = juce::jmax(nextOutputId, maxOutputId);
+        nextInsertId = juce::jmax(nextInsertId, job.maxInsertId);
+        nextChannelId = juce::jmax(nextChannelId, job.maxChannelId);
+        nextOutputId = juce::jmax(nextOutputId, job.maxOutputId);
         // Collect captures no live channel references so their device close
         // runs after the lock is released (see retiredCaptures.clear()).
         for (auto it = inputCaptures_.begin(); it != inputCaptures_.end();) {
@@ -2435,31 +2548,9 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
 
     // Re-apply device assignments where possible: the device stored in the
     // scene wins; channels from scenes saved before sourceDeviceId was
-    // persisted keep whatever device was live for the same id.
-    std::map<std::uint32_t, juce::String> desiredInputDevices;
-    for (const auto& savedChannel : scene.channels) {
-        const juce::String sceneDevice(savedChannel.sourceDeviceId);
-        if (sceneDevice.isNotEmpty()) {
-            desiredInputDevices[savedChannel.id] = sceneDevice;
-            continue;
-        }
-        const auto live = savedInputDevices.find(savedChannel.id);
-        if (live != savedInputDevices.end() && live->second.isNotEmpty()) {
-            desiredInputDevices[savedChannel.id] = live->second;
-        }
-    }
-    std::map<std::uint32_t, juce::String> desiredOutputDevices;
-    for (const auto& savedOutput : scene.outputs) {
-        const juce::String sceneDevice(savedOutput.deviceId);
-        if (sceneDevice.isNotEmpty()) {
-            desiredOutputDevices[savedOutput.id] = sceneDevice;
-            continue;
-        }
-        const auto live = savedOutputDevices.find(savedOutput.id);
-        if (live != savedOutputDevices.end() && live->second.isNotEmpty()) {
-            desiredOutputDevices[savedOutput.id] = live->second;
-        }
-    }
+    // persisted keep whatever device was live for the same id. The maps were
+    // resolved in prepareSceneRestore.
+
     // Record the assignments only. Opening them inline would run one blocking
     // driver probe per endpoint on the message thread, which is what made
     // loading a scene look like a freeze; the background opener below (or the
@@ -2467,7 +2558,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
     {
         const juce::ScopedLock lock(stateLock);
         clockOutputId = 0;
-        for (const auto& [id, name] : desiredInputDevices) {
+        for (const auto& [id, name] : job.desiredInputDevices) {
             if (auto* channel = findChannel(id)) {
                 channel->inputDeviceName = name;
                 channel->sourceDeviceId = isSilentDeviceName(name) ? std::string{}
@@ -2475,7 +2566,7 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
                 channel->inputError.clear();
             }
         }
-        for (const auto& [id, name] : desiredOutputDevices) {
+        for (const auto& [id, name] : job.desiredOutputDevices) {
             if (auto* output = findOutput(id)) {
                 // setOutputDevice treats the silent choice as "no device".
                 output->outputDeviceName = isSilentDeviceName(name) ? juce::String{} : name;
@@ -2484,10 +2575,42 @@ juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool open
         }
     }
 
-    if (openDevicesNow)
+    if (job.openDevicesNow)
         openStripsDevicesAsync();
 
-    return loadErrors;
+    const juce::String errors = job.errors;
+    restoreJob_.reset();
+    return errors;
+}
+
+void AudioEngine::timerCallback() {
+    if (!restoreActive_.load(std::memory_order_acquire) || restoreJob_ == nullptr) {
+        stopTimer();
+        return;
+    }
+    // One plugin per turn: the message loop repaints between slow plugins.
+    if (loadNextPendingInsert()) return;
+    // A device job can start while the inserts load. Device workers hold bare
+    // Channel*/Output* across blocking driver probes, so swapping the strips
+    // under them is a use-after-free. Wait for the job, then commit; opening
+    // the new rig would also be dropped while that job is still running.
+    if (isOpeningDevices()) {
+        startTimer(50);
+        return;
+    }
+    stopTimer();
+    auto finished = std::move(restoreJob_->onFinished);
+    const auto errors = commitSceneRestore();
+    restoreActive_.store(false, std::memory_order_release);
+    if (finished) finished(errors);
+}
+
+void AudioEngine::abortSceneRestore() {
+    stopTimer();
+    restoreJob_.reset();
+    restoreActive_.store(false, std::memory_order_release);
+    restoreDone_.store(0, std::memory_order_relaxed);
+    restoreTotal_.store(0, std::memory_order_relaxed);
 }
 
 juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName) {
@@ -2704,12 +2827,16 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
                                                         requestedInputBufferSize_,
                                                         capacityReserveFrames};
         pruneUnusedCaptures();
+        // Configure before releasing stateLock. The channels above already
+        // point at this capture, and render() may be pulling it the moment the
+        // lock opens; the delay target and health window are not atomics.
+        capture->setHealthThresholds(getHealthThresholds());
+        // The clock may have negotiated while this input was probing. Settle
+        // the read delay on the real block here as well, so a capture that
+        // commits after prepareToPlayImpl's sweep cannot keep its provisional
+        // delay.
+        capture->applyRenderBlockFrames(settledBlockFrames);
     }
-    capture->setHealthThresholds(getHealthThresholds());
-    // The clock may have negotiated while this input was probing. Settle the
-    // read delay on the real block here as well, so a capture that commits
-    // after prepareToPlayImpl's sweep cannot keep its provisional delay.
-    capture->applyRenderBlockFrames(settledBlockFrames);
     recordDeviceCapabilities(deviceName, true, capture->availableInputCount(), 0,
                              capture->getSampleRate(), capture->getDeviceBufferSize(),
                              probeMs, deviceModeName(capture->getActiveDeviceType()));
@@ -3217,6 +3344,7 @@ void AudioEngine::handleClockLoss() {
     std::uint32_t lost = 0;
     int lastRate = 48000;
     pluginrack::ClockFailoverDecision decision;
+    juce::String promotedName;
     {
         const juce::ScopedLock lock(stateLock);
         lastRate = static_cast<int>(std::lround(
@@ -3249,7 +3377,7 @@ void AudioEngine::handleClockLoss() {
                 output->output->setRenderHook([this](int n) { this->render(n); });
                 output->output->setRenderActive(true);
                 clockOutputId = output->id;
-                juce::Logger::writeToLog("Clock promoted to " + output->outputDeviceName);
+                promotedName = output->outputDeviceName;
                 break;
             }
         } else {
@@ -3258,8 +3386,12 @@ void AudioEngine::handleClockLoss() {
         publishRenderOutputsLocked();
     }
 
+    // Logging is file IO: never do it while holding stateLock, or a render
+    // callback that misses the lock pays for the write with silence.
     if (decision.action == pluginrack::ClockAction::Promote) {
         stopInternalClock();
+        if (promotedName.isNotEmpty())
+            juce::Logger::writeToLog("Clock promoted to " + promotedName);
     } else {
         startInternalClock(lastRate);
         juce::Logger::writeToLog(
@@ -3419,13 +3551,36 @@ juce::String AudioEngine::forceAsio() {    const auto asio = DeviceEnumeration::
 
     // 2. Point the input strips on this interface at the ASIO device, before
     //    the clock moves: the duplex match is "capture device == clock device",
-    //    so doing it afterwards leaves the clock on the split path.
-    const int retargeted = retargetInputsToClockDevice(target);
+    //    so doing it afterwards leaves the clock on the split path. Keep the
+    //    previous assignments: setOutputDevice only rolls back what *it*
+    //    retargets, and these inputs are already on the clock name by then.
+    std::vector<std::pair<std::uint32_t, juce::String>> previous;
+    const int retargeted = retargetInputsToClockDevice(target, &previous);
 
     // 3. Move the clock. It now sees a duplex capture, so one driver client
     //    carries both directions and the read delay disappears.
     const auto error = setOutputDevice(clockId, target);
-    if (error.isNotEmpty()) return "ASIO refused: " + error;
+    if (error.isNotEmpty()) {
+        // The clock refused: undo step 2, or these strips stay flagged duplex
+        // with no capture behind them and stay silent.
+        if (!previous.empty()) {
+            {
+                const juce::ScopedLock lock(stateLock);
+                for (auto& c : channels) {
+                    for (const auto& [id, name] : previous) {
+                        if (c->id != id) continue;
+                        c->input.reset();
+                        c->duplexInput = false;
+                        c->duplexInputChannels = 0;
+                        c->inputDeviceName = name;
+                        c->sourceDeviceId = name.toStdString();
+                    }
+                }
+            }
+            prepareInputs();
+        }
+        return "ASIO refused: " + error;
+    }
 
     if (retargeted > 0) {
         return "Clock and " + juce::String(retargeted) + " input"

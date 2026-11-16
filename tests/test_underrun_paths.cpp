@@ -482,15 +482,42 @@ TEST_CASE("input and output buffer sizes are independently configurable",
 
 TEST_CASE("scene restore loads plugins before the device handoff",
           "[plugin][restore]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto prepare = functionBody(cpp, "juce::String AudioEngine::prepareSceneRestore");
+    const auto load = functionBody(cpp, "bool AudioEngine::loadNextPendingInsert");
+    const auto commit = functionBody(cpp, "juce::String AudioEngine::commitSceneRestore");
+    // Building queues every insert with its saved state; only the staged
+    // loader instantiates them, and the commit never loads a plugin itself.
+    CHECK(contains(prepare, "savedInsert.pluginState"));
+    CHECK(contains(prepare, "pending.push_back"));
+    CHECK(contains(load, "loadPlugin"));
+    CHECK(contains(load, "load.pluginState"));
+    CHECK(!contains(commit, "loadPlugin"));
+    // Devices are opened only after every queued plugin was committed.
+    CHECK(contains(commit, "openStripsDevicesAsync()"));
+}
+
+TEST_CASE("the synchronous restore drains the staged queue", "[plugin][restore]") {
     const auto body = functionBody(readSource("app/src/AudioEngine.cpp"),
                                    "juce::String AudioEngine::restoreScene");
-    const auto load = body.find("loadPlugin(juce::File(insert->pluginPath)");
-    const auto device = body.find("openStripsDevicesAsync()");
-    REQUIRE(load != std::string::npos);
-    REQUIRE(device != std::string::npos);
-    CHECK(load < device);
-    // Restored slots hand their saved state back to the plugin instance.
-    CHECK(contains(body, "savedInsert.pluginState"));
+    CHECK(contains(body, "prepareSceneRestore"));
+    CHECK(contains(body, "loadNextPendingInsert"));
+    CHECK(contains(body, "commitSceneRestore"));
+}
+
+TEST_CASE("the staged restore keeps the message loop free", "[plugin][restore]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto begin = functionBody(cpp, "juce::String AudioEngine::beginSceneRestore");
+    CHECK(contains(begin, "restoreActive_.store(true"));
+    CHECK(contains(begin, "startTimer(1)"));
+    // One insert per timer turn, then the same commit the blocking path uses.
+    const auto tick = functionBody(cpp, "void AudioEngine::timerCallback");
+    CHECK(contains(tick, "loadNextPendingInsert"));
+    CHECK(contains(tick, "commitSceneRestore"));
+    CHECK(contains(tick, "finished(errors)"));
+    // Shutdown mid-restore must not leak a timer or a half-built rig.
+    const auto destructor = functionBody(cpp, "AudioEngine::~AudioEngine");
+    CHECK(contains(destructor, "abortSceneRestore"));
 }
 
 TEST_CASE("scene save captures the live plugin state", "[plugin][restore]") {
@@ -992,14 +1019,19 @@ TEST_CASE("Force ASIO picks the interface and reports what it did", "[latency][a
     // to run while one is in flight, which left the clock on WASAPI.
     CHECK(contains(force, "applySettingsValues(settings)"));
     CHECK_FALSE(contains(force, "applyDeviceSettings(settings)"));
-    // The capture strips follow the clock, or duplex never engages.
-    CHECK(contains(force, "retargetInputsToClockDevice(target)"));
-    const auto retarget = force.find("retargetInputsToClockDevice(target)");
+    // The capture strips follow the clock, or duplex never engages. The
+    // previous assignments are kept because setOutputDevice only rolls back
+    // what it retargets itself, and these strips are already on the new name.
+    CHECK(contains(force, "retargetInputsToClockDevice(target, &previous)"));
+    const auto retarget = force.find("retargetInputsToClockDevice(target, &previous)");
     const auto moveClock = force.find("setOutputDevice(clockId, target)");
     REQUIRE(retarget != std::string::npos);
     REQUIRE(moveClock != std::string::npos);
     CHECK(retarget < moveClock);
     CHECK(contains(force, "ASIO refused: "));
+    // A refused clock restores the captures moved above.
+    CHECK(contains(force, "if (!previous.empty())"));
+    CHECK(contains(force, "c->duplexInput = false"));
 
     // The same adoption must happen when the clock is picked in the device
     // menu, not only from the button.
@@ -1313,7 +1345,7 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
     const auto save = functionBody(engine, "pluginrack::Scene AudioEngine::makeScene");
     CHECK(contains(save, "scene.audio = getDeviceSettings();"));
     const auto restore =
-        functionBody(engine, "juce::String AudioEngine::restoreScene");
+        functionBody(engine, "juce::String AudioEngine::prepareSceneRestore");
     CHECK(contains(restore, "applySettingsValues(*scene.audio);"));
 
     const auto settings = readSource("app/src/SettingsView.cpp");
@@ -1400,9 +1432,9 @@ TEST_CASE("scene swaps release plugin editors before their processors", "[app][u
     CHECK(contains(router, "releaseEditorsNow"));
 
     const auto apply = functionBody(readSource("app/src/MainComponent.cpp"),
-                                    "juce::String MainComponent::applyScene");
+                                    "juce::String MainComponent::applySceneAsync");
     const auto releaseIdx = apply.find("releaseDockedEditor()");
-    const auto restoreIdx = apply.find("restoreScene(");
+    const auto restoreIdx = apply.find("beginSceneRestore(");
     REQUIRE(releaseIdx != std::string::npos);
     REQUIRE(restoreIdx != std::string::npos);
     CHECK(releaseIdx < restoreIdx);

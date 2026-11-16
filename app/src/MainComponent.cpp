@@ -186,11 +186,17 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     , routingView(audioEngine)
     , patchesView(audioEngine)
     , ioView(audioEngine)
-    , savesView([this](const pluginrack::Scene& scene) {
-          return onRestoreRequested ? onRestoreRequested(scene) : juce::String();
+    , savesView([this](const pluginrack::Scene& scene,
+                       std::function<void(const juce::String&)> finished) {
+          return onRestoreRequested
+                     ? onRestoreRequested(scene, std::move(finished))
+                     : juce::String("Scene restore is unavailable.");
       },
                 [this](const juce::String& name) {
                     if (onSaveLoaded) onSaveLoaded(name);
+                },
+                [this](const juce::String& oldName, const juce::String& newName) {
+                    if (onSaveIdentityChanged) onSaveIdentityChanged(oldName, newName);
                 })
     , settingsView(audioEngine) {
     rackView.onJumpToMixer = [this] {
@@ -296,11 +302,19 @@ MainComponent::MainComponent()
     toolbar.onViewSelected = [this](AppView view) { router.setView(view); };
     router.onViewChanged = [this](AppView view) { toolbar.setView(view); };
     router.onStructureChanged = [this] { refreshViews(); };
-    router.onRestoreRequested = [this](const pluginrack::Scene& scene) { return applyScene(scene); };
+    router.onRestoreRequested = [this](const pluginrack::Scene& scene,
+                                       std::function<void(const juce::String&)> finished) {
+        return applySceneAsync(scene, true, std::move(finished));
+    };
     router.onSaveLoaded = [this](const juce::String& name) { activeSaveName_ = name; };
+    router.onSaveIdentityChanged = [this](const juce::String& oldName,
+                                          const juce::String& newName) {
+        if (activeSaveName_.equalsIgnoreCase(oldName)) activeSaveName_ = newName;
+    };
     toolbar.onSave = [this] {
         // Stay where the user is: overwrite the active save, or ask for a
         // name when nothing is active yet. No teleport to the Saves tab.
+        if (refuseSaveWhileRestoring()) return;
         if (activeSaveName_.isNotEmpty()) {
             const auto error = SceneBridge::saveNamed(audioEngine.makeScene(), activeSaveName_);
             if (error.isNotEmpty()) showError(error);
@@ -325,6 +339,15 @@ MainComponent::MainComponent()
 
 void MainComponent::timerCallback() {
     audioEngine.pollLatencyMeasurement();
+    if (audioEngine.isSceneRestoreActive()) {
+        // A staged restore instantiates one plugin per message-loop turn; the
+        // clock line reports it so a slow plugin reads as progress, not a hang.
+        toolbar.setClockText("Loading scene... "
+                                 + juce::String(audioEngine.getSceneRestoreDone()) + "/"
+                                 + juce::String(audioEngine.getSceneRestoreTotal()),
+                             true);
+        return;
+    }
     if (audioEngine.isOpeningDevices()) {
         const auto total = audioEngine.getDeviceOpenTotal();
         const auto done = audioEngine.getDeviceOpenProgress();
@@ -523,6 +546,9 @@ void MainComponent::showMenu() {
     });
     menu.addSeparator();
     menu.addItem("Reset to Defaults", [this] {
+        // A staged restore owns the live strips until its commit; mutating
+        // them now would be thrown away, and saveScene would refuse anyway.
+        if (refuseSaveWhileRestoring()) return;
         if (audioEngine.isOpeningDevices()) {
             showError("Audio is still starting up. Please try again in a moment.");
             return;
@@ -686,12 +712,20 @@ void MainComponent::showSnapshotPlaceholder() {
                                            "Snapshots are not implemented yet - scene save/load stays in the toolbar.");
 }
 
+bool MainComponent::refuseSaveWhileRestoring() {
+    if (!audioEngine.isSceneRestoreActive()) return false;
+    showError("The scene is still loading. Please try saving again in a moment.");
+    return true;
+}
+
 void MainComponent::saveScene() {
+    if (refuseSaveWhileRestoring()) return;
     const auto error = SceneBridge::save(audioEngine.makeScene());
     if (error.isNotEmpty()) showError(error);
 }
 
 void MainComponent::saveSceneAs() {
+    if (refuseSaveWhileRestoring()) return;
     auto* w = new juce::AlertWindow("Save Scene", "Enter a name for this save.", juce::MessageBoxIconType::QuestionIcon);
     w->addTextEditor("name", "", "Save name");
     w->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
@@ -721,14 +755,51 @@ void MainComponent::loadScene(bool showMissingMessage) {
         if (showMissingMessage) showError("No scene has been saved yet.");
         return;
     }
-    const auto pluginErrors = applyScene(*saved);
-    if (pluginErrors.isNotEmpty())
-        showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
-    else {
-        // The startup scene becomes the active save, so Save overwrites it.
-        const auto defaultName = SceneBridge::getDefaultSaveName();
-        if (defaultName.isNotEmpty()) activeSaveName_ = defaultName;
+    juce::Component::SafePointer<MainComponent> safe(this);
+    const auto startError = applySceneAsync(*saved, true, [safe](const juce::String& pluginErrors) {
+        if (safe == nullptr) return;
+        if (pluginErrors.isNotEmpty()) {
+            safe->showError("The scene was loaded, but some plugins could not be restored:\n"
+                            + pluginErrors);
+        } else {
+            // The startup scene becomes the active save, so Save overwrites it.
+            const auto defaultName = SceneBridge::getDefaultSaveName();
+            if (defaultName.isNotEmpty()) safe->activeSaveName_ = defaultName;
+        }
+    });
+    if (startError.isNotEmpty()) showError(startError);
+}
+
+juce::String MainComponent::applySceneAsync(const pluginrack::Scene& scene, bool openDevicesNow,
+                                            std::function<void(const juce::String&)> onFinished) {
+    // The engine instantiates one insert per message-loop turn; this call only
+    // validates, releases editors, and starts the staged build. sceneLoading_
+    // keeps menu/Saves loads and saves from overlapping it.
+    if (sceneLoading_.exchange(true))
+        return "A scene is already loading. Please try again in a moment.";
+    if (audioEngine.isOpeningDevices()) {
+        sceneLoading_.store(false);
+        return "Audio is still starting up. Please try again in a moment.";
     }
+    // An editor must not outlive the processor that backs it; close them while
+    // the old strips are still alive. refreshViews re-docks after the commit.
+    router.releaseDockedEditor();
+    mixer.closeAllEqWindows();
+    juce::Component::SafePointer<MainComponent> safe(this);
+    const auto error = audioEngine.beginSceneRestore(
+        scene, openDevicesNow,
+        [safe, onFinished](juce::String pluginErrors) {
+            if (safe != nullptr) {
+                safe->sceneLoading_.store(false);
+                safe->refreshViews();
+            }
+            if (onFinished) onFinished(pluginErrors);
+        });
+    if (error.isNotEmpty()) {
+        sceneLoading_.store(false);
+        return error;
+    }
+    return {};
 }
 
 juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool openDevicesNow) {
@@ -743,8 +814,10 @@ juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool open
         return "A scene is already loading. Please try again in a moment.";
     if (audioEngine.isOpeningDevices()) {
         sceneLoading_.store(false);
-        showError("Audio is still starting up. Please try again in a moment.");
-        return {};
+        const juce::String message =
+            "Audio is still starting up. Please try again in a moment.";
+        showError(message);
+        return message;
     }
     // The rack may dock an editor from a strip whose plugin dies inside
     // restoreScene; release it first (an editor outliving its processor
@@ -768,13 +841,23 @@ void MainComponent::initialiseAudio() {
         showError(error);
         audioEngine.openDefaultDevicesAsync();
     } else if (saved.has_value()) {
-        // Build the strips and load the plugins now (fast), then let the
-        // engine open the streams on its worker: a slow WASAPI probe must not
-        // take the message thread with it.
-        const auto pluginErrors = applyScene(*saved, /*openDevicesNow=*/false);
-        if (pluginErrors.isNotEmpty())
-            showError("The scene was loaded, but some plugins could not be restored:\n" + pluginErrors);
-        audioEngine.openStripsDevicesAsync();
+        // Build the strips and load the plugins in the staged restore (one
+        // plugin per message-loop turn), then let the engine open the streams
+        // on its worker: a slow plugin or WASAPI probe must not take the
+        // message thread with it.
+        juce::Component::SafePointer<MainComponent> safe(this);
+        const auto startError = applySceneAsync(*saved, /*openDevicesNow=*/false,
+                                                [safe](const juce::String& pluginErrors) {
+            if (safe == nullptr) return;
+            if (pluginErrors.isNotEmpty())
+                safe->showError("The scene was loaded, but some plugins could not be restored:\n"
+                                + pluginErrors);
+            safe->audioEngine.openStripsDevicesAsync();
+        });
+        if (startError.isNotEmpty()) {
+            showError(startError);
+            audioEngine.openDefaultDevicesAsync();
+        }
     } else {
         audioEngine.openDefaultDevicesAsync();
     }
@@ -789,6 +872,12 @@ void MainComponent::initialiseAudio() {
 }
 
 void MainComponent::saveSceneOnExit() {
+    if (audioEngine.isSceneRestoreActive()) {
+        // The live strips are mid-replacement; saving now would write the old
+        // rig. The previous exit autosave stays as the last good session.
+        juce::Logger::writeToLog("exit autosave skipped: a scene restore was still running");
+        return;
+    }
     // shutdown() terminates the process right after this returns, so a dialog
     // cannot be shown here. Log it and leave a note the next launch surfaces.
     const auto error = SceneBridge::saveLast(audioEngine.makeScene());
