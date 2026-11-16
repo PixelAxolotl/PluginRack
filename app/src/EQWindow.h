@@ -139,9 +139,9 @@ public:
 
 private:
     void timerCallback() override;
-    void applyFromControls(); // knob/button edits -> curve repaint + apply
-    void applyDelayFromControl(); // delay knob -> owner (not a band value)
-    void syncControls();      // reflect the selected band into knobs/buttons
+    void applyFromControls();
+    void applyDelayFromControl();
+    void syncControls();
 
     EQCurveComponent curve;
     juce::Label titleLabel{"EQ", "EQ"};
@@ -150,8 +150,8 @@ private:
     std::function<void(const std::vector<pluginrack::EqBand>&)> applyBands;
     bool embedded = false;
 
-    MiniButton bypassButton{"Bypass"};    // selected band enabled toggle
-    MiniButton soloButton{"Solo"};        // selected band solo toggle
+    MiniButton bypassButton{"Bypass"};
+    MiniButton soloButton{"Solo"};
     MiniButton flipButton{"FLIP"};        // whole-EQ polarity flip
     // Selected point's mode: bell ("BAND") or shelf ("SHELF"). The two filter
     // points are driven by the HPF/LPF switches instead, so this one disables
@@ -205,7 +205,7 @@ private:
     std::vector<float> fftScratch;  // 2N floats: N real inputs + engine workspace
     std::vector<float> tapL;
     std::vector<float> tapR;
-    std::vector<float> spectrumDb;  // FFT bins 0..N/2, dBFS, fed to the curve
+    std::vector<float> spectrumDb;  // FFT bins 0..N/2, dBFS
     // Smoothed copy of spectrumDb (fast attack, slow release per bin) so
     // music/noise reads as a steady Pro-Q-style trace instead of flicker.
     // Same size as spectrumDb, UI thread only, allocated at construction.

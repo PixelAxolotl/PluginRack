@@ -150,7 +150,6 @@ void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
             return;
         }
     }
-    // Clicking empty space clears the selection.
     if (selection.index >= 0) {
         selection.index = -1;
         updateStatusText();

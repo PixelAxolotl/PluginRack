@@ -137,7 +137,6 @@ void ToolbarComponent::paint(juce::Graphics& g) {
                           false);
     }
 
-    // wordmark
     g.setColour(theme::green());
     g.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     g.drawText("PluginRack", 46, 0, 152, getHeight(), juce::Justification::centredLeft);

@@ -1158,7 +1158,6 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
         return;
     }
 
-    // clear device
     for (int ch = 0; ch < numOutputChannels; ++ch) {
         if (outputChannelData[ch] != nullptr) {
             juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);

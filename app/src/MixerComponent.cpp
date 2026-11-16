@@ -128,9 +128,6 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     };
     addAndMakeVisible(muteButton);
 
-    // All built-in state lives in the insert cards now; no standalone
-    // EQ/Comp/Gate buttons remain on the strip.
-
     refreshInserts();
 }
 
@@ -824,7 +821,6 @@ void MixerComponent::OutputStrip::refreshAfterInsertChange() {
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
         auto callback = safe->onRenamed;
-        // reuse onRenamed as the structure-changed callback for outputs
         if (callback) callback();
     });
 }

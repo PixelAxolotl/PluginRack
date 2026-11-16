@@ -47,7 +47,6 @@ void DeviceControl::paint(juce::Graphics& g) {
     auto area = getLocalBounds().reduced(narrow ? 5 : 8, 4);
     // right side: dot + chevron
     auto right = area.removeFromRight(26);
-    // chevron
     {
         juce::Path p;
         auto chevronArea = right.removeFromRight(10).toFloat();
@@ -59,7 +58,6 @@ void DeviceControl::paint(juce::Graphics& g) {
         g.setColour(theme::dim());
         g.strokePath(p, juce::PathStrokeType(1.2f));
     }
-    // dot
     {
         juce::Colour dot = theme::dim(); // none
         if (error.isNotEmpty()) dot = theme::red();
@@ -71,7 +69,6 @@ void DeviceControl::paint(juce::Graphics& g) {
         g.fillEllipse(dotR);
     }
 
-    // left text
     auto textArea = area;
     g.setColour(theme::text());
     g.setFont(theme::ui::itemFont());

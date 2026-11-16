@@ -42,7 +42,7 @@ struct ParamMsg {
     std::uint64_t seq = 0;
 };
 
-constexpr int kParamRingSlots = 512; // power of two
+constexpr int kParamRingSlots = 512;
 static_assert((kParamRingSlots & (kParamRingSlots - 1)) == 0, "ring size must be a power of two");
 
 struct ParamRing {

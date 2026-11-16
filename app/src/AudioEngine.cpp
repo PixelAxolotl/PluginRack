@@ -1141,7 +1141,6 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
     if (isOpeningDevices()) {
         return "Audio devices are still starting up. Try again in a moment.";
     }
-    // Find the output.
     AudioEngine::Output* out = nullptr;
     for (auto& o : outputs) {
         if (o->id == outputId) { out = o.get(); break; }

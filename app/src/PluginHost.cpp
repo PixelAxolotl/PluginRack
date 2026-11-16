@@ -203,7 +203,6 @@ bool record(const juce::String& path, int exitCode, std::uint32_t insertId) {
     entry->setProperty("time", juce::Time::getCurrentTime().toISO8601(true));
     faults.add(juce::var(entry));
 
-    // Bound to last 100.
     while (faults.size() > 100) faults.remove(0);
 
     auto* out = new juce::DynamicObject();

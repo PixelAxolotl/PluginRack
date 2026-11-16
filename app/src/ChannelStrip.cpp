@@ -191,9 +191,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
         audioEngine.setChannelSoloed(channel.id, soloButton.getToggleState());
     };
 
-    // All built-in state lives in the insert cards now; no standalone
-    // EQ/Comp/Gate buttons remain on the strip.
-
     refreshInserts();
     refreshRouting();
     refreshInput();
@@ -202,7 +199,6 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 ChannelStrip::~ChannelStrip() {
     closeAllEffectWindows();
 }
-// openers appended below
 void ChannelStrip::openMultibandWindow() {
     if (multibandWindow != nullptr) { multibandWindow->toFront(true); return; }
     if (channel.multibandEffects.empty()) {
