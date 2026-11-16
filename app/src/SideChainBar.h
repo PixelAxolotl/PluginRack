@@ -10,7 +10,7 @@
 // side-chain source (a channel, an output or a dedicated aux bus), the point
 // in that strip the signal is tapped from, and its trim. The bar edits the
 // focused insert in place; the engine owns the routing.
-class SideChainBar final : public juce::Component {
+class SideChainBar final : public juce::Component, private juce::Timer {
 public:
     explicit SideChainBar(AudioEngine& engine);
 
@@ -22,6 +22,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void timerCallback() override;
 
     static constexpr int kHeight = 40;
 
@@ -47,4 +48,5 @@ private:
     juce::Slider gainSlider;
     juce::TextButton addBusButton{"+ Bus"};
     juce::TextButton sourcesButton{"Sources"};
+    juce::Label keyLevel;
 };

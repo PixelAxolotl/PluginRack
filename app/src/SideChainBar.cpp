@@ -124,6 +124,28 @@ SideChainBar::SideChainBar(AudioEngine& engine) : audioEngine(engine) {
     sourcesButton.onClick = [this] { editBusSources(); };
     addAndMakeVisible(sourcesButton);
     sourcesButton.setVisible(false);
+
+    keyLevel.setText("Key -inf", juce::dontSendNotification);
+    keyLevel.setJustificationType(juce::Justification::centredRight);
+    keyLevel.setTooltip("Peak level of the side-chain key reaching this insert");
+    keyLevel.setColour(juce::Label::textColourId, theme::dim());
+    keyLevel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    addAndMakeVisible(keyLevel);
+    startTimerHz(20);
+}
+
+void SideChainBar::timerCallback() {
+    if (target == nullptr || selectedSource() == pluginrack::SideChainSource::None) {
+        keyLevel.setText("Key -inf", juce::dontSendNotification);
+        return;
+    }
+    const float peak = audioEngine.getSideChainKeyPeak(ownerId, target->id, targetIsOutput);
+    if (peak <= 0.0f) {
+        keyLevel.setText("Key -inf", juce::dontSendNotification);
+        return;
+    }
+    const float db = juce::Decibels::gainToDecibels(peak, -100.0f);
+    keyLevel.setText("Key " + juce::String(db, 1) + " dB", juce::dontSendNotification);
 }
 
 void SideChainBar::setTarget(AudioEngine::InsertSlot* insert, bool isOutput,
@@ -297,6 +319,8 @@ void SideChainBar::resized() {
     area.removeFromLeft(gap);
     gainSlider.setBounds(area.removeFromLeft(150));
     area.removeFromLeft(gap);
+    keyLevel.setBounds(area.removeFromRight(96));
+    area.removeFromRight(gap);
 
     // Buttons keep their size; the source list takes what is left.
     if (sourcesButton.isVisible()) {

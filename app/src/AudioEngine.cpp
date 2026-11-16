@@ -557,6 +557,7 @@ void AudioEngine::render(int frames) {
         insert.sideChainBuffer.clear(start, count);
         if (insert.sideChainSource == pluginrack::SideChainSource::None
             || insert.sideChainSourceId == 0) {
+            insert.sideChainKeyPeak.set(insert.sideChainKeyPeak.get() * 0.85f);
             return;
         }
         const juce::AudioBuffer<float>* source = nullptr;
@@ -597,6 +598,9 @@ void AudioEngine::render(int frames) {
             insert.sideChainBuffer.applyGain(0, start, count, gain);
             insert.sideChainBuffer.applyGain(1, start, count, gain);
         }
+        const float peak = insert.sideChainBuffer.getMagnitude(0, start, count);
+        const float previous = insert.sideChainKeyPeak.get();
+        insert.sideChainKeyPeak.set(peak > previous ? peak : previous * 0.85f);
     };
 
     meters.advance(frames, currentSampleRate);
@@ -733,6 +737,7 @@ void AudioEngine::render(int frames) {
         channel->rmsL = channel->buffer.getRMSLevel(0, 0, frames);
         channel->rmsR = channel->buffer.getRMSLevel(1, 0, frames);
     }
+
 
     for (const auto& route : routes) {
         const auto channelIt = std::find_if(channels.begin(), channels.end(), [&route](const auto& c) {
@@ -2210,6 +2215,27 @@ const std::vector<std::unique_ptr<AudioEngine::Output>>& AudioEngine::getOutputs
 
 const std::vector<std::unique_ptr<AudioEngine::AuxBus>>& AudioEngine::getAuxBuses() const {
     return auxBuses;
+}
+
+float AudioEngine::getSideChainKeyPeak(std::uint32_t ownerId, std::uint32_t insertId,
+                                       bool isOutput) const {
+    const juce::ScopedLock lock(stateLock);
+    const auto findPeak = [insertId](const std::vector<std::unique_ptr<InsertSlot>>& inserts) -> float {
+        for (const auto& insert : inserts) {
+            if (insert != nullptr && insert->id == insertId) return insert->sideChainKeyPeak.get();
+        }
+        return 0.0f;
+    };
+    if (isOutput) {
+        for (const auto& output : outputs) {
+            if (output != nullptr && output->id == ownerId) return findPeak(output->inserts);
+        }
+    } else {
+        for (const auto& channel : channels) {
+            if (channel != nullptr && channel->id == ownerId) return findPeak(channel->inserts);
+        }
+    }
+    return 0.0f;
 }
 
 const std::vector<std::unique_ptr<AudioEngine::Route>>& AudioEngine::getRoutes() const {
@@ -4917,3 +4943,4 @@ void AudioEngine::releaseDeviceInputsForClock(const juce::String& deviceName) {
     }
     if (previous != nullptr) previous->close();
 }
+

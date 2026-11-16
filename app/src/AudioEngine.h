@@ -59,6 +59,9 @@ public:
         // Preallocated in prepareToPlayImpl, 2 x maxBlockFrames. The render
         // loop fills it from the selected source before the plugin runs.
         juce::AudioBuffer<float> sideChainBuffer;
+        // Peak of the side-chain key the audio thread last fed to this insert,
+        // with a light decay so the metering in the racks bar stays readable.
+        juce::Atomic<float> sideChainKeyPeak{0.0f};
         int latencySamples = 0;
         // State blob from the scene while the plugin could not be loaded (for
         // example a missing bundle). A save must write it back unchanged
@@ -629,6 +632,9 @@ public:
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<AuxBus>>& getAuxBuses() const;
+    // Peak of the key currently reaching the insert's side-chain input. Zero
+    // when the insert has no side-chain source. Read by the UI timer.
+    float getSideChainKeyPeak(std::uint32_t ownerId, std::uint32_t insertId, bool isOutput) const;
     const std::vector<std::unique_ptr<Route>>& getRoutes() const;
 
     Channel* getChannelById(std::uint32_t channelId) {
