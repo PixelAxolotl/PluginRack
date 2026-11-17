@@ -146,7 +146,38 @@ void validateLimiters(const char* kind, std::uint32_t id, const std::vector<Limi
 void validateFeedbackSuppressors(const char* kind, std::uint32_t id, const std::vector<FeedbackSuppressorEffect>& effects, std::vector<SceneError>& errors) {
     if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " feedbackSuppressorEffects too many"});
     for (const auto& e : effects) {
-        if (!std::isfinite(e.strength) || e.strength < 0.0f || e.strength > 1.0f) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " invalid feedback suppressor parameters"});
+        if (!std::isfinite(e.strength) || e.strength < 0.0f || e.strength > 1.0f
+            || !std::isfinite(e.attenuationDb)
+            || e.attenuationDb < kFeedbackSuppressorMinAttenuationDb
+            || e.attenuationDb > kFeedbackSuppressorMaxAttenuationDb
+            || !std::isfinite(e.gainReductionMultiplier)
+            || e.gainReductionMultiplier < kFeedbackSuppressorMinGainReductionMultiplier
+            || e.gainReductionMultiplier > kFeedbackSuppressorMaxGainReductionMultiplier
+            || !std::isfinite(e.attackMs)
+            || e.attackMs < kFeedbackSuppressorMinAttackMs
+            || e.attackMs > kFeedbackSuppressorMaxAttackMs
+            || !std::isfinite(e.holdMs)
+            || e.holdMs < kFeedbackSuppressorMinHoldMs
+            || e.holdMs > kFeedbackSuppressorMaxHoldMs
+            || !std::isfinite(e.releaseMs)
+            || e.releaseMs < kFeedbackSuppressorMinReleaseMs
+            || e.releaseMs > kFeedbackSuppressorMaxReleaseMs
+            || !std::isfinite(e.detectionDelayMs)
+            || e.detectionDelayMs < kFeedbackSuppressorMinDetectionDelayMs
+            || e.detectionDelayMs > kFeedbackSuppressorMaxDetectionDelayMs
+            || !std::isfinite(e.inputSensitivityDb)
+            || e.inputSensitivityDb < kFeedbackSuppressorMinSensitivityDb
+            || e.inputSensitivityDb > kFeedbackSuppressorMaxSensitivityDb
+            || !std::isfinite(e.detectorHighPassHz)
+            || e.detectorHighPassHz < kFeedbackSuppressorMinDetectorHz
+            || e.detectorHighPassHz > kFeedbackSuppressorMaxHighPassHz
+            || !std::isfinite(e.detectorLowPassHz)
+            || e.detectorLowPassHz < kFeedbackSuppressorMinLowPassHz
+            || e.detectorLowPassHz > kFeedbackSuppressorMaxDetectorHz
+            || e.detectorLowPassHz - e.detectorHighPassHz < kFeedbackSuppressorDetectorGapHz) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " invalid feedback suppressor parameters"});
+        }
     }
 }
 
@@ -340,6 +371,9 @@ void validateStrip(const char* kind, const Strip& strip, std::vector<SceneError>
                               strip.multibandRtaWeighting, errors);
     validateEffectRtaSettings(kind, strip.id, "deEsser", strip.deEsserRtaOffsetDb,
                               strip.deEsserRtaWeighting, errors);
+    validateEffectRtaSettings(kind, strip.id, "feedbackSuppressor",
+                              strip.feedbackSuppressorRtaOffsetDb,
+                              strip.feedbackSuppressorRtaWeighting, errors);
 }
 
 } // namespace

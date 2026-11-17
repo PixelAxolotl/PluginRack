@@ -5,6 +5,7 @@
 #include "DeEsserWindow.h"
 #include "EffectEdits.h"
 #include "LimiterWindow.h"
+#include "FeedbackSuppressorWindow.h"
 #include "MultibandWindow.h"
 
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
@@ -164,6 +165,12 @@ void MixerComponent::OutputStrip::closeAllEffectWindows() {
         limiterWindow = nullptr;
         delete doomed;
     }
+    if (feedbackSuppressorWindow != nullptr) {
+        auto* doomed = feedbackSuppressorWindow;
+        feedbackSuppressorWindow = nullptr;
+        output.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        delete doomed;
+    }
 }
 
 void MixerComponent::OutputStrip::openMultibandWindow() {
@@ -282,6 +289,62 @@ void MixerComponent::OutputStrip::openLimiterWindow() {
         if (safe != nullptr) safe->output.limiterTap.snapshot(true, l, r, n);
     };
     output.limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
+}
+
+void MixerComponent::OutputStrip::openFeedbackSuppressorWindow() {
+    if (feedbackSuppressorWindow != nullptr) { feedbackSuppressorWindow->toFront(true); return; }
+    if (output.feedbackSuppressorEffects.empty()) {
+        auto effects = output.feedbackSuppressorEffects;
+        effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
+        output.feedbackSuppressorEffects = effects;
+        audioEngine.setOutputFeedbackSuppressors(output.id, effects);
+        audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
+    }
+    juce::Component::SafePointer<OutputStrip> safe(this);
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    feedbackSuppressorWindow = new FeedbackSuppressorWindow("Feedback Suppressor - " + output.name,
+        output.feedbackSuppressorEffects.front(),
+        [safe](const pluginrack::FeedbackSuppressorEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->output.feedbackSuppressorEffects;
+            const auto it = std::find_if(effects.begin(), effects.end(), [&effect](const auto& e) {
+                return e.id == effect.id;
+            });
+            if (it == effects.end())
+                effects.push_back(effect);
+            else
+                effectedit::applyEdit(effects, effect, bypassChanged);
+            safe->output.feedbackSuppressorEffects = effects;
+            safe->audioEngine.setOutputFeedbackSuppressors(safe->output.id, effects);
+            safe->refreshInserts();
+        }, output.feedbackSuppressorRtaOffsetDb, output.feedbackSuppressorRtaWeighting,
+        liveRateHz);
+    feedbackSuppressorWindow->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr)
+            safe->audioEngine.setOutputFeedbackSuppressorRtaOffset(safe->output.id, offsetDb);
+    };
+    feedbackSuppressorWindow->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr)
+            safe->audioEngine.setOutputFeedbackSuppressorRtaWeighting(safe->output.id, weighting);
+    };
+    feedbackSuppressorWindow->onClose = [safe] {
+        if (safe != nullptr) {
+            safe->output.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            if (safe->feedbackSuppressorWindow != nullptr) {
+                auto* w = safe->feedbackSuppressorWindow;
+                safe->feedbackSuppressorWindow = nullptr;
+                delete w;
+            }
+        }
+    };
+    feedbackSuppressorWindow->pullAnalyzerTap = [safe](bool postEq, float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.feedbackTap.snapshot(postEq, l, r, n);
+    };
+    feedbackSuppressorWindow->pullNotches = [safe](float* f, float* d, int n) {
+        return safe == nullptr ? 0
+                               : safe->audioEngine.getOutputFeedbackNotches(safe->output.id, f, d, n);
+    };
+    output.feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 
 void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
@@ -743,6 +806,7 @@ void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, b
         auto effects = output.feedbackSuppressorEffects;
         effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputFeedbackSuppressors(output.id, effects);
+        if (feedbackSuppressorWindow != nullptr) feedbackSuppressorWindow->setBypassed(bypassed);
         return;
     }
     auto effects = output.effects;
@@ -761,6 +825,8 @@ void MixerComponent::OutputStrip::activateBuiltIn(pluginrack::ChainItem item) {
         openDeEsserWindow();
     else if (item.type == pluginrack::ChainItemType::Limiter)
         openLimiterWindow();
+    else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor)
+        openFeedbackSuppressorWindow();
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
@@ -818,6 +884,10 @@ void MixerComponent::OutputStrip::eraseBuiltIn(pluginrack::ChainItem item) {
     }
     for (const auto& entry : cardItems)
         audioEngine.removeOutputChainItem(output.id, entry);
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
+        && feedbackSuppressorWindow != nullptr) {
+        feedbackSuppressorWindow->onClose();
+    }
     refreshAfterInsertChange();
 }
 

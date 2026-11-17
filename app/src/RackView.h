@@ -14,6 +14,7 @@
 #include "DynamicsWindow.h"
 #include "EQWindow.h"
 #include "LimiterWindow.h"
+#include "FeedbackSuppressorWindow.h"
 #include "MultibandWindow.h"
 #include "InsertHost.h"
 #include "InsertMiniView.h"
@@ -139,7 +140,7 @@ private:
     void closeEffectWindows();
     void focusDeEsser();
     void focusLimiter();
-    void focusDynamics(pluginrack::DynamicsEffectType type);
+    void focusFeedbackSuppressor();    void focusDynamics(pluginrack::DynamicsEffectType type);
     void closeDynamicsWindow();
     void refreshDynamicsButtons();
     void renameSelectedChain();
@@ -219,7 +220,7 @@ private:
     MultibandWindow* multibandWindow = nullptr;
     DeEsserWindow* deEsserWindow = nullptr;
     LimiterWindow* limiterWindow = nullptr;
-    juce::Component* focusedEffectWindow = nullptr;
+    FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;    juce::Component* focusedEffectWindow = nullptr;
     bool eqFocused = false;
     bool dynamicsFocused = false;
     juce::Viewport slotViewport;

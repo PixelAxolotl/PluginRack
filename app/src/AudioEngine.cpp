@@ -667,8 +667,13 @@ void AudioEngine::render(int frames) {
                         if (f != channel->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->limiterEffects.begin()); if (i < channel->limiterProcessors.size()) channel->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+                        // The feedback editor's IN/OUT meters must show this
+                        // plugin, not the whole strip. Snapshot immediately
+                        // before and after the suppressor runs.
+                        channel->feedbackTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         auto f = std::find_if(channel->feedbackSuppressorEffects.begin(), channel->feedbackSuppressorEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->feedbackSuppressorEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->feedbackSuppressorEffects.begin()); if (i < channel->feedbackSuppressorProcessors.size()) channel->feedbackSuppressorProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
+                        channel->feedbackTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
@@ -816,6 +821,11 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
                         auto f = std::find_if(output->limiterEffects.begin(), output->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != output->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-output->limiterEffects.begin()); if (i < output->limiterProcessors.size()) output->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         output->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+                    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+                        output->feedbackTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
+                        auto f = std::find_if(output->feedbackSuppressorEffects.begin(), output->feedbackSuppressorEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                        if (f != output->feedbackSuppressorEffects.end()) { const auto i = static_cast<std::size_t>(f-output->feedbackSuppressorEffects.begin()); if (i < output->feedbackSuppressorProcessors.size()) output->feedbackSuppressorProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
+                        output->feedbackTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else {
                         auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
@@ -1491,6 +1501,15 @@ void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::Ch
              ++i)
             if (channel->effects[i].id == item.id)
                 channel->effectProcessors[i].setEffect(channel->effects[i]);
+    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        for (auto& effect : channel->feedbackSuppressorEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->feedbackSuppressorEffects.size()
+                                && i < channel->feedbackSuppressorProcessors.size();
+             ++i)
+            if (channel->feedbackSuppressorEffects[i].id == item.id)
+                channel->feedbackSuppressorProcessors[i].setEffect(
+                    channel->feedbackSuppressorEffects[i]);
     }
 }
 
@@ -1528,6 +1547,15 @@ void AudioEngine::removeOutputChainItem(std::uint32_t outputId, pluginrack::Chai
              ++i)
             if (output->effects[i].id == item.id)
                 output->effectProcessors[i].setEffect(output->effects[i]);
+    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        for (auto& effect : output->feedbackSuppressorEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->feedbackSuppressorEffects.size()
+                                && i < output->feedbackSuppressorProcessors.size();
+             ++i)
+            if (output->feedbackSuppressorEffects[i].id == item.id)
+                output->feedbackSuppressorProcessors[i].setEffect(
+                    output->feedbackSuppressorEffects[i]);
     }
 }
 
@@ -2011,6 +2039,17 @@ void AudioEngine::setChannelDeEsserRtaWeighting(std::uint32_t channelId, int wei
         channel->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
+void AudioEngine::setChannelFeedbackSuppressorRtaOffset(std::uint32_t channelId, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId)) channel->feedbackSuppressorRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setChannelFeedbackSuppressorRtaWeighting(std::uint32_t channelId, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* channel = findChannel(channelId))
+        channel->feedbackSuppressorRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
 void AudioEngine::setOutputEq(std::uint32_t outputId,
                               const std::vector<pluginrack::EqBand>& bands) {
     const juce::ScopedLock lock(stateLock);
@@ -2082,6 +2121,17 @@ void AudioEngine::setOutputDeEsserRtaWeighting(std::uint32_t outputId, int weigh
     const juce::ScopedLock lock(stateLock);
     if (auto* output = findOutput(outputId))
         output->deEsserRtaWeighting = juce::jlimit(0, 2, weighting);
+}
+
+void AudioEngine::setOutputFeedbackSuppressorRtaOffset(std::uint32_t outputId, float offsetDb) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* output = findOutput(outputId)) output->feedbackSuppressorRtaOffsetDb = offsetDb;
+}
+
+void AudioEngine::setOutputFeedbackSuppressorRtaWeighting(std::uint32_t outputId, int weighting) {
+    const juce::ScopedLock lock(stateLock);
+    if (auto* output = findOutput(outputId))
+        output->feedbackSuppressorRtaWeighting = juce::jlimit(0, 2, weighting);
 }
 
 void AudioEngine::setChannelEffects(
@@ -2285,10 +2335,13 @@ void copyStripFields(const LiveStrip& from, SavedStrip& to) {
     to.multibandRtaWeighting = from.multibandRtaWeighting;
     to.deEsserRtaOffsetDb = from.deEsserRtaOffsetDb;
     to.deEsserRtaWeighting = from.deEsserRtaWeighting;
+    to.feedbackSuppressorRtaOffsetDb = from.feedbackSuppressorRtaOffsetDb;
+    to.feedbackSuppressorRtaWeighting = from.feedbackSuppressorRtaWeighting;
     to.effects = from.effects;
     to.multibandEffects = from.multibandEffects;
     to.deEsserEffects = from.deEsserEffects;
     to.limiterEffects = from.limiterEffects;
+    to.feedbackSuppressorEffects = from.feedbackSuppressorEffects;
     to.chain = from.chain;
 }
 
@@ -2526,6 +2579,8 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         channel->multibandRtaWeighting = savedChannel.multibandRtaWeighting;
         channel->deEsserRtaOffsetDb = savedChannel.deEsserRtaOffsetDb;
         channel->deEsserRtaWeighting = savedChannel.deEsserRtaWeighting;
+        channel->feedbackSuppressorRtaOffsetDb = savedChannel.feedbackSuppressorRtaOffsetDb;
+        channel->feedbackSuppressorRtaWeighting = savedChannel.feedbackSuppressorRtaWeighting;
         channel->eqBypassed = !savedChannel.eqEnabled;
         channel->eq.prepare(sampleRate, bufferSize);
         channel->eq.setBands(channel->eqBands);
@@ -2622,6 +2677,8 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->multibandRtaWeighting = savedOutput.multibandRtaWeighting;
         output->deEsserRtaOffsetDb = savedOutput.deEsserRtaOffsetDb;
         output->deEsserRtaWeighting = savedOutput.deEsserRtaWeighting;
+        output->feedbackSuppressorRtaOffsetDb = savedOutput.feedbackSuppressorRtaOffsetDb;
+        output->feedbackSuppressorRtaWeighting = savedOutput.feedbackSuppressorRtaWeighting;
         output->eqBypassed = !savedOutput.eqEnabled;
         output->eq.prepare(sampleRate, bufferSize);
         output->eq.setBands(output->eqBands);
@@ -4536,6 +4593,38 @@ AudioEngine::DeviceState AudioEngine::getOutputDeviceState(std::uint32_t outputI
             return {output->outputDeviceName, output->outputError, 0, output->outputDeviceType};
     }
     return {};
+}
+
+int AudioEngine::getChannelFeedbackNotches(std::uint32_t channelId, float* freqs,
+                                           int max) const {
+    return getChannelFeedbackNotches(channelId, freqs, nullptr, max);
+}
+
+int AudioEngine::getChannelFeedbackNotches(std::uint32_t channelId, float* freqs,
+                                           float* depthsDb, int max) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& channel : channels) {
+        if (channel->id == channelId && !channel->feedbackSuppressorProcessors.empty())
+            return channel->feedbackSuppressorProcessors.front().copyActiveNotches(
+                freqs, depthsDb, max);
+    }
+    return 0;
+}
+
+int AudioEngine::getOutputFeedbackNotches(std::uint32_t outputId, float* freqs,
+                                          int max) const {
+    return getOutputFeedbackNotches(outputId, freqs, nullptr, max);
+}
+
+int AudioEngine::getOutputFeedbackNotches(std::uint32_t outputId, float* freqs,
+                                          float* depthsDb, int max) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& output : outputs) {
+        if (output->id == outputId && !output->feedbackSuppressorProcessors.empty())
+            return output->feedbackSuppressorProcessors.front().copyActiveNotches(
+                freqs, depthsDb, max);
+    }
+    return 0;
 }
 
 std::vector<std::pair<juce::String, juce::String>> AudioEngine::getDeviceErrors() const {

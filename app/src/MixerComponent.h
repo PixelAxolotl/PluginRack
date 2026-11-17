@@ -65,7 +65,7 @@ private:
         void openMultibandWindow();
         void openDeEsserWindow();
         void openLimiterWindow();
-        void refreshDynamicsButtons();
+        void openFeedbackSuppressorWindow();        void refreshDynamicsButtons();
     
         // IInsertHost
         juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
@@ -129,7 +129,7 @@ private:
         MultibandWindow* multibandWindow = nullptr;
         DeEsserWindow* deEsserWindow = nullptr;
         LimiterWindow* limiterWindow = nullptr;
-    };
+        FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;    };
 
     void rebuildChannelStrips();
     void rebuildOutputStrips();

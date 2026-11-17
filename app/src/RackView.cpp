@@ -1394,6 +1394,12 @@ void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginH
 }
 
 void RackView::refreshEditor() {
+    // Any refresh means the bay is being reassigned. A built-in panel left
+    // docked here would otherwise stay visible above the incoming VST editor
+    // (or keep the bay from showing it at all).
+    if (focusedEffectWindow != nullptr)
+        closeEffectWindows();
+
     if (eqFocused && eqWindow != nullptr) {
         hideDockedEditor();
         if (eqWindow->getParentComponent() != &editorHolder)
@@ -1837,12 +1843,16 @@ void RackView::closeEqWindow() {
 
 void RackView::closeEffectWindows() {
     if (focusedEffectWindow == nullptr) return;
+    if (feedbackSuppressorWindow != nullptr) {
+        if (auto* c = currentChannel()) c->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (auto* o = currentOutput()) o->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+    }
     auto* doomed = focusedEffectWindow;
     focusedEffectWindow = nullptr;
     multibandWindow = nullptr;
     deEsserWindow = nullptr;
     limiterWindow = nullptr;
-    eqFocused = false;
+    feedbackSuppressorWindow = nullptr;    eqFocused = false;
     dynamicsFocused = false;
     editorHolder.removeChildComponent(doomed);
     delete doomed;
@@ -1983,6 +1993,69 @@ void RackView::focusLimiter() {
     resized();
 }
 
+void RackView::focusFeedbackSuppressor() {
+    closeEffectWindows();
+    closeEqWindow();
+    closeDynamicsWindow();
+    auto* channel = currentChannel();
+    if (channel == nullptr) return;
+    juce::Component::SafePointer<RackView> safe(this);
+    if (channel->feedbackSuppressorEffects.empty()) {
+        auto effects = channel->feedbackSuppressorEffects;
+        effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
+        channel->feedbackSuppressorEffects = effects;
+        audioEngine.setChannelFeedbackSuppressors(channel->id, effects);
+        channel->chain.push_back({pluginrack::ChainItemType::FeedbackSuppressor, 1});
+        audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
+    }
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    auto* window = new FeedbackSuppressorWindow(
+        "Feedback Suppressor - " + channel->name, channel->feedbackSuppressorEffects.front(),
+        [safe](const pluginrack::FeedbackSuppressorEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto* currentChannel = safe->currentChannel();
+            if (currentChannel == nullptr) return;
+            auto effects = currentChannel->feedbackSuppressorEffects;
+            const auto it = std::find_if(effects.begin(), effects.end(), [&effect](const auto& e) {
+                return e.id == effect.id;
+            });
+            if (it == effects.end())
+                effects.push_back(effect);
+            else
+                effectedit::applyEdit(effects, effect, bypassChanged);
+            currentChannel->feedbackSuppressorEffects = effects;
+            safe->audioEngine.setChannelFeedbackSuppressors(currentChannel->id, effects);
+        }, channel->feedbackSuppressorRtaOffsetDb, channel->feedbackSuppressorRtaWeighting,
+        liveRateHz);
+    window->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe == nullptr || safe->currentChannel() == nullptr) return;
+        safe->audioEngine.setChannelFeedbackSuppressorRtaOffset(safe->currentChannel()->id, offsetDb);
+    };
+    window->applyWeighting = [safe](int weighting) {
+        if (safe == nullptr || safe->currentChannel() == nullptr) return;
+        safe->audioEngine.setChannelFeedbackSuppressorRtaWeighting(safe->currentChannel()->id, weighting);
+    };
+    channel->feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe](bool postEq, float* l, float* r, int n) {
+        if (safe != nullptr && safe->currentChannel() != nullptr)
+            safe->currentChannel()->feedbackTap.snapshot(postEq, l, r, n);
+    };
+    window->pullNotches = [safe](float* f, float* d, int n) {
+        if (safe == nullptr || safe->currentChannel() == nullptr) return 0;
+        return safe->audioEngine.getChannelFeedbackNotches(safe->currentChannel()->id, f, d, n);
+    };
+    window->onClose = [safe] {
+        if (safe == nullptr) return;
+        if (auto* c = safe->currentChannel()) c->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (auto* o = safe->currentOutput()) o->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        safe->closeEffectWindows();
+    };
+    feedbackSuppressorWindow = window;
+    focusedEffectWindow = window;
+    hideDockedEditor();
+    editorHolder.addAndMakeVisible(window);
+    resized();
+}
 
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
@@ -2811,6 +2884,7 @@ void RackView::activateBuiltIn(pluginrack::ChainItem item) {
     else if (item.type == pluginrack::ChainItemType::Multiband) focusMultiband();
     else if (item.type == pluginrack::ChainItemType::DeEsser) focusDeEsser();
     else if (item.type == pluginrack::ChainItemType::Limiter) focusLimiter();
+    else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) focusFeedbackSuppressor();
 }
 
 void RackView::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
@@ -2898,6 +2972,12 @@ void RackView::eraseBuiltIn(pluginrack::ChainItem item) {
         } else if (auto* channel = currentChannel()) {
             audioEngine.removeChannelChainItem(channel->id, entry);
         }
+    }
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
+        && feedbackSuppressorWindow != nullptr) {
+        if (auto* c = currentChannel()) c->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (auto* o = currentOutput()) o->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        closeEffectWindows();
     }
     refreshAfterInsertChange();
 }

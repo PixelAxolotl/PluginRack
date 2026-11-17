@@ -278,6 +278,62 @@ void ChannelStrip::openLimiterWindow() {
     channel.limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 
+void ChannelStrip::openFeedbackSuppressorWindow() {
+    if (feedbackSuppressorWindow != nullptr) { feedbackSuppressorWindow->toFront(true); return; }
+    if (channel.feedbackSuppressorEffects.empty()) {
+        auto effects = channel.feedbackSuppressorEffects;
+        effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
+        channel.feedbackSuppressorEffects = effects;
+        audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
+        audioEngine.ensureChannelChainItem(channel.id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
+    }
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    feedbackSuppressorWindow = new FeedbackSuppressorWindow("Feedback Suppressor - " + channel.name,
+        channel.feedbackSuppressorEffects.front(),
+        [safe](const pluginrack::FeedbackSuppressorEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->channel.feedbackSuppressorEffects;
+            const auto found = std::find_if(effects.begin(), effects.end(),
+                [&effect](const auto& candidate) { return candidate.id == effect.id; });
+            if (found == effects.end()) {
+                effects.push_back(effect);
+            } else {
+                effectedit::applyEdit(effects, effect, bypassChanged);
+            }
+            safe->channel.feedbackSuppressorEffects = effects;
+            safe->audioEngine.setChannelFeedbackSuppressors(safe->channel.id, effects);
+            safe->refreshInserts();
+        }, channel.feedbackSuppressorRtaOffsetDb, channel.feedbackSuppressorRtaWeighting,
+        liveRateHz);
+    feedbackSuppressorWindow->applySpectrumOffset = [safe](float offsetDb) {
+        if (safe != nullptr)
+            safe->audioEngine.setChannelFeedbackSuppressorRtaOffset(safe->channel.id, offsetDb);
+    };
+    feedbackSuppressorWindow->applyWeighting = [safe](int weighting) {
+        if (safe != nullptr)
+            safe->audioEngine.setChannelFeedbackSuppressorRtaWeighting(safe->channel.id, weighting);
+    };
+    feedbackSuppressorWindow->onClose = [safe] {
+        if (safe != nullptr) {
+            safe->channel.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            if (safe->feedbackSuppressorWindow) {
+                auto* w = safe->feedbackSuppressorWindow;
+                safe->feedbackSuppressorWindow = nullptr;
+                delete w;
+            }
+        }
+    };
+    feedbackSuppressorWindow->pullAnalyzerTap = [safe](bool postEq, float* l, float* r, int n) {
+        if (safe != nullptr) safe->channel.feedbackTap.snapshot(postEq, l, r, n);
+    };
+    feedbackSuppressorWindow->pullNotches = [safe](float* f, float* d, int n) {
+        return safe == nullptr ? 0
+                               : safe->audioEngine.getChannelFeedbackNotches(safe->channel.id, f, d, n);
+    };
+    channel.feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
+}
+
 void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {
         dynamicsWindow->toFront(true);
@@ -422,6 +478,12 @@ void ChannelStrip::closeAllEffectWindows() {
     if (limiterWindow != nullptr) {
         auto* doomed = limiterWindow;
         limiterWindow = nullptr;
+        delete doomed;
+    }
+    if (feedbackSuppressorWindow != nullptr) {
+        auto* doomed = feedbackSuppressorWindow;
+        feedbackSuppressorWindow = nullptr;
+        channel.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
 }
@@ -880,6 +942,7 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         auto effects = channel.feedbackSuppressorEffects;
         effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
+        if (feedbackSuppressorWindow != nullptr) feedbackSuppressorWindow->setBypassed(bypassed);
         return;
     }
     auto effects = channel.effects;
@@ -900,7 +963,7 @@ void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {
     else if (item.type == pluginrack::ChainItemType::Limiter)
         openLimiterWindow();
     else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor)
-        ; // no editor window in first version
+        openFeedbackSuppressorWindow();
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
@@ -973,6 +1036,10 @@ void ChannelStrip::eraseBuiltIn(pluginrack::ChainItem item) {
     }
     for (const auto& entry : cardItems)
         audioEngine.removeChannelChainItem(channel.id, entry);
+    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
+        && feedbackSuppressorWindow != nullptr) {
+        feedbackSuppressorWindow->onClose();
+    }
     refreshAfterInsertChange();
 }
 

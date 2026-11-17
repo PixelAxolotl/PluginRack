@@ -99,6 +99,8 @@ struct Strip {
     int multibandRtaWeighting = 0;
     float deEsserRtaOffsetDb = 0.0f;
     int deEsserRtaWeighting = 0;
+    float feedbackSuppressorRtaOffsetDb = 0.0f;
+    int feedbackSuppressorRtaWeighting = 0;
     std::vector<ChainItem> chain;
     bool eqEnabled = false;
     std::vector<EqBand> eqBands = defaultEqBands();

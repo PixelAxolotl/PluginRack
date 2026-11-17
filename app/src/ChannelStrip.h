@@ -12,6 +12,7 @@
 #include "MultibandWindow.h"
 #include "DeEsserWindow.h"
 #include "LimiterWindow.h"
+#include "FeedbackSuppressorWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
@@ -37,6 +38,7 @@ public:
     void openMultibandWindow();
     void openDeEsserWindow();
     void openLimiterWindow();
+    void openFeedbackSuppressorWindow();
     void refreshDynamicsButtons();
 
     // IInsertHost
@@ -125,6 +127,6 @@ private:
     MultibandWindow* multibandWindow = nullptr;
     DeEsserWindow* deEsserWindow = nullptr;
     LimiterWindow* limiterWindow = nullptr;
-
+    FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStrip)
 };

@@ -600,6 +600,8 @@ void MainComponent::showMenu() {
                                                     audioEngine.setChannelMultibandRtaWeighting(c->id, 0);
                                                     audioEngine.setChannelDeEsserRtaOffset(c->id, 0.0f);
                                                     audioEngine.setChannelDeEsserRtaWeighting(c->id, 0);
+                                                    audioEngine.setChannelFeedbackSuppressorRtaOffset(c->id, 0.0f);
+                                                    audioEngine.setChannelFeedbackSuppressorRtaWeighting(c->id, 0);
                                                     audioEngine.setChannelEffects(c->id, pluginrack::defaultDynamicsEffects());
                                                     audioEngine.setChannelMultiband(c->id, pluginrack::defaultMultibandEffects());
                                                     audioEngine.setChannelDeEssers(c->id, pluginrack::defaultDeEsserEffects());
@@ -629,6 +631,8 @@ audioEngine.setChannelFeedbackSuppressors(c->id, pluginrack::defaultFeedbackSupp
                                                     audioEngine.setOutputMultibandRtaWeighting(outputId, 0);
                                                     audioEngine.setOutputDeEsserRtaOffset(outputId, 0.0f);
                                                     audioEngine.setOutputDeEsserRtaWeighting(outputId, 0);
+                                                    audioEngine.setOutputFeedbackSuppressorRtaOffset(outputId, 0.0f);
+                                                    audioEngine.setOutputFeedbackSuppressorRtaWeighting(outputId, 0);
                                                     audioEngine.setOutputEffects(outputId, pluginrack::defaultDynamicsEffects());
                                                     audioEngine.setOutputMultiband(outputId, pluginrack::defaultMultibandEffects());
                                                     audioEngine.setOutputDeEssers(outputId, pluginrack::defaultDeEsserEffects());

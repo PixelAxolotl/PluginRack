@@ -103,6 +103,7 @@ target_sources(pluginrack_app PRIVATE
     src/DeEsserWindow.cpp
     src/DeEsserWindow.h
     src/LimiterWindow.cpp
+    src/FeedbackSuppressorWindow.cpp
     src/LimiterWindow.h
     src/ValueEditSlider.cpp
     src/ValueEditSlider.h

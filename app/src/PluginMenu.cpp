@@ -270,6 +270,9 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
     builtInMenu.addItem("Limiter", true, false, [onBuiltIn] {
         onBuiltIn({pluginrack::ChainItemType::Limiter, 1});
     });
+    builtInMenu.addItem("Feedback Suppressor", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::FeedbackSuppressor, 1});
+    });
     menu.addSubMenu("Built-In effects", builtInMenu);
 
     addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);

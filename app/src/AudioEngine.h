@@ -170,6 +170,8 @@ public:
         int multibandRtaWeighting = 0;
         float deEsserRtaOffsetDb = 0.0f;
         int deEsserRtaWeighting = 0;
+        float feedbackSuppressorRtaOffsetDb = 0.0f;
+        int feedbackSuppressorRtaWeighting = 0;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         std::vector<pluginrack::MultibandEffect> multibandEffects;
@@ -195,6 +197,11 @@ public:
         AnalyzerTap multibandTap;
         AnalyzerTap deEsserTap;
         AnalyzerTap limiterTap;
+        // Dedicated pre/post feed captured immediately around the feedback
+        // suppressor in the chain. The editor's RTA and IN/OUT meters show the
+        // suppressor's own input/output, and the tap is independent from
+        // analyzerTap so removing a mini-card preview cannot freeze them.
+        AnalyzerTap feedbackTap;
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         // Guarded by stateLock; read them through getChannelDeviceState().
         juce::String inputDeviceName;
@@ -246,6 +253,8 @@ public:
         int multibandRtaWeighting = 0;
         float deEsserRtaOffsetDb = 0.0f;
         int deEsserRtaWeighting = 0;
+        float feedbackSuppressorRtaOffsetDb = 0.0f;
+        int feedbackSuppressorRtaWeighting = 0;
         std::vector<pluginrack::DynamicsEffect> effects{pluginrack::defaultDynamicsEffects()};
         std::vector<pluginrack::DynamicsProcessor> effectProcessors;
         std::vector<pluginrack::MultibandEffect> multibandEffects;
@@ -263,6 +272,11 @@ public:
         AnalyzerTap multibandTap;
         AnalyzerTap deEsserTap;
         AnalyzerTap limiterTap;
+        // Dedicated pre/post feed captured immediately around the feedback
+        // suppressor in the chain. The editor's RTA and IN/OUT meters show the
+        // suppressor's own input/output, and the tap is independent from
+        // analyzerTap so removing a mini-card preview cannot freeze them.
+        AnalyzerTap feedbackTap;
         AnalyzerTap analyzerTap; // UI-thread spectrum feed for the EQ window
         // Guarded by stateLock; read them through getOutputDeviceState().
         juce::String outputDeviceName;
@@ -435,6 +449,14 @@ public:
     };
     DeviceState getChannelDeviceState(std::uint32_t channelId) const;
     DeviceState getOutputDeviceState(std::uint32_t outputId) const;
+    // Active feedback-suppressor notch frequencies for the editor's response
+    // graph, copied under stateLock. Returns the number written.
+    int getChannelFeedbackNotches(std::uint32_t channelId, float* freqs, int max) const;
+    int getChannelFeedbackNotches(std::uint32_t channelId, float* freqs,
+                                  float* depthsDb, int max) const;
+    int getOutputFeedbackNotches(std::uint32_t outputId, float* freqs, int max) const;
+    int getOutputFeedbackNotches(std::uint32_t outputId, float* freqs,
+                                 float* depthsDb, int max) const;
     // Locked copies for the views that list failures or watch devices.
     std::vector<std::pair<juce::String, juce::String>> getDeviceErrors() const;
     std::vector<juce::String> getAssignedInputDeviceNames() const;
@@ -606,6 +628,8 @@ public:
     void setChannelMultibandRtaWeighting(std::uint32_t channelId, int weighting);
     void setChannelDeEsserRtaOffset(std::uint32_t channelId, float offsetDb);
     void setChannelDeEsserRtaWeighting(std::uint32_t channelId, int weighting);
+    void setChannelFeedbackSuppressorRtaOffset(std::uint32_t channelId, float offsetDb);
+    void setChannelFeedbackSuppressorRtaWeighting(std::uint32_t channelId, int weighting);
     void setOutputEq(std::uint32_t outputId, const std::vector<pluginrack::EqBand>& bands);
     void setOutputEqBypassed(std::uint32_t outputId, bool bypassed);
     void setOutputEqDelay(std::uint32_t outputId, float delayMs);
@@ -617,6 +641,8 @@ public:
     void setOutputMultibandRtaWeighting(std::uint32_t outputId, int weighting);
     void setOutputDeEsserRtaOffset(std::uint32_t outputId, float offsetDb);
     void setOutputDeEsserRtaWeighting(std::uint32_t outputId, int weighting);
+    void setOutputFeedbackSuppressorRtaOffset(std::uint32_t outputId, float offsetDb);
+    void setOutputFeedbackSuppressorRtaWeighting(std::uint32_t outputId, int weighting);
     void setChannelEffects(std::uint32_t channelId,
                            const std::vector<pluginrack::DynamicsEffect>& effects);
     void setOutputEffects(std::uint32_t outputId,

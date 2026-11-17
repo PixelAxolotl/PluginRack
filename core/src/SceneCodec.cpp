@@ -271,7 +271,16 @@ void from_json(const nlohmann::json& j, LimiterEffect& effect) {
 
 void to_json(nlohmann::json& j, const FeedbackSuppressorEffect& effect) {
     j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed},
-                       {"strength", effect.strength}};
+                       {"strength", effect.strength},
+                       {"attenuationDb", effect.attenuationDb},
+                       {"gainReductionMultiplier", effect.gainReductionMultiplier},
+                       {"attackMs", effect.attackMs},
+                       {"holdMs", effect.holdMs},
+                       {"releaseMs", effect.releaseMs},
+                       {"detectionDelayMs", effect.detectionDelayMs},
+                       {"inputSensitivityDb", effect.inputSensitivityDb},
+                       {"detectorHighPassHz", effect.detectorHighPassHz},
+                       {"detectorLowPassHz", effect.detectorLowPassHz}};
 }
 
 void from_json(const nlohmann::json& j, FeedbackSuppressorEffect& effect) {
@@ -279,6 +288,16 @@ void from_json(const nlohmann::json& j, FeedbackSuppressorEffect& effect) {
     effect.id = j.value("id", 1u);
     effect.bypassed = j.value("bypassed", false);
     effect.strength = j.value("strength", effect.strength);
+    effect.attenuationDb = j.value("attenuationDb", effect.attenuationDb);
+    effect.gainReductionMultiplier = j.value("gainReductionMultiplier",
+                                             effect.gainReductionMultiplier);
+    effect.attackMs = j.value("attackMs", effect.attackMs);
+    effect.holdMs = j.value("holdMs", effect.holdMs);
+    effect.releaseMs = j.value("releaseMs", effect.releaseMs);
+    effect.detectionDelayMs = j.value("detectionDelayMs", effect.detectionDelayMs);
+    effect.inputSensitivityDb = j.value("inputSensitivityDb", effect.inputSensitivityDb);
+    effect.detectorHighPassHz = j.value("detectorHighPassHz", effect.detectorHighPassHz);
+    effect.detectorLowPassHz = j.value("detectorLowPassHz", effect.detectorLowPassHz);
 }
 
 void to_json(nlohmann::json& j, DynamicsEffectType type) {
@@ -450,6 +469,8 @@ void to_json(nlohmann::json& j, const Strip& strip) {
         {"multibandRtaWeighting", strip.multibandRtaWeighting},
         {"deEsserRtaOffsetDb", strip.deEsserRtaOffsetDb},
         {"deEsserRtaWeighting", strip.deEsserRtaWeighting},
+        {"feedbackSuppressorRtaOffsetDb", strip.feedbackSuppressorRtaOffsetDb},
+        {"feedbackSuppressorRtaWeighting", strip.feedbackSuppressorRtaWeighting},
         {"chain", strip.chain},
         {"eqEnabled", strip.eqEnabled},
         {"eqBands", strip.eqBands},
@@ -490,6 +511,8 @@ void from_json(const nlohmann::json& j, Strip& strip) {
     strip.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
     strip.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);
     strip.deEsserRtaWeighting = j.value("deEsserRtaWeighting", 0);
+    strip.feedbackSuppressorRtaOffsetDb = j.value("feedbackSuppressorRtaOffsetDb", 0.0f);
+    strip.feedbackSuppressorRtaWeighting = j.value("feedbackSuppressorRtaWeighting", 0);
     strip.eqEnabled = j.value("eqEnabled", false);
     strip.eqDelayMs = j.value("eqDelayMs", 0.0f);
     strip.eqPhaseFlip = j.value("eqPhaseFlip", false);
