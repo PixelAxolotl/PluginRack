@@ -543,6 +543,25 @@ FeedbackSuppressorWindow::FeedbackSuppressorWindow(const juce::String& title,
     content.addAndMakeVisible(detectionDelay);
     content.addAndMakeVisible(detectionDelayLabel);
 
+    const juce::String infoText =
+        juce::String("Speech-safe preset\n")
+        + juce::String(kFeedbackSuppressorDefaultCuts) + " cuts | "
+        + juce::String(juce::roundToInt(kFeedbackSuppressorDefaultAttenuationDb)) + " dB | Confirm "
+        + juce::String(juce::roundToInt(kFeedbackSuppressorDefaultDetectionDelayMs)) + " ms\n"
+        + "Set Input Sens just above room noise.\n"
+        + "Voice cut? Raise Confirm.\n"
+        + "Feedback missed? Lower Confirm.";
+    infoLabel.setText(infoText, juce::dontSendNotification);
+    infoLabel.setJustificationType(juce::Justification::topLeft);
+    infoLabel.setFont(juce::Font(juce::FontOptions(10.0f)));
+    infoLabel.setColour(juce::Label::textColourId, theme::dim());
+    infoLabel.setMinimumHorizontalScale(0.75f);
+    infoLabel.setTooltip(
+        "Speech-safe tuning: keep Input Sens just above the room noise. "
+        "Raise Confirm if sustained voice is being cut, or lower it if real "
+        "feedback slips through.");
+    content.addAndMakeVisible(infoLabel);
+
     content.addAndMakeVisible(graph);
     content.addAndMakeVisible(inputMeter);
     content.addAndMakeVisible(outputMeter);
@@ -731,10 +750,18 @@ void FeedbackSuppressorWindow::resized() {
                                    detectionDelayLabel, detectionDelay);
 
         rail.removeFromTop(6);
-        auto meters = rail.removeFromTop(juce::jmin(90, rail.getHeight()));
+        const int availableForMeters = juce::jmax(0, rail.getHeight() - 4);
+        const int infoHeight = juce::jmin(64, juce::jmax(0, availableForMeters - 44));
+        const int metersHeight = juce::jmax(0, juce::jmin(90, availableForMeters - infoHeight));
+        auto meters = rail.removeFromTop(metersHeight);
         inputMeter.setBounds(meters.removeFromLeft(62));
         meters.removeFromLeft(16);
         outputMeter.setBounds(meters.removeFromLeft(62));
+
+        auto infoArea = rail.removeFromBottom(infoHeight);
+        infoLabel.setBounds(infoArea.reduced(0, 2));
+        infoLabel.setJustificationType(juce::Justification::topLeft);
+        infoLabel.setVisible(infoHeight >= 30);
     } else {
         const int graphHeight = juce::jlimit(80, 150, area.getHeight() * 35 / 100);
         graph.setBounds(area.removeFromTop(graphHeight));
@@ -771,9 +798,16 @@ void FeedbackSuppressorWindow::resized() {
         auto controls = area.reduced(4, 0);
         enableButton.setBounds(controls.removeFromTop(22).removeFromLeft(86));
         controls.removeFromTop(6);
-        auto meters = controls.removeFromTop(juce::jmin(92, controls.getHeight()));
+        const int infoReserve = juce::jmin(72, juce::jmax(0, controls.getHeight() - 44));
+        const int metersHeight = juce::jmax(0, juce::jmin(92, controls.getHeight() - infoReserve));
+        auto meters = controls.removeFromTop(metersHeight);
         inputMeter.setBounds(meters.removeFromLeft(52));
         meters.removeFromLeft(10);
         outputMeter.setBounds(meters.removeFromLeft(52));
+
+        auto infoArea = controls.removeFromBottom(infoReserve);
+        infoLabel.setBounds(infoArea.reduced(2, 0));
+        infoLabel.setJustificationType(juce::Justification::topRight);
+        infoLabel.setVisible(infoReserve >= 30);
     }
 }

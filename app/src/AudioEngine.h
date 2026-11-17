@@ -664,6 +664,14 @@ public:
     void setOutputFeedbackSuppressors(std::uint32_t outputId,
                                      const std::vector<pluginrack::FeedbackSuppressorEffect>& effects);
 
+    // Restore a built-in effect's processing parameters to its factory
+    // defaults. Called when its editor is opened: closing and reopening an
+    // editor must not carry the previous session's knob positions. Bypass
+    // state is preserved. Eq also resets delay and phase; RTA display
+    // preferences are intentionally left alone.
+    void resetChannelBuiltIn(std::uint32_t channelId, pluginrack::ChainItemType type);
+    void resetOutputBuiltIn(std::uint32_t outputId, pluginrack::ChainItemType type);
+
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<AuxBus>>& getAuxBuses() const;

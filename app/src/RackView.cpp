@@ -1734,6 +1734,7 @@ void RackView::focusEq() {
         return;
     }
     if (auto* ch = currentChannel()) {
+        audioEngine.resetChannelBuiltIn(ch->id, pluginrack::ChainItemType::Eq);
         juce::Component::SafePointer<RackView> safe(this);
         const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
         auto* window = new EQWindow(
@@ -1783,6 +1784,7 @@ void RackView::focusEq() {
         resized();
     } else if (auto* out = currentOutput()) {
         const std::uint32_t outputId = (std::uint32_t)selectedId;
+        audioEngine.resetOutputBuiltIn(outputId, pluginrack::ChainItemType::Eq);
         juce::Component::SafePointer<RackView> safe(this);
         const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
         auto* window = new EQWindow(
@@ -1865,6 +1867,7 @@ void RackView::focusMultiband() {
     closeDynamicsWindow();
     auto* channel = currentChannel();
     if (channel == nullptr) return;
+    audioEngine.resetChannelBuiltIn(channel->id, pluginrack::ChainItemType::Multiband);
 
     juce::Component::SafePointer<RackView> safe(this);
     if (channel->multibandEffects.empty()) {
@@ -1913,6 +1916,7 @@ void RackView::focusDeEsser() {
     closeDynamicsWindow();
     auto* channel = currentChannel();
     if (channel == nullptr) return;
+    audioEngine.resetChannelBuiltIn(channel->id, pluginrack::ChainItemType::DeEsser);
 
     juce::Component::SafePointer<RackView> safe(this);
     if (channel->deEsserEffects.empty()) {
@@ -1961,6 +1965,7 @@ void RackView::focusLimiter() {
     closeDynamicsWindow();
     auto* channel = currentChannel();
     if (channel == nullptr) return;
+    audioEngine.resetChannelBuiltIn(channel->id, pluginrack::ChainItemType::Limiter);
 
     juce::Component::SafePointer<RackView> safe(this);
     if (channel->limiterEffects.empty()) {
@@ -1999,6 +2004,7 @@ void RackView::focusFeedbackSuppressor() {
     closeDynamicsWindow();
     auto* channel = currentChannel();
     if (channel == nullptr) return;
+    audioEngine.resetChannelBuiltIn(channel->id, pluginrack::ChainItemType::FeedbackSuppressor);
     juce::Component::SafePointer<RackView> safe(this);
     if (channel->feedbackSuppressorEffects.empty()) {
         auto effects = channel->feedbackSuppressorEffects;
@@ -2099,6 +2105,7 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
 
     juce::Component::SafePointer<RackView> safe(this);
     if (auto* ch = currentChannel()) {
+        audioEngine.resetChannelBuiltIn(ch->id, pluginrack::ChainItemType::Dynamics);
         auto it = findEffect(ch->effects);
         if (it == ch->effects.end()) return;
         auto gateIt = findGate(ch->effects);
@@ -2126,6 +2133,7 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         ch->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
         dynamicsWindow = window;
     } else if (auto* out = currentOutput()) {
+        audioEngine.resetOutputBuiltIn(out->id, pluginrack::ChainItemType::Dynamics);
         auto it = findEffect(out->effects);
         if (it == out->effects.end()) return;
         auto gateIt = findGate(out->effects);

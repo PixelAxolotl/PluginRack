@@ -60,16 +60,16 @@ TEST_CASE("feedback suppressor defaults match the current tuning") {
     const auto effect = pluginrack::makeDefaultFeedbackSuppressorEffect(7);
     REQUIRE(effect.id == 7u);
     REQUIRE(effect.bypassed == false);
-    REQUIRE(pluginrack::feedbackSuppressorCutCount(effect.strength) == 8);
-    REQUIRE(effect.attenuationDb == 24.0f);
-    REQUIRE(effect.inputSensitivityDb == -43.0f);
-    REQUIRE(effect.detectorHighPassHz == 20.0f);
-    REQUIRE(effect.detectorLowPassHz == 20000.0f);
-    REQUIRE(effect.gainReductionMultiplier == 4.0f);
-    REQUIRE(effect.attackMs == 9.0f);
-    REQUIRE(effect.holdMs == 90.0f);
-    REQUIRE(effect.releaseMs == 10.0f);
-    REQUIRE(effect.detectionDelayMs == 60.0f);
+    REQUIRE(pluginrack::feedbackSuppressorCutCount(effect.strength) == 4);
+    REQUIRE(effect.attenuationDb == 12.0f);
+    REQUIRE(effect.inputSensitivityDb == -40.0f);
+    REQUIRE(effect.detectorHighPassHz == 90.0f);
+    REQUIRE(effect.detectorLowPassHz == 14000.0f);
+    REQUIRE(effect.gainReductionMultiplier == 1.0f);
+    REQUIRE(effect.attackMs == 20.0f);
+    REQUIRE(effect.holdMs == 300.0f);
+    REQUIRE(effect.releaseMs == 300.0f);
+    REQUIRE(effect.detectionDelayMs == 300.0f);
 }
 
 TEST_CASE("feedback suppressor depth follows ringing level") {
@@ -1012,6 +1012,7 @@ TEST_CASE("feedback suppressor separates three close low-frequency bands") {
     std::array<float, 8> notches{};
     const int count = processor.copyActiveNotches(notches.data(), static_cast<int>(notches.size()));
     REQUIRE(count == 3);
+    INFO("notches " << notches[0] << " " << notches[1] << " " << notches[2]);
     const auto hasNear = [&notches, count](float hz) {
         for (int i = 0; i < count; ++i) {
             if (std::fabs(notches[static_cast<std::size_t>(i)] - hz) < 3.0f) return true;
@@ -1054,4 +1055,257 @@ TEST_CASE("feedback suppressor confirms a loud peak sooner than a quiet one") {
 
     REQUIRE(hasCutAfter(0.5f));
     REQUIRE_FALSE(hasCutAfter(0.01f));
+}
+
+namespace {
+constexpr double kProbeRate = 48000.0;
+
+// Pin the detector to the published low-frequency baseline so these probes
+// describe the analyser, not the current strip preset (whose defaults put the
+// high-pass above this band and cut only 12 dB).
+pluginrack::FeedbackSuppressorEffect pinnedLowFrequencyEffect(int cuts) {
+    auto effect = pluginrack::makeDefaultFeedbackSuppressorEffect();
+    effect.bypassed = false;
+    effect.strength = pluginrack::feedbackSuppressorStrengthForCuts(cuts);
+    effect.detectorHighPassHz = 20.0f;
+    effect.detectorLowPassHz = 20000.0f;
+    effect.inputSensitivityDb = -43.0f;
+    effect.attenuationDb = pluginrack::kFeedbackSuppressorMaxAttenuationDb;
+    effect.gainReductionMultiplier = pluginrack::kFeedbackSuppressorMaxGainReductionMultiplier;
+    effect.detectionDelayMs = 60.0f;
+    effect.attackMs = 9.0f;
+    effect.holdMs = 90.0f;
+    effect.releaseMs = 10.0f;
+    return effect;
+}
+
+struct ProbeRun {
+    std::vector<float> left;
+    std::vector<float> right;
+    float firstCutMs = -1.0f;
+    float firstCutHz = 0.0f;
+    float lastCutHz = 0.0f;
+};
+
+ProbeRun runProbe(std::vector<float> left, std::vector<float> right, int blockFrames,
+                  int cuts, float probeHz) {
+    pluginrack::FeedbackSuppressorProcessor processor;
+    processor.prepare(kProbeRate);
+    processor.setEffect(pinnedLowFrequencyEffect(cuts));
+    ProbeRun run{std::move(left), std::move(right)};
+
+    std::array<float, 8> freqs{};
+    std::array<float, 8> depths{};
+    const int total = static_cast<int>(run.left.size());
+    for (int offset = 0; offset < total; offset += blockFrames) {
+        const int frames = std::min(blockFrames, total - offset);
+        processor.process(run.left.data() + offset, run.right.data() + offset, frames);
+        const int count = processor.copyActiveNotches(freqs.data(), depths.data(), 8);
+        for (int i = 0; i < count; ++i) {
+            const auto index = static_cast<std::size_t>(i);
+            if (std::fabs(freqs[index] - probeHz) > 5.0f) continue;
+            run.lastCutHz = freqs[index];
+            if (run.firstCutMs < 0.0f) {
+                run.firstCutMs = 1000.0f * static_cast<float>(offset + frames)
+                               / static_cast<float>(kProbeRate);
+                run.firstCutHz = freqs[index];
+            }
+        }
+    }
+    return run;
+}
+
+double projectedAmplitude(const std::vector<float>& samples, std::size_t from, double hz) {
+    const std::size_t count = samples.size() - from;
+    double real = 0.0;
+    double imag = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const double phase = 2.0 * 3.14159265358979323846 * hz
+                           * static_cast<double>(i) / kProbeRate;
+        real += static_cast<double>(samples[from + i]) * std::cos(phase);
+        imag += static_cast<double>(samples[from + i]) * std::sin(phase);
+    }
+    return 2.0 * std::sqrt(real * real + imag * imag)
+         / static_cast<double>(std::max<std::size_t>(1, count));
+}
+
+float probeAttenuationDb(const std::vector<float>& input, const std::vector<float>& output,
+                         double hz) {
+    const std::size_t tail = static_cast<std::size_t>(0.5 * kProbeRate);
+    const std::size_t from = output.size() > tail ? output.size() - tail : 0;
+    const double in = projectedAmplitude(input, from, hz);
+    const double out = projectedAmplitude(output, from, hz);
+    return static_cast<float>(20.0 * std::log10(std::max(in, 1e-12) / std::max(out, 1e-12)));
+}
+
+void mixInto(std::vector<float>& target, const std::vector<float>& other) {
+    for (std::size_t i = 0; i < target.size(); ++i) target[i] += other[i];
+}
+} // namespace
+
+TEST_CASE("feedback suppressor cuts a 68 Hz tone within 300 ms") {
+    auto tone = sine(68.0f, 0.22f, 48000);
+    const auto run = runProbe(tone, tone, 512, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 300.0f);
+    REQUIRE(probeAttenuationDb(tone, run.left, 68.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor cuts anti-phase low-frequency feedback") {
+    auto left = sine(68.0f, 0.22f, 48000);
+    auto right = left;
+    for (float& sample : right) sample = -sample;
+    const auto run = runProbe(left, right, 512, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 300.0f);
+    REQUIRE(probeAttenuationDb(left, run.left, 68.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor cuts a quiet 40 Hz tone in 64-frame blocks") {
+    auto tone = sine(40.0f, 0.012f, 48000);
+    const auto run = runProbe(tone, tone, 64, 8, 40.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 300.0f);
+    REQUIRE(probeAttenuationDb(tone, run.left, 40.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor cuts a quiet 40 Hz tone in 1024-frame blocks") {
+    auto tone = sine(40.0f, 0.012f, 48000);
+    const auto run = runProbe(tone, tone, 1024, 8, 40.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 300.0f);
+    REQUIRE(probeAttenuationDb(tone, run.left, 40.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor spends its only cut on the stronger bass tone") {
+    auto mixture = sine(68.0f, 0.32f, 48000);
+    mixInto(mixture, sine(1000.0f, 0.06f, 48000));
+    const auto run = runProbe(mixture, mixture, 512, 1, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 400.0f);
+    REQUIRE(probeAttenuationDb(mixture, run.left, 68.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor keeps its history across a quiet block") {
+    auto tone = sine(68.0f, 0.3f, 24000);
+    std::vector<float> left(tone.begin(), tone.end());
+    // One fully silent 512-frame block near the end of the first fill must not
+    // restart the 8192-sample analysis window.
+    std::fill(left.begin() + 7680, left.begin() + 8192, 0.0f);
+    auto right = left;
+    const auto run = runProbe(left, right, 512, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 260.0f);
+}
+
+TEST_CASE("feedback suppressor does not close its gate on one quiet block") {
+    auto tone = sine(68.0f, 0.22f, 48000);
+    const auto run = runProbe(tone, tone, 64, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(run.firstCutMs <= 240.0f);
+}
+
+TEST_CASE("feedback suppressor forgets the detector after two seconds of silence") {
+    pluginrack::FeedbackSuppressorProcessor processor;
+    processor.prepare(48000.0);
+    processor.setEffect(pinnedLowFrequencyEffect(8));
+
+    auto tone = sine(68.0f, 0.3f, 19200);
+    auto right = tone;
+    for (std::size_t offset = 0; offset < tone.size(); offset += 512) {
+        const int count = static_cast<int>(std::min<std::size_t>(512, tone.size() - offset));
+        processor.process(tone.data() + offset, right.data() + offset, count);
+    }
+    std::array<float, 8> notches{};
+    REQUIRE(processor.copyActiveNotches(notches.data(), 8) > 0);
+
+    std::vector<float> silence(48000 * 3, 0.0f);
+    std::vector<float> silenceRight = silence;
+    for (std::size_t offset = 0; offset < silence.size(); offset += 512) {
+        const int count = static_cast<int>(std::min<std::size_t>(512, silence.size() - offset));
+        processor.process(silence.data() + offset, silenceRight.data() + offset, count);
+    }
+    REQUIRE(processor.copyActiveNotches(notches.data(), 8) == 0);
+}
+
+TEST_CASE("feedback suppressor cuts a 90 degree phase-shifted bass tone") {
+    auto left = sine(68.0f, 0.22f, 48000);
+    std::vector<float> right(left.size());
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        right[i] = static_cast<float>(0.22 * std::sin(
+            2.0 * 3.14159265358979323846 * 68.0 * static_cast<double>(i) / 48000.0
+            + 0.5 * 3.14159265358979323846));
+    }
+    const auto run = runProbe(left, right, 512, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(probeAttenuationDb(left, run.left, 68.0) >= 12.0f);
+}
+
+TEST_CASE("feedback suppressor keeps an in-phase bass cut centered") {
+    auto tone = sine(68.0f, 0.22f, 48000);
+    const auto run = runProbe(tone, tone, 512, 8, 68.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(std::fabs(run.firstCutHz - 68.0f) <= 3.0f);
+}
+
+TEST_CASE("feedback suppressor keeps a cut when a new peak is only slightly louder") {
+    auto mixture = sine(1000.0f, 0.3f, 48000);
+    const int switchAt = 14400;  // 300 ms: the 1 kHz cut is established
+    for (int i = switchAt; i < static_cast<int>(mixture.size()); ++i) {
+        const double t = static_cast<double>(i - switchAt) / 48000.0;
+        mixture[static_cast<std::size_t>(i)] += static_cast<float>(
+            0.36 * std::sin(2.0 * 3.14159265358979323846 * 1500.0 * t));
+    }
+    auto right = mixture;
+    const auto run = runProbe(mixture, right, 512, 1, 1000.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(std::fabs(run.lastCutHz - 1000.0f) <= 20.0f);
+}
+
+namespace {
+float halfBinCenterError(float hz) {
+    auto tone = sine(hz, 0.3f, 96000);
+    const auto run = runProbe(tone, tone, 512, 8, hz);
+    REQUIRE(run.firstCutMs > 0.0f);
+    return std::fabs(run.lastCutHz - hz);
+}
+} // namespace
+
+TEST_CASE("feedback suppressor centers low cuts within 1 Hz on half-bin tones") {
+    const double bin = kProbeRate / 8192.0;
+    for (const double index : {6.5, 7.5, 10.5, 11.5}) {
+        const auto hz = static_cast<float>(index * bin);
+        INFO("tone " << hz << " Hz");
+        REQUIRE(halfBinCenterError(hz) <= 1.0f);
+    }
+}
+
+TEST_CASE("feedback suppressor still centers a clipped bass peak") {
+    auto tone = sine(90.0f, 1.5f, 48000);
+    for (float& sample : tone) sample = std::clamp(sample, -1.0f, 1.0f);
+    const auto run = runProbe(tone, tone, 512, 8, 90.0f);
+    REQUIRE(run.firstCutMs > 0.0f);
+    REQUIRE(std::fabs(run.lastCutHz - 90.0f) <= 3.0f);
+}
+
+TEST_CASE("feedback suppressor counts a gate close and a stale reset") {
+    pluginrack::FeedbackSuppressorProcessor processor;
+    processor.prepare(48000.0);
+    processor.setEffect(pinnedLowFrequencyEffect(8));
+
+    auto tone = sine(68.0f, 0.3f, 24000);
+    auto right = tone;
+    for (std::size_t offset = 0; offset < tone.size(); offset += 512) {
+        const int count = static_cast<int>(std::min<std::size_t>(512, tone.size() - offset));
+        processor.process(tone.data() + offset, right.data() + offset, count);
+    }
+
+    std::vector<float> silence(48000 * 3, 0.0f);
+    std::vector<float> silenceRight = silence;
+    for (std::size_t offset = 0; offset < silence.size(); offset += 512) {
+        const int count = static_cast<int>(std::min<std::size_t>(512, silence.size() - offset));
+        processor.process(silence.data() + offset, silenceRight.data() + offset, count);
+    }
+    REQUIRE(processor.stats().gateCloses >= 1);
+    REQUIRE(processor.stats().gateResets >= 1);
 }

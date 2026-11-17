@@ -200,6 +200,7 @@ ChannelStrip::~ChannelStrip() {
 }
 void ChannelStrip::openMultibandWindow() {
     if (multibandWindow != nullptr) { multibandWindow->toFront(true); return; }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::Multiband);
     if (channel.multibandEffects.empty()) {
         auto effects = channel.multibandEffects;
         effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
@@ -228,6 +229,7 @@ void ChannelStrip::openMultibandWindow() {
 }
 void ChannelStrip::openDeEsserWindow() {
     if (deEsserWindow != nullptr) { deEsserWindow->toFront(true); return; }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::DeEsser);
     if (channel.deEsserEffects.empty()) {
         auto effects = channel.deEsserEffects;
         effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
@@ -256,6 +258,7 @@ void ChannelStrip::openDeEsserWindow() {
 }
 void ChannelStrip::openLimiterWindow() {
     if (limiterWindow != nullptr) { limiterWindow->toFront(true); return; }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::Limiter);
     if (channel.limiterEffects.empty()) {
         auto effects = channel.limiterEffects;
         effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
@@ -280,6 +283,7 @@ void ChannelStrip::openLimiterWindow() {
 
 void ChannelStrip::openFeedbackSuppressorWindow() {
     if (feedbackSuppressorWindow != nullptr) { feedbackSuppressorWindow->toFront(true); return; }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::FeedbackSuppressor);
     if (channel.feedbackSuppressorEffects.empty()) {
         auto effects = channel.feedbackSuppressorEffects;
         effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
@@ -339,6 +343,7 @@ void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
         dynamicsWindow->toFront(true);
         return;
     }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::Dynamics);
     juce::Component::SafePointer<ChannelStrip> safe(this);
     auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
                            [type](const auto& effect) { return effect.type == type; });
@@ -386,6 +391,7 @@ void ChannelStrip::openEqWindow() {
         eqWindow->toFront(true);
         return;
     }
+    audioEngine.resetChannelBuiltIn(channel.id, pluginrack::ChainItemType::Eq);
     juce::Component::SafePointer<ChannelStrip> safe(this);
     // Live device rate so the curve's magnitude maths matches what the engine
     // applies; getLatencyReport().sampleRate is the UI-thread convention

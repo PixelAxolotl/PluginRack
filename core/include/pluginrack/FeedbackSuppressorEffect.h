@@ -12,36 +12,48 @@ namespace pluginrack {
 
 inline constexpr float kFeedbackSuppressorMinSensitivityDb = -80.0f;
 inline constexpr float kFeedbackSuppressorMaxSensitivityDb = 0.0f;
-inline constexpr float kFeedbackSuppressorDefaultSensitivityDb = -43.0f;
+inline constexpr float kFeedbackSuppressorDefaultSensitivityDb = -40.0f;
 inline constexpr float kFeedbackSuppressorMinDetectorHz = 20.0f;
 inline constexpr float kFeedbackSuppressorMaxDetectorHz = 20000.0f;
 inline constexpr float kFeedbackSuppressorMaxHighPassHz = 200.0f;
 inline constexpr float kFeedbackSuppressorMinLowPassHz = 4000.0f;
-inline constexpr float kFeedbackSuppressorDefaultHighPassHz = 20.0f;
-inline constexpr float kFeedbackSuppressorDefaultLowPassHz = 20000.0f;
+inline constexpr float kFeedbackSuppressorDefaultHighPassHz = 90.0f;
+inline constexpr float kFeedbackSuppressorDefaultLowPassHz = 14000.0f;
 inline constexpr float kFeedbackSuppressorDetectorGapHz = 20.0f;
 inline constexpr float kFeedbackSuppressorMinAttenuationDb = 0.0f;
 inline constexpr float kFeedbackSuppressorMaxAttenuationDb = 24.0f;
-inline constexpr float kFeedbackSuppressorDefaultAttenuationDb = 24.0f;
+inline constexpr float kFeedbackSuppressorDefaultAttenuationDb = 12.0f;
 inline constexpr float kFeedbackSuppressorMinGainReductionMultiplier = 0.25f;
 inline constexpr float kFeedbackSuppressorMaxGainReductionMultiplier = 4.0f;
-inline constexpr float kFeedbackSuppressorDefaultGainReductionMultiplier = 4.0f;
+inline constexpr float kFeedbackSuppressorDefaultGainReductionMultiplier = 1.0f;
 inline constexpr float kFeedbackSuppressorMinAttackMs = 0.0f;
 inline constexpr float kFeedbackSuppressorMaxAttackMs = 100.0f;
-inline constexpr float kFeedbackSuppressorDefaultAttackMs = 9.0f;
+inline constexpr float kFeedbackSuppressorDefaultAttackMs = 20.0f;
 inline constexpr float kFeedbackSuppressorMinHoldMs = 0.0f;
 inline constexpr float kFeedbackSuppressorMaxHoldMs = 2000.0f;
-inline constexpr float kFeedbackSuppressorDefaultHoldMs = 90.0f;
+inline constexpr float kFeedbackSuppressorDefaultHoldMs = 300.0f;
 inline constexpr float kFeedbackSuppressorMinReleaseMs = 10.0f;
 inline constexpr float kFeedbackSuppressorMaxReleaseMs = 2000.0f;
-inline constexpr float kFeedbackSuppressorDefaultReleaseMs = 10.0f;
+inline constexpr float kFeedbackSuppressorDefaultReleaseMs = 300.0f;
 inline constexpr float kFeedbackSuppressorMinDetectionDelayMs = 0.0f;
 inline constexpr float kFeedbackSuppressorMaxDetectionDelayMs = 1000.0f;
-inline constexpr float kFeedbackSuppressorDefaultDetectionDelayMs = 60.0f;
+inline constexpr float kFeedbackSuppressorDefaultDetectionDelayMs = 300.0f;
 inline constexpr int kFeedbackSuppressorMinCuts = 1;
 inline constexpr int kFeedbackSuppressorMaxCuts = 8;
-inline constexpr int kFeedbackSuppressorDefaultCuts = 8;
+inline constexpr int kFeedbackSuppressorDefaultCuts = 4;
 inline constexpr int kFeedbackSuppressorAnalysisSize = 2048;
+
+// The detector gate is clocked by samples, not by host callbacks. Judging a
+// whole callback at once lets one quiet 64-frame block near a bass tone's zero
+// crossing look like silence and restart the 8192-sample analysis window.
+// Energy is averaged over a 50 ms rolling window, the gate closes only after a
+// 120 ms dwell 3 dB below the open threshold, and only a two-second silence
+// discards the analysis history.
+inline constexpr float kFeedbackSuppressorGateWindowSeconds = 0.05f;
+inline constexpr float kFeedbackSuppressorGateCloseRatio = 0.70794578f;  // -3 dB
+inline constexpr float kFeedbackSuppressorGateCloseSeconds = 0.12f;
+inline constexpr float kFeedbackSuppressorGateResetSeconds = 2.0f;
+inline constexpr int kFeedbackSuppressorMaxGateWindowSamples = 16384;
 
 // The Strength knob is a cut count, but scenes store it as the original 0..1
 // float so sessions saved before the knob changed still load correctly.
@@ -135,6 +147,18 @@ public:
     int copyActiveNotches(float* dest, int max) const noexcept;
     int copyActiveNotches(float* freqs, float* depthsDb, int max) const noexcept;
 
+    // Detector bookkeeping for tests and tuning. Written on the audio thread,
+    // read by the same thread (or a test) after rendering; no tearing concern
+    // in practice because a snapshot is only informational.
+    struct Stats {
+        std::uint32_t gateCloses = 0;
+        std::uint32_t gateResets = 0;
+        std::uint32_t promotions = 0;
+        std::uint32_t preemptions = 0;
+        std::uint32_t candidateRejections = 0;
+    };
+    const Stats& stats() const noexcept { return stats_; }
+
 private:
     static constexpr int kMaxNotches = 8;
     static constexpr int kHighAnalysisSize = kFeedbackSuppressorAnalysisSize;
@@ -159,6 +183,7 @@ private:
         float target = 0.0f;
         int holdSamples = 0;
         float binWidthHz = 23.4f;
+        float levelDb = -120.0f;
     };
 
     struct Detection {
@@ -202,7 +227,9 @@ private:
     std::array<std::atomic<float>, kMaxNotches> publishedFreqs_{};
     std::array<std::atomic<float>, kMaxNotches> publishedDepths_{};
     std::atomic<int> publishedCount_{0};
-    std::vector<float> analysisBuffer_;
+    // One ring per input channel: the low band compares per-channel power so
+    // anti-phase feedback cannot cancel in a mono sum.
+    std::array<std::vector<float>, 2> analysisBuffer_;
     int analysisWrite_ = 0;
     int analysisCount_ = 0;
     int framesSinceAnalysis_ = 0;
@@ -221,6 +248,22 @@ private:
     int rmsCount_ = 0;
     float sensitivityLinear_ = 0.0031622777f;
     bool gateOpen_ = false;
+    // Sample-clocked gate: a short ring of per-sample energy plus a running
+    // sum, so the decision is independent of the host's block size.
+    std::vector<float> gateEnergy_;
+    int gateWrite_ = 0;
+    int gateWindow_ = 1;
+    double gateEnergySum_ = 0.0;
+    double gateOpenEnergy_ = 0.0;
+    double gateCloseEnergy_ = 0.0;
+    int gateCloseDwell_ = 0;
+    int gateResetDwell_ = 0;
+    int gateClosedSamples_ = 0;
+    // Samples accumulated in the rolling energy window. Opening uses the
+    // mean over what has been collected so far so a fresh detector still
+    // engages on the first loud block; closing always needs the full window.
+    int gateFilled_ = 0;
+    Stats stats_{};
     // Four cascaded second-order sections give a 48 dB/oct detector filter.
     // The Q values below form an 8th-order Butterworth response so the band
     // edge is steep without rippling into the pass band.
@@ -229,8 +272,8 @@ private:
     std::array<float, 4> hpB2_{};
     std::array<float, 4> hpA1_{};
     std::array<float, 4> hpA2_{};
-    std::array<float, 4> hpZ1_{};
-    std::array<float, 4> hpZ2_{};
+    std::array<std::array<float, 4>, 2> hpZ1_{};
+    std::array<std::array<float, 4>, 2> hpZ2_{};
     // Mirror the HPF on the detector's upper edge. Filtering only the FFT
     // search bins still lets a loud out-of-band tone leak into in-band bins
     // through the analysis window and look like a valid resonance.
@@ -239,19 +282,22 @@ private:
     std::array<float, 4> lpB2_{};
     std::array<float, 4> lpA1_{};
     std::array<float, 4> lpA2_{};
-    std::array<float, 4> lpZ1_{};
-    std::array<float, 4> lpZ2_{};
+    std::array<std::array<float, 4>, 2> lpZ1_{};
+    std::array<std::array<float, 4>, 2> lpZ2_{};
 
     void analyze();
     void analyzeSpectrum(int fftSize, const std::vector<float>& mags,
-                         float bandLowHz, float bandHighHz);
-    void updateNotches(const std::vector<Detection>& detections);
+                         float bandLowHz, float bandHighHz, int budget);
+    void updateNotches(const std::vector<Detection>& detections,
+                       bool ageCandidates = true);
     void updateNotchCoefficients(Notch& notch) const noexcept;
     void updateAnalysisHighPass() noexcept;
     void resetAnalysisHighPass() noexcept;
     void updateAnalysisLowPass() noexcept;
     void resetAnalysisLowPass() noexcept;
     void refreshEnvelopeSteps() noexcept;
+    void refreshGateThresholds() noexcept;
+    void resetGate() noexcept;
     void clearAnalysisHistory() noexcept;
     void clearCandidates() noexcept;
     void closeGate() noexcept;

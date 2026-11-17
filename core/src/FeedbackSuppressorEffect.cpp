@@ -121,6 +121,17 @@ FeedbackSuppressorProcessor& FeedbackSuppressorProcessor::operator=(
     rmsCount_ = other.rmsCount_;
     sensitivityLinear_ = other.sensitivityLinear_;
     gateOpen_ = other.gateOpen_;
+    gateEnergy_ = other.gateEnergy_;
+    gateWrite_ = other.gateWrite_;
+    gateWindow_ = other.gateWindow_;
+    gateEnergySum_ = other.gateEnergySum_;
+    gateOpenEnergy_ = other.gateOpenEnergy_;
+    gateCloseEnergy_ = other.gateCloseEnergy_;
+    gateCloseDwell_ = other.gateCloseDwell_;
+    gateResetDwell_ = other.gateResetDwell_;
+    gateClosedSamples_ = other.gateClosedSamples_;
+    gateFilled_ = other.gateFilled_;
+    stats_ = other.stats_;
     return *this;
 }
 
@@ -151,7 +162,7 @@ float feedbackSuppressorStaticGainDb(float /*levelDb*/, const FeedbackSuppressor
 
 void FeedbackSuppressorProcessor::prepare(double sampleRate) {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
-    analysisBuffer_.assign(kLowAnalysisSize, 0.0f);
+    for (auto& buffer : analysisBuffer_) buffer.assign(kLowAnalysisSize, 0.0f);
     fftReal_.assign(kHighAnalysisSize, 0.0f);
     fftImag_.assign(kHighAnalysisSize, 0.0f);
     mags_.assign(kHighAnalysisSize / 2, 0.0f);
@@ -161,7 +172,7 @@ void FeedbackSuppressorProcessor::prepare(double sampleRate) {
     peaks_.clear();
     peaks_.reserve(kLowAnalysisSize / 2);
     detections_.clear();
-    detections_.reserve(kMaxNotches);
+    detections_.reserve(2 * kMaxNotches);
     analysisWrite_ = 0;
     analysisCount_ = 0;
     framesSinceAnalysis_ = 0;
@@ -170,6 +181,13 @@ void FeedbackSuppressorProcessor::prepare(double sampleRate) {
     outputRmsAccum_ = 0.0f;
     rmsCount_ = 0;
     gateOpen_ = false;
+    gateWindow_ = std::clamp(
+        static_cast<int>(std::lround(
+            sampleRate_ * static_cast<double>(kFeedbackSuppressorGateWindowSeconds))),
+        1, kFeedbackSuppressorMaxGateWindowSamples);
+    gateEnergy_.assign(static_cast<std::size_t>(gateWindow_), 0.0f);
+    resetGate();
+    stats_ = Stats{};
     refreshEnvelopeSteps();
     for (auto& n : notches_) n = Notch{};
     clearCandidates();
@@ -235,6 +253,7 @@ void FeedbackSuppressorProcessor::setEffect(const FeedbackSuppressorEffect& effe
     updateAnalysisHighPass();
     updateAnalysisLowPass();
     refreshEnvelopeSteps();
+    refreshGateThresholds();
     // Attenuation changes the peaking-filter coefficients. Refresh any cut
     // that is currently alive so the knob responds without waiting for the
     // next detector pass.
@@ -250,6 +269,28 @@ void FeedbackSuppressorProcessor::refreshEnvelopeSteps() noexcept {
         : 1.0f / std::max(1.0f, effect_.attackMs * 0.001f * sampleRate);
     releaseStep_ = 1.0f / std::max(1.0f, effect_.releaseMs * 0.001f * sampleRate);
     holdSamples_ = std::max(0, static_cast<int>(std::lround(effect_.holdMs * 0.001f * sampleRate)));
+}
+
+void FeedbackSuppressorProcessor::refreshGateThresholds() noexcept {
+    const double open = static_cast<double>(sensitivityLinear_) * sensitivityLinear_;
+    // Both channels contribute, and the running sum spans the whole window.
+    gateOpenEnergy_ = open * 2.0 * static_cast<double>(gateWindow_);
+    gateCloseEnergy_ = gateOpenEnergy_
+        * static_cast<double>(kFeedbackSuppressorGateCloseRatio)
+        * static_cast<double>(kFeedbackSuppressorGateCloseRatio);
+    gateCloseDwell_ = std::max(1, static_cast<int>(std::lround(
+        sampleRate_ * static_cast<double>(kFeedbackSuppressorGateCloseSeconds))));
+    gateResetDwell_ = std::max(1, static_cast<int>(std::lround(
+        sampleRate_ * static_cast<double>(kFeedbackSuppressorGateResetSeconds))));
+}
+
+void FeedbackSuppressorProcessor::resetGate() noexcept {
+    std::fill(gateEnergy_.begin(), gateEnergy_.end(), 0.0f);
+    gateEnergySum_ = 0.0;
+    gateWrite_ = 0;
+    gateClosedSamples_ = 0;
+    gateFilled_ = 0;
+    gateOpen_ = false;
 }
 
 void FeedbackSuppressorProcessor::updateNotchCoefficients(Notch& notch) const noexcept {
@@ -274,13 +315,14 @@ void FeedbackSuppressorProcessor::updateNotchCoefficients(Notch& notch) const no
 
 void FeedbackSuppressorProcessor::reset() noexcept {
     closeGate();
+    resetGate();
 }
 
 void FeedbackSuppressorProcessor::clearAnalysisHistory() noexcept {
     analysisWrite_ = 0;
     analysisCount_ = 0;
     framesSinceAnalysis_ = 0;
-    std::fill(analysisBuffer_.begin(), analysisBuffer_.end(), 0.0f);
+    for (auto& buffer : analysisBuffer_) std::fill(buffer.begin(), buffer.end(), 0.0f);
     inputRmsAccum_ = 0.0f;
     outputRmsAccum_ = 0.0f;
     rmsCount_ = 0;
@@ -295,13 +337,13 @@ void FeedbackSuppressorProcessor::clearCandidates() noexcept {
 }
 
 void FeedbackSuppressorProcessor::resetAnalysisHighPass() noexcept {
-    hpZ1_.fill(0.0f);
-    hpZ2_.fill(0.0f);
+    for (auto& state : hpZ1_) state.fill(0.0f);
+    for (auto& state : hpZ2_) state.fill(0.0f);
 }
 
 void FeedbackSuppressorProcessor::resetAnalysisLowPass() noexcept {
-    lpZ1_.fill(0.0f);
-    lpZ2_.fill(0.0f);
+    for (auto& state : lpZ1_) state.fill(0.0f);
+    for (auto& state : lpZ2_) state.fill(0.0f);
 }
 
 void FeedbackSuppressorProcessor::updateAnalysisLowPass() noexcept {
@@ -405,14 +447,19 @@ void FeedbackSuppressorProcessor::closeGate() noexcept {
     publishedCount_.store(0, std::memory_order_relaxed);
     clearAnalysisHistory();
     gateOpen_ = false;
+    gateClosedSamples_ = 0;
 }
 
 void FeedbackSuppressorProcessor::analyze() {
     if (sampleRate_ <= 0.0) return;
     detections_.clear();
+    const int maxCuts = std::min(kMaxNotches,
+                                 feedbackSuppressorCutCount(effect_.strength));
 
     // High band: the fast 2048-point FFT still reacts every 10.7 ms. Its
-    // lowest bin is ~23.4 Hz at 48 kHz, which is fine above the split.
+    // lowest bin is ~23.4 Hz at 48 kHz, which is fine above the split. It keeps
+    // the mono sum: above the split a cancelled stereo component is rare and
+    // the single view is less noisy.
     if (analysisCount_ >= kHighAnalysisSize) {
         const int n = kHighAnalysisSize;
         const int available = std::min(analysisCount_, n);
@@ -422,7 +469,8 @@ void FeedbackSuppressorProcessor::analyze() {
             if (i >= first) {
                 const int src = (analysisWrite_ - available + (i - first) + kLowAnalysisSize)
                               % kLowAnalysisSize;
-                sample = analysisBuffer_[static_cast<std::size_t>(src)];
+                const auto index = static_cast<std::size_t>(src);
+                sample = 0.5f * (analysisBuffer_[0][index] + analysisBuffer_[1][index]);
             }
             const float w = 0.5f - 0.5f * std::cos(
                 2.0f * kPi * static_cast<float>(i) / static_cast<float>(n - 1));
@@ -437,44 +485,77 @@ void FeedbackSuppressorProcessor::analyze() {
         }
         analyzeSpectrum(n, mags_,
                         std::max(effect_.detectorHighPassHz, kAnalysisSplitHz),
-                        effect_.detectorLowPassHz);
+                        effect_.detectorLowPassHz, maxCuts);
     }
 
     // Low band: 8192 samples gives ~5.9 Hz bins at 48 kHz. That is enough
     // resolution to put a bass cut on the resonance instead of on a neighbour
     // 20+ Hz away. It needs 170 ms of history, so it starts later than the
     // high band and does not slow the high-band response.
+    //
+    // Both channels go through one complex transform: left in the real part,
+    // right in the imaginary part, then split with the Hermitian pair. Taking
+    // the larger per-channel magnitude means feedback that arrives in opposite
+    // polarity on L and R cannot cancel out of the detector.
     if (analysisCount_ >= kLowAnalysisSize) {
         const int n = kLowAnalysisSize;
         for (int i = 0; i < n; ++i) {
             const int src = (analysisWrite_ - n + i + kLowAnalysisSize) % kLowAnalysisSize;
-            const float sample = analysisBuffer_[static_cast<std::size_t>(src)];
+            const auto index = static_cast<std::size_t>(src);
             const float w = 0.5f - 0.5f * std::cos(
                 2.0f * kPi * static_cast<float>(i) / static_cast<float>(n - 1));
-            fftLowReal_[static_cast<std::size_t>(i)] = sample * w;
-            fftLowImag_[static_cast<std::size_t>(i)] = 0.0f;
+            fftLowReal_[static_cast<std::size_t>(i)] = analysisBuffer_[0][index] * w;
+            fftLowImag_[static_cast<std::size_t>(i)] = analysisBuffer_[1][index] * w;
         }
         fft(fftLowReal_, fftLowImag_);
         for (int i = 1; i < n / 2; ++i) {
-            magsLow_[static_cast<std::size_t>(i)] =
-                std::sqrt(fftLowReal_[static_cast<std::size_t>(i)] * fftLowReal_[static_cast<std::size_t>(i)]
-                        + fftLowImag_[static_cast<std::size_t>(i)] * fftLowImag_[static_cast<std::size_t>(i)]);
+            const int mirror = n - i;
+            const float xr = fftLowReal_[static_cast<std::size_t>(i)];
+            const float xi = fftLowImag_[static_cast<std::size_t>(i)];
+            const float yr = fftLowReal_[static_cast<std::size_t>(mirror)];
+            const float yi = fftLowImag_[static_cast<std::size_t>(mirror)];
+            const float leftRe = 0.5f * (xr + yr);
+            const float leftIm = 0.5f * (xi - yi);
+            const float rightRe = 0.5f * (xi + yi);
+            const float rightIm = -0.5f * (xr - yr);
+            magsLow_[static_cast<std::size_t>(i)] = std::max(
+                std::sqrt(leftRe * leftRe + leftIm * leftIm),
+                std::sqrt(rightRe * rightRe + rightIm * rightIm));
         }
         analyzeSpectrum(n, magsLow_,
                         effect_.detectorHighPassHz,
-                        std::min(effect_.detectorLowPassHz, kAnalysisSplitHz));
+                        std::min(effect_.detectorLowPassHz, kAnalysisSplitHz), maxCuts);
     }
 
+    // Rank the two bands against each other before the user's cut budget is
+    // spent. levelDb is already normalized per window, so a 68 Hz resonance and
+    // a 1 kHz howl compare fairly. A detection that straddles the split is
+    // merged into the stronger of the pair.
     std::sort(detections_.begin(), detections_.end(),
               [](const Detection& a, const Detection& b) {
                   return a.levelDb > b.levelDb;
               });
+    int kept = 0;
+    for (int i = 0; i < static_cast<int>(detections_.size()) && kept < maxCuts; ++i) {
+        const auto& candidate = detections_[static_cast<std::size_t>(i)];
+        bool duplicate = false;
+        for (int j = 0; j < kept; ++j) {
+            const auto& keptDetection = detections_[static_cast<std::size_t>(j)];
+            const float bin = std::max(candidate.binWidthHz, keptDetection.binWidthHz);
+            if (std::fabs(candidate.freq - keptDetection.freq) <= bin * 1.25f) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) detections_[static_cast<std::size_t>(kept++)] = candidate;
+    }
+    detections_.resize(static_cast<std::size_t>(kept));
     updateNotches(detections_);
 }
 
 void FeedbackSuppressorProcessor::analyzeSpectrum(
     int fftSize, const std::vector<float>& mags,
-    float bandLowHz, float bandHighHz) {
+    float bandLowHz, float bandHighHz, int budget) {
     if (fftSize < 16 || mags.empty() || sampleRate_ <= 0.0) return;
     const int half = fftSize / 2;
     const float binWidth = static_cast<float>(sampleRate_) / static_cast<float>(fftSize);
@@ -574,7 +655,31 @@ void FeedbackSuppressorProcessor::analyzeSpectrum(
         const bool plateau = mags[static_cast<std::size_t>(i - 1)] > center * 0.95f
                           || mags[static_cast<std::size_t>(i + 1)] > center * 0.95f;
         float offset = 0.0f;
-        if (!plateau && denom < -1e-6f) {
+        bool fitted = false;
+        // A half-bin tone puts equal energy in two bins. The picker keeps the
+        // upper one, so a 3-point parabola reports a full 0.5-bin error and the
+        // side it picks flips from pass to pass as the window moves. A
+        // five-point least-squares vertex is symmetric across that plateau and
+        // finds the centre between the bins. Only trust it when the peak is
+        // isolated: a clipped or broad peak leaves energy in the outer bins and
+        // falls back to the conservative 3-point path.
+        if (plateau && fftSize == kLowAnalysisSize && i >= 2 && i + 2 < half
+            && mags[static_cast<std::size_t>(i - 2)] < center * 0.5f
+            && mags[static_cast<std::size_t>(i + 2)] < center * 0.5f) {
+            const float y0 = std::log(std::max(1e-12f, mags[static_cast<std::size_t>(i - 2)]));
+            const float y1 = left;
+            const float y2 = middle;
+            const float y3 = right;
+            const float y4 = std::log(std::max(1e-12f, mags[static_cast<std::size_t>(i + 2)]));
+            const float b = (-2.0f * y0 - y1 + y3 + 2.0f * y4) / 10.0f;
+            const float a = ((4.0f * y0 + y1 + y3 + 4.0f * y4)
+                             - 2.0f * (y0 + y1 + y2 + y3 + y4)) / 14.0f;
+            if (a < -1e-4f) {
+                offset = std::clamp(-b / (2.0f * a), -1.0f, 1.0f);
+                fitted = std::isfinite(offset);
+            }
+        }
+        if (!fitted && !plateau && denom < -1e-6f) {
             offset = 0.5f * (left - right) / denom;
             offset = std::clamp(offset, -0.5f, 0.5f);
             if (!std::isfinite(offset)) offset = 0.0f;
@@ -592,13 +697,16 @@ void FeedbackSuppressorProcessor::analyzeSpectrum(
         return a.magnitude > b.magnitude;
     });
 
-    const int maxCuts = std::min(kMaxNotches, feedbackSuppressorCutCount(effect_.strength));
     const bool lowResolution = fftSize == kLowAnalysisSize;
     const float mergeHz = lowResolution
         ? binWidth * 1.25f
         : binWidth * 2.0f;
+    // Each band contributes its own shortlist; the caller ranks the merged
+    // pool against the user's cut budget afterwards. Filling the budget here
+    // would let whichever transform runs first starve the other band.
+    int added = 0;
     for (const auto& peak : peaks_) {
-        if (static_cast<int>(detections_.size()) >= maxCuts) break;
+        if (added >= budget) break;
         const float f = peak.bin * static_cast<float>(sampleRate_) / static_cast<float>(fftSize);
         if (f < bandLowHz || f > bandHighHz) continue;
 
@@ -651,11 +759,12 @@ void FeedbackSuppressorProcessor::analyzeSpectrum(
                                peak.leftBin,
                                peak.rightBin,
                                binWidth});
+        ++added;
     }
 }
 
 void FeedbackSuppressorProcessor::updateNotches(
-    const std::vector<Detection>& detections) {
+    const std::vector<Detection>& detections, bool ageCandidates) {
     ++analysisPass_;
     std::array<Notch, kMaxNotches> next{};
     std::array<bool, kMaxNotches> used{};
@@ -728,6 +837,7 @@ void FeedbackSuppressorProcessor::updateNotches(
                                     effect_.detectorLowPassHz);
             notch.target = 1.0f;
             notch.holdSamples = holdSamples_;
+            notch.levelDb = detection.levelDb;
             used[static_cast<std::size_t>(i)] = true;
             updateNotchCoefficients(notch);
             next[static_cast<std::size_t>(count++)] = notch;
@@ -800,12 +910,16 @@ void FeedbackSuppressorProcessor::updateNotches(
     }
 
     // Age candidates that were not seen in this pass. A couple of misses are
-    // allowed; more than that means the peak is gone, not merely noisy.
-    for (int i = 0; i < kMaxNotches; ++i) {
-        auto& candidate = candidates_[static_cast<std::size_t>(i)];
-        if (candidate.hits <= 0 || candidate.lastSeenPass == analysisPass_) continue;
-        ++candidate.misses;
-        if (candidate.misses > allowedMisses) candidate = Candidate{};
+    // allowed; more than that means the peak is gone, not merely noisy. While
+    // the gate is closed the detector is frozen: the kept samples are still
+    // valid, so confirmation progress must survive a brief level dip.
+    if (ageCandidates) {
+        for (int i = 0; i < kMaxNotches; ++i) {
+            auto& candidate = candidates_[static_cast<std::size_t>(i)];
+            if (candidate.hits <= 0 || candidate.lastSeenPass == analysisPass_) continue;
+            ++candidate.misses;
+            if (candidate.misses > allowedMisses) candidate = Candidate{};
+        }
     }
 
     const auto candidateIsEligible = [&](const Candidate& candidate) {
@@ -831,6 +945,7 @@ void FeedbackSuppressorProcessor::updateNotches(
         notch.depthDb = candidate.depthDb;
         notch.targetDepthDb = candidate.depthDb;
         notch.target = 1.0f;
+        notch.levelDb = candidate.lastLevelDb;
         notch.binWidthHz = candidate.binWidthHz > 0.0f
             ? candidate.binWidthHz
             : 23.4f;
@@ -843,7 +958,12 @@ void FeedbackSuppressorProcessor::updateNotches(
     // authoritative.
     for (int i = 0; i < kMaxNotches; ++i) {
         auto& candidate = candidates_[static_cast<std::size_t>(i)];
-        if (!candidateIsEligible(candidate)) continue;
+        if (!candidateIsEligible(candidate)) {
+            if (candidate.hits > 0 && candidate.lastSeenPass == analysisPass_) {
+                ++stats_.candidateRejections;
+            }
+            continue;
+        }
 
         // A confirmed candidate may be a bin-boundary sibling of a cut that
         // was just promoted in this pass. Merge it into that cut instead of
@@ -858,6 +978,7 @@ void FeedbackSuppressorProcessor::updateNotches(
             existing.depthDb = 0.25f * existing.depthDb + 0.75f * candidate.depthDb;
             existing.target = 1.0f;
             existing.holdSamples = holdSamples_;
+            existing.levelDb = std::max(existing.levelDb, candidate.lastLevelDb);
             updateNotchCoefficients(existing);
             candidate = Candidate{};
             mergedIntoExisting = true;
@@ -870,27 +991,34 @@ void FeedbackSuppressorProcessor::updateNotches(
             notch.holdSamples = holdSamples_;
             updateNotchCoefficients(notch);
             next[static_cast<std::size_t>(count++)] = notch;
+            ++stats_.promotions;
             candidate = Candidate{};
             continue;
         }
 
+        // The rack is full. Cross-band ranking decided which cuts were worth
+        // opening, but a loud high-band howl can still own the bank when a
+        // stronger bass resonance confirms one hop later. Replace the weakest
+        // cut when the confirmed candidate is clearly louder; keep a wide
+        // margin so two similar peaks do not trade places on every pass.
         if (effect_.holdMs <= 0.0f) continue;
+        if (candidate.tonalityDb < 8.0f) continue;
         int replaceIndex = -1;
-        float weakestDepth = 1.0e9f;
+        float weakestLevel = 1.0e9f;
         for (int j = 0; j < count; ++j) {
             const auto& held = next[static_cast<std::size_t>(j)];
-            if (held.holdSamples <= 0 || held.holdSamples > holdSamples_ / 2) continue;
-            if (held.depthDb < weakestDepth) {
-                weakestDepth = held.depthDb;
+            if (held.levelDb < weakestLevel) {
+                weakestLevel = held.levelDb;
                 replaceIndex = j;
             }
         }
-        if (replaceIndex < 0 || candidate.depthDb <= weakestDepth + 6.0f) continue;
+        if (replaceIndex < 0 || candidate.lastLevelDb < weakestLevel + 6.0f) continue;
 
         Notch notch = makeNotchFromCandidate(candidate);
         notch.holdSamples = holdSamples_;
         updateNotchCoefficients(notch);
         next[static_cast<std::size_t>(replaceIndex)] = notch;
+        ++stats_.preemptions;
         candidate = Candidate{};
     }
 
@@ -939,38 +1067,15 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
         reductionDb_ = 0.0f;
         resetAnalysisHighPass();
         resetAnalysisLowPass();
+        resetGate();
         return;
     }
 
-    // Input sensitivity is a hard gate on the block RMS. Below it the detector
-    // stops learning so room noise and converter hiss cannot create a notch.
-    // Existing cuts are still allowed to finish Hold and Release smoothly
-    // instead of disappearing the instant the level dips.
-    double energy = 0.0;
-    for (int i = 0; i < frames; ++i) {
-        energy += static_cast<double>(left[i]) * left[i]
-                + static_cast<double>(right[i]) * right[i];
-    }
-    const float blockRms = static_cast<float>(
-        std::sqrt(energy / (2.0 * static_cast<double>(frames))));
-    const bool detectorOpen = blockRms >= sensitivityLinear_;
-
-    bool hasActiveNotches = false;
-    for (const auto& notch : notches_) {
-        if (notch.active) { hasActiveNotches = true; break; }
-    }
-    if (!detectorOpen && !hasActiveNotches) {
-        if (gateOpen_) closeGate();
-        return;
-    }
-    if (!detectorOpen && gateOpen_) {
-        // The level just fell below the gate. Keep the cuts alive so their
-        // hold/release can run, but discard the detector history so a later
-        // reopen does not analyze stale samples.
-        clearAnalysisHistory();
-    }
-    gateOpen_ = detectorOpen;
-
+    // The detector gate is clocked per sample inside the render loop below.
+    // A block-level RMS test lets a single quiet 64-frame callback near a bass
+    // zero crossing look like silence and throw away the 8192-sample window;
+    // the rolling 50 ms energy sum cannot be fooled that way. Cuts that are
+    // already open still run Hold and Release while the gate is closed.
     const int n = kLowAnalysisSize;
     // Analyze inside large host blocks too. A single 16k-frame call would
     // otherwise finish before the detector ever ran, leaving the first block
@@ -981,6 +1086,39 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
             const int index = start + i;
             const float inL = left[index];
             const float inR = right[index];
+
+            const double instantEnergy = static_cast<double>(inL) * inL
+                                       + static_cast<double>(inR) * inR;
+            gateEnergySum_ -= static_cast<double>(gateEnergy_[static_cast<std::size_t>(gateWrite_)]);
+            gateEnergy_[static_cast<std::size_t>(gateWrite_)] = static_cast<float>(instantEnergy);
+            gateEnergySum_ += instantEnergy;
+            gateWrite_ = (gateWrite_ + 1) % gateWindow_;
+            if (gateFilled_ < gateWindow_) {
+                ++gateFilled_;
+            }
+            if (gateOpen_) {
+                if (gateEnergySum_ < gateCloseEnergy_) {
+                    if (++gateClosedSamples_ >= gateCloseDwell_) {
+                        gateOpen_ = false;
+                        ++stats_.gateCloses;
+                    }
+                } else {
+                    gateClosedSamples_ = 0;
+                }
+            } else if (gateEnergySum_
+                       >= gateOpenEnergy_
+                              * static_cast<double>(gateFilled_)
+                              / static_cast<double>(gateWindow_)) {
+                gateOpen_ = true;
+                gateClosedSamples_ = 0;
+            } else if (++gateClosedSamples_ >= gateResetDwell_) {
+                // A long enough silence means the kept window no longer
+                // describes the room; start clean on the next phrase.
+                clearAnalysisHistory();
+                gateClosedSamples_ = 0;
+                ++stats_.gateResets;
+            }
+
             float xL = inL;
             float xR = inR;
             for (auto& notch : notches_) {
@@ -1010,27 +1148,31 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
             left[index] = xL;
             right[index] = xR;
 
-            // Analysis buffer update (mono mix). While the gate is closed we
-            // do not feed the detector; the cuts are only releasing.
-            if (detectorOpen) {
-                const float mono = 0.5f * (inL + inR);
-                float hp = mono;
-                for (int stage = 0; stage < 4; ++stage) {
-                    const auto s = static_cast<std::size_t>(stage);
-                    const float y = hpB0_[s] * hp + hpZ1_[s];
-                    hpZ1_[s] = hpB1_[s] * hp - hpA1_[s] * y + hpZ2_[s];
-                    hpZ2_[s] = hpB2_[s] * hp - hpA2_[s] * y;
-                    hp = y;
+            // Analysis buffer update. Each channel keeps its own filtered
+            // history: the low band compares per-channel power, so feedback
+            // that is inverted between L and R still shows up. The high band
+            // derives its mono view from the same two rings.
+            if (gateOpen_) {
+                for (int channel = 0; channel < 2; ++channel) {
+                    const auto c = static_cast<std::size_t>(channel);
+                    float hp = channel == 0 ? inL : inR;
+                    for (int stage = 0; stage < 4; ++stage) {
+                        const auto s = static_cast<std::size_t>(stage);
+                        const float y = hpB0_[s] * hp + hpZ1_[c][s];
+                        hpZ1_[c][s] = hpB1_[s] * hp - hpA1_[s] * y + hpZ2_[c][s];
+                        hpZ2_[c][s] = hpB2_[s] * hp - hpA2_[s] * y;
+                        hp = y;
+                    }
+                    float lp = hp;
+                    for (int stage = 0; stage < 4; ++stage) {
+                        const auto s = static_cast<std::size_t>(stage);
+                        const float y = lpB0_[s] * lp + lpZ1_[c][s];
+                        lpZ1_[c][s] = lpB1_[s] * lp - lpA1_[s] * y + lpZ2_[c][s];
+                        lpZ2_[c][s] = lpB2_[s] * lp - lpA2_[s] * y;
+                        lp = y;
+                    }
+                    analysisBuffer_[c][static_cast<std::size_t>(analysisWrite_)] = lp;
                 }
-                float lp = hp;
-                for (int stage = 0; stage < 4; ++stage) {
-                    const auto s = static_cast<std::size_t>(stage);
-                    const float y = lpB0_[s] * lp + lpZ1_[s];
-                    lpZ1_[s] = lpB1_[s] * lp - lpA1_[s] * y + lpZ2_[s];
-                    lpZ2_[s] = lpB2_[s] * lp - lpA2_[s] * y;
-                    lp = y;
-                }
-                analysisBuffer_[analysisWrite_] = lp;
                 analysisWrite_ = (analysisWrite_ + 1) % n;
                 if (analysisCount_ < n) ++analysisCount_;
             }
@@ -1042,15 +1184,17 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
         }
 
         framesSinceAnalysis_ += chunk;
-        if (detectorOpen) {
+        if (gateOpen_) {
             if (analysisCount_ >= kHighAnalysisSize && framesSinceAnalysis_ >= kAnalysisInterval) {
                 analyze();
                 framesSinceAnalysis_ = 0;
             }
         } else if (framesSinceAnalysis_ >= kAnalysisInterval) {
             // No new detections: advance hold/release on the surviving cuts.
+            // Candidates are frozen, not aged, because the kept history is
+            // still valid and only the level dipped.
             detections_.clear();
-            updateNotches(detections_);
+            updateNotches(detections_, false);
             framesSinceAnalysis_ = 0;
         }
     }

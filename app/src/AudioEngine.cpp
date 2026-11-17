@@ -38,6 +38,17 @@
 #endif
 
 namespace {
+template <typename Effect, typename MakeDefault>
+void resetEffectsPreservingBypass(std::vector<Effect>& effects, MakeDefault makeDefault) {
+    for (auto& effect : effects) {
+        const auto id = effect.id;
+        const bool bypassed = effect.bypassed;
+        auto fresh = makeDefault(id);
+        fresh.bypassed = bypassed;
+        effect = fresh;
+    }
+}
+
 // A loopback either answers inside this window or the hunt is abandoned.
 constexpr std::uint32_t kLatencyMeasureTimeoutMs = 3000;
 
@@ -2245,6 +2256,190 @@ void AudioEngine::setOutputFeedbackSuppressors(std::uint32_t outputId, const std
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
     syncNewEffects(output, effects, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, currentSampleRate);
+}
+
+void AudioEngine::resetChannelBuiltIn(std::uint32_t channelId, pluginrack::ChainItemType type) {
+    if (type == pluginrack::ChainItemType::Eq) {
+        setChannelEq(channelId, pluginrack::defaultEqBands());
+        setChannelEqDelay(channelId, 0.0f);
+        setChannelEqPhaseFlip(channelId, false);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Dynamics) {
+        std::vector<pluginrack::DynamicsEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* channel = findChannel(channelId);
+            if (channel == nullptr) return;
+            effects = channel->effects;
+        }
+        const auto defaults = pluginrack::defaultDynamicsEffects();
+        for (auto& effect : effects) {
+            const auto found = std::find_if(defaults.begin(), defaults.end(),
+                                            [&effect](const auto& candidate) {
+                                                return candidate.type == effect.type;
+                                            });
+            if (found == defaults.end()) continue;
+            auto fresh = *found;
+            fresh.id = effect.id;
+            fresh.bypassed = effect.bypassed;
+            effect = fresh;
+        }
+        setChannelEffects(channelId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Multiband) {
+        std::vector<pluginrack::MultibandEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* channel = findChannel(channelId);
+            if (channel == nullptr) return;
+            effects = channel->multibandEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultMultibandEffect(id);
+        });
+        setChannelMultiband(channelId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::DeEsser) {
+        std::vector<pluginrack::DeEsserEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* channel = findChannel(channelId);
+            if (channel == nullptr) return;
+            effects = channel->deEsserEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultDeEsserEffect(id);
+        });
+        setChannelDeEssers(channelId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Limiter) {
+        std::vector<pluginrack::LimiterEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* channel = findChannel(channelId);
+            if (channel == nullptr) return;
+            effects = channel->limiterEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultLimiterEffect(id);
+        });
+        setChannelLimiters(channelId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        std::vector<pluginrack::FeedbackSuppressorEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* channel = findChannel(channelId);
+            if (channel == nullptr) return;
+            effects = channel->feedbackSuppressorEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultFeedbackSuppressorEffect(id);
+        });
+        setChannelFeedbackSuppressors(channelId, effects);
+    }
+}
+
+void AudioEngine::resetOutputBuiltIn(std::uint32_t outputId, pluginrack::ChainItemType type) {
+    if (type == pluginrack::ChainItemType::Eq) {
+        setOutputEq(outputId, pluginrack::defaultEqBands());
+        setOutputEqDelay(outputId, 0.0f);
+        setOutputEqPhaseFlip(outputId, false);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Dynamics) {
+        std::vector<pluginrack::DynamicsEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* output = findOutput(outputId);
+            if (output == nullptr) return;
+            effects = output->effects;
+        }
+        const auto defaults = pluginrack::defaultDynamicsEffects();
+        for (auto& effect : effects) {
+            const auto found = std::find_if(defaults.begin(), defaults.end(),
+                                            [&effect](const auto& candidate) {
+                                                return candidate.type == effect.type;
+                                            });
+            if (found == defaults.end()) continue;
+            auto fresh = *found;
+            fresh.id = effect.id;
+            fresh.bypassed = effect.bypassed;
+            effect = fresh;
+        }
+        setOutputEffects(outputId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Multiband) {
+        std::vector<pluginrack::MultibandEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* output = findOutput(outputId);
+            if (output == nullptr) return;
+            effects = output->multibandEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultMultibandEffect(id);
+        });
+        setOutputMultiband(outputId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::DeEsser) {
+        std::vector<pluginrack::DeEsserEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* output = findOutput(outputId);
+            if (output == nullptr) return;
+            effects = output->deEsserEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultDeEsserEffect(id);
+        });
+        setOutputDeEssers(outputId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::Limiter) {
+        std::vector<pluginrack::LimiterEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* output = findOutput(outputId);
+            if (output == nullptr) return;
+            effects = output->limiterEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultLimiterEffect(id);
+        });
+        setOutputLimiters(outputId, effects);
+        return;
+    }
+
+    if (type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        std::vector<pluginrack::FeedbackSuppressorEffect> effects;
+        {
+            const juce::ScopedLock lock(stateLock);
+            auto* output = findOutput(outputId);
+            if (output == nullptr) return;
+            effects = output->feedbackSuppressorEffects;
+        }
+        resetEffectsPreservingBypass(effects, [](std::uint32_t id) {
+            return pluginrack::makeDefaultFeedbackSuppressorEffect(id);
+        });
+        setOutputFeedbackSuppressors(outputId, effects);
+    }
 }
 
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {

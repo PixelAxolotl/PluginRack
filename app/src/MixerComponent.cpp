@@ -178,6 +178,7 @@ void MixerComponent::OutputStrip::openMultibandWindow() {
         multibandWindow->toFront(true);
         return;
     }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::Multiband);
     if (output.multibandEffects.empty()) {
         auto effects = output.multibandEffects;
         effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
@@ -220,6 +221,7 @@ void MixerComponent::OutputStrip::openDeEsserWindow() {
         deEsserWindow->toFront(true);
         return;
     }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::DeEsser);
     if (output.deEsserEffects.empty()) {
         auto effects = output.deEsserEffects;
         effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
@@ -262,6 +264,7 @@ void MixerComponent::OutputStrip::openLimiterWindow() {
         limiterWindow->toFront(true);
         return;
     }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::Limiter);
     if (output.limiterEffects.empty()) {
         auto effects = output.limiterEffects;
         effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
@@ -293,6 +296,7 @@ void MixerComponent::OutputStrip::openLimiterWindow() {
 
 void MixerComponent::OutputStrip::openFeedbackSuppressorWindow() {
     if (feedbackSuppressorWindow != nullptr) { feedbackSuppressorWindow->toFront(true); return; }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::FeedbackSuppressor);
     if (output.feedbackSuppressorEffects.empty()) {
         auto effects = output.feedbackSuppressorEffects;
         effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
@@ -352,6 +356,7 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
         dynamicsWindow->toFront(true);
         return;
     }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::Dynamics);
     juce::Component::SafePointer<OutputStrip> safe(this);
     const auto outputId = output.id;
     auto it = std::find_if(output.effects.begin(), output.effects.end(),
@@ -394,6 +399,7 @@ void MixerComponent::OutputStrip::openEqWindow() {
         eqWindow->toFront(true);
         return;
     }
+    audioEngine.resetOutputBuiltIn(output.id, pluginrack::ChainItemType::Eq);
     const std::uint32_t outputId = output.id;
     juce::Component::SafePointer<OutputStrip> safe(this);
     // Live device rate for the curve's magnitude maths (see ChannelStrip).

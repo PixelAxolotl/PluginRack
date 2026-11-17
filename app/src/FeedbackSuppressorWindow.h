@@ -102,6 +102,7 @@ private:
     FeedbackSuppressorGraph graph;
     FeedbackSuppressorMeter inputMeter{"IN"};
     FeedbackSuppressorMeter outputMeter{"OUT"};
+    juce::Label infoLabel;
     juce::Label analyzerLabel{"", "Analyzer"};
     juce::Label rtaOffsetLabel{"", "0"};
     MiniButton rtaMinusButton{"-"};
