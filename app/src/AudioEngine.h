@@ -684,6 +684,12 @@ public:
     bool takeOutputDenoiserLearnedProfile(std::uint32_t outputId, std::uint32_t effectId,
                                           std::vector<float>& profile, double& sampleRate);
 
+    // Live gain reduction per trim band for the denoiser editor meter.
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>
+    getChannelDenoiserBandReduction(std::uint32_t channelId, std::uint32_t effectId);
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>
+    getOutputDenoiserBandReduction(std::uint32_t outputId, std::uint32_t effectId);
+
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<AuxBus>>& getAuxBuses() const;

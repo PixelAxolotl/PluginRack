@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -102,6 +103,15 @@ public:
         return currentReductionDb_.load(std::memory_order_relaxed);
     }
 
+    // Live reduction per profile-trim band, matching what the editor draws.
+    // Bands run low to high frequency; values are 0..40 dB.
+    float bandReductionDb(int band) const noexcept {
+        if (band < 0 || band >= kSpectralDenoiserTrimBandCount) {
+            return 0.0f;
+        }
+        return bandReductionDb_[static_cast<std::size_t>(band)].load(std::memory_order_relaxed);
+    }
+
 private:
     void rebuildNoiseFromProfile();
     void rebuildTrimGains();
@@ -142,6 +152,7 @@ private:
     std::atomic<bool> learning_{false};
     std::atomic<bool> profileReady_{false};
     std::atomic<float> currentReductionDb_{0.0f};
+    std::array<std::atomic<float>, kSpectralDenoiserTrimBandCount> bandReductionDb_{};
 };
 
 } // namespace pluginrack

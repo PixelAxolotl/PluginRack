@@ -74,6 +74,11 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
     profileReady_.store(other.profileReady_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     currentReductionDb_.store(other.currentReductionDb_.load(std::memory_order_relaxed),
                               std::memory_order_relaxed);
+    for (std::size_t band = 0; band < bandReductionDb_.size(); ++band) {
+        bandReductionDb_[band].store(
+            other.bandReductionDb_[band].load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
     return *this;
 }
 
@@ -187,6 +192,9 @@ void SpectralDenoiserProcessor::reset() noexcept {
     learning_.store(false, std::memory_order_relaxed);
     profileReady_.store(false, std::memory_order_relaxed);
     currentReductionDb_.store(0.0f, std::memory_order_relaxed);
+    for (auto& band : bandReductionDb_) {
+        band.store(0.0f, std::memory_order_relaxed);
+    }
     if (!noise_.empty() && !effect_.hasProfile()) {
         std::fill(noise_.begin(), noise_.end(), 0.0f);
         noiseSeeded_ = false;
@@ -354,13 +362,26 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     }
 
     float minimumGain = 1.0f;
+    std::array<float, kSpectralDenoiserTrimBandCount> bandGain{};
+    bandGain.fill(1.0f);
     for (std::size_t k = 0; k < bins; ++k) {
         const float target = std::clamp(frequencyGain_[k], 0.0f, 1.0f);
         const float coeff = target < smoothGain_[k] ? attackCoeff_ : releaseCoeff_;
         smoothGain_[k] += coeff * (target - smoothGain_[k]);
         minimumGain = std::min(minimumGain, smoothGain_[k]);
+        const int band = spectralDenoiserTrimBand(
+            static_cast<double>(k) * sampleRate_ / kSpectralDenoiserFftSize,
+            sampleRate_ * 0.5);
+        bandGain[static_cast<std::size_t>(band)] =
+            std::min(bandGain[static_cast<std::size_t>(band)], smoothGain_[k]);
     }
     currentReductionDb_.store(-dsp::gainToDb(minimumGain), std::memory_order_relaxed);
+    for (std::size_t band = 0; band < bandGain.size(); ++band) {
+        const float reduction = std::clamp(-dsp::gainToDb(bandGain[band]),
+                                           kSpectralDenoiserMinReductionDb,
+                                           kSpectralDenoiserMaxReductionDb);
+        bandReductionDb_[band].store(reduction, std::memory_order_relaxed);
+    }
 
     for (std::size_t k = 0; k < bins; ++k) {
         reLeft_[k] *= smoothGain_[k];

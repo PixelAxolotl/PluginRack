@@ -9,6 +9,9 @@ namespace {
 
 constexpr float kPlotFloorDb = -80.0f;
 constexpr float kPlotCeilingDb = 6.0f;
+constexpr float kMeterHeight = 64.0f;
+constexpr float kMeterGap = 10.0f;
+constexpr float kMeterFloorDb = 40.0f;
 
 } // namespace
 
@@ -19,6 +22,18 @@ SpectralDenoiserProfileView::SpectralDenoiserProfileView(
     setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
 }
 
+void SpectralDenoiserProfileView::setReduction(
+    const std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>& bands) {
+    float change = 0.0f;
+    for (std::size_t band = 0; band < bands.size(); ++band) {
+        change = std::max(change, std::abs(bands[band] - reductionDb[band]));
+    }
+    reductionDb = bands;
+    if (change >= 0.05f) {
+        repaint();
+    }
+}
+
 void SpectralDenoiserProfileView::ensureTrims() {
     if (effect.profileTrimDb.size()
         != static_cast<std::size_t>(pluginrack::kSpectralDenoiserTrimBandCount)) {
@@ -27,7 +42,14 @@ void SpectralDenoiserProfileView::ensureTrims() {
 }
 
 juce::Rectangle<float> SpectralDenoiserProfileView::plotArea() const {
-    return getLocalBounds().toFloat().reduced(8.0f, 20.0f);
+    auto area = getLocalBounds().toFloat().reduced(8.0f, 20.0f);
+    area.removeFromBottom(kMeterHeight + kMeterGap);
+    return area;
+}
+
+juce::Rectangle<float> SpectralDenoiserProfileView::meterArea() const {
+    auto area = getLocalBounds().toFloat().reduced(8.0f, 20.0f);
+    return area.removeFromBottom(kMeterHeight);
 }
 
 float SpectralDenoiserProfileView::frequencyForBin(std::size_t bin) const {
@@ -167,6 +189,66 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
         g.drawText("After trim", legend.withTrimmedLeft(84),
                    juce::Justification::topLeft, false);
     }
+
+    // Live gain reduction, one bar per trim band, with the envelope shaded so
+    // the shape of the cut reads at a glance.
+    const auto meter = meterArea();
+    g.setColour(theme::control().darker(0.35f));
+    g.fillRoundedRectangle(meter, 3.0f);
+    g.setColour(theme::line().withAlpha(0.35f));
+    g.drawRoundedRectangle(meter.reduced(0.5f), 3.0f, 1.0f);
+
+    auto yForReduction = [&meter](float db) {
+        const float position = juce::jlimit(0.0f, 1.0f, db / kMeterFloorDb);
+        return meter.getBottom() - position * meter.getHeight();
+    };
+    for (const float db : {0.0f, 12.0f, 24.0f, 40.0f}) {
+        g.setColour(theme::line().withAlpha(db == 0.0f ? 0.5f : 0.25f));
+        g.drawHorizontalLine(static_cast<int>(std::lround(yForReduction(db))),
+                             meter.getX(), meter.getRight());
+    }
+
+    const double trimLow = pluginrack::kSpectralDenoiserTrimLowHz;
+    juce::Path envelope;
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> centres{};
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        const double lowPosition = static_cast<double>(band)
+            / pluginrack::kSpectralDenoiserTrimBandCount;
+        const double highPosition = static_cast<double>(band + 1)
+            / pluginrack::kSpectralDenoiserTrimBandCount;
+        const float left = xForFrequency(
+            static_cast<float>(trimLow * std::pow(nyquist / trimLow, lowPosition)));
+        const float right = xForFrequency(
+            static_cast<float>(trimLow * std::pow(nyquist / trimLow, highPosition)));
+        const float x = 0.5f * (left + right);
+        centres[static_cast<std::size_t>(band)] = x;
+        const float value = reductionDb[static_cast<std::size_t>(band)];
+        const float top = yForReduction(value);
+        const float barWidth = std::max(right - left - 1.5f, 1.5f);
+        g.setColour(theme::cyan().withAlpha(0.30f + 0.5f * (value / kMeterFloorDb)));
+        g.fillRoundedRectangle(left + 0.75f, top,
+                               barWidth, meter.getBottom() - top,
+                               1.0f);
+        if (band == 0) envelope.startNewSubPath(x, top);
+        else envelope.lineTo(x, top);
+    }
+
+    if (effect.hasProfile() || effect.mode == pluginrack::SpectralDenoiserMode::Adaptive) {
+        envelope.lineTo(centres.back(), meter.getBottom());
+        envelope.lineTo(centres.front(), meter.getBottom());
+        envelope.closeSubPath();
+        g.setColour(theme::orange().withAlpha(0.16f));
+        g.fillPath(envelope);
+    }
+
+    g.setFont(juce::Font(juce::FontOptions(9.0f)));
+    g.setColour(theme::dim());
+    g.drawText("GR", meter.reduced(5, 2).removeFromTop(10),
+               juce::Justification::topLeft, false);
+    g.drawText("0", meter.reduced(5, 1).removeFromTop(10),
+               juce::Justification::topRight, false);
+    g.drawText("-40 dB", meter.reduced(5, 1).removeFromBottom(10),
+               juce::Justification::bottomRight, false);
 }
 
 void SpectralDenoiserProfileView::mouseDown(const juce::MouseEvent& e) {
@@ -293,7 +375,7 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
 
     refreshStatus();
     setVisible(true);
-    startTimer(100);
+    startTimer(50);
 }
 
 void SpectralDenoiserWindow::startLearning() {
@@ -334,6 +416,14 @@ void SpectralDenoiserWindow::refreshStatus() {
 }
 
 void SpectralDenoiserWindow::timerCallback() {
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> bands{};
+    if (!effect.bypassed) {
+        bands = outputStrip
+            ? audioEngine.getOutputDenoiserBandReduction(targetId, effect.id)
+            : audioEngine.getChannelDenoiserBandReduction(targetId, effect.id);
+    }
+    profileView.setReduction(bands);
+
     if (!learning) return;
 
     const float progress = outputStrip

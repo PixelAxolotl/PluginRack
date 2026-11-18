@@ -5,17 +5,21 @@
 #include "Theme.h"
 #include "ValueEditSlider.h"
 
+#include <array>
+
 class AudioEngine;
 
 // Draws the learned noise profile and lets the user shape it with one trim per
 // log-spaced band. The spectrum uses the profile's own sample rate so it stays
-// correct after the scene is reopened at a different rate.
+// correct after the scene is reopened at a different rate. A meter strip below
+// the curve shows the live gain reduction per band.
 class SpectralDenoiserProfileView final : public juce::Component {
 public:
     explicit SpectralDenoiserProfileView(pluginrack::SpectralDenoiserEffect& effectToEdit);
 
     std::function<void()> onTrimEdited;
 
+    void setReduction(const std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>& bands);
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
@@ -25,12 +29,14 @@ private:
     void ensureTrims();
     int bandAt(int x) const;
     juce::Rectangle<float> plotArea() const;
+    juce::Rectangle<float> meterArea() const;
     float frequencyForBin(std::size_t bin) const;
     float frequencyForBandCentre(int band) const;
     float xForFrequency(float hz) const;
     float trimPixelsPerDb() const;
 
     pluginrack::SpectralDenoiserEffect& effect;
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> reductionDb{};
     int dragBand = -1;
     float dragStartTrim = 0.0f;
     int dragStartY = 0;
@@ -46,7 +52,7 @@ public:
     using ApplyCallback = std::function<void(const pluginrack::SpectralDenoiserEffect&, bool bypassChanged)>;
 
     static constexpr int kWidth = theme::ui::kEffectWindowW;
-    static constexpr int kHeight = 520;
+    static constexpr int kHeight = 600;
 
     SpectralDenoiserWindow(const juce::String& title,
                            const pluginrack::SpectralDenoiserEffect& initialEffect,

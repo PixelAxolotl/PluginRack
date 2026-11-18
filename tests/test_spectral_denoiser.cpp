@@ -200,6 +200,42 @@ TEST_CASE("spectral denoiser reduces steady noise") {
     REQUIRE(processor.currentReductionDb() > 6.0f);
 }
 
+TEST_CASE("spectral denoiser publishes band gain reduction") {
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.reductionDb = 24.0f;
+    effect.mode = pluginrack::SpectralDenoiserMode::Adaptive;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    auto input = noise(96000, 0x13572468u);
+    for (auto& sample : input) {
+        sample *= 0.1f;
+    }
+    auto left = input;
+    auto right = input;
+    processInBlocks(processor, left, right);
+
+    float peak = 0.0f;
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        const float reduction = processor.bandReductionDb(band);
+        REQUIRE(std::isfinite(reduction));
+        REQUIRE(reduction >= 0.0f);
+        REQUIRE(reduction <= pluginrack::kSpectralDenoiserMaxReductionDb);
+        peak = std::max(peak, reduction);
+    }
+    REQUIRE(peak > 6.0f);
+
+    // Out-of-range bands read as silence rather than touching memory.
+    REQUIRE(processor.bandReductionDb(-1) == 0.0f);
+    REQUIRE(processor.bandReductionDb(pluginrack::kSpectralDenoiserTrimBandCount) == 0.0f);
+
+    processor.reset();
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        REQUIRE(processor.bandReductionDb(band) == 0.0f);
+    }
+}
+
 TEST_CASE("spectral denoiser learns a noise profile") {
     auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
     effect.mode = pluginrack::SpectralDenoiserMode::Learn;

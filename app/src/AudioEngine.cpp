@@ -2354,6 +2354,38 @@ bool AudioEngine::takeOutputDenoiserLearnedProfile(std::uint32_t outputId, std::
         && output->spectralDenoiserProcessors[index].takeLearnedProfile(profile, sampleRate);
 }
 
+std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>
+AudioEngine::getChannelDenoiserBandReduction(std::uint32_t channelId, std::uint32_t effectId) {
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> bands{};
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return bands;
+    const auto index = denoiserIndex(channel->spectralDenoiserEffects,
+                                     channel->spectralDenoiserProcessors, effectId);
+    if (index >= channel->spectralDenoiserProcessors.size()) return bands;
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        bands[static_cast<std::size_t>(band)] =
+            channel->spectralDenoiserProcessors[index].bandReductionDb(band);
+    }
+    return bands;
+}
+
+std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>
+AudioEngine::getOutputDenoiserBandReduction(std::uint32_t outputId, std::uint32_t effectId) {
+    std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> bands{};
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return bands;
+    const auto index = denoiserIndex(output->spectralDenoiserEffects,
+                                     output->spectralDenoiserProcessors, effectId);
+    if (index >= output->spectralDenoiserProcessors.size()) return bands;
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        bands[static_cast<std::size_t>(band)] =
+            output->spectralDenoiserProcessors[index].bandReductionDb(band);
+    }
+    return bands;
+}
+
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
         if (route->channelId == channelId && route->outputId == outputId) {
