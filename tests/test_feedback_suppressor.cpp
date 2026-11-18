@@ -1143,6 +1143,43 @@ void mixInto(std::vector<float>& target, const std::vector<float>& other) {
 }
 } // namespace
 
+TEST_CASE("feedback suppressor protects upper partials of a harmonic stack") {
+constexpr int frames = 48000 * 2;
+constexpr std::array<float, 6> frequencies{140.0f, 280.0f, 420.0f,
+560.0f, 700.0f, 840.0f};
+constexpr std::array<float, 6> amplitudes{0.24f, 0.16f, 0.12f,
+0.09f, 0.07f, 0.05f};
+std::vector<float> left(static_cast<std::size_t>(frames), 0.0f);
+for (std::size_t partial = 0; partial < frequencies.size(); ++partial) {
+mixInto(left, sine(frequencies[partial], amplitudes[partial], frames));
+}
+auto right = left;
+
+pluginrack::FeedbackSuppressorProcessor processor;
+processor.prepare(kProbeRate);
+processor.setEffect(pinnedLowFrequencyEffect(8));
+for (std::size_t offset = 0; offset < left.size(); offset += 512) {
+const int count = static_cast<int>(std::min<std::size_t>(512, left.size() - offset));
+processor.process(left.data() + offset, right.data() + offset, count);
+}
+
+std::array<float, 8> notches{};
+const int count = processor.copyActiveNotches(notches.data(),
+static_cast<int>(notches.size()));
+const auto hasNotchNear = [&notches, count](float hz) {
+for (int i = 0; i < count; ++i) {
+if (std::fabs(notches[static_cast<std::size_t>(i)] - hz) < 10.0f) return true;
+}
+return false;
+};
+
+REQUIRE(hasNotchNear(frequencies[0]));
+for (std::size_t partial = 1; partial < frequencies.size(); ++partial) {
+INFO("upper partial " << frequencies[partial] << " Hz");
+REQUIRE_FALSE(hasNotchNear(frequencies[partial]));
+}
+}
+
 TEST_CASE("feedback suppressor cuts a 68 Hz tone within 300 ms") {
     auto tone = sine(68.0f, 0.22f, 48000);
     const auto run = runProbe(tone, tone, 512, 8, 68.0f);

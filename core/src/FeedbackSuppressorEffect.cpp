@@ -804,6 +804,41 @@ void FeedbackSuppressorProcessor::updateNotches(
         return std::clamp(frequencyHz * 0.03f, bin * 1.1f, bin * 1.5f);
     };
 
+    const int detectionCount = std::min(static_cast<int>(detections.size()), kMaxNotches);
+    std::array<bool, kMaxNotches> protectedPartials{};
+    for (int fundamentalIndex = 0; fundamentalIndex < detectionCount; ++fundamentalIndex) {
+        const auto& fundamental = detections[static_cast<std::size_t>(fundamentalIndex)];
+        if (fundamental.freq < 70.0f || fundamental.freq > 500.0f) continue;
+
+        std::array<bool, kMaxNotches> matchingPartials{};
+        int matchedHarmonics = 0;
+        for (int harmonic = 2; harmonic <= 8; ++harmonic) {
+            const float expectedHz = fundamental.freq * static_cast<float>(harmonic);
+            int closestIndex = -1;
+            float closestDistance = 1.0e9f;
+            for (int partialIndex = 0; partialIndex < detectionCount; ++partialIndex) {
+                if (partialIndex == fundamentalIndex) continue;
+                const auto& partial = detections[static_cast<std::size_t>(partialIndex)];
+                const float distance = std::fabs(partial.freq - expectedHz);
+                if (distance > matchTolerance(expectedHz, partial.binWidthHz)
+                    || distance >= closestDistance) continue;
+                closestIndex = partialIndex;
+                closestDistance = distance;
+            }
+            if (closestIndex >= 0) {
+                matchingPartials[static_cast<std::size_t>(closestIndex)] = true;
+                ++matchedHarmonics;
+            }
+        }
+
+        if (matchedHarmonics < 2) continue;
+        for (int partialIndex = 0; partialIndex < detectionCount; ++partialIndex) {
+            if (matchingPartials[static_cast<std::size_t>(partialIndex)]) {
+                protectedPartials[static_cast<std::size_t>(partialIndex)] = true;
+            }
+        }
+    }
+
     // A new frequency must survive several detector passes before it earns a
     // cut. This is the main defence against short voice peaks and musical
     // transients. One or two missed hops are tolerated so a single noisy FFT
@@ -831,8 +866,8 @@ void FeedbackSuppressorProcessor::updateNotches(
     // Keep existing cuts first. A detection that lands on an active cut only
     // refreshes its Hold and depth; its frequency glides toward the detection
     // instead of hard-locking to the first estimate.
-    const int detectionCount = std::min(static_cast<int>(detections.size()), kMaxNotches);
     for (int p = 0; p < detectionCount && count < maxCuts; ++p) {
+        if (protectedPartials[static_cast<std::size_t>(p)]) continue;
         const auto& detection = detections[static_cast<std::size_t>(p)];
         const float tolerance = matchTolerance(detection.freq, detection.binWidthHz);
         bool matched = false;
@@ -977,6 +1012,17 @@ void FeedbackSuppressorProcessor::updateNotches(
     // authoritative.
     for (int i = 0; i < kMaxNotches; ++i) {
         auto& candidate = candidates_[static_cast<std::size_t>(i)];
+        bool isProtectedPartial = false;
+        for (int p = 0; p < detectionCount; ++p) {
+            if (!protectedPartials[static_cast<std::size_t>(p)]) continue;
+            const auto& partial = detections[static_cast<std::size_t>(p)];
+            if (std::fabs(candidate.freq - partial.freq)
+                <= matchTolerance(candidate.freq, candidate.binWidthHz)) {
+                isProtectedPartial = true;
+                break;
+            }
+        }
+        if (isProtectedPartial) continue;
         if (!candidateIsEligible(candidate)) {
             if (candidate.hits > 0 && candidate.lastSeenPass == analysisPass_) {
                 ++stats_.candidateRejections;
