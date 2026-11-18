@@ -319,6 +319,9 @@ void to_json(nlohmann::json& j, const SpectralDenoiserEffect& effect) {
                        {"reductionDb", effect.reductionDb},
                        {"profileSampleRate", effect.profileSampleRate},
                        {"noiseProfile", effect.noiseProfile}};
+    if (!effect.profileTrimDb.empty()) {
+        j["profileTrimDb"] = effect.profileTrimDb;
+    }
 }
 
 void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
@@ -329,6 +332,7 @@ void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
     effect.reductionDb = j.value("reductionDb", effect.reductionDb);
     effect.profileSampleRate = j.value("profileSampleRate", 0.0);
     if (j.contains("noiseProfile")) j.at("noiseProfile").get_to(effect.noiseProfile);
+    if (j.contains("profileTrimDb")) j.at("profileTrimDb").get_to(effect.profileTrimDb);
 }
 
 void to_json(nlohmann::json& j, DynamicsEffectType type) {

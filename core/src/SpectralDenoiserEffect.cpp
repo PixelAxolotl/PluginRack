@@ -55,6 +55,7 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
     reRight_ = other.reRight_;
     imRight_ = other.imRight_;
     noise_ = other.noise_;
+    trimGain_ = other.trimGain_;
     rawGain_ = other.rawGain_;
     frequencyGain_ = other.frequencyGain_;
     smoothGain_ = other.smoothGain_;
@@ -102,6 +103,7 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
     reRight_.assign(fftSize, 0.0f);
     imRight_.assign(fftSize, 0.0f);
     noise_.assign(bins, 0.0f);
+    trimGain_.assign(bins, 1.0f);
     rawGain_.assign(bins, 1.0f);
     frequencyGain_.assign(bins, 1.0f);
     smoothGain_.assign(bins, 1.0f);
@@ -115,6 +117,7 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
 
     prepared_ = true;
     rebuildNoiseFromProfile();
+    rebuildTrimGains();
     reset();
 }
 
@@ -122,6 +125,7 @@ void SpectralDenoiserProcessor::setEffect(const SpectralDenoiserEffect& effect) 
     effect_ = effect;
     if (prepared_) {
         rebuildNoiseFromProfile();
+        rebuildTrimGains();
     }
 }
 
@@ -148,6 +152,22 @@ void SpectralDenoiserProcessor::rebuildNoiseFromProfile() {
         noise_[k] = a + (b - a) * fraction;
     }
     noiseSeeded_ = true;
+}
+
+void SpectralDenoiserProcessor::rebuildTrimGains() {
+    const auto bins = static_cast<std::size_t>(kSpectralDenoiserBinCount);
+    trimGain_.assign(bins, 1.0f);
+    if (effect_.profileTrimDb.size()
+        != static_cast<std::size_t>(kSpectralDenoiserTrimBandCount)) {
+        return;
+    }
+    const double nyquist = sampleRate_ * 0.5;
+    for (std::size_t k = 0; k < bins; ++k) {
+        const double frequency = static_cast<double>(k) * sampleRate_
+            / static_cast<double>(kSpectralDenoiserFftSize);
+        const int band = spectralDenoiserTrimBand(frequency, nyquist);
+        trimGain_[k] = dsp::dbToGain(spectralDenoiserTrimDb(effect_.profileTrimDb, band));
+    }
 }
 
 void SpectralDenoiserProcessor::reset() noexcept {
@@ -303,7 +323,7 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
             continue;
         }
 
-        const float noisePower = std::max(noise_[k], kSilencePower);
+        const float noisePower = std::max(noise_[k], kSilencePower) * trimGain_[k];
         const float snr = std::max(0.0f, power / noisePower - 1.0f);
         const float wiener = snr / (snr + 1.0f);
         rawGain_[k] = floorGain + (1.0f - floorGain) * wiener;

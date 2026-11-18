@@ -208,6 +208,23 @@ void validateSpectralDenoisers(const char* kind, std::uint32_t id,
                               std::string(kind) + " " + std::to_string(id) +
                                   " spectral denoiser reductionDb out of range [0, 40]"});
         }
+        if (!e.profileTrimDb.empty()
+            && e.profileTrimDb.size()
+                != static_cast<std::size_t>(kSpectralDenoiserTrimBandCount)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser profile trim must have 32 bands"});
+        } else {
+            for (float trim : e.profileTrimDb) {
+                if (!std::isfinite(trim) || trim < kSpectralDenoiserMinTrimDb
+                    || trim > kSpectralDenoiserMaxTrimDb) {
+                    errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                                      std::string(kind) + " " + std::to_string(id) +
+                                          " spectral denoiser profile trim out of range"});
+                    break;
+                }
+            }
+        }
         const bool hasProfile = !e.noiseProfile.empty() || e.profileSampleRate > 0.0;
         if (!hasProfile) {
             continue;

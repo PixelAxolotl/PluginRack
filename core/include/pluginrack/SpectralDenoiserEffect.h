@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -15,6 +17,34 @@ inline constexpr float kSpectralDenoiserMinReductionDb = 0.0f;
 inline constexpr float kSpectralDenoiserMaxReductionDb = 40.0f;
 inline constexpr float kSpectralDenoiserDefaultReductionDb = 12.0f;
 inline constexpr float kSpectralDenoiserMinSampleRate = 8000.0f;
+inline constexpr int kSpectralDenoiserTrimBandCount = 32;
+inline constexpr float kSpectralDenoiserMinTrimDb = -18.0f;
+inline constexpr float kSpectralDenoiserMaxTrimDb = 18.0f;
+inline constexpr float kSpectralDenoiserTrimLowHz = 20.0f;
+
+// Maps a frequency onto one of the log-spaced profile-trim bands. The editor
+// and the processor share this so a dragged band covers exactly what is cut.
+inline int spectralDenoiserTrimBand(double frequencyHz, double nyquistHz) noexcept {
+    if (!(frequencyHz > kSpectralDenoiserTrimLowHz)
+        || !(nyquistHz > kSpectralDenoiserTrimLowHz)) {
+        return 0;
+    }
+    const double span = std::log(nyquistHz / kSpectralDenoiserTrimLowHz);
+    const double position = std::log(frequencyHz / kSpectralDenoiserTrimLowHz) / span;
+    const int band = static_cast<int>(position * kSpectralDenoiserTrimBandCount);
+    if (band < 0) {
+        return 0;
+    }
+    return band >= kSpectralDenoiserTrimBandCount ? kSpectralDenoiserTrimBandCount - 1 : band;
+}
+
+inline float spectralDenoiserTrimDb(const std::vector<float>& trims, int band) noexcept {
+    if (band < 0 || band >= kSpectralDenoiserTrimBandCount
+        || trims.size() != static_cast<std::size_t>(kSpectralDenoiserTrimBandCount)) {
+        return 0.0f;
+    }
+    return trims[static_cast<std::size_t>(band)];
+}
 
 enum class SpectralDenoiserMode {
     Learn = 0,   // use the captured noise profile without tracking
@@ -29,6 +59,9 @@ struct SpectralDenoiserEffect {
     // Learned noise power per FFT bin (0..Nyquist). Empty when never learned.
     std::vector<float> noiseProfile;
     double profileSampleRate = 0.0;
+    // Optional per-band offset applied to the noise estimate. Empty means
+    // untouched; otherwise exactly kSpectralDenoiserTrimBandCount entries.
+    std::vector<float> profileTrimDb;
 
     bool hasProfile() const noexcept {
         return profileSampleRate > 0.0
@@ -71,6 +104,7 @@ public:
 
 private:
     void rebuildNoiseFromProfile();
+    void rebuildTrimGains();
     void processFrame() noexcept;
     void fft(std::vector<float>& re, std::vector<float>& im, bool inverse) const noexcept;
 
@@ -88,6 +122,7 @@ private:
     std::vector<float> reRight_;
     std::vector<float> imRight_;
     std::vector<float> noise_;
+    std::vector<float> trimGain_;
     std::vector<float> rawGain_;
     std::vector<float> frequencyGain_;
     std::vector<float> smoothGain_;
