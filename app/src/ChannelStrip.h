@@ -13,6 +13,7 @@
 #include "DeEsserWindow.h"
 #include "LimiterWindow.h"
 #include "FeedbackSuppressorWindow.h"
+#include "SpectralDenoiserWindow.h"
 #include "InsertHost.h"
 #include "LevelMeter.h"
 #include "MiniButton.h"
@@ -39,6 +40,7 @@ public:
     void openDeEsserWindow();
     void openLimiterWindow();
     void openFeedbackSuppressorWindow();
+    void openSpectralDenoiserWindow();
     void refreshDynamicsButtons();
 
     // IInsertHost
@@ -128,5 +130,6 @@ private:
     DeEsserWindow* deEsserWindow = nullptr;
     LimiterWindow* limiterWindow = nullptr;
     FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;
+    SpectralDenoiserWindow* spectralDenoiserWindow = nullptr;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStrip)
 };

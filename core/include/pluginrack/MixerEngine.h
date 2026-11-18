@@ -93,6 +93,7 @@ private:
         std::vector<DeEsserProcessor> deEssers;
         std::vector<LimiterProcessor> limiters;
         std::vector<FeedbackSuppressorProcessor> feedbackSuppressors;
+        std::vector<SpectralDenoiserProcessor> spectralDenoisers;
         std::vector<Step> steps;
     };
 

@@ -334,6 +334,42 @@ void ChannelStrip::openFeedbackSuppressorWindow() {
     channel.feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 
+void ChannelStrip::openSpectralDenoiserWindow() {
+    if (spectralDenoiserWindow != nullptr) { spectralDenoiserWindow->toFront(true); return; }
+    if (channel.spectralDenoiserEffects.empty()) {
+        auto effects = channel.spectralDenoiserEffects;
+        effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
+        channel.spectralDenoiserEffects = effects;
+        audioEngine.setChannelSpectralDenoisers(channel.id, effects);
+        audioEngine.ensureChannelChainItem(channel.id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
+    }
+    juce::Component::SafePointer<ChannelStrip> safe(this);
+    spectralDenoiserWindow = new SpectralDenoiserWindow(
+        "Spectral Denoiser - " + channel.name, channel.spectralDenoiserEffects.front(),
+        audioEngine, false, channel.id,
+        [safe](const pluginrack::SpectralDenoiserEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            auto effects = safe->channel.spectralDenoiserEffects;
+            const auto found = std::find_if(effects.begin(), effects.end(),
+                [&effect](const auto& candidate) { return candidate.id == effect.id; });
+            if (found == effects.end()) {
+                effects.push_back(effect);
+            } else {
+                effectedit::applyEdit(effects, effect, bypassChanged);
+            }
+            safe->channel.spectralDenoiserEffects = effects;
+            safe->audioEngine.setChannelSpectralDenoisers(safe->channel.id, effects);
+            safe->refreshInserts();
+        });
+    spectralDenoiserWindow->onClose = [safe] {
+        if (safe != nullptr && safe->spectralDenoiserWindow) {
+            auto* w = safe->spectralDenoiserWindow;
+            safe->spectralDenoiserWindow = nullptr;
+            delete w;
+        }
+    };
+}
+
 void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {
         dynamicsWindow->toFront(true);
@@ -484,6 +520,11 @@ void ChannelStrip::closeAllEffectWindows() {
         auto* doomed = feedbackSuppressorWindow;
         feedbackSuppressorWindow = nullptr;
         channel.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        delete doomed;
+    }
+    if (spectralDenoiserWindow != nullptr) {
+        auto* doomed = spectralDenoiserWindow;
+        spectralDenoiserWindow = nullptr;
         delete doomed;
     }
 }
@@ -664,6 +705,9 @@ void ChannelStrip::refreshInserts() {
         } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
             const auto it = std::find_if(channel.feedbackSuppressorEffects.begin(), channel.feedbackSuppressorEffects.end(), [id=item.id](const auto& e){return e.id==id;});
             slots[r]->setBuiltIn(item, "Feedback Suppressor", it!=channel.feedbackSuppressorEffects.end() && it->bypassed);
+        } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+            const auto it = std::find_if(channel.spectralDenoiserEffects.begin(), channel.spectralDenoiserEffects.end(), [id=item.id](const auto& e){return e.id==id;});
+            slots[r]->setBuiltIn(item, "Spectral Denoiser", it!=channel.spectralDenoiserEffects.end() && it->bypassed);
         } else {
             const auto it = std::find_if(channel.effects.begin(), channel.effects.end(),
                                          [id = item.id](const auto& effect) { return effect.id == id; });
@@ -945,6 +989,13 @@ void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         if (feedbackSuppressorWindow != nullptr) feedbackSuppressorWindow->setBypassed(bypassed);
         return;
     }
+    if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+        auto effects = channel.spectralDenoiserEffects;
+        effectedit::setBypass(effects, item.id, bypassed);
+        audioEngine.setChannelSpectralDenoisers(channel.id, effects);
+        if (spectralDenoiserWindow != nullptr) spectralDenoiserWindow->setBypassed(bypassed);
+        return;
+    }
     auto effects = channel.effects;
     effectedit::setBypass(effects, item.id, bypassed);
     audioEngine.setChannelEffects(channel.id, effects);
@@ -964,6 +1015,8 @@ void ChannelStrip::activateBuiltIn(pluginrack::ChainItem item) {
         openLimiterWindow();
     else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor)
         openFeedbackSuppressorWindow();
+    else if (item.type == pluginrack::ChainItemType::SpectralDenoiser)
+        openSpectralDenoiserWindow();
     // Gate and Compressor share one panel; it is where the gate row lives.
     else
         openDynamicsWindow(pluginrack::DynamicsEffectType::Compressor);
@@ -986,6 +1039,9 @@ void ChannelStrip::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
     }
     if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(channel.feedbackSuppressorEffects.begin(), channel.feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) {
         auto effects = channel.feedbackSuppressorEffects; effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
+    }
+    if (item.type == pluginrack::ChainItemType::SpectralDenoiser && std::none_of(channel.spectralDenoiserEffects.begin(), channel.spectralDenoiserEffects.end(), [&item](const auto& e){return e.id==item.id;})) {
+        auto effects = channel.spectralDenoiserEffects; effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(item.id)); audioEngine.setChannelSpectralDenoisers(channel.id, effects);
     }
     // Comp/Gate is one object: picking it restores the partner row too, so
     // the card comes back whole instead of one effect at a time.
@@ -1039,6 +1095,10 @@ void ChannelStrip::eraseBuiltIn(pluginrack::ChainItem item) {
     if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
         && feedbackSuppressorWindow != nullptr) {
         feedbackSuppressorWindow->onClose();
+    }
+    if (item.type == pluginrack::ChainItemType::SpectralDenoiser
+        && spectralDenoiserWindow != nullptr) {
+        spectralDenoiserWindow->onClose();
     }
     refreshAfterInsertChange();
 }

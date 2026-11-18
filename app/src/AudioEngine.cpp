@@ -673,6 +673,9 @@ void AudioEngine::render(int frames) {
                         auto f = std::find_if(channel->feedbackSuppressorEffects.begin(), channel->feedbackSuppressorEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->feedbackSuppressorEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->feedbackSuppressorEffects.begin()); if (i < channel->feedbackSuppressorProcessors.size()) channel->feedbackSuppressorProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->feedbackTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+                    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+                        auto f = std::find_if(channel->spectralDenoiserEffects.begin(), channel->spectralDenoiserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                        if (f != channel->spectralDenoiserEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->spectralDenoiserEffects.begin()); if (i < channel->spectralDenoiserProcessors.size()) channel->spectralDenoiserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                     } else {
                         auto insert = std::find_if(channel->inserts.begin(), channel->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
@@ -721,6 +724,7 @@ void AudioEngine::render(int frames) {
                 processNewMissing(channel->chain, channel->deEsserEffects, channel->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
 processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
+                processNewMissing(channel->chain, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count);
                 channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(channel->buffer, start, count);
             }
@@ -825,6 +829,9 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
                         auto f = std::find_if(output->feedbackSuppressorEffects.begin(), output->feedbackSuppressorEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != output->feedbackSuppressorEffects.end()) { const auto i = static_cast<std::size_t>(f-output->feedbackSuppressorEffects.begin()); if (i < output->feedbackSuppressorProcessors.size()) output->feedbackSuppressorProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         output->feedbackTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+                    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+                        auto f = std::find_if(output->spectralDenoiserEffects.begin(), output->spectralDenoiserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
+                        if (f != output->spectralDenoiserEffects.end()) { const auto i = static_cast<std::size_t>(f-output->spectralDenoiserEffects.begin()); if (i < output->spectralDenoiserProcessors.size()) output->spectralDenoiserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                     } else {
                         auto insert = std::find_if(output->inserts.begin(), output->inserts.end(),
                                                    [id = item.id](const auto& value) { return value->id == id; });
@@ -867,6 +874,7 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
                 processNewMissing(output->chain, output->deEsserEffects, output->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
                 processNewMissing(output->chain, output->limiterEffects, output->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
 processNewMissing(output->chain, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
+                processNewMissing(output->chain, output->spectralDenoiserEffects, output->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count);
                 output->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(output->buffer, start, count);
             }
@@ -1237,6 +1245,7 @@ void AudioEngine::addChannel() {
     for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
     for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
 for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->feedbackSuppressorProcessors.push_back(std::move(pr)); }
+    for (const auto& e : channel->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->spectralDenoiserProcessors.push_back(std::move(pr)); }
     for (const auto& output : outputs) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -1280,6 +1289,7 @@ void AudioEngine::addOutput() {
     for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
     for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
 for (const auto& e : output->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->feedbackSuppressorProcessors.push_back(std::move(pr)); }
+    for (const auto& e : output->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->spectralDenoiserProcessors.push_back(std::move(pr)); }
     for (const auto& channel : channels) {
         auto route = std::make_unique<Route>();
         route->channelId = channel->id;
@@ -1509,6 +1519,15 @@ void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::Ch
             if (channel->feedbackSuppressorEffects[i].id == item.id)
                 channel->feedbackSuppressorProcessors[i].setEffect(
                     channel->feedbackSuppressorEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+        for (auto& effect : channel->spectralDenoiserEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->spectralDenoiserEffects.size()
+                                && i < channel->spectralDenoiserProcessors.size();
+             ++i)
+            if (channel->spectralDenoiserEffects[i].id == item.id)
+                channel->spectralDenoiserProcessors[i].setEffect(
+                    channel->spectralDenoiserEffects[i]);
     }
 }
 
@@ -1555,6 +1574,15 @@ void AudioEngine::removeOutputChainItem(std::uint32_t outputId, pluginrack::Chai
             if (output->feedbackSuppressorEffects[i].id == item.id)
                 output->feedbackSuppressorProcessors[i].setEffect(
                     output->feedbackSuppressorEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+        for (auto& effect : output->spectralDenoiserEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->spectralDenoiserEffects.size()
+                                && i < output->spectralDenoiserProcessors.size();
+             ++i)
+            if (output->spectralDenoiserEffects[i].id == item.id)
+                output->spectralDenoiserProcessors[i].setEffect(
+                    output->spectralDenoiserEffects[i]);
     }
 }
 
@@ -2245,6 +2273,86 @@ void AudioEngine::setOutputFeedbackSuppressors(std::uint32_t outputId, const std
     if (output == nullptr) return;
     syncNewEffects(output, effects, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, currentSampleRate);
 }
+void AudioEngine::setChannelSpectralDenoisers(std::uint32_t channelId, const std::vector<pluginrack::SpectralDenoiserEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    syncNewEffects(channel, effects, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, currentSampleRate);
+}
+void AudioEngine::setOutputSpectralDenoisers(std::uint32_t outputId, const std::vector<pluginrack::SpectralDenoiserEffect>& effects) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    syncNewEffects(output, effects, output->spectralDenoiserEffects, output->spectralDenoiserProcessors, currentSampleRate);
+}
+
+namespace {
+template <typename Effects, typename Processors>
+std::size_t denoiserIndex(const Effects& effects, const Processors& processors, std::uint32_t effectId) {
+    const std::size_t count = std::min(effects.size(), processors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (effects[i].id == effectId) return i;
+    }
+    return count;
+}
+} // namespace
+
+void AudioEngine::startChannelDenoiserLearn(std::uint32_t channelId, std::uint32_t effectId) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    const auto index = denoiserIndex(channel->spectralDenoiserEffects,
+                                     channel->spectralDenoiserProcessors, effectId);
+    if (index < channel->spectralDenoiserProcessors.size())
+        channel->spectralDenoiserProcessors[index].startLearning();
+}
+void AudioEngine::startOutputDenoiserLearn(std::uint32_t outputId, std::uint32_t effectId) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return;
+    const auto index = denoiserIndex(output->spectralDenoiserEffects,
+                                     output->spectralDenoiserProcessors, effectId);
+    if (index < output->spectralDenoiserProcessors.size())
+        output->spectralDenoiserProcessors[index].startLearning();
+}
+float AudioEngine::getChannelDenoiserLearnProgress(std::uint32_t channelId, std::uint32_t effectId) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return 0.0f;
+    const auto index = denoiserIndex(channel->spectralDenoiserEffects,
+                                     channel->spectralDenoiserProcessors, effectId);
+    return index < channel->spectralDenoiserProcessors.size()
+        ? channel->spectralDenoiserProcessors[index].learnProgress() : 0.0f;
+}
+float AudioEngine::getOutputDenoiserLearnProgress(std::uint32_t outputId, std::uint32_t effectId) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return 0.0f;
+    const auto index = denoiserIndex(output->spectralDenoiserEffects,
+                                     output->spectralDenoiserProcessors, effectId);
+    return index < output->spectralDenoiserProcessors.size()
+        ? output->spectralDenoiserProcessors[index].learnProgress() : 0.0f;
+}
+bool AudioEngine::takeChannelDenoiserLearnedProfile(std::uint32_t channelId, std::uint32_t effectId,
+                                                    std::vector<float>& profile, double& sampleRate) {
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return false;
+    const auto index = denoiserIndex(channel->spectralDenoiserEffects,
+                                     channel->spectralDenoiserProcessors, effectId);
+    return index < channel->spectralDenoiserProcessors.size()
+        && channel->spectralDenoiserProcessors[index].takeLearnedProfile(profile, sampleRate);
+}
+bool AudioEngine::takeOutputDenoiserLearnedProfile(std::uint32_t outputId, std::uint32_t effectId,
+                                                   std::vector<float>& profile, double& sampleRate) {
+    const juce::ScopedLock lock(stateLock);
+    auto* output = findOutput(outputId);
+    if (output == nullptr) return false;
+    const auto index = denoiserIndex(output->spectralDenoiserEffects,
+                                     output->spectralDenoiserProcessors, effectId);
+    return index < output->spectralDenoiserProcessors.size()
+        && output->spectralDenoiserProcessors[index].takeLearnedProfile(profile, sampleRate);
+}
 
 float AudioEngine::getSendGain(std::uint32_t channelId, std::uint32_t outputId) const {
     for (const auto& route : routes) {
@@ -2594,6 +2702,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->feedbackSuppressorProcessors.push_back(std::move(pr)); }
+        for (const auto& e : channel->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->spectralDenoiserProcessors.push_back(std::move(pr)); }
         // An empty saved chain is a real empty state (no effects loaded).
         // Scenes without per-strip ordering predate this field; their effects
         // still run via processEffectsMissingFromChain, so a missing chain
@@ -2692,6 +2801,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->feedbackSuppressorProcessors.push_back(std::move(pr)); }
+        for (const auto& e : output->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->spectralDenoiserProcessors.push_back(std::move(pr)); }
         output->chain = savedOutput.chain;
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());

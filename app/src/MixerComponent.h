@@ -15,6 +15,7 @@
 #include "MiniButton.h"
 #include "StripDialog.h"
 #include "Theme.h"
+#include "SpectralDenoiserWindow.h"
 #include "ValueEditSlider.h"
 
 class MixerComponent final : public juce::Component {
@@ -65,7 +66,9 @@ private:
         void openMultibandWindow();
         void openDeEsserWindow();
         void openLimiterWindow();
-        void openFeedbackSuppressorWindow();        void refreshDynamicsButtons();
+        void openFeedbackSuppressorWindow();
+        void openSpectralDenoiserWindow();
+        void refreshDynamicsButtons();
     
         // IInsertHost
         juce::String insertPlugin(const juce::File&, int pluginUniqueId = 0) override;
@@ -129,7 +132,8 @@ private:
         MultibandWindow* multibandWindow = nullptr;
         DeEsserWindow* deEsserWindow = nullptr;
         LimiterWindow* limiterWindow = nullptr;
-        FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;    };
+        FeedbackSuppressorWindow* feedbackSuppressorWindow = nullptr;
+        SpectralDenoiserWindow* spectralDenoiserWindow = nullptr;    };
 
     void rebuildChannelStrips();
     void rebuildOutputStrips();

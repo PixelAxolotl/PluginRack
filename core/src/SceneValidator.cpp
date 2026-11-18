@@ -181,6 +181,55 @@ void validateFeedbackSuppressors(const char* kind, std::uint32_t id, const std::
     }
 }
 
+void validateSpectralDenoisers(const char* kind, std::uint32_t id,
+                               const std::vector<SpectralDenoiserEffect>& effects,
+                               std::vector<SceneError>& errors) {
+    if (effects.size() > 3) errors.push_back({SceneErrorCode::ValueOutOfRange, id, std::string(kind) + " spectralDenoiserEffects too many"});
+    std::unordered_set<std::uint32_t> effectIds;
+    effectIds.reserve(effects.size() * 2 + 1);
+    for (const auto& e : effects) {
+        if (e.id == 0) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser id must not be zero"});
+        } else if (!effectIds.insert(e.id).second) {
+            errors.push_back({SceneErrorCode::DuplicateEffectId, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " has duplicate spectral denoiser id " + std::to_string(e.id)});
+        }
+        if (e.mode != SpectralDenoiserMode::Learn && e.mode != SpectralDenoiserMode::Adaptive) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " has an unknown spectral denoiser mode"});
+        }
+        if (!std::isfinite(e.reductionDb) || e.reductionDb < kSpectralDenoiserMinReductionDb ||
+            e.reductionDb > kSpectralDenoiserMaxReductionDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser reductionDb out of range [0, 40]"});
+        }
+        const bool hasProfile = !e.noiseProfile.empty() || e.profileSampleRate > 0.0;
+        if (!hasProfile) {
+            continue;
+        }
+        if (e.noiseProfile.size() != static_cast<std::size_t>(kSpectralDenoiserBinCount) ||
+            !std::isfinite(e.profileSampleRate) || e.profileSampleRate <= 0.0) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser profile is incomplete"});
+            continue;
+        }
+        for (float bin : e.noiseProfile) {
+            if (!std::isfinite(bin) || bin < 0.0f) {
+                errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                                  std::string(kind) + " " + std::to_string(id) +
+                                      " spectral denoiser profile has an invalid bin"});
+                break;
+            }
+        }
+    }
+}
+
 void validateInserts(const char* kind, std::uint32_t id,
                      const std::vector<InsertSlot>& inserts,
                      std::vector<SceneError>& errors) {
@@ -244,6 +293,7 @@ void validateChain(const char* kind, std::uint32_t id, const std::vector<ChainIt
             case ChainItemType::DeEsser:
             case ChainItemType::Limiter:
             case ChainItemType::FeedbackSuppressor:
+            case ChainItemType::SpectralDenoiser:
                 // Deliberately not checked against the strip's effects: scenes
                 // written by earlier builds carry rows such as a stale
                 // `Dynamics 2` next to effects 1 and 3, and the mixer tolerates
@@ -364,6 +414,7 @@ void validateStrip(const char* kind, const Strip& strip, std::vector<SceneError>
     validateDeEssers(kind, strip.id, strip.deEsserEffects, errors);
     validateLimiters(kind, strip.id, strip.limiterEffects, errors);
     validateFeedbackSuppressors(kind, strip.id, strip.feedbackSuppressorEffects, errors);
+    validateSpectralDenoisers(kind, strip.id, strip.spectralDenoiserEffects, errors);
     validateChain(kind, strip.id, strip.chain, strip.inserts, errors);
     validateRtaSettings(kind, strip.id, strip.eqRtaOffsetDb, strip.eqRtaWeighting,
                         errors);

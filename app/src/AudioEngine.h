@@ -182,6 +182,8 @@ public:
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         std::vector<pluginrack::FeedbackSuppressorEffect> feedbackSuppressorEffects;
         std::vector<pluginrack::FeedbackSuppressorProcessor> feedbackSuppressorProcessors;
+        std::vector<pluginrack::SpectralDenoiserEffect> spectralDenoiserEffects;
+        std::vector<pluginrack::SpectralDenoiserProcessor> spectralDenoiserProcessors;
         juce::Atomic<bool> eqBypassed{true};
         // One tap per built-in, each written at its own point in the chain:
         // eqTap after the EQ, dynamicsTap after Comp/Gate, multibandTap
@@ -265,6 +267,8 @@ public:
         std::vector<pluginrack::LimiterProcessor> limiterProcessors;
         std::vector<pluginrack::FeedbackSuppressorEffect> feedbackSuppressorEffects;
         std::vector<pluginrack::FeedbackSuppressorProcessor> feedbackSuppressorProcessors;
+        std::vector<pluginrack::SpectralDenoiserEffect> spectralDenoiserEffects;
+        std::vector<pluginrack::SpectralDenoiserProcessor> spectralDenoiserProcessors;
         juce::Atomic<bool> eqBypassed{true};
         // One tap per built-in, same rule as Channel.
         AnalyzerTap eqTap;
@@ -663,6 +667,22 @@ public:
                                       const std::vector<pluginrack::FeedbackSuppressorEffect>& effects);
     void setOutputFeedbackSuppressors(std::uint32_t outputId,
                                      const std::vector<pluginrack::FeedbackSuppressorEffect>& effects);
+    void setChannelSpectralDenoisers(std::uint32_t channelId,
+                                     const std::vector<pluginrack::SpectralDenoiserEffect>& effects);
+    void setOutputSpectralDenoisers(std::uint32_t outputId,
+                                    const std::vector<pluginrack::SpectralDenoiserEffect>& effects);
+
+    // Noise-profile learning runs on the audio thread; these only flip a flag
+    // or read the processor's atomic progress. The profile is handed back to
+    // the message thread through take*LearnedProfile.
+    void startChannelDenoiserLearn(std::uint32_t channelId, std::uint32_t effectId);
+    void startOutputDenoiserLearn(std::uint32_t outputId, std::uint32_t effectId);
+    float getChannelDenoiserLearnProgress(std::uint32_t channelId, std::uint32_t effectId);
+    float getOutputDenoiserLearnProgress(std::uint32_t outputId, std::uint32_t effectId);
+    bool takeChannelDenoiserLearnedProfile(std::uint32_t channelId, std::uint32_t effectId,
+                                           std::vector<float>& profile, double& sampleRate);
+    bool takeOutputDenoiserLearnedProfile(std::uint32_t outputId, std::uint32_t effectId,
+                                          std::vector<float>& profile, double& sampleRate);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;

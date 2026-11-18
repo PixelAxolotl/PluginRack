@@ -300,6 +300,37 @@ void from_json(const nlohmann::json& j, FeedbackSuppressorEffect& effect) {
     effect.detectorLowPassHz = j.value("detectorLowPassHz", effect.detectorLowPassHz);
 }
 
+void to_json(nlohmann::json& j, SpectralDenoiserMode mode) {
+    switch (mode) {
+        case SpectralDenoiserMode::Learn: j = "Learn"; break;
+        case SpectralDenoiserMode::Adaptive: j = "Adaptive"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, SpectralDenoiserMode& mode) {
+    const auto name = j.get<std::string>();
+    if (name == "Learn") mode = SpectralDenoiserMode::Learn;
+    else if (name == "Adaptive") mode = SpectralDenoiserMode::Adaptive;
+    else throw nlohmann::json::other_error::create(502, "unknown SpectralDenoiserMode '" + name + "'", &j);
+}
+
+void to_json(nlohmann::json& j, const SpectralDenoiserEffect& effect) {
+    j = nlohmann::json{{"id", effect.id}, {"bypassed", effect.bypassed}, {"mode", effect.mode},
+                       {"reductionDb", effect.reductionDb},
+                       {"profileSampleRate", effect.profileSampleRate},
+                       {"noiseProfile", effect.noiseProfile}};
+}
+
+void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
+    effect = SpectralDenoiserEffect{};
+    effect.id = j.value("id", 1u);
+    effect.bypassed = j.value("bypassed", false);
+    if (j.contains("mode")) j.at("mode").get_to(effect.mode);
+    effect.reductionDb = j.value("reductionDb", effect.reductionDb);
+    effect.profileSampleRate = j.value("profileSampleRate", 0.0);
+    if (j.contains("noiseProfile")) j.at("noiseProfile").get_to(effect.noiseProfile);
+}
+
 void to_json(nlohmann::json& j, DynamicsEffectType type) {
     switch (type) {
         case DynamicsEffectType::Compressor: j = "Compressor"; break;
@@ -395,6 +426,7 @@ void to_json(nlohmann::json& j, ChainItemType type) {
         case ChainItemType::DeEsser: j = "DeEsser"; break;
         case ChainItemType::Limiter: j = "Limiter"; break;
         case ChainItemType::FeedbackSuppressor: j = "FeedbackSuppressor"; break;
+        case ChainItemType::SpectralDenoiser: j = "SpectralDenoiser"; break;
     }
 }
 
@@ -407,6 +439,7 @@ void from_json(const nlohmann::json& j, ChainItemType& type) {
     else if (name == "DeEsser") type = ChainItemType::DeEsser;
     else if (name == "Limiter") type = ChainItemType::Limiter;
     else if (name == "FeedbackSuppressor") type = ChainItemType::FeedbackSuppressor;
+    else if (name == "SpectralDenoiser") type = ChainItemType::SpectralDenoiser;
     else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
 }
 
@@ -465,6 +498,7 @@ void to_json(nlohmann::json& j, const Strip& strip) {
         {"deEsserEffects", strip.deEsserEffects},
         {"limiterEffects", strip.limiterEffects},
         {"feedbackSuppressorEffects", strip.feedbackSuppressorEffects},
+        {"spectralDenoiserEffects", strip.spectralDenoiserEffects},
         {"multibandRtaOffsetDb", strip.multibandRtaOffsetDb},
         {"multibandRtaWeighting", strip.multibandRtaWeighting},
         {"deEsserRtaOffsetDb", strip.deEsserRtaOffsetDb},
@@ -507,6 +541,7 @@ void from_json(const nlohmann::json& j, Strip& strip) {
     if (j.contains("deEsserEffects")) j.at("deEsserEffects").get_to(strip.deEsserEffects);
     if (j.contains("limiterEffects")) j.at("limiterEffects").get_to(strip.limiterEffects);
     if (j.contains("feedbackSuppressorEffects")) j.at("feedbackSuppressorEffects").get_to(strip.feedbackSuppressorEffects);
+    if (j.contains("spectralDenoiserEffects")) j.at("spectralDenoiserEffects").get_to(strip.spectralDenoiserEffects);
     strip.multibandRtaOffsetDb = j.value("multibandRtaOffsetDb", 0.0f);
     strip.multibandRtaWeighting = j.value("multibandRtaWeighting", 0);
     strip.deEsserRtaOffsetDb = j.value("deEsserRtaOffsetDb", 0.0f);

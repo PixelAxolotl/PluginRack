@@ -105,6 +105,8 @@ target_sources(pluginrack_app PRIVATE
     src/LimiterWindow.cpp
     src/FeedbackSuppressorWindow.cpp
     src/LimiterWindow.h
+    src/SpectralDenoiserWindow.cpp
+    src/SpectralDenoiserWindow.h
     src/ValueEditSlider.cpp
     src/ValueEditSlider.h
     src/WindowsEndpointFormat.cpp

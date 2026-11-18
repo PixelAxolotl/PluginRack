@@ -648,19 +648,21 @@ void RackView::refreshSlots() {
             slot->setMiniView(std::move(mini));
             slot->setSelected(eqFocused);
             eqCard = slot;
-        } else if (item.type == pluginrack::ChainItemType::Multiband || item.type == pluginrack::ChainItemType::DeEsser || item.type == pluginrack::ChainItemType::Limiter || item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
-            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : item.type == pluginrack::ChainItemType::Limiter ? "Limiter" : "Feedback Suppressor";
+        } else if (item.type == pluginrack::ChainItemType::Multiband || item.type == pluginrack::ChainItemType::DeEsser || item.type == pluginrack::ChainItemType::Limiter || item.type == pluginrack::ChainItemType::FeedbackSuppressor || item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+            const juce::String name = item.type == pluginrack::ChainItemType::Multiband ? "Multiband Comp" : item.type == pluginrack::ChainItemType::DeEsser ? "De-esser" : item.type == pluginrack::ChainItemType::Limiter ? "Limiter" : item.type == pluginrack::ChainItemType::SpectralDenoiser ? "Spectral Denoiser" : "Feedback Suppressor";
             bool bp = false;
             if (auto* ch = currentChannel()) {
                 if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : ch->multibandEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : ch->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : ch->limiterEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) for (auto& e : ch->feedbackSuppressorEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::SpectralDenoiser) for (auto& e : ch->spectralDenoiserEffects) if (e.id==item.id) bp=e.bypassed;
             } else if (auto* out = currentOutput()) {
                 if (item.type == pluginrack::ChainItemType::Multiband) for (auto& e : out->multibandEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::DeEsser) for (auto& e : out->deEsserEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::Limiter) for (auto& e : out->limiterEffects) if (e.id==item.id) bp=e.bypassed;
                 if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) for (auto& e : out->feedbackSuppressorEffects) if (e.id==item.id) bp=e.bypassed;
+                if (item.type == pluginrack::ChainItemType::SpectralDenoiser) for (auto& e : out->spectralDenoiserEffects) if (e.id==item.id) bp=e.bypassed;
             }
             slot->setBuiltIn(item, name, bp);
             if (item.type == pluginrack::ChainItemType::Multiband) {
@@ -1852,7 +1854,7 @@ void RackView::closeEffectWindows() {
     multibandWindow = nullptr;
     deEsserWindow = nullptr;
     limiterWindow = nullptr;
-    feedbackSuppressorWindow = nullptr;    eqFocused = false;
+    feedbackSuppressorWindow = nullptr;    spectralDenoiserWindow = nullptr;    eqFocused = false;
     dynamicsFocused = false;
     editorHolder.removeChildComponent(doomed);
     delete doomed;
@@ -2057,6 +2059,79 @@ void RackView::focusFeedbackSuppressor() {
     resized();
 }
 
+
+void RackView::focusSpectralDenoiser() {
+    closeEffectWindows();
+    closeEqWindow();
+    closeDynamicsWindow();
+
+    juce::Component::SafePointer<RackView> safe(this);
+    const bool isOutput = selectedIsOutput;
+    std::uint32_t stripId = 0;
+    const pluginrack::SpectralDenoiserEffect* initial = nullptr;
+
+    if (isOutput) {
+        auto* output = currentOutput();
+        if (output == nullptr) return;
+        if (output->spectralDenoiserEffects.empty()) {
+            auto effects = output->spectralDenoiserEffects;
+            effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
+            output->spectralDenoiserEffects = effects;
+            audioEngine.setOutputSpectralDenoisers(output->id, effects);
+            output->chain.push_back({pluginrack::ChainItemType::SpectralDenoiser, 1});
+            audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
+        }
+        stripId = output->id;
+        initial = &output->spectralDenoiserEffects.front();
+    } else {
+        auto* channel = currentChannel();
+        if (channel == nullptr) return;
+        if (channel->spectralDenoiserEffects.empty()) {
+            auto effects = channel->spectralDenoiserEffects;
+            effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
+            channel->spectralDenoiserEffects = effects;
+            audioEngine.setChannelSpectralDenoisers(channel->id, effects);
+            channel->chain.push_back({pluginrack::ChainItemType::SpectralDenoiser, 1});
+            audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
+        }
+        stripId = channel->id;
+        initial = &channel->spectralDenoiserEffects.front();
+    }
+
+    auto* window = new SpectralDenoiserWindow(
+        "Spectral Denoiser - " + juce::String(isOutput ? currentOutput()->name : currentChannel()->name),
+        *initial, audioEngine, isOutput, stripId,
+        [safe, isOutput](const pluginrack::SpectralDenoiserEffect& effect, bool bypassChanged) {
+            if (safe == nullptr) return;
+            if (isOutput) {
+                auto* output = safe->currentOutput();
+                if (output == nullptr) return;
+                auto effects = output->spectralDenoiserEffects;
+                const auto it = std::find_if(effects.begin(), effects.end(),
+                    [&effect](const auto& e) { return e.id == effect.id; });
+                if (it == effects.end()) effects.push_back(effect);
+                else effectedit::applyEdit(effects, effect, bypassChanged);
+                output->spectralDenoiserEffects = effects;
+                safe->audioEngine.setOutputSpectralDenoisers(output->id, effects);
+            } else {
+                auto* channel = safe->currentChannel();
+                if (channel == nullptr) return;
+                auto effects = channel->spectralDenoiserEffects;
+                const auto it = std::find_if(effects.begin(), effects.end(),
+                    [&effect](const auto& e) { return e.id == effect.id; });
+                if (it == effects.end()) effects.push_back(effect);
+                else effectedit::applyEdit(effects, effect, bypassChanged);
+                channel->spectralDenoiserEffects = effects;
+                safe->audioEngine.setChannelSpectralDenoisers(channel->id, effects);
+            }
+        });
+    window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
+    spectralDenoiserWindow = window;
+    focusedEffectWindow = window;
+    hideDockedEditor();
+    editorHolder.addAndMakeVisible(window);
+    resized();
+}
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {
@@ -2841,6 +2916,19 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
             effectedit::setBypass(effects, item.id, bypassed);
             audioEngine.setChannelFeedbackSuppressors(channel->id, effects);
         }
+    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+        if (selectedIsOutput) {
+            if (auto* output = currentOutput()) {
+                auto effects = output->spectralDenoiserEffects;
+                effectedit::setBypass(effects, item.id, bypassed);
+                audioEngine.setOutputSpectralDenoisers(output->id, effects);
+            }
+        } else if (auto* channel = currentChannel()) {
+            auto effects = channel->spectralDenoiserEffects;
+            effectedit::setBypass(effects, item.id, bypassed);
+            audioEngine.setChannelSpectralDenoisers(channel->id, effects);
+        }
+        if (spectralDenoiserWindow != nullptr) spectralDenoiserWindow->setBypassed(bypassed);
     } else {
         // Resolve like the card does: a scene keeps the effect ids it was
         // saved with, which can differ from the chain row's id.
@@ -2885,6 +2973,7 @@ void RackView::activateBuiltIn(pluginrack::ChainItem item) {
     else if (item.type == pluginrack::ChainItemType::DeEsser) focusDeEsser();
     else if (item.type == pluginrack::ChainItemType::Limiter) focusLimiter();
     else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) focusFeedbackSuppressor();
+    else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) focusSpectralDenoiser();
 }
 
 void RackView::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
@@ -2899,12 +2988,14 @@ void RackView::insertBuiltIn(pluginrack::ChainItem item, int chainIndex) {
             if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(output->deEsserEffects.begin(), output->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setOutputDeEssers(output->id, fx); }
             if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(output->limiterEffects.begin(), output->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setOutputLimiters(output->id, fx); }
             if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(output->feedbackSuppressorEffects.begin(), output->feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->feedbackSuppressorEffects; fx.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setOutputFeedbackSuppressors(output->id, fx); }
+            if (item.type == pluginrack::ChainItemType::SpectralDenoiser && std::none_of(output->spectralDenoiserEffects.begin(), output->spectralDenoiserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = output->spectralDenoiserEffects; fx.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(item.id)); audioEngine.setOutputSpectralDenoisers(output->id, fx); }
         }
     } else if (auto* channel = currentChannel()) {
         if (item.type == pluginrack::ChainItemType::Multiband && std::none_of(channel->multibandEffects.begin(), channel->multibandEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->multibandEffects; fx.push_back(pluginrack::makeDefaultMultibandEffect(item.id)); audioEngine.setChannelMultiband(channel->id, fx); }
         if (item.type == pluginrack::ChainItemType::DeEsser && std::none_of(channel->deEsserEffects.begin(), channel->deEsserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->deEsserEffects; fx.push_back(pluginrack::makeDefaultDeEsserEffect(item.id)); audioEngine.setChannelDeEssers(channel->id, fx); }
         if (item.type == pluginrack::ChainItemType::Limiter && std::none_of(channel->limiterEffects.begin(), channel->limiterEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->limiterEffects; fx.push_back(pluginrack::makeDefaultLimiterEffect(item.id)); audioEngine.setChannelLimiters(channel->id, fx); }
         if (item.type == pluginrack::ChainItemType::FeedbackSuppressor && std::none_of(channel->feedbackSuppressorEffects.begin(), channel->feedbackSuppressorEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->feedbackSuppressorEffects; fx.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(item.id)); audioEngine.setChannelFeedbackSuppressors(channel->id, fx); }
+        if (item.type == pluginrack::ChainItemType::SpectralDenoiser && std::none_of(channel->spectralDenoiserEffects.begin(), channel->spectralDenoiserEffects.end(), [&item](const auto& e){return e.id==item.id;})) { auto fx = channel->spectralDenoiserEffects; fx.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(item.id)); audioEngine.setChannelSpectralDenoisers(channel->id, fx); }
     }
     if (item.type == pluginrack::ChainItemType::Dynamics) {
         if (const auto* effects = currentEffects()) {
@@ -2977,6 +3068,10 @@ void RackView::eraseBuiltIn(pluginrack::ChainItem item) {
         && feedbackSuppressorWindow != nullptr) {
         if (auto* c = currentChannel()) c->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
         if (auto* o = currentOutput()) o->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        closeEffectWindows();
+    }
+    if (item.type == pluginrack::ChainItemType::SpectralDenoiser
+        && spectralDenoiserWindow != nullptr) {
         closeEffectWindows();
     }
     refreshAfterInsertChange();

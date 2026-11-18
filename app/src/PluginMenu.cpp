@@ -273,6 +273,9 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
     builtInMenu.addItem("Feedback Suppressor", true, false, [onBuiltIn] {
         onBuiltIn({pluginrack::ChainItemType::FeedbackSuppressor, 1});
     });
+    builtInMenu.addItem("Spectral Denoiser", true, false, [onBuiltIn] {
+        onBuiltIn({pluginrack::ChainItemType::SpectralDenoiser, 1});
+    });
     menu.addSubMenu("Built-In effects", builtInMenu);
 
     addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);
