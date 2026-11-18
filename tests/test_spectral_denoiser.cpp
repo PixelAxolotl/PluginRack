@@ -70,6 +70,97 @@ TEST_CASE("spectral denoiser reports one frame of latency") {
     }
 }
 
+TEST_CASE("spectral denoiser latency does not depend on the host block size") {
+    for (const int blockSize : {1, 17, 64, 128, 333, 1024, 4096}) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.reductionDb = 0.0f;
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+
+        auto input = noise(4096, 0x0badf00du);
+        auto left = input;
+        auto right = input;
+        processInBlocks(processor, left, right, blockSize);
+
+        for (std::size_t i = 1024; i < input.size(); ++i) {
+            REQUIRE(left[i] == Catch::Approx(input[i - 512]).margin(1.0e-4f));
+        }
+    }
+}
+
+TEST_CASE("spectral denoiser learned profile protects a tone above the noise") {
+    pluginrack::SpectralDenoiserEffect learning = pluginrack::makeDefaultSpectralDenoiserEffect();
+    pluginrack::SpectralDenoiserProcessor learner;
+    learner.prepare(kSampleRate);
+    learner.setEffect(learning);
+    learner.startLearning();
+
+    auto trainingLeft = noise(static_cast<std::size_t>(kSampleRate * 1.5), 0x2468ace0u);
+    for (auto& sample : trainingLeft) sample *= 0.02f;
+    auto trainingRight = trainingLeft;
+    processInBlocks(learner, trainingLeft, trainingRight);
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(learner.takeLearnedProfile(profile, profileRate));
+    REQUIRE(profileRate == Catch::Approx(kSampleRate));
+    REQUIRE(profile.size() == static_cast<std::size_t>(pluginrack::kSpectralDenoiserBinCount));
+
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+    effect.reductionDb = 18.0f;
+    effect.noiseProfile = profile;
+    effect.profileSampleRate = profileRate;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    std::vector<float> left(static_cast<std::size_t>(kSampleRate * 2.0));
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        left[i] = 0.5f * std::sin(2.0 * 3.14159265358979323846 * 1000.0
+                                  * static_cast<double>(i) / kSampleRate);
+    }
+    auto right = left;
+    processInBlocks(processor, left, right);
+
+    REQUIRE(rms(left, left.size() / 2) > 0.30f);
+}
+
+TEST_CASE("spectral denoiser remaps a learned profile to another sample rate") {
+    pluginrack::SpectralDenoiserProcessor learner;
+    learner.prepare(44100.0);
+    learner.setEffect(pluginrack::makeDefaultSpectralDenoiserEffect());
+    learner.startLearning();
+
+    auto trainingLeft = noise(static_cast<std::size_t>(44100.0 * 1.5), 0x13579bdfu);
+    for (auto& sample : trainingLeft) sample *= 0.02f;
+    auto trainingRight = trainingLeft;
+    processInBlocks(learner, trainingLeft, trainingRight);
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(learner.takeLearnedProfile(profile, profileRate));
+    REQUIRE(profileRate == Catch::Approx(44100.0));
+
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+    effect.reductionDb = 24.0f;
+    effect.noiseProfile = profile;
+    effect.profileSampleRate = profileRate;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    auto input = noise(static_cast<std::size_t>(kSampleRate * 1.5), 0x2468ace0u);
+    for (auto& sample : input) sample *= 0.02f;
+    auto left = input;
+    auto right = input;
+    processInBlocks(processor, left, right);
+
+    REQUIRE(rms(left, input.size() / 2) < rms(input, input.size() / 2) * 0.6f);
+}
+
 TEST_CASE("spectral denoiser bypass keeps the delay") {
     auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
     effect.bypassed = true;

@@ -4171,6 +4171,22 @@ AudioEngine::InsertSlot* AudioEngine::findOutputInsert(std::uint32_t outputId, s
     return nullptr;
 }
 
+namespace {
+// Built-in effects report their algorithmic delay here. Bypass preserves the
+// delay, so every denoiser named by the chain counts. An effect removed from
+// the chain is marked bypassed and no longer runs, so it must not count.
+template <typename Strip>
+int spectralDenoiserLatencySamples(const Strip& strip) {
+    int samples = 0;
+    for (const auto& effect : strip.spectralDenoiserEffects) {
+        const pluginrack::ChainItem item{pluginrack::ChainItemType::SpectralDenoiser, effect.id};
+        const bool inChain = std::find(strip.chain.begin(), strip.chain.end(), item) != strip.chain.end();
+        if (inChain || !effect.bypassed) samples += pluginrack::kSpectralDenoiserLatencySamples;
+    }
+    return samples;
+}
+} // namespace
+
 AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
     LatencyReport report;
     const juce::ScopedTryLock lock(stateLock);
@@ -4224,6 +4240,13 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                 maxInsertName = insert->pluginName;
             }
         }
+        const int denoiserSamples = spectralDenoiserLatencySamples(*inputChannel);
+        pluginSamples += denoiserSamples;
+        if (denoiserSamples > maxInsertSamples) {
+            maxInsertSamples = denoiserSamples;
+            maxInsertId = 0xFFFFFFFFu;
+            maxInsertName = "Spectral Denoiser";
+        }
     }
 
     int outputDeviceSamples = 0;
@@ -4247,6 +4270,13 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                         maxInsertId = insert->id;
                         maxInsertName = insert->pluginName;
                     }
+                }
+                const int denoiserSamples = spectralDenoiserLatencySamples(*output);
+                pluginSamples += denoiserSamples;
+                if (denoiserSamples > maxInsertSamples) {
+                    maxInsertSamples = denoiserSamples;
+                    maxInsertId = 0xFFFFFFFFu;
+                    maxInsertName = "Spectral Denoiser";
                 }
                 valid = true;
                 break;
