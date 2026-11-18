@@ -17,7 +17,14 @@ inline constexpr float kFeedbackSuppressorMinDetectorHz = 20.0f;
 inline constexpr float kFeedbackSuppressorMaxDetectorHz = 20000.0f;
 inline constexpr float kFeedbackSuppressorMaxHighPassHz = 200.0f;
 inline constexpr float kFeedbackSuppressorMinLowPassHz = 4000.0f;
-inline constexpr float kFeedbackSuppressorDefaultHighPassHz = 90.0f;
+// The knob's minimum position means "no cutoff": the detector's 48 dB/oct
+// high-pass is replaced by a single 5 Hz DC-blocking section, so nothing in
+// the audible bass range is filtered away. Anything above the minimum filters
+// normally.
+inline constexpr float kFeedbackSuppressorDefaultHighPassHz = kFeedbackSuppressorMinDetectorHz;
+inline constexpr float kFeedbackSuppressorDcBlockerHz = 5.0f;
+// At or below this the detector stops high-passing the analysis signal.
+inline constexpr float kFeedbackSuppressorHighPassBypassHz = 20.0f;
 inline constexpr float kFeedbackSuppressorDefaultLowPassHz = 14000.0f;
 inline constexpr float kFeedbackSuppressorDetectorGapHz = 20.0f;
 inline constexpr float kFeedbackSuppressorMinAttenuationDb = 0.0f;

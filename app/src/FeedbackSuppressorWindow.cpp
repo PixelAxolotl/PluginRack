@@ -77,19 +77,35 @@ double detectorFilterDbAt(double freq, float highPassHz, float lowPassHz,
         0.5097955791041592, 0.6013448869350453,
         0.8999762231364156, 2.5629154477415055};
     const double fs = std::max(1.0, sampleRate);
-    const double hp = std::clamp(static_cast<double>(highPassHz), 10.0,
-                                 std::min(20000.0, fs * 0.45));
+    // The detector's minimum position means no cutoff: it runs a one-pole DC
+    // blocker instead of the 8th-order Butterworth, and the graph has to show
+    // the same thing or the drawn band edge lies about what is filtered.
+    const bool hpBypassed = highPassHz <= kFeedbackSuppressorHighPassBypassHz + 0.5f;
+    const double hp = std::clamp(
+        hpBypassed ? static_cast<double>(kFeedbackSuppressorDcBlockerHz)
+                   : static_cast<double>(highPassHz),
+        1.0, std::min(20000.0, fs * 0.45));
     const double lp = std::clamp(static_cast<double>(lowPassHz), 40.0,
                                  std::min(20000.0, fs * 0.475));
     double db = 0.0;
-    for (const double q : kButterworthQ) {
+    if (hpBypassed) {
         const double w0 = 2.0 * juce::MathConstants<double>::pi * hp / fs;
         const double cosw = std::cos(w0);
-        const double alpha = std::sin(w0) / (2.0 * q);
+        const double alpha = std::sin(w0) / (2.0 * 0.7071067811865476);
         const double a0 = 1.0 + alpha;
         db += biquadMagnitudeDb(freq, (1.0 + cosw) * 0.5 / a0,
                                 -(1.0 + cosw) / a0, (1.0 + cosw) * 0.5 / a0,
                                 -2.0 * cosw / a0, (1.0 - alpha) / a0, fs);
+    } else {
+        for (const double q : kButterworthQ) {
+            const double w0 = 2.0 * juce::MathConstants<double>::pi * hp / fs;
+            const double cosw = std::cos(w0);
+            const double alpha = std::sin(w0) / (2.0 * q);
+            const double a0 = 1.0 + alpha;
+            db += biquadMagnitudeDb(freq, (1.0 + cosw) * 0.5 / a0,
+                                    -(1.0 + cosw) / a0, (1.0 + cosw) * 0.5 / a0,
+                                    -2.0 * cosw / a0, (1.0 - alpha) / a0, fs);
+        }
     }
     for (const double q : kButterworthQ) {
         const double w0 = 2.0 * juce::MathConstants<double>::pi * lp / fs;
@@ -470,7 +486,9 @@ FeedbackSuppressorWindow::FeedbackSuppressorWindow(const juce::String& title,
               kFeedbackSuppressorMaxHighPassHz,
               1.0, " Hz", kFeedbackSuppressorDefaultHighPassHz, theme::cyan());
     highPass.setSkewFactorFromMidPoint(80.0);
-    highPass.setTooltip("Detector high-pass: 48 dB/oct below this frequency");
+    highPass.setTooltip("Detector high-pass: 48 dB/oct below this frequency. "
+                        "At 20 Hz it is off (DC blocker only), so bass feedback is "
+                        "not filtered away.");
     highPass.onValueChange = [this] {
         const float hp = static_cast<float>(highPass.getValue());
         effect.detectorHighPassHz = juce::jlimit(

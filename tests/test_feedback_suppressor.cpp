@@ -63,7 +63,7 @@ TEST_CASE("feedback suppressor defaults match the current tuning") {
     REQUIRE(pluginrack::feedbackSuppressorCutCount(effect.strength) == 4);
     REQUIRE(effect.attenuationDb == 12.0f);
     REQUIRE(effect.inputSensitivityDb == -40.0f);
-    REQUIRE(effect.detectorHighPassHz == 90.0f);
+    REQUIRE(effect.detectorHighPassHz == 20.0f);
     REQUIRE(effect.detectorLowPassHz == 14000.0f);
     REQUIRE(effect.gainReductionMultiplier == 1.0f);
     REQUIRE(effect.attackMs == 20.0f);
@@ -1308,4 +1308,57 @@ TEST_CASE("feedback suppressor counts a gate close and a stale reset") {
     }
     REQUIRE(processor.stats().gateCloses >= 1);
     REQUIRE(processor.stats().gateResets >= 1);
+}
+
+TEST_CASE("feedback suppressor cuts feedback just below the old high-pass default") {
+    const auto effect = pluginrack::makeDefaultFeedbackSuppressorEffect();
+    REQUIRE(effect.detectorHighPassHz <= pluginrack::kFeedbackSuppressorHighPassBypassHz);
+
+    pluginrack::FeedbackSuppressorProcessor processor;
+    processor.prepare(48000.0);
+    processor.setEffect(effect);
+
+    auto left = sine(89.0f, 0.2f, 72000);
+    auto right = left;
+    for (std::size_t offset = 0; offset < left.size(); offset += 512) {
+        const int count = static_cast<int>(std::min<std::size_t>(512, left.size() - offset));
+        processor.process(left.data() + offset, right.data() + offset, count);
+    }
+
+    std::array<float, 8> freqs{};
+    std::array<float, 8> depths{};
+    const int count = processor.copyActiveNotches(freqs.data(), depths.data(),
+                                                  static_cast<int>(freqs.size()));
+    REQUIRE(count > 0);
+    REQUIRE(std::fabs(freqs[0] - 89.0f) < 5.0f);
+    REQUIRE(depths[0] > 2.0f);
+}
+
+TEST_CASE("feedback suppressor high-pass minimum leaves bass unfiltered") {
+    const auto cuts = pluginrack::feedbackSuppressorStrengthForCuts(4);
+    auto detect = [cuts](float highPassHz) {
+        auto effect = pluginrack::makeDefaultFeedbackSuppressorEffect();
+        effect.detectorHighPassHz = highPassHz;
+        effect.detectionDelayMs = 0.0f;
+        effect.strength = cuts;
+
+        pluginrack::FeedbackSuppressorProcessor processor;
+        processor.prepare(48000.0);
+        processor.setEffect(effect);
+
+        auto left = sine(89.0f, 0.2f, 24000);
+        auto right = left;
+        for (std::size_t offset = 0; offset < left.size(); offset += 512) {
+            const int count = static_cast<int>(std::min<std::size_t>(512, left.size() - offset));
+            processor.process(left.data() + offset, right.data() + offset, count);
+        }
+
+        std::array<float, 8> freqs{};
+        const int count = processor.copyActiveNotches(freqs.data(),
+                                                      static_cast<int>(freqs.size()));
+        return count > 0 && std::fabs(freqs[0] - 89.0f) < 5.0f;
+    };
+
+    REQUIRE(detect(pluginrack::kFeedbackSuppressorMinDetectorHz));
+    REQUIRE_FALSE(detect(90.0f));
 }

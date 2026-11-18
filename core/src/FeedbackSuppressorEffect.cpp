@@ -394,22 +394,41 @@ void FeedbackSuppressorProcessor::updateAnalysisLowPass() noexcept {
 
 void FeedbackSuppressorProcessor::updateAnalysisHighPass() noexcept {
     // Four cascaded RBJ high-pass sections form an 8th-order (48 dB/oct)
-    // Butterworth filter on the mono analysis signal. This keeps DC, sub-bass
+    // Butterworth filter on the analysis signal. This keeps DC, sub-bass
     // rumble and loud below-band content out of the detector without touching
     // the audio output.
+    //
+    // At the minimum knob position there is no cutoff at all: an 8th-order
+    // filter tuned to 20 Hz still colours the first two octaves, and a bass
+    // note or a resonance at 89 Hz must not lose level before it reaches the
+    // peak picker. That position runs a single 5 Hz DC-blocking section instead.
     const double fs = std::max(1.0, sampleRate_);
-    const double f = std::clamp(static_cast<double>(effect_.detectorHighPassHz),
-                                10.0,
-                                std::min(20000.0, fs * 0.45));
+    const bool bypassed = effect_.detectorHighPassHz <= kFeedbackSuppressorHighPassBypassHz + 0.5f;
+    const double f = std::clamp(
+        bypassed ? static_cast<double>(kFeedbackSuppressorDcBlockerHz)
+                 : static_cast<double>(effect_.detectorHighPassHz),
+        1.0,
+        std::min(20000.0, fs * 0.45));
     const double w0 = 2.0 * 3.14159265358979323846 * f / fs;
     const double cosw = std::cos(w0);
     const double sinw = std::sin(w0);
     constexpr std::array<double, 4> kButterworthQ{
         0.5097955791041592, 0.6013448869350453,
         0.8999762231364156, 2.5629154477415055};
+    const int stages = bypassed ? 1 : 4;
+    hpB0_.fill(0.0f);
+    hpB1_.fill(0.0f);
+    hpB2_.fill(0.0f);
+    hpA1_.fill(0.0f);
+    hpA2_.fill(0.0f);
+    for (int stage = stages; stage < 4; ++stage) {
+        hpB0_[static_cast<std::size_t>(stage)] = 1.0f;  // identity
+    }
     bool valid = true;
-    for (int stage = 0; stage < 4; ++stage) {
-        const double alpha = sinw / (2.0 * kButterworthQ[static_cast<std::size_t>(stage)]);
+    for (int stage = 0; stage < stages; ++stage) {
+        const double q = bypassed ? 0.7071067811865476
+                                  : kButterworthQ[static_cast<std::size_t>(stage)];
+        const double alpha = sinw / (2.0 * q);
         const double a0 = 1.0 + alpha;
         if (std::fabs(a0) < 1e-12) {
             valid = false;
