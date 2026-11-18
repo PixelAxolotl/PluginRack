@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -45,6 +46,35 @@ inline float spectralDenoiserTrimDb(const std::vector<float>& trims, int band) n
         return 0.0f;
     }
     return trims[static_cast<std::size_t>(band)];
+}
+
+// Interpolates the trim curve at an arbitrary frequency. Bands narrower than
+// the FFT resolution have no bin centre of their own, so their trims still
+// reach the surrounding bins through this curve.
+inline float spectralDenoiserTrimDbAt(const std::vector<float>& trims,
+                                      double frequencyHz,
+                                      double nyquistHz) noexcept {
+    if (trims.size() != static_cast<std::size_t>(kSpectralDenoiserTrimBandCount)
+        || !(nyquistHz > kSpectralDenoiserTrimLowHz)) {
+        return 0.0f;
+    }
+    const double span = std::log(nyquistHz / kSpectralDenoiserTrimLowHz);
+    double position = 0.0;
+    if (frequencyHz > kSpectralDenoiserTrimLowHz) {
+        position = std::log(frequencyHz / kSpectralDenoiserTrimLowHz) / span
+            * kSpectralDenoiserTrimBandCount;
+    }
+    // Band b owns [b, b+1), so its value lives at the band centre (b + 0.5).
+    // Interpolating through those points keeps each band's trim intact at its
+    // centre while blending across the edges.
+    double curvePosition = position - 0.5;
+    curvePosition = std::clamp(curvePosition, 0.0,
+                               static_cast<double>(kSpectralDenoiserTrimBandCount - 1));
+    const auto index = static_cast<std::size_t>(curvePosition);
+    const auto next = std::min(index + 1,
+                               static_cast<std::size_t>(kSpectralDenoiserTrimBandCount - 1));
+    const auto fraction = static_cast<float>(curvePosition - static_cast<double>(index));
+    return trims[index] + (trims[next] - trims[index]) * fraction;
 }
 
 enum class SpectralDenoiserMode {

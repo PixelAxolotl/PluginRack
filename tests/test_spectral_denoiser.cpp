@@ -226,6 +226,12 @@ TEST_CASE("spectral denoiser publishes band gain reduction") {
     }
     REQUIRE(peak > 6.0f);
 
+    // Low log bands contain no bin of their own; the meter samples the gain
+    // curve so every bar stays populated.
+    for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
+        REQUIRE(processor.bandReductionDb(band) > 0.5f);
+    }
+
     // Out-of-range bands read as silence rather than touching memory.
     REQUIRE(processor.bandReductionDb(-1) == 0.0f);
     REQUIRE(processor.bandReductionDb(pluginrack::kSpectralDenoiserTrimBandCount) == 0.0f);
@@ -234,6 +240,30 @@ TEST_CASE("spectral denoiser publishes band gain reduction") {
     for (int band = 0; band < pluginrack::kSpectralDenoiserTrimBandCount; ++band) {
         REQUIRE(processor.bandReductionDb(band) == 0.0f);
     }
+}
+
+TEST_CASE("spectral denoiser interpolates trims between bands") {
+    std::vector<float> trims(pluginrack::kSpectralDenoiserTrimBandCount, 0.0f);
+    trims[4] = 12.0f;
+
+    const double nyquist = 24000.0;
+    const double low = pluginrack::kSpectralDenoiserTrimLowHz;
+    const double ratio = nyquist / low;
+    const auto frequencyAt = [&](double position) {
+        return low * std::pow(ratio, position / pluginrack::kSpectralDenoiserTrimBandCount);
+    };
+
+    // Each band keeps its own value at its centre.
+    REQUIRE(pluginrack::spectralDenoiserTrimDbAt(trims, frequencyAt(4.5), nyquist)
+            == Catch::Approx(12.0f));
+    REQUIRE(pluginrack::spectralDenoiserTrimDbAt(trims, frequencyAt(5.5), nyquist)
+            == Catch::Approx(0.0f));
+
+    // The curve blends across the boundary between bands.
+    REQUIRE(pluginrack::spectralDenoiserTrimDbAt(trims, frequencyAt(5.0), nyquist)
+            == Catch::Approx(6.0f));
+
+    REQUIRE(pluginrack::spectralDenoiserTrimDbAt({}, frequencyAt(4.5), nyquist) == 0.0f);
 }
 
 TEST_CASE("spectral denoiser learns a noise profile") {

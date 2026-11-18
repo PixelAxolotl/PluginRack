@@ -170,8 +170,8 @@ void SpectralDenoiserProcessor::rebuildTrimGains() {
     for (std::size_t k = 0; k < bins; ++k) {
         const double frequency = static_cast<double>(k) * sampleRate_
             / static_cast<double>(kSpectralDenoiserFftSize);
-        const int band = spectralDenoiserTrimBand(frequency, nyquist);
-        trimGain_[k] = dsp::dbToGain(spectralDenoiserTrimDb(effect_.profileTrimDb, band));
+        trimGain_[k] = dsp::dbToGain(
+            spectralDenoiserTrimDbAt(effect_.profileTrimDb, frequency, nyquist));
     }
 }
 
@@ -362,22 +362,33 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     }
 
     float minimumGain = 1.0f;
-    std::array<float, kSpectralDenoiserTrimBandCount> bandGain{};
-    bandGain.fill(1.0f);
     for (std::size_t k = 0; k < bins; ++k) {
         const float target = std::clamp(frequencyGain_[k], 0.0f, 1.0f);
         const float coeff = target < smoothGain_[k] ? attackCoeff_ : releaseCoeff_;
         smoothGain_[k] += coeff * (target - smoothGain_[k]);
         minimumGain = std::min(minimumGain, smoothGain_[k]);
-        const int band = spectralDenoiserTrimBand(
-            static_cast<double>(k) * sampleRate_ / kSpectralDenoiserFftSize,
-            sampleRate_ * 0.5);
-        bandGain[static_cast<std::size_t>(band)] =
-            std::min(bandGain[static_cast<std::size_t>(band)], smoothGain_[k]);
     }
     currentReductionDb_.store(-dsp::gainToDb(minimumGain), std::memory_order_relaxed);
-    for (std::size_t band = 0; band < bandGain.size(); ++band) {
-        const float reduction = std::clamp(-dsp::gainToDb(bandGain[band]),
+
+    // Read the meter at each band centre. Log bands below the FFT resolution
+    // contain no bin of their own; sampling the gain curve keeps every bar
+    // populated instead of leaving holes.
+    const double binWidth = sampleRate_ / kSpectralDenoiserFftSize;
+    const double nyquist = sampleRate_ * 0.5;
+    const double bandRatio = nyquist / kSpectralDenoiserTrimLowHz;
+    for (std::size_t band = 0; band < bandReductionDb_.size(); ++band) {
+        const double centre = kSpectralDenoiserTrimLowHz
+            * std::pow(bandRatio,
+                       (static_cast<double>(band) + 0.5)
+                           / kSpectralDenoiserTrimBandCount);
+        double position = std::clamp(centre / binWidth, 1.0,
+                                     static_cast<double>(bins - 1));
+        const auto index = static_cast<std::size_t>(position);
+        const auto next = std::min(index + 1, bins - 1);
+        const auto fraction = static_cast<float>(position - static_cast<double>(index));
+        const float gain = smoothGain_[index]
+            + (smoothGain_[next] - smoothGain_[index]) * fraction;
+        const float reduction = std::clamp(-dsp::gainToDb(gain),
                                            kSpectralDenoiserMinReductionDb,
                                            kSpectralDenoiserMaxReductionDb);
         bandReductionDb_[band].store(reduction, std::memory_order_relaxed);
