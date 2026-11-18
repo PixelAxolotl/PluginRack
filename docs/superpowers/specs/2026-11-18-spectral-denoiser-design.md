@@ -21,7 +21,7 @@ Learned profiles are saved with the scene. The effect is available on channel an
 ## User-facing behavior
 
 - Add **Spectral Denoiser** to channel and output effect menus, chain rows, and the focused built-in effect editor.
-- Controls: **Mode** (Learn / Adaptive), **Learn** and **Clear Profile** actions, and **Reduction**. Show learn progress and whether a usable profile exists. If Learn mode has no profile, pass audio through and clearly indicate that learning is needed.
+- Controls: **Mode** (Learn / Adaptive), **Learn** and **Clear Profile** actions, **Reduction**, and a **Threshold** offset (±18 dB) that shifts the whole noise estimate up or down without changing what is learned. Show learn progress and whether a usable profile exists. If Learn mode has no profile, pass audio through and clearly indicate that learning is needed.
 - Show the learned profile as a log-frequency curve in the editor. Split it into 32 bands that can be trimmed ±18 dB and reset individually or together; the graph also draws the trimmed threshold so the effect of a drag is visible. Trims are saved with the effect and applied to both the learned and adaptive noise estimate.
 - Learn captures approximately one second of the current input; the user should provide a noise-only segment. A completed profile is stored with the effect and restored with the scene.
 - Adaptive mode starts estimating automatically. Use a conservative noise-floor tracker that is slower to learn increases than decreases and is less willing to update during strong tonal/transient content. This mode is a convenience, not a promise that all wanted content will be protected.
@@ -41,9 +41,9 @@ Learned profiles are saved with the scene. The effect is available on channel an
 
 ## State, learning, and real-time communication
 
-- Add an effect value type with id, bypass, mode, reduction, profile metadata, band trims, and the learned profile bins. Keep the profile owned by the effect/scene state so save/load is deterministic.
+- Add an effect value type with id, bypass, mode, reduction, threshold offset, profile metadata, band trims, and the learned profile bins. Keep the profile owned by the effect/scene state so save/load is deterministic.
 - Extend JSON encoding/decoding additively. Older scenes without denoiser fields load with no denoiser instances; new fields use defaults. Do not bump the scene schema version unless compatibility testing shows the reader must interpret an older representation differently.
-- Validate mode, finite/ranged controls, profile format/version, sample rate, bin count, finite/non-negative bin values, and the optional band-trim vector (empty or exactly 32 finite values within ±18 dB). Invalid profile data must fail validation rather than enter the audio processor.
+- Validate mode, finite/ranged controls (including the ±18 dB threshold offset), profile format/version, sample rate, bin count, finite/non-negative bin values, and the optional band-trim vector (empty or exactly 32 finite values within ±18 dB). Invalid profile data must fail validation rather than enter the audio processor.
 - Starting/stopping learning uses bounded atomic commands. The processor captures and publishes completion through a preallocated, lock-free or non-blocking handoff; the message thread applies the finished profile to scene state and handles persistence. No editor callback may mutate DSP vectors concurrently with rendering.
 - A changed sample rate rebuilds processor working buffers while retaining/remapping the saved profile as described above. Clearing the profile is an explicit user action.
 
@@ -56,7 +56,7 @@ Learned profiles are saved with the scene. The effect is available on channel an
 
 ## Validation
 
-- DSP tests: WOLA reconstruction at zero reduction; fixed latency for multiple block sizes; bypass equality to delayed dry; stable shared stereo gain; learned-profile reduction of stationary noise beneath a stronger tone; adaptive convergence without learning a sustained stronger tone as noise; band trims changing how hard a band is cut; finite output and correct reset/sample-rate behavior.
+- DSP tests: WOLA reconstruction at zero reduction; fixed latency for multiple block sizes; bypass equality to delayed dry; stable shared stereo gain; learned-profile reduction of stationary noise beneath a stronger tone; adaptive convergence without learning a sustained stronger tone as noise; band trims changing how hard a band is cut; threshold offset changing how hard noise is cut; finite output and correct reset/sample-rate behavior.
 - Real-time safety tests or instrumentation: no allocations or blocking locks during `process()` and no races while requesting/capturing a profile.
 - Scene tests: learned-profile, trim, and control round trip, defaults for older scenes, invalid profile/trim rejection, and sample-rate remapping.
 - Chain/integration tests: order, bypass, removal, channel/output processing, latency reporting/compensation, and editor updates surviving close/reopen.

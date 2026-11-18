@@ -225,6 +225,13 @@ void validateSpectralDenoisers(const char* kind, std::uint32_t id,
                 }
             }
         }
+        if (!std::isfinite(e.thresholdOffsetDb)
+            || e.thresholdOffsetDb < kSpectralDenoiserMinThresholdOffsetDb
+            || e.thresholdOffsetDb > kSpectralDenoiserMaxThresholdOffsetDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser threshold offset out of range"});
+        }
         const bool hasProfile = !e.noiseProfile.empty() || e.profileSampleRate > 0.0;
         if (!hasProfile) {
             continue;

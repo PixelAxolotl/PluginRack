@@ -84,6 +84,8 @@ private:
     juce::ComboBox modeCombo;
     ValueEditSlider reduction;
     juce::Label reductionLabel{"", "Max Reduction"};
+    ValueEditSlider thresholdOffset;
+    juce::Label thresholdOffsetLabel{"", "Threshold"};
     juce::TextButton learnButton{"Learn"};
     juce::TextButton clearButton{"Clear Profile"};
     juce::TextButton resetTrimButton{"Reset Trim"};

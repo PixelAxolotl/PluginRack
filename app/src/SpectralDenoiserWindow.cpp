@@ -368,6 +368,29 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
     reductionLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
     reductionLabel.setColour(juce::Label::textColourId, theme::dim());
 
+    content.addAndMakeVisible(thresholdOffset);
+    content.addAndMakeVisible(thresholdOffsetLabel);
+    thresholdOffset.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    thresholdOffset.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 18);
+    thresholdOffset.setRange(pluginrack::kSpectralDenoiserMinThresholdOffsetDb,
+                             pluginrack::kSpectralDenoiserMaxThresholdOffsetDb, 0.5);
+    thresholdOffset.setTextValueSuffix(" dB");
+    thresholdOffset.setDoubleClickReturnValue(true, 0.0);
+    thresholdOffset.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
+    thresholdOffset.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
+    thresholdOffset.setColour(juce::Slider::textBoxTextColourId, theme::text());
+    thresholdOffset.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    thresholdOffset.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    thresholdOffset.setValue(effect.thresholdOffsetDb, juce::dontSendNotification);
+    thresholdOffset.onValueChange = [this] {
+        effect.thresholdOffsetDb = static_cast<float>(thresholdOffset.getValue());
+        if (apply) apply(effect, false);
+    };
+
+    thresholdOffsetLabel.setJustificationType(juce::Justification::centred);
+    thresholdOffsetLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    thresholdOffsetLabel.setColour(juce::Label::textColourId, theme::dim());
+
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
     statusLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -404,13 +427,19 @@ void SpectralDenoiserWindow::refreshStatus() {
     const juce::String trimText = trimmed > 0
         ? " · " + juce::String(trimmed) + (trimmed == 1 ? " band" : " bands") + " trimmed"
         : juce::String();
+    const juce::String offsetText = std::abs(effect.thresholdOffsetDb) >= 0.25f
+        ? " · threshold " + juce::String(effect.thresholdOffsetDb > 0.0f ? "+" : "")
+            + juce::String(effect.thresholdOffsetDb, 1) + " dB"
+        : juce::String();
     if (effect.hasProfile()) {
-        statusLabel.setText("Noise profile saved" + trimText, juce::dontSendNotification);
+        statusLabel.setText("Noise profile saved" + trimText + offsetText,
+                            juce::dontSendNotification);
     } else if (effect.mode == pluginrack::SpectralDenoiserMode::Learn) {
-        statusLabel.setText("Learn a noise-only profile to reduce noise",
+        statusLabel.setText("Learn a noise-only profile to reduce noise" + offsetText,
                             juce::dontSendNotification);
     } else {
-        statusLabel.setText("Adaptive: tracks the noise floor as it plays" + trimText,
+        statusLabel.setText("Adaptive: tracks the noise floor as it plays"
+                            + trimText + offsetText,
                             juce::dontSendNotification);
     }
 }
@@ -491,7 +520,10 @@ void SpectralDenoiserWindow::resized() {
     profileView.setBounds(area.removeFromTop(graphHeight));
     area.removeFromTop(8);
 
-    const auto knobArea = area.removeFromTop(juce::jmin(knobHeight, area.getHeight()));
+    auto knobArea = area.removeFromTop(juce::jmin(knobHeight, area.getHeight()));
+    auto knobLeft = knobArea.removeFromLeft(knobArea.getWidth() / 2);
+    theme::ui::placeWindowKnob(knobLeft.withSizeKeepingCentre(150, knobLeft.getHeight()),
+                               thresholdOffsetLabel, thresholdOffset);
     theme::ui::placeWindowKnob(knobArea.withSizeKeepingCentre(150, knobArea.getHeight()),
                                reductionLabel, reduction);
 }

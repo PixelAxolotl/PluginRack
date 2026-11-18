@@ -344,6 +344,50 @@ TEST_CASE("spectral denoiser band trim changes how hard a band is cut") {
     REQUIRE(trimmedNoise < protectedNoise * 0.5f);
 }
 
+TEST_CASE("spectral denoiser threshold offset changes how hard noise is cut") {
+    pluginrack::SpectralDenoiserProcessor learner;
+    learner.prepare(kSampleRate);
+    learner.setEffect(pluginrack::makeDefaultSpectralDenoiserEffect());
+    learner.startLearning();
+
+    auto training = noise(static_cast<std::size_t>(kSampleRate * 1.5), 0x0ddc0ffe);
+    for (auto& sample : training) sample *= 0.02f;
+    auto trainingRight = training;
+    processInBlocks(learner, training, trainingRight);
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(learner.takeLearnedProfile(profile, profileRate));
+
+    auto render = [&](float offsetDb) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+        effect.reductionDb = 18.0f;
+        effect.noiseProfile = profile;
+        effect.profileSampleRate = profileRate;
+        effect.thresholdOffsetDb = offsetDb;
+
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+
+        const auto size = static_cast<std::size_t>(kSampleRate * 1.5);
+        std::vector<float> left(size);
+        const auto signal = noise(size, 0x0ddc0ffe);
+        for (std::size_t i = 0; i < size; ++i) {
+            left[i] = 0.04f * signal[i];
+        }
+        auto right = left;
+        processInBlocks(processor, left, right);
+
+        return rms(left, size / 2);
+    };
+
+    const float protectedNoise = render(pluginrack::kSpectralDenoiserMinThresholdOffsetDb);
+    const float trimmedNoise = render(pluginrack::kSpectralDenoiserMaxThresholdOffsetDb);
+    REQUIRE(trimmedNoise < protectedNoise * 0.5f);
+}
+
 TEST_CASE("spectral denoiser effect settings serialize") {
     pluginrack::SpectralDenoiserEffect effect = pluginrack::makeDefaultSpectralDenoiserEffect(9);
     effect.mode = pluginrack::SpectralDenoiserMode::Learn;
@@ -353,6 +397,7 @@ TEST_CASE("spectral denoiser effect settings serialize") {
     effect.profileSampleRate = 44100.0;
     effect.profileTrimDb.assign(pluginrack::kSpectralDenoiserTrimBandCount, 0.0f);
     effect.profileTrimDb[3] = 6.5f;
+    effect.thresholdOffsetDb = 7.5f;
 
     pluginrack::Scene scene;
     scene.schemaVersion = pluginrack::kSchemaVersion;
@@ -369,6 +414,7 @@ TEST_CASE("spectral denoiser effect settings serialize") {
     REQUIRE(json.find("SpectralDenoiser") != std::string::npos);
     REQUIRE(json.find("noiseProfile") != std::string::npos);
     REQUIRE(json.find("profileTrimDb") != std::string::npos);
+    REQUIRE(json.find("thresholdOffsetDb") != std::string::npos);
 
     const auto loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
@@ -383,6 +429,7 @@ TEST_CASE("spectral denoiser effect settings serialize") {
     REQUIRE(restored.profileTrimDb.size()
             == static_cast<std::size_t>(pluginrack::kSpectralDenoiserTrimBandCount));
     REQUIRE(restored.profileTrimDb[3] == Catch::Approx(6.5f));
+    REQUIRE(restored.thresholdOffsetDb == Catch::Approx(7.5f));
 }
 
 TEST_CASE("spectral denoiser validator rejects bad settings") {
@@ -418,6 +465,15 @@ TEST_CASE("spectral denoiser validator rejects bad settings") {
 
     trimmed.profileTrimDb[7] = -6.0f;
     scene.channels.front().spectralDenoiserEffects = {trimmed};
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    auto offset = pluginrack::makeDefaultSpectralDenoiserEffect(2);
+    offset.thresholdOffsetDb = 99.0f;
+    scene.channels.front().spectralDenoiserEffects = {offset};
+    REQUIRE_FALSE(pluginrack::validate(scene).empty());
+
+    offset.thresholdOffsetDb = -6.0f;
+    scene.channels.front().spectralDenoiserEffects = {offset};
     REQUIRE(pluginrack::validate(scene).empty());
 }
 

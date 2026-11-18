@@ -297,6 +297,9 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     const bool useStaticProfile = effect_.mode == SpectralDenoiserMode::Learn && effect_.hasProfile();
     const bool adaptive = !useStaticProfile;
     const float floorGain = dsp::dbToGain(-clampReduction(effect_.reductionDb));
+    const float thresholdGain = dsp::dbToGain(
+        std::clamp(effect_.thresholdOffsetDb, kSpectralDenoiserMinThresholdOffsetDb,
+                   kSpectralDenoiserMaxThresholdOffsetDb));
 
     for (std::size_t k = 0; k < bins; ++k) {
         const float powerLeft = reLeft_[k] * reLeft_[k] + imLeft_[k] * imLeft_[k];
@@ -331,7 +334,8 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
             continue;
         }
 
-        const float noisePower = std::max(noise_[k], kSilencePower) * trimGain_[k];
+        const float noisePower = std::max(noise_[k], kSilencePower) * trimGain_[k]
+            * thresholdGain;
         const float snr = std::max(0.0f, power / noisePower - 1.0f);
         const float wiener = snr / (snr + 1.0f);
         rawGain_[k] = floorGain + (1.0f - floorGain) * wiener;

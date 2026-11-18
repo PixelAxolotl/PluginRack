@@ -23,6 +23,8 @@ inline constexpr int kSpectralDenoiserTrimBandCount = 32;
 inline constexpr float kSpectralDenoiserMinTrimDb = -18.0f;
 inline constexpr float kSpectralDenoiserMaxTrimDb = 18.0f;
 inline constexpr float kSpectralDenoiserTrimLowHz = 20.0f;
+inline constexpr float kSpectralDenoiserMinThresholdOffsetDb = -18.0f;
+inline constexpr float kSpectralDenoiserMaxThresholdOffsetDb = 18.0f;
 
 // Maps a frequency onto one of the log-spaced profile-trim bands. The editor
 // and the processor share this so a dragged band covers exactly what is cut.
@@ -93,6 +95,9 @@ struct SpectralDenoiserEffect {
     // Optional per-band offset applied to the noise estimate. Empty means
     // untouched; otherwise exactly kSpectralDenoiserTrimBandCount entries.
     std::vector<float> profileTrimDb;
+    // Shifts the whole threshold up or down without changing what is learned.
+    // Positive values assume more noise and cut harder.
+    float thresholdOffsetDb = 0.0f;
 
     bool hasProfile() const noexcept {
         return profileSampleRate > 0.0
