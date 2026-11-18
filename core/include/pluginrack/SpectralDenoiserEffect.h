@@ -25,6 +25,14 @@ inline constexpr float kSpectralDenoiserMaxTrimDb = 18.0f;
 inline constexpr float kSpectralDenoiserTrimLowHz = 20.0f;
 inline constexpr float kSpectralDenoiserMinThresholdOffsetDb = -18.0f;
 inline constexpr float kSpectralDenoiserMaxThresholdOffsetDb = 18.0f;
+inline constexpr float kSpectralDenoiserMinMixPercent = 0.0f;
+inline constexpr float kSpectralDenoiserMaxMixPercent = 100.0f;
+inline constexpr float kSpectralDenoiserMinSpeed = 0.25f;
+inline constexpr float kSpectralDenoiserMaxSpeed = 4.0f;
+inline constexpr float kSpectralDenoiserMinLearnSeconds = 0.5f;
+inline constexpr float kSpectralDenoiserMaxLearnSeconds = 3.0f;
+inline constexpr float kSpectralDenoiserMinStereoLinkPercent = 0.0f;
+inline constexpr float kSpectralDenoiserMaxStereoLinkPercent = 100.0f;
 
 // Maps a frequency onto one of the log-spaced profile-trim bands. The editor
 // and the processor share this so a dragged band covers exactly what is cut.
@@ -98,6 +106,16 @@ struct SpectralDenoiserEffect {
     // Shifts the whole threshold up or down without changing what is learned.
     // Positive values assume more noise and cut harder.
     float thresholdOffsetDb = 0.0f;
+    // Wet/dry balance. The dry side is the delayed input, so latency is fixed.
+    float mixPercent = kSpectralDenoiserMaxMixPercent;
+    // Monitor-only: plays what the denoiser removes. Never saved with a scene.
+    bool listen = false;
+    // Multiplies both the attack and release rates; higher reacts faster.
+    float speed = 1.0f;
+    // How much noise the Learn pass averages, in seconds.
+    float learnSeconds = 1.0f;
+    // 100 keeps one mask for both sides; lower blends toward per-side gains.
+    float stereoLinkPercent = kSpectralDenoiserMaxStereoLinkPercent;
 
     bool hasProfile() const noexcept {
         return profileSampleRate > 0.0
@@ -110,7 +128,8 @@ struct SpectralDenoiserEffect {
 SpectralDenoiserEffect makeDefaultSpectralDenoiserEffect(std::uint32_t id = 1);
 
 // Streaming STFT denoiser. All buffers are allocated in prepare(); process()
-// never allocates. Stereo is linked: one gain mask is applied to both sides.
+// never allocates. One gain mask is shared by default; the stereo link control
+// blends toward per-side masks that use the same noise estimate.
 class SpectralDenoiserProcessor {
 public:
     SpectralDenoiserProcessor() = default;
@@ -150,6 +169,7 @@ public:
 private:
     void rebuildNoiseFromProfile();
     void rebuildTrimGains();
+    void updateSmoothing();
     void processFrame() noexcept;
     void fft(std::vector<float>& re, std::vector<float>& im, bool inverse) const noexcept;
 
@@ -171,6 +191,12 @@ private:
     std::vector<float> rawGain_;
     std::vector<float> frequencyGain_;
     std::vector<float> smoothGain_;
+    std::vector<float> rawGainLeft_;
+    std::vector<float> rawGainRight_;
+    std::vector<float> frequencyGainLeft_;
+    std::vector<float> frequencyGainRight_;
+    std::vector<float> smoothGainLeft_;
+    std::vector<float> smoothGainRight_;
     std::vector<double> learnSum_;
     std::vector<float> pendingProfile_;
 
@@ -181,6 +207,7 @@ private:
     float overlapNorm_ = 1.0f;
     float attackCoeff_ = 0.2f;
     float releaseCoeff_ = 0.05f;
+    int learnTargetFrames_ = 375;
     std::atomic<int> learnFrames_{0};
 
     std::atomic<bool> learnRequest_{false};

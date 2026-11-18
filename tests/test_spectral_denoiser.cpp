@@ -398,6 +398,11 @@ TEST_CASE("spectral denoiser effect settings serialize") {
     effect.profileTrimDb.assign(pluginrack::kSpectralDenoiserTrimBandCount, 0.0f);
     effect.profileTrimDb[3] = 6.5f;
     effect.thresholdOffsetDb = 7.5f;
+    effect.mixPercent = 55.0f;
+    effect.speed = 1.5f;
+    effect.learnSeconds = 2.5f;
+    effect.stereoLinkPercent = 40.0f;
+    effect.listen = true;
 
     pluginrack::Scene scene;
     scene.schemaVersion = pluginrack::kSchemaVersion;
@@ -415,6 +420,11 @@ TEST_CASE("spectral denoiser effect settings serialize") {
     REQUIRE(json.find("noiseProfile") != std::string::npos);
     REQUIRE(json.find("profileTrimDb") != std::string::npos);
     REQUIRE(json.find("thresholdOffsetDb") != std::string::npos);
+    REQUIRE(json.find("mixPercent") != std::string::npos);
+    REQUIRE(json.find("speed") != std::string::npos);
+    REQUIRE(json.find("learnSeconds") != std::string::npos);
+    REQUIRE(json.find("stereoLinkPercent") != std::string::npos);
+    REQUIRE(json.find("listen") == std::string::npos);
 
     const auto loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
@@ -430,6 +440,11 @@ TEST_CASE("spectral denoiser effect settings serialize") {
             == static_cast<std::size_t>(pluginrack::kSpectralDenoiserTrimBandCount));
     REQUIRE(restored.profileTrimDb[3] == Catch::Approx(6.5f));
     REQUIRE(restored.thresholdOffsetDb == Catch::Approx(7.5f));
+    REQUIRE(restored.mixPercent == Catch::Approx(55.0f));
+    REQUIRE(restored.speed == Catch::Approx(1.5f));
+    REQUIRE(restored.learnSeconds == Catch::Approx(2.5f));
+    REQUIRE(restored.stereoLinkPercent == Catch::Approx(40.0f));
+    REQUIRE_FALSE(restored.listen);
 }
 
 TEST_CASE("spectral denoiser validator rejects bad settings") {
@@ -475,6 +490,42 @@ TEST_CASE("spectral denoiser validator rejects bad settings") {
     offset.thresholdOffsetDb = -6.0f;
     scene.channels.front().spectralDenoiserEffects = {offset};
     REQUIRE(pluginrack::validate(scene).empty());
+
+    auto mix = pluginrack::makeDefaultSpectralDenoiserEffect(2);
+    mix.mixPercent = 101.0f;
+    scene.channels.front().spectralDenoiserEffects = {mix};
+    REQUIRE_FALSE(pluginrack::validate(scene).empty());
+
+    mix.mixPercent = 50.0f;
+    scene.channels.front().spectralDenoiserEffects = {mix};
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    auto speed = pluginrack::makeDefaultSpectralDenoiserEffect(2);
+    speed.speed = 0.1f;
+    scene.channels.front().spectralDenoiserEffects = {speed};
+    REQUIRE_FALSE(pluginrack::validate(scene).empty());
+
+    speed.speed = 2.0f;
+    scene.channels.front().spectralDenoiserEffects = {speed};
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    auto learnSeconds = pluginrack::makeDefaultSpectralDenoiserEffect(2);
+    learnSeconds.learnSeconds = 4.0f;
+    scene.channels.front().spectralDenoiserEffects = {learnSeconds};
+    REQUIRE_FALSE(pluginrack::validate(scene).empty());
+
+    learnSeconds.learnSeconds = 2.0f;
+    scene.channels.front().spectralDenoiserEffects = {learnSeconds};
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    auto link = pluginrack::makeDefaultSpectralDenoiserEffect(2);
+    link.stereoLinkPercent = -1.0f;
+    scene.channels.front().spectralDenoiserEffects = {link};
+    REQUIRE_FALSE(pluginrack::validate(scene).empty());
+
+    link.stereoLinkPercent = 0.0f;
+    scene.channels.front().spectralDenoiserEffects = {link};
+    REQUIRE(pluginrack::validate(scene).empty());
 }
 
 TEST_CASE("spectral denoiser runs in the mixer chain") {
@@ -519,6 +570,233 @@ TEST_CASE("spectral denoiser runs in the mixer chain") {
     const float inputLevel = rms(input, 24000);
     const float outputLevel = rms(outputLeft, 24000);
     REQUIRE(outputLevel < inputLevel * 0.5f);
+}
+
+namespace {
+
+float toneMagnitude(const std::vector<float>& samples, std::size_t begin,
+                    double frequencyHz, double sampleRate) {
+    const double step = 2.0 * 3.14159265358979323846 * frequencyHz / sampleRate;
+    double real = 0.0;
+    double imaginary = 0.0;
+    for (std::size_t n = 0; begin + n < samples.size(); ++n) {
+        const double phase = step * static_cast<double>(n);
+        real += static_cast<double>(samples[begin + n]) * std::cos(phase);
+        imaginary += static_cast<double>(samples[begin + n]) * std::sin(phase);
+    }
+    const auto count = static_cast<double>(samples.size() - begin);
+    return static_cast<float>(std::sqrt(real * real + imaginary * imaginary) / count);
+}
+
+} // namespace
+
+TEST_CASE("spectral denoiser mix blends wet with delayed dry") {
+    auto base = pluginrack::makeDefaultSpectralDenoiserEffect();
+    base.reductionDb = 40.0f;
+
+    const auto size = static_cast<std::size_t>(kSampleRate);
+    std::vector<float> dry(size);
+    const auto signal = noise(size, 0x51ee7u);
+    for (std::size_t i = 0; i < size; ++i) {
+        dry[i] = 0.1f * signal[i];
+    }
+
+    const auto render = [&](float mixPercent) {
+        auto effect = base;
+        effect.mixPercent = mixPercent;
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+        auto left = dry;
+        auto right = dry;
+        processInBlocks(processor, left, right);
+        return left;
+    };
+
+    const auto dryOnly = render(0.0f);
+    for (std::size_t i = 2048; i < size; ++i) {
+        REQUIRE(dryOnly[i] == Catch::Approx(dry[i - pluginrack::kSpectralDenoiserLatencySamples])
+                                   .margin(1.0e-6f));
+    }
+
+    const auto wetOnly = render(100.0f);
+    const auto half = render(50.0f);
+    REQUIRE(rms(wetOnly, size / 2) < rms(dryOnly, size / 2) * 0.9f);
+
+    for (std::size_t i = 4096; i < size; ++i) {
+        const float delayed = dry[i - pluginrack::kSpectralDenoiserLatencySamples];
+        const float expected = 0.5f * delayed + 0.5f * wetOnly[i];
+        REQUIRE(half[i] == Catch::Approx(expected).margin(1.0e-5f));
+    }
+}
+
+TEST_CASE("spectral denoiser listen outputs the removed signal") {
+    auto base = pluginrack::makeDefaultSpectralDenoiserEffect();
+    base.reductionDb = 24.0f;
+
+    const auto size = static_cast<std::size_t>(kSampleRate);
+    std::vector<float> dry(size);
+    const auto signal = noise(size, 0x1a57e7u);
+    for (std::size_t i = 0; i < size; ++i) {
+        dry[i] = 0.1f * signal[i];
+    }
+
+    const auto render = [&](bool listen) {
+        auto effect = base;
+        effect.listen = listen;
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+        auto left = dry;
+        auto right = dry;
+        processInBlocks(processor, left, right);
+        return left;
+    };
+
+    const auto wet = render(false);
+    const auto removed = render(true);
+    for (std::size_t i = 4096; i < size; ++i) {
+        const float expected = dry[i - pluginrack::kSpectralDenoiserLatencySamples] - wet[i];
+        REQUIRE(removed[i] == Catch::Approx(expected).margin(1.0e-5f));
+    }
+    REQUIRE(rms(removed, size / 2) > 1.0e-3f);
+}
+
+TEST_CASE("spectral denoiser speed changes how fast the gain closes") {
+    pluginrack::SpectralDenoiserProcessor learner;
+    learner.prepare(kSampleRate);
+    learner.setEffect(pluginrack::makeDefaultSpectralDenoiserEffect());
+    learner.startLearning();
+
+    auto training = noise(static_cast<std::size_t>(kSampleRate * 1.5), 0x5eed1234u);
+    for (auto& sample : training) {
+        sample *= 0.02f;
+    }
+    auto trainingRight = training;
+    processInBlocks(learner, training, trainingRight);
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(learner.takeLearnedProfile(profile, profileRate));
+
+    const auto size = static_cast<std::size_t>(kSampleRate * 1.5);
+    const auto drop = static_cast<std::size_t>(kSampleRate * 0.75);
+    std::vector<float> signal(size);
+    const auto loud = noise(size, 0x5eed5678u);
+    const auto quiet = noise(size, 0x5eed9abcu);
+    for (std::size_t i = 0; i < size; ++i) {
+        signal[i] = 0.2f * loud[i];
+        if (i >= drop) {
+            signal[i] = 0.02f * quiet[i];
+        }
+    }
+
+    const auto render = [&](float speed) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+        effect.reductionDb = 24.0f;
+        effect.speed = speed;
+        effect.noiseProfile = profile;
+        effect.profileSampleRate = profileRate;
+
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+        auto left = signal;
+        auto right = signal;
+        processInBlocks(processor, left, right);
+        // Measure just after the level drops, while the attack is still in
+        // progress: the fast setting should already be closed.
+        const auto begin = drop + 1024;
+        const auto end = std::min(left.size(), begin + 480);
+        const std::vector<float> window(left.begin() + static_cast<std::ptrdiff_t>(begin),
+                                        left.begin() + static_cast<std::ptrdiff_t>(end));
+        return rms(window, 0);
+    };
+
+    const float fast = render(pluginrack::kSpectralDenoiserMaxSpeed);
+    const float slow = render(pluginrack::kSpectralDenoiserMinSpeed);
+    REQUIRE(fast < slow * 0.5f);
+}
+
+TEST_CASE("spectral denoiser learn time controls the pass length") {
+    const auto measure = [](float seconds) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.learnSeconds = seconds;
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+        processor.startLearning();
+
+        auto samples = noise(static_cast<std::size_t>(kSampleRate * 0.8), 0x1ea2c0u);
+        for (auto& sample : samples) {
+            sample *= 0.02f;
+        }
+        auto right = samples;
+        processInBlocks(processor, samples, right);
+        return processor.learnProgress();
+    };
+
+    const float shortPass = measure(pluginrack::kSpectralDenoiserMinLearnSeconds);
+    const float longPass = measure(pluginrack::kSpectralDenoiserMaxLearnSeconds);
+    REQUIRE(shortPass >= 0.999f);
+    REQUIRE(longPass > 0.1f);
+    REQUIRE(longPass < 0.5f);
+}
+
+TEST_CASE("spectral denoiser stereo link trades separation for a shared mask") {
+    pluginrack::SpectralDenoiserProcessor learner;
+    learner.prepare(kSampleRate);
+    learner.setEffect(pluginrack::makeDefaultSpectralDenoiserEffect());
+    learner.startLearning();
+
+    const auto size = static_cast<std::size_t>(kSampleRate * 1.5);
+    auto training = noise(size, 0x2a2a2a2au);
+    for (auto& sample : training) {
+        sample *= 0.02f;
+    }
+    auto trainingRight = training;
+    processInBlocks(learner, training, trainingRight);
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(learner.takeLearnedProfile(profile, profileRate));
+
+    const auto render = [&](float linkPercent) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+        effect.reductionDb = 24.0f;
+        effect.stereoLinkPercent = linkPercent;
+        effect.noiseProfile = profile;
+        effect.profileSampleRate = profileRate;
+
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+
+        std::vector<float> left(size);
+        std::vector<float> right(size);
+        const auto leftNoise = noise(size, 0x2a2a2a2au);
+        const auto rightNoise = noise(size, 0x3b3b3b3bu);
+        for (std::size_t i = 0; i < size; ++i) {
+            left[i] = 0.02f * leftNoise[i];
+            right[i] = 0.02f * rightNoise[i];
+            // A tone in the right channel only; the linked mask opens for it
+            // on both sides, so the left channel's noise leaks through.
+            right[i] += 0.3f * static_cast<float>(std::sin(
+                2.0 * 3.14159265358979323846 * 937.5 * static_cast<double>(i) / kSampleRate));
+        }
+        processInBlocks(processor, left, right);
+        return left;
+    };
+
+    const auto linked = render(pluginrack::kSpectralDenoiserMaxStereoLinkPercent);
+    const auto separate = render(pluginrack::kSpectralDenoiserMinStereoLinkPercent);
+
+    const auto window = static_cast<std::size_t>(kSampleRate);
+    const auto linkedLeak = toneMagnitude(linked, window, 937.5, kSampleRate);
+    const auto separateLeak = toneMagnitude(separate, window, 937.5, kSampleRate);
+    REQUIRE(linkedLeak > separateLeak * 4.0f);
 }
 
 TEST_CASE("spectral denoiser keeps non-finite input out of the chain") {

@@ -232,6 +232,31 @@ void validateSpectralDenoisers(const char* kind, std::uint32_t id,
                               std::string(kind) + " " + std::to_string(id) +
                                   " spectral denoiser threshold offset out of range"});
         }
+        if (!std::isfinite(e.mixPercent) || e.mixPercent < kSpectralDenoiserMinMixPercent
+            || e.mixPercent > kSpectralDenoiserMaxMixPercent) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser mix out of range [0, 100]"});
+        }
+        if (!std::isfinite(e.speed) || e.speed < kSpectralDenoiserMinSpeed
+            || e.speed > kSpectralDenoiserMaxSpeed) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser speed out of range [0.25, 4]"});
+        }
+        if (!std::isfinite(e.learnSeconds) || e.learnSeconds < kSpectralDenoiserMinLearnSeconds
+            || e.learnSeconds > kSpectralDenoiserMaxLearnSeconds) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser learn length out of range [0.5, 3]"});
+        }
+        if (!std::isfinite(e.stereoLinkPercent)
+            || e.stereoLinkPercent < kSpectralDenoiserMinStereoLinkPercent
+            || e.stereoLinkPercent > kSpectralDenoiserMaxStereoLinkPercent) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser stereo link out of range [0, 100]"});
+        }
         const bool hasProfile = !e.noiseProfile.empty() || e.profileSampleRate > 0.0;
         if (!hasProfile) {
             continue;

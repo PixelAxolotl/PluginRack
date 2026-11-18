@@ -325,6 +325,18 @@ void to_json(nlohmann::json& j, const SpectralDenoiserEffect& effect) {
     if (effect.thresholdOffsetDb != 0.0f) {
         j["thresholdOffsetDb"] = effect.thresholdOffsetDb;
     }
+    if (effect.mixPercent != kSpectralDenoiserMaxMixPercent) {
+        j["mixPercent"] = effect.mixPercent;
+    }
+    if (effect.speed != 1.0f) {
+        j["speed"] = effect.speed;
+    }
+    if (effect.learnSeconds != 1.0f) {
+        j["learnSeconds"] = effect.learnSeconds;
+    }
+    if (effect.stereoLinkPercent != kSpectralDenoiserMaxStereoLinkPercent) {
+        j["stereoLinkPercent"] = effect.stereoLinkPercent;
+    }
 }
 
 void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
@@ -337,6 +349,12 @@ void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
     if (j.contains("noiseProfile")) j.at("noiseProfile").get_to(effect.noiseProfile);
     if (j.contains("profileTrimDb")) j.at("profileTrimDb").get_to(effect.profileTrimDb);
     effect.thresholdOffsetDb = j.value("thresholdOffsetDb", 0.0f);
+    effect.mixPercent = j.value("mixPercent", effect.mixPercent);
+    effect.speed = j.value("speed", effect.speed);
+    effect.learnSeconds = j.value("learnSeconds", effect.learnSeconds);
+    effect.stereoLinkPercent = j.value("stereoLinkPercent", effect.stereoLinkPercent);
+    // Listen is monitor-only and deliberately never restored from a scene.
+    effect.listen = false;
 }
 
 void to_json(nlohmann::json& j, DynamicsEffectType type) {

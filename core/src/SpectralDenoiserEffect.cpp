@@ -21,8 +21,12 @@ float clampReduction(float db) noexcept {
     return std::clamp(db, kSpectralDenoiserMinReductionDb, kSpectralDenoiserMaxReductionDb);
 }
 
-int learnFrameTarget(double sampleRate) noexcept {
-    const auto frames = static_cast<int>(std::lround(sampleRate / kSpectralDenoiserHopSize));
+int learnFrameTarget(double sampleRate, float seconds) noexcept {
+    const double length = std::clamp(static_cast<double>(seconds),
+                                     static_cast<double>(kSpectralDenoiserMinLearnSeconds),
+                                     static_cast<double>(kSpectralDenoiserMaxLearnSeconds));
+    const auto frames = static_cast<int>(
+        std::lround(sampleRate * length / kSpectralDenoiserHopSize));
     return std::max(frames, 1);
 }
 
@@ -59,6 +63,12 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
     rawGain_ = other.rawGain_;
     frequencyGain_ = other.frequencyGain_;
     smoothGain_ = other.smoothGain_;
+    rawGainLeft_ = other.rawGainLeft_;
+    rawGainRight_ = other.rawGainRight_;
+    frequencyGainLeft_ = other.frequencyGainLeft_;
+    frequencyGainRight_ = other.frequencyGainRight_;
+    smoothGainLeft_ = other.smoothGainLeft_;
+    smoothGainRight_ = other.smoothGainRight_;
     learnSum_ = other.learnSum_;
     pendingProfile_ = other.pendingProfile_;
     inputWrite_ = other.inputWrite_;
@@ -66,6 +76,7 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
     hopCounter_ = other.hopCounter_;
     noiseSeeded_ = other.noiseSeeded_;
     learnFrames_.store(other.learnFrames_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    learnTargetFrames_ = other.learnTargetFrames_;
     overlapNorm_ = other.overlapNorm_;
     attackCoeff_ = other.attackCoeff_;
     releaseCoeff_ = other.releaseCoeff_;
@@ -112,13 +123,17 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
     rawGain_.assign(bins, 1.0f);
     frequencyGain_.assign(bins, 1.0f);
     smoothGain_.assign(bins, 1.0f);
+    rawGainLeft_.assign(bins, 1.0f);
+    rawGainRight_.assign(bins, 1.0f);
+    frequencyGainLeft_.assign(bins, 1.0f);
+    frequencyGainRight_.assign(bins, 1.0f);
+    smoothGainLeft_.assign(bins, 1.0f);
+    smoothGainRight_.assign(bins, 1.0f);
     learnSum_.assign(bins, 0.0);
     pendingProfile_.assign(bins, 0.0f);
 
-    // Frames arrive every hop; express the time constants in frames.
-    const auto frameRate = static_cast<double>(sampleRate_) / kSpectralDenoiserHopSize;
-    attackCoeff_ = dsp::smoothingCoeff(frameRate, 10.0f);
-    releaseCoeff_ = dsp::smoothingCoeff(frameRate, 60.0f);
+    learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds);
+    updateSmoothing();
 
     prepared_ = true;
     rebuildNoiseFromProfile();
@@ -131,7 +146,19 @@ void SpectralDenoiserProcessor::setEffect(const SpectralDenoiserEffect& effect) 
     if (prepared_) {
         rebuildNoiseFromProfile();
         rebuildTrimGains();
+        learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds);
+        updateSmoothing();
     }
+}
+
+void SpectralDenoiserProcessor::updateSmoothing() {
+    // Frames arrive every hop; express the time constants in frames. Speed
+    // scales both ends so one control can go from gentle to snappy.
+    const auto frameRate = static_cast<double>(sampleRate_) / kSpectralDenoiserHopSize;
+    const float speed = std::clamp(effect_.speed, kSpectralDenoiserMinSpeed,
+                                   kSpectralDenoiserMaxSpeed);
+    attackCoeff_ = dsp::smoothingCoeff(frameRate, 10.0f / speed);
+    releaseCoeff_ = dsp::smoothingCoeff(frameRate, 60.0f / speed);
 }
 
 void SpectralDenoiserProcessor::rebuildNoiseFromProfile() {
@@ -183,6 +210,12 @@ void SpectralDenoiserProcessor::reset() noexcept {
     std::fill(smoothGain_.begin(), smoothGain_.end(), 1.0f);
     std::fill(rawGain_.begin(), rawGain_.end(), 1.0f);
     std::fill(frequencyGain_.begin(), frequencyGain_.end(), 1.0f);
+    std::fill(smoothGainLeft_.begin(), smoothGainLeft_.end(), 1.0f);
+    std::fill(smoothGainRight_.begin(), smoothGainRight_.end(), 1.0f);
+    std::fill(rawGainLeft_.begin(), rawGainLeft_.end(), 1.0f);
+    std::fill(rawGainRight_.begin(), rawGainRight_.end(), 1.0f);
+    std::fill(frequencyGainLeft_.begin(), frequencyGainLeft_.end(), 1.0f);
+    std::fill(frequencyGainRight_.begin(), frequencyGainRight_.end(), 1.0f);
     std::fill(learnSum_.begin(), learnSum_.end(), 0.0);
     inputWrite_ = 0;
     inputSamples_ = 0;
@@ -212,8 +245,9 @@ float SpectralDenoiserProcessor::learnProgress() const noexcept {
     if (!learning_.load(std::memory_order_acquire)) {
         return 0.0f;
     }
-    const int target = learnFrameTarget(sampleRate_);
-    return std::clamp(static_cast<float>(learnFrames_) / static_cast<float>(target), 0.0f, 1.0f);
+    return std::clamp(static_cast<float>(learnFrames_)
+                          / static_cast<float>(std::max(learnTargetFrames_, 1)),
+                      0.0f, 1.0f);
 }
 
 bool SpectralDenoiserProcessor::takeLearnedProfile(std::vector<float>& profile, double& sampleRate) noexcept {
@@ -231,6 +265,10 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
     }
 
     constexpr std::size_t fftSize = static_cast<std::size_t>(kSpectralDenoiserFftSize);
+    const float mix = std::clamp(effect_.mixPercent, kSpectralDenoiserMinMixPercent,
+                                 kSpectralDenoiserMaxMixPercent)
+        * 0.01f;
+    const bool listen = effect_.listen && !effect_.bypassed;
 
     for (int i = 0; i < frames; ++i) {
         float l = left[i];
@@ -241,6 +279,11 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
         if (!std::isfinite(r)) {
             r = 0.0f;
         }
+
+        // The slot about to be overwritten still holds the input from one frame
+        // ago, which is exactly the dry signal at the reported latency.
+        const float dryLeft = inputLeft_[inputWrite_];
+        const float dryRight = inputRight_[inputWrite_];
 
         inputLeft_[inputWrite_] = l;
         inputRight_[inputWrite_] = r;
@@ -257,10 +300,20 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
         if (inputSamples_ > fftSize) {
             const std::uint64_t position = inputSamples_ - fftSize - 1;
             const auto slot = static_cast<std::size_t>(position & kOverlapMask);
-            left[i] = overlapLeft_[slot];
-            right[i] = overlapRight_[slot];
+            const float wetLeft = overlapLeft_[slot];
+            const float wetRight = overlapRight_[slot];
             overlapLeft_[slot] = 0.0f;
             overlapRight_[slot] = 0.0f;
+            if (listen) {
+                left[i] = dryLeft - wetLeft;
+                right[i] = dryRight - wetRight;
+            } else if (mix >= 0.999f) {
+                left[i] = wetLeft;
+                right[i] = wetRight;
+            } else {
+                left[i] = dryLeft + (wetLeft - dryLeft) * mix;
+                right[i] = dryRight + (wetRight - dryRight) * mix;
+            }
         } else {
             left[i] = 0.0f;
             right[i] = 0.0f;
@@ -300,6 +353,10 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     const float thresholdGain = dsp::dbToGain(
         std::clamp(effect_.thresholdOffsetDb, kSpectralDenoiserMinThresholdOffsetDb,
                    kSpectralDenoiserMaxThresholdOffsetDb));
+    const float linkAmount = std::clamp(effect_.stereoLinkPercent,
+                                        kSpectralDenoiserMinStereoLinkPercent,
+                                        kSpectralDenoiserMaxStereoLinkPercent)
+        * 0.01f;
 
     for (std::size_t k = 0; k < bins; ++k) {
         const float powerLeft = reLeft_[k] * reLeft_[k] + imLeft_[k] * imLeft_[k];
@@ -309,11 +366,15 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
         if (learning) {
             learnSum_[k] += static_cast<double>(power);
             rawGain_[k] = 1.0f;
+            rawGainLeft_[k] = 1.0f;
+            rawGainRight_[k] = 1.0f;
             continue;
         }
 
         if (bypassed || (effect_.mode == SpectralDenoiserMode::Learn && !effect_.hasProfile())) {
             rawGain_[k] = 1.0f;
+            rawGainLeft_[k] = 1.0f;
+            rawGainRight_[k] = 1.0f;
             continue;
         }
 
@@ -331,19 +392,31 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
 
         if (power <= kSilencePower) {
             rawGain_[k] = 1.0f;
+            rawGainLeft_[k] = 1.0f;
+            rawGainRight_[k] = 1.0f;
             continue;
         }
 
         const float noisePower = std::max(noise_[k], kSilencePower) * trimGain_[k]
             * thresholdGain;
-        const float snr = std::max(0.0f, power / noisePower - 1.0f);
-        const float wiener = snr / (snr + 1.0f);
-        rawGain_[k] = floorGain + (1.0f - floorGain) * wiener;
+        const auto gainForPower = [noisePower, floorGain](float binPower) {
+            const float snr = std::max(0.0f, binPower / noisePower - 1.0f);
+            const float wiener = snr / (snr + 1.0f);
+            return floorGain + (1.0f - floorGain) * wiener;
+        };
+        const float linkedGain = gainForPower(power);
+        rawGain_[k] = linkedGain;
+        // The noise estimate stays shared; below 100% each side decides how
+        // much of that estimate to act on using its own spectrum.
+        rawGainLeft_[k] = linkAmount * linkedGain
+            + (1.0f - linkAmount) * gainForPower(powerLeft);
+        rawGainRight_[k] = linkAmount * linkedGain
+            + (1.0f - linkAmount) * gainForPower(powerRight);
     }
 
     if (learning) {
         learnFrames_ += 1;
-        if (learnFrames_ >= learnFrameTarget(sampleRate_)) {
+        if (learnFrames_ >= std::max(learnTargetFrames_, 1)) {
             const float scale = 1.0f / static_cast<float>(learnFrames_);
             for (std::size_t k = 0; k < bins; ++k) {
                 pendingProfile_[k] = static_cast<float>(learnSum_[k]) * scale;
@@ -354,25 +427,37 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     }
 
     // Smooth across neighbouring bins, then in time, to avoid musical noise.
-    if (bins > 2) {
-        frequencyGain_[0] = rawGain_[0];
-        for (std::size_t k = 1; k + 1 < bins; ++k) {
-            frequencyGain_[k] = 0.25f * rawGain_[k - 1] + 0.5f * rawGain_[k]
-                + 0.25f * rawGain_[k + 1];
+    const auto smoothMask = [this, bins](const std::vector<float>& raw,
+                                         std::vector<float>& frequency,
+                                         std::vector<float>& smooth) {
+        if (bins > 2) {
+            frequency[0] = raw[0];
+            for (std::size_t k = 1; k + 1 < bins; ++k) {
+                frequency[k] = 0.25f * raw[k - 1] + 0.5f * raw[k] + 0.25f * raw[k + 1];
+            }
+            frequency[bins - 1] = raw[bins - 1];
+        } else {
+            frequency = raw;
         }
-        frequencyGain_[bins - 1] = rawGain_[bins - 1];
-    } else {
-        frequencyGain_ = rawGain_;
-    }
 
-    float minimumGain = 1.0f;
-    for (std::size_t k = 0; k < bins; ++k) {
-        const float target = std::clamp(frequencyGain_[k], 0.0f, 1.0f);
-        const float coeff = target < smoothGain_[k] ? attackCoeff_ : releaseCoeff_;
-        smoothGain_[k] += coeff * (target - smoothGain_[k]);
-        minimumGain = std::min(minimumGain, smoothGain_[k]);
-    }
+        float minimum = 1.0f;
+        for (std::size_t k = 0; k < bins; ++k) {
+            const float target = std::clamp(frequency[k], 0.0f, 1.0f);
+            const float coeff = target < smooth[k] ? attackCoeff_ : releaseCoeff_;
+            smooth[k] += coeff * (target - smooth[k]);
+            minimum = std::min(minimum, smooth[k]);
+        }
+        return minimum;
+    };
+
+    const float minimumGain = smoothMask(rawGain_, frequencyGain_, smoothGain_);
     currentReductionDb_.store(-dsp::gainToDb(minimumGain), std::memory_order_relaxed);
+
+    const bool useSideMasks = linkAmount < 0.999f;
+    if (useSideMasks) {
+        smoothMask(rawGainLeft_, frequencyGainLeft_, smoothGainLeft_);
+        smoothMask(rawGainRight_, frequencyGainRight_, smoothGainRight_);
+    }
 
     // Read the meter at each band centre. Log bands below the FFT resolution
     // contain no bin of their own; sampling the gain curve keeps every bar
@@ -399,20 +484,22 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     }
 
     for (std::size_t k = 0; k < bins; ++k) {
-        reLeft_[k] *= smoothGain_[k];
-        imLeft_[k] *= smoothGain_[k];
-        reRight_[k] *= smoothGain_[k];
-        imRight_[k] *= smoothGain_[k];
+        const float maskLeft = useSideMasks ? smoothGainLeft_[k] : smoothGain_[k];
+        const float maskRight = useSideMasks ? smoothGainRight_[k] : smoothGain_[k];
+        reLeft_[k] *= maskLeft;
+        imLeft_[k] *= maskLeft;
+        reRight_[k] *= maskRight;
+        imRight_[k] *= maskRight;
         if (k == 0 || k + 1 == bins) {
             continue;
         }
         // Mirror the mask onto the negative frequencies so the inverse
         // transform stays real.
         const std::size_t mirror = static_cast<std::size_t>(kSpectralDenoiserFftSize) - k;
-        reLeft_[mirror] *= smoothGain_[k];
-        imLeft_[mirror] *= smoothGain_[k];
-        reRight_[mirror] *= smoothGain_[k];
-        imRight_[mirror] *= smoothGain_[k];
+        reLeft_[mirror] *= maskLeft;
+        imLeft_[mirror] *= maskLeft;
+        reRight_[mirror] *= maskRight;
+        imRight_[mirror] *= maskRight;
     }
     fft(reLeft_, imLeft_, true);
     fft(reRight_, imRight_, true);

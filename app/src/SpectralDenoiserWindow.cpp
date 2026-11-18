@@ -286,6 +286,35 @@ void SpectralDenoiserProfileView::mouseDoubleClick(const juce::MouseEvent& e) {
     }
 }
 
+void SpectralDenoiserWindow::setupKnob(ValueEditSlider& slider, juce::Label& label,
+                                       const juce::String& name, double min, double max,
+                                       double step, double value, double defaultValue,
+                                       float pluginrack::SpectralDenoiserEffect::*field,
+                                       const juce::String& suffix) {
+    content.addAndMakeVisible(slider);
+    content.addAndMakeVisible(label);
+    slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 18);
+    slider.setRange(min, max, step);
+    slider.setTextValueSuffix(suffix);
+    slider.setDoubleClickReturnValue(true, defaultValue);
+    slider.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
+    slider.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
+    slider.setColour(juce::Slider::textBoxTextColourId, theme::text());
+    slider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    slider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    slider.setValue(value, juce::dontSendNotification);
+    slider.onValueChange = [this, &slider, field] {
+        effect.*field = static_cast<float>(slider.getValue());
+        if (apply) apply(effect, false);
+    };
+
+    label.setText(name, juce::dontSendNotification);
+    label.setJustificationType(juce::Justification::centred);
+    label.setFont(juce::Font(juce::FontOptions(11.0f)));
+    label.setColour(juce::Label::textColourId, theme::dim());
+}
+
 SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
                                                const pluginrack::SpectralDenoiserEffect& initialEffect,
                                                AudioEngine& engine, bool isOutput,
@@ -340,56 +369,46 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
         refreshStatus();
     };
 
+    theme::ui::styleButton(listenButton);
+    content.addAndMakeVisible(listenButton);
+    listenButton.setClickingTogglesState(true);
+    listenButton.setToggleState(effect.listen, juce::dontSendNotification);
+    listenButton.onClick = [this] {
+        effect.listen = listenButton.getToggleState();
+        if (apply) apply(effect, false);
+        refreshStatus();
+    };
+
     content.addAndMakeVisible(profileView);
     profileView.onTrimEdited = [this] {
         if (apply) apply(effect, false);
     };
 
-    content.addAndMakeVisible(reduction);
-    content.addAndMakeVisible(reductionLabel);
-    reduction.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    reduction.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 18);
-    reduction.setRange(pluginrack::kSpectralDenoiserMinReductionDb,
-                       pluginrack::kSpectralDenoiserMaxReductionDb, 0.5);
-    reduction.setTextValueSuffix(" dB");
-    reduction.setDoubleClickReturnValue(true, pluginrack::kSpectralDenoiserDefaultReductionDb);
-    reduction.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
-    reduction.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
-    reduction.setColour(juce::Slider::textBoxTextColourId, theme::text());
-    reduction.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
-    reduction.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
-    reduction.setValue(effect.reductionDb, juce::dontSendNotification);
-    reduction.onValueChange = [this] {
-        effect.reductionDb = static_cast<float>(reduction.getValue());
-        if (apply) apply(effect, false);
-    };
-
-    reductionLabel.setJustificationType(juce::Justification::centred);
-    reductionLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    reductionLabel.setColour(juce::Label::textColourId, theme::dim());
-
-    content.addAndMakeVisible(thresholdOffset);
-    content.addAndMakeVisible(thresholdOffsetLabel);
-    thresholdOffset.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-    thresholdOffset.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 18);
-    thresholdOffset.setRange(pluginrack::kSpectralDenoiserMinThresholdOffsetDb,
-                             pluginrack::kSpectralDenoiserMaxThresholdOffsetDb, 0.5);
-    thresholdOffset.setTextValueSuffix(" dB");
-    thresholdOffset.setDoubleClickReturnValue(true, 0.0);
-    thresholdOffset.setColour(juce::Slider::rotarySliderFillColourId, theme::cyan());
-    thresholdOffset.setColour(juce::Slider::rotarySliderOutlineColourId, theme::border());
-    thresholdOffset.setColour(juce::Slider::textBoxTextColourId, theme::text());
-    thresholdOffset.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
-    thresholdOffset.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
-    thresholdOffset.setValue(effect.thresholdOffsetDb, juce::dontSendNotification);
-    thresholdOffset.onValueChange = [this] {
-        effect.thresholdOffsetDb = static_cast<float>(thresholdOffset.getValue());
-        if (apply) apply(effect, false);
-    };
-
-    thresholdOffsetLabel.setJustificationType(juce::Justification::centred);
-    thresholdOffsetLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
-    thresholdOffsetLabel.setColour(juce::Label::textColourId, theme::dim());
+    setupKnob(reduction, reductionLabel, "Max Reduction",
+              pluginrack::kSpectralDenoiserMinReductionDb,
+              pluginrack::kSpectralDenoiserMaxReductionDb, 0.5, effect.reductionDb,
+              pluginrack::kSpectralDenoiserDefaultReductionDb,
+              &pluginrack::SpectralDenoiserEffect::reductionDb, " dB");
+    setupKnob(thresholdOffset, thresholdOffsetLabel, "Threshold",
+              pluginrack::kSpectralDenoiserMinThresholdOffsetDb,
+              pluginrack::kSpectralDenoiserMaxThresholdOffsetDb, 0.5, effect.thresholdOffsetDb,
+              0.0, &pluginrack::SpectralDenoiserEffect::thresholdOffsetDb, " dB");
+    setupKnob(mix, mixLabel, "Mix", pluginrack::kSpectralDenoiserMinMixPercent,
+              pluginrack::kSpectralDenoiserMaxMixPercent, 1.0, effect.mixPercent,
+              pluginrack::kSpectralDenoiserMaxMixPercent,
+              &pluginrack::SpectralDenoiserEffect::mixPercent, " %");
+    setupKnob(speed, speedLabel, "Speed", pluginrack::kSpectralDenoiserMinSpeed,
+              pluginrack::kSpectralDenoiserMaxSpeed, 0.05, effect.speed, 1.0,
+              &pluginrack::SpectralDenoiserEffect::speed, "x");
+    setupKnob(stereoLink, stereoLinkLabel, "Stereo Link",
+              pluginrack::kSpectralDenoiserMinStereoLinkPercent,
+              pluginrack::kSpectralDenoiserMaxStereoLinkPercent, 1.0,
+              effect.stereoLinkPercent, pluginrack::kSpectralDenoiserMaxStereoLinkPercent,
+              &pluginrack::SpectralDenoiserEffect::stereoLinkPercent, " %");
+    setupKnob(learnLength, learnLengthLabel, "Learn Time",
+              pluginrack::kSpectralDenoiserMinLearnSeconds,
+              pluginrack::kSpectralDenoiserMaxLearnSeconds, 0.5, effect.learnSeconds, 1.0,
+              &pluginrack::SpectralDenoiserEffect::learnSeconds, " s");
 
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -431,17 +450,28 @@ void SpectralDenoiserWindow::refreshStatus() {
         ? " · threshold " + juce::String(effect.thresholdOffsetDb > 0.0f ? "+" : "")
             + juce::String(effect.thresholdOffsetDb, 1) + " dB"
         : juce::String();
+    const juce::String listenText = effect.listen ? " · listening to the removed signal" : "";
     if (effect.hasProfile()) {
-        statusLabel.setText("Noise profile saved" + trimText + offsetText,
+        statusLabel.setText("Noise profile saved" + trimText + offsetText + listenText,
                             juce::dontSendNotification);
     } else if (effect.mode == pluginrack::SpectralDenoiserMode::Learn) {
-        statusLabel.setText("Learn a noise-only profile to reduce noise" + offsetText,
+        statusLabel.setText("Learn a noise-only profile to reduce noise" + offsetText + listenText,
                             juce::dontSendNotification);
     } else {
         statusLabel.setText("Adaptive: tracks the noise floor as it plays"
-                            + trimText + offsetText,
+                                + trimText + offsetText + listenText,
                             juce::dontSendNotification);
     }
+}
+
+void SpectralDenoiserWindow::closeButtonPressed() {
+    // Listen is a monitoring state, not a scene setting; leave the effect in
+    // its normal mode if the editor is closed while it is engaged.
+    if (effect.listen) {
+        effect.listen = false;
+        if (apply) apply(effect, false);
+    }
+    if (onClose) onClose();
 }
 
 void SpectralDenoiserWindow::timerCallback() {
@@ -510,20 +540,35 @@ void SpectralDenoiserWindow::resized() {
     clearButton.setBounds(topRow.removeFromLeft(100));
     topRow.removeFromLeft(8);
     resetTrimButton.setBounds(topRow.removeFromLeft(96));
+    topRow.removeFromLeft(8);
+    listenButton.setBounds(topRow.removeFromLeft(84));
 
     area.removeFromTop(4);
     statusLabel.setBounds(area.removeFromTop(18));
 
     area.removeFromTop(6);
-    const int knobHeight = juce::jlimit(110, 170, area.getHeight() - 130);
-    const int graphHeight = juce::jmax(120, area.getHeight() - knobHeight - 8);
+    const int knobRowHeight = juce::jlimit(110, 150, (area.getHeight() - 128) / 2);
+    const int graphHeight = juce::jmax(120, area.getHeight() - knobRowHeight * 2 - 8);
     profileView.setBounds(area.removeFromTop(graphHeight));
     area.removeFromTop(8);
 
-    auto knobArea = area.removeFromTop(juce::jmin(knobHeight, area.getHeight()));
-    auto knobLeft = knobArea.removeFromLeft(knobArea.getWidth() / 2);
-    theme::ui::placeWindowKnob(knobLeft.withSizeKeepingCentre(150, knobLeft.getHeight()),
-                               thresholdOffsetLabel, thresholdOffset);
-    theme::ui::placeWindowKnob(knobArea.withSizeKeepingCentre(150, knobArea.getHeight()),
-                               reductionLabel, reduction);
+    const auto placeRow = [](juce::Rectangle<int> row,
+                             std::initializer_list<std::pair<juce::Label*, ValueEditSlider*>> knobs) {
+        const int cellWidth = row.getWidth() / static_cast<int>(knobs.size());
+        for (const auto& [label, slider] : knobs) {
+            auto cell = row.removeFromLeft(cellWidth);
+            theme::ui::placeWindowKnob(
+                cell.withSizeKeepingCentre(juce::jmin(150, cell.getWidth()), cell.getHeight()),
+                *label, *slider);
+        }
+    };
+
+    auto firstRow = area.removeFromTop(juce::jmin(knobRowHeight, area.getHeight()));
+    placeRow(firstRow, {{&thresholdOffsetLabel, &thresholdOffset},
+                        {&reductionLabel, &reduction},
+                        {&mixLabel, &mix}});
+    auto secondRow = area.removeFromTop(juce::jmin(knobRowHeight, area.getHeight()));
+    placeRow(secondRow, {{&speedLabel, &speed},
+                         {&stereoLinkLabel, &stereoLink},
+                         {&learnLengthLabel, &learnLength}});
 }

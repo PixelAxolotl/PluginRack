@@ -63,7 +63,7 @@ public:
     void resized() override;
     void timerCallback() override;
     void setBypassed(bool b);
-    void closeButtonPressed() override { if (onClose) onClose(); }
+    void closeButtonPressed() override;
 
     std::function<void()> onClose;
 
@@ -71,6 +71,10 @@ private:
     void startLearning();
     void clearProfile();
     void refreshStatus();
+    void setupKnob(ValueEditSlider& slider, juce::Label& label, const juce::String& name,
+                   double min, double max, double step, double value, double defaultValue,
+                   float pluginrack::SpectralDenoiserEffect::*field,
+                   const juce::String& suffix);
 
     pluginrack::SpectralDenoiserEffect effect;
     ApplyCallback apply;
@@ -86,6 +90,15 @@ private:
     juce::Label reductionLabel{"", "Max Reduction"};
     ValueEditSlider thresholdOffset;
     juce::Label thresholdOffsetLabel{"", "Threshold"};
+    ValueEditSlider mix;
+    juce::Label mixLabel{"", "Mix"};
+    ValueEditSlider speed;
+    juce::Label speedLabel{"", "Speed"};
+    ValueEditSlider stereoLink;
+    juce::Label stereoLinkLabel{"", "Stereo Link"};
+    ValueEditSlider learnLength;
+    juce::Label learnLengthLabel{"", "Learn Time"};
+    juce::TextButton listenButton{"Listen"};
     juce::TextButton learnButton{"Learn"};
     juce::TextButton clearButton{"Clear Profile"};
     juce::TextButton resetTrimButton{"Reset Trim"};
