@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -12,6 +13,7 @@ constexpr float kPlotCeilingDb = 6.0f;
 constexpr float kMeterHeight = 64.0f;
 constexpr float kMeterGap = 10.0f;
 constexpr float kMeterFloorDb = 40.0f;
+constexpr float kSampleStep = 2.0f;
 
 } // namespace
 
@@ -32,6 +34,14 @@ void SpectralDenoiserProfileView::setReduction(
     if (change >= 0.05f) {
         repaint();
     }
+}
+
+void SpectralDenoiserProfileView::setShowAfterTrim(bool show) {
+    if (showAfterTrim == show) {
+        return;
+    }
+    showAfterTrim = show;
+    repaint();
 }
 
 void SpectralDenoiserProfileView::ensureTrims() {
@@ -132,10 +142,20 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
         const double rate = effect.profileSampleRate > 0.0 ? effect.profileSampleRate : 48000.0;
         const double binHz = rate * 0.5
             / static_cast<double>(pluginrack::kSpectralDenoiserBinCount - 1);
-        // Average neighbouring bins in a fixed 1/12-octave window. Raw bin
-        // values are noisy at high frequencies, where many bins share a pixel.
-        const double halfWindow = std::pow(2.0, 1.0 / 24.0);
-        auto smoothedDb = [&](double hz) {
+        // First average neighbouring bins in a narrow log window, which removes
+        // the bin-to-bin jitter of raw values.
+        const double halfWindow = std::pow(2.0, 1.0 / 48.0);
+        const int sampleCount = std::max(
+            2, static_cast<int>(std::ceil(plot.getWidth() / kSampleStep)) + 1);
+        std::vector<float> sampleX(static_cast<std::size_t>(sampleCount));
+        std::vector<float> sampleDb(static_cast<std::size_t>(sampleCount));
+        for (int i = 0; i < sampleCount; ++i) {
+            const float x = std::min(
+                plot.getX() + kSampleStep * static_cast<float>(i), plot.getRight());
+            const double position = juce::jlimit(
+                0.0, 1.0, static_cast<double>(x - plot.getX()) / plot.getWidth());
+            const double hz = pluginrack::kSpectralDenoiserTrimLowHz
+                * std::pow(nyquist / pluginrack::kSpectralDenoiserTrimLowHz, position);
             const int lowBin = std::clamp(
                 static_cast<int>(std::floor(hz / halfWindow / binHz)), 0,
                 pluginrack::kSpectralDenoiserBinCount - 1);
@@ -149,22 +169,28 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
                                 1.0e-12);
             }
             const double mean = sum / static_cast<double>(highBin - lowBin + 1);
-            return static_cast<float>(10.0 * std::log10(mean / reference));
-        };
+            sampleX[static_cast<std::size_t>(i)] = x;
+            sampleDb[static_cast<std::size_t>(i)] =
+                static_cast<float>(10.0 * std::log10(mean / reference));
+        }
 
+        // Then blur across log-frequency: a wider window in the low octaves,
+        // narrowing towards the top so narrow high-frequency peaks stay visible.
         juce::Path profilePath;
-        bool started = false;
-        for (float x = plot.getX(); x <= plot.getRight(); x += 2.0f) {
-            const double position = plot.getWidth() > 0.0f
-                ? juce::jlimit(0.0, 1.0,
-                               static_cast<double>(x - plot.getX()) / plot.getWidth())
-                : 0.0;
-            const double hz = pluginrack::kSpectralDenoiserTrimLowHz
-                * std::pow(nyquist / pluginrack::kSpectralDenoiserTrimLowHz, position);
-            const float y = yForDb(smoothedDb(hz));
-            if (!started) {
+        for (int i = 0; i < sampleCount; ++i) {
+            const float position = static_cast<float>(i) / static_cast<float>(sampleCount - 1);
+            const int radius = std::max(1, static_cast<int>(std::lround(6.0f - 5.0f * position)));
+            const int low = std::max(0, i - radius);
+            const int high = std::min(sampleCount - 1, i + radius);
+            double sum = 0.0;
+            for (int j = low; j <= high; ++j) {
+                sum += sampleDb[static_cast<std::size_t>(j)];
+            }
+            const float db = static_cast<float>(sum / static_cast<double>(high - low + 1));
+            const float x = sampleX[static_cast<std::size_t>(i)];
+            const float y = yForDb(db);
+            if (i == 0) {
                 profilePath.startNewSubPath(x, y);
-                started = true;
             } else {
                 profilePath.lineTo(x, y);
             }
@@ -173,7 +199,8 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
         g.strokePath(profilePath, juce::PathStrokeType(1.6f));
     }
 
-    // Threshold after the band trims, plus a handle per band.
+    // Threshold after the band trims, plus a handle per band. Hidden until the
+    // After Trim toggle is switched on.
     const int trimCount = pluginrack::kSpectralDenoiserTrimBandCount;
     auto bandBaseDb = [&](int band) {
         if (!hasProfile || reference <= 0.0f) {
@@ -187,23 +214,25 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
             std::max(effect.noiseProfile[centreBin], 1.0e-12f) / reference);
     };
 
-    juce::Path trimPath;
-    for (int band = 0; band < trimCount; ++band) {
-        const float trim = pluginrack::spectralDenoiserTrimDb(effect.profileTrimDb, band);
-        const float x = xForFrequency(frequencyForBandCentre(band));
-        const float y = yForDb(bandBaseDb(band) + trim);
-        if (band == 0) trimPath.startNewSubPath(x, y);
-        else trimPath.lineTo(x, y);
-    }
-    g.setColour(theme::amber().withAlpha(0.9f));
-    g.strokePath(trimPath, juce::PathStrokeType(1.4f));
+    if (showAfterTrim) {
+        juce::Path trimPath;
+        for (int band = 0; band < trimCount; ++band) {
+            const float trim = pluginrack::spectralDenoiserTrimDb(effect.profileTrimDb, band);
+            const float x = xForFrequency(frequencyForBandCentre(band));
+            const float y = yForDb(bandBaseDb(band) + trim);
+            if (band == 0) trimPath.startNewSubPath(x, y);
+            else trimPath.lineTo(x, y);
+        }
+        g.setColour(theme::amber().withAlpha(0.9f));
+        g.strokePath(trimPath, juce::PathStrokeType(1.4f));
 
-    for (int band = 0; band < trimCount; ++band) {
-        const float trim = pluginrack::spectralDenoiserTrimDb(effect.profileTrimDb, band);
-        const float x = xForFrequency(frequencyForBandCentre(band));
-        const float y = yForDb(bandBaseDb(band) + trim);
-        g.setColour(band == dragBand ? theme::text() : theme::orange());
-        g.fillEllipse(x - 2.5f, y - 2.5f, 5.0f, 5.0f);
+        for (int band = 0; band < trimCount; ++band) {
+            const float trim = pluginrack::spectralDenoiserTrimDb(effect.profileTrimDb, band);
+            const float x = xForFrequency(frequencyForBandCentre(band));
+            const float y = yForDb(bandBaseDb(band) + trim);
+            g.setColour(band == dragBand ? theme::text() : theme::orange());
+            g.fillEllipse(x - 2.5f, y - 2.5f, 5.0f, 5.0f);
+        }
     }
 
     if (!hasProfile) {
@@ -216,7 +245,7 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
         const auto legend = getLocalBounds().reduced(12, 4).removeFromTop(12);
         g.setColour(theme::cyan());
         g.drawText("Noise profile", legend, juce::Justification::topLeft, false);
-        g.setColour(theme::amber());
+        g.setColour(theme::amber().withAlpha(showAfterTrim ? 1.0f : 0.35f));
         g.drawText("After trim", legend.withTrimmedLeft(84),
                    juce::Justification::topLeft, false);
     }
@@ -283,6 +312,10 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
 }
 
 void SpectralDenoiserProfileView::mouseDown(const juce::MouseEvent& e) {
+    if (!showAfterTrim) {
+        dragBand = -1;
+        return;
+    }
     dragBand = bandAt(e.x);
     ensureTrims();
     dragStartTrim = effect.profileTrimDb[static_cast<std::size_t>(dragBand)];
@@ -308,6 +341,9 @@ void SpectralDenoiserProfileView::mouseDrag(const juce::MouseEvent& e) {
 }
 
 void SpectralDenoiserProfileView::mouseDoubleClick(const juce::MouseEvent& e) {
+    if (!showAfterTrim) {
+        return;
+    }
     const int band = bandAt(e.x);
     ensureTrims();
     effect.profileTrimDb[static_cast<std::size_t>(band)] = 0.0f;
@@ -413,6 +449,14 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
     content.addAndMakeVisible(profileView);
     profileView.onTrimEdited = [this] {
         if (apply) apply(effect, false);
+    };
+
+    theme::ui::styleButton(afterTrimButton);
+    content.addAndMakeVisible(afterTrimButton);
+    afterTrimButton.setClickingTogglesState(true);
+    afterTrimButton.setToggleState(false, juce::dontSendNotification);
+    afterTrimButton.onClick = [this] {
+        profileView.setShowAfterTrim(afterTrimButton.getToggleState());
     };
 
     setupKnob(reduction, reductionLabel, "Max Reduction",
@@ -573,6 +617,8 @@ void SpectralDenoiserWindow::resized() {
     resetTrimButton.setBounds(topRow.removeFromLeft(96));
     topRow.removeFromLeft(8);
     listenButton.setBounds(topRow.removeFromLeft(84));
+    topRow.removeFromLeft(8);
+    afterTrimButton.setBounds(topRow.removeFromLeft(96));
 
     area.removeFromTop(4);
     statusLabel.setBounds(area.removeFromTop(18));

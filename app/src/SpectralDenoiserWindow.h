@@ -20,6 +20,7 @@ public:
     std::function<void()> onTrimEdited;
 
     void setReduction(const std::array<float, pluginrack::kSpectralDenoiserTrimBandCount>& bands);
+    void setShowAfterTrim(bool show);
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
@@ -40,6 +41,7 @@ private:
     int dragBand = -1;
     float dragStartTrim = 0.0f;
     int dragStartY = 0;
+    bool showAfterTrim = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectralDenoiserProfileView)
 };
@@ -99,6 +101,7 @@ private:
     ValueEditSlider learnLength;
     juce::Label learnLengthLabel{"", "Learn Time"};
     juce::TextButton listenButton{"Listen"};
+    juce::TextButton afterTrimButton{"After Trim"};
     juce::TextButton learnButton{"Learn"};
     juce::TextButton clearButton{"Clear Profile"};
     juce::TextButton resetTrimButton{"Reset Trim"};
