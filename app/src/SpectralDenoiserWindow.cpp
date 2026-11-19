@@ -129,14 +129,45 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
     };
 
     if (hasProfile && reference > 0.0f) {
+        const double rate = effect.profileSampleRate > 0.0 ? effect.profileSampleRate : 48000.0;
+        const double binHz = rate * 0.5
+            / static_cast<double>(pluginrack::kSpectralDenoiserBinCount - 1);
+        // Average neighbouring bins in a fixed 1/12-octave window. Raw bin
+        // values are noisy at high frequencies, where many bins share a pixel.
+        const double halfWindow = std::pow(2.0, 1.0 / 24.0);
+        auto smoothedDb = [&](double hz) {
+            const int lowBin = std::clamp(
+                static_cast<int>(std::floor(hz / halfWindow / binHz)), 0,
+                pluginrack::kSpectralDenoiserBinCount - 1);
+            const int highBin = std::clamp(
+                static_cast<int>(std::ceil(hz * halfWindow / binHz)), lowBin,
+                pluginrack::kSpectralDenoiserBinCount - 1);
+            double sum = 0.0;
+            for (int bin = lowBin; bin <= highBin; ++bin) {
+                sum += std::max(static_cast<double>(
+                                    effect.noiseProfile[static_cast<std::size_t>(bin)]),
+                                1.0e-12);
+            }
+            const double mean = sum / static_cast<double>(highBin - lowBin + 1);
+            return static_cast<float>(10.0 * std::log10(mean / reference));
+        };
+
         juce::Path profilePath;
-        for (std::size_t bin = 0; bin < effect.noiseProfile.size(); ++bin) {
-            const float db = 10.0f * std::log10(
-                std::max(effect.noiseProfile[bin], 1.0e-12f) / reference);
-            const float x = xForFrequency(frequencyForBin(bin));
-            const float y = yForDb(db);
-            if (bin == 0) profilePath.startNewSubPath(x, y);
-            else profilePath.lineTo(x, y);
+        bool started = false;
+        for (float x = plot.getX(); x <= plot.getRight(); x += 2.0f) {
+            const double position = plot.getWidth() > 0.0f
+                ? juce::jlimit(0.0, 1.0,
+                               static_cast<double>(x - plot.getX()) / plot.getWidth())
+                : 0.0;
+            const double hz = pluginrack::kSpectralDenoiserTrimLowHz
+                * std::pow(nyquist / pluginrack::kSpectralDenoiserTrimLowHz, position);
+            const float y = yForDb(smoothedDb(hz));
+            if (!started) {
+                profilePath.startNewSubPath(x, y);
+                started = true;
+            } else {
+                profilePath.lineTo(x, y);
+            }
         }
         g.setColour(theme::cyan());
         g.strokePath(profilePath, juce::PathStrokeType(1.6f));
