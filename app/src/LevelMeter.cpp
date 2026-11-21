@@ -210,18 +210,18 @@ void LevelMeter::paint(juce::Graphics& g) {
         lastLabelBottom = labelTop + 10;
     }
 
-    // Each bar is named at its foot. The chip keeps the letter readable
-    // whether or not the bar underneath it is lit.
+    // Each bar is named at its foot, straight over the bar and with no plate
+    // behind it: any backing turns the letters into a small level display of
+    // their own, and any band or frame there reads as one.
     const int labelHeight = juce::jmin(10, barHeight);
-    if (labelHeight >= 8) {
+    if (stereo && labelHeight >= 8) {
         g.setFont(juce::Font(juce::FontOptions(8.0f)));
-        for (int side = 0; side < (stereo ? 2 : 0); ++side) {
+        for (int side = 0; side < 2; ++side) {
             const auto bar = side == 0 ? leftBar : rightBar;
-            const auto chip = bar.withY(bar.getBottom() - labelHeight).withHeight(labelHeight);
-            g.setColour(theme::bg().withAlpha(0.85f));
-            g.fillRect(chip);
             g.setColour(theme::text());
-            g.drawText(side == 1 ? "R" : "L", chip, juce::Justification::centred, false);
+            g.drawText(side == 1 ? "R" : "L",
+                       bar.withY(bar.getBottom() - labelHeight).withHeight(labelHeight),
+                       juce::Justification::centred, false);
         }
     }
 
