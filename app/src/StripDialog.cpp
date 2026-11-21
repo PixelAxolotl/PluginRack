@@ -28,7 +28,15 @@ public:
 void StripDialog::show(const juce::String& title, const juce::String& currentName,
                        float currentHue,
                        std::function<void(const juce::String& newName, float newHue)> onApply) {
+    // Only one rename dialog at a time: a second invocation just brings the
+    // existing window forward instead of stacking another one on top of it.
+    static juce::Component::SafePointer<StripDialogWindow> currentWindow;
+    if (currentWindow != nullptr) {
+        currentWindow->toFront(true);
+        return;
+    }
     auto* window = new StripDialogWindow(title);
+    currentWindow = window;
     auto* body = new Body(currentName, currentHue, std::move(onApply));
     window->setContentOwned(body, false);
     window->setSize(kDialogW, kDialogH);

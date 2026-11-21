@@ -482,6 +482,12 @@ void MainComponent::feedDiagnosticsSignal(int /*numBins*/, double sampleRateHz) 
 
 juce::Component* MainComponent::focusDiagnosticsEffect(pluginrack::ChainItemType type) {
     router.getRackView().setSelectedChannel(1, false);
+    if (type == pluginrack::ChainItemType::SpectralDenoiser
+        || type == pluginrack::ChainItemType::FeedbackSuppressor) {
+        router.getRackView().focusDiagnosticsWindow(type);
+        feedDiagnosticsSignal(4097, 48000.0);
+        return router.getRackView().getFocusedDiagnosticsEffect();
+    }
     const auto& channels = audioEngine.getChannels();
     std::vector<pluginrack::ChainItem> chain;
     if (!channels.empty()) {

@@ -2133,6 +2133,11 @@ void RackView::focusSpectralDenoiser() {
     resized();
 }
 
+void RackView::focusDiagnosticsWindow(pluginrack::ChainItemType type) {
+    if (type == pluginrack::ChainItemType::SpectralDenoiser) focusSpectralDenoiser();
+    else if (type == pluginrack::ChainItemType::FeedbackSuppressor) focusFeedbackSuppressor();
+}
+
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
     if (dynamicsWindow != nullptr) {
         if (dynamicsWindow->getType() != type) {

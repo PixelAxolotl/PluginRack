@@ -46,6 +46,7 @@ public:
 
     void setSelectedChannel(int channelId, bool isOutput);
     juce::Component* getFocusedDiagnosticsEffect() { return focusedEffectWindow; }
+    void focusDiagnosticsWindow(pluginrack::ChainItemType type);
 
     // Releases the docked plugin editor before the engine destroys the
     // strip that owns its plugin instance (scene restore). The editor's

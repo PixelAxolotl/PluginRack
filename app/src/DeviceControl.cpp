@@ -117,23 +117,13 @@ void DeviceControl::mouseDown(const juce::MouseEvent& e) {
         if (onRename) onRename();
         return;
     }
-    // Left-click on the title row renames; the device row opens the menu.
-    // The old code opened the menu on every mouseDown, which ate the first
-    // click of a double-click rename.
-    const auto pos = e.getPosition();
-    const auto area = contentArea(*this);
-    const int titleH = area.getHeight() / 2;
-    if (pos.y < area.getY() + titleH) {
-        if (onRename) onRename();
-        return;
-    }
+    // Left-click (anywhere) chooses the device; renaming is right-click only.
     if (onClick) onClick();
 }
 
 void DeviceControl::mouseDoubleClick(const juce::MouseEvent&) {
-    // One action per double-click: the tooltip promises rename, and a strip
-    // that also navigates on the same gesture would do both at once.
-    if (onRename) onRename();
+    // Renaming is right-click only; a double-click must not open the rename
+    // dialog.
 }
 
 bool DeviceControl::keyPressed(const juce::KeyPress& key) {
