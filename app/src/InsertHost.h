@@ -213,18 +213,6 @@ public:
         removeButton.setTooltip("Remove this plugin");
         addAndMakeVisible(removeButton);
 
-        reloadButton.setClickAction([this] {
-            if (insert == nullptr) return;
-            host.reloadPlugin(insert->id);
-            juce::MessageManager::callAsync([safeHost = juce::Component::SafePointer<juce::Component>(hostComponent)] {
-                if (auto* comp = safeHost.getComponent())
-                    if (auto* h = dynamic_cast<IInsertHost*>(comp)) h->refreshAfterInsertChange();
-            });
-        });
-        reloadButton.setTooltip("Reload the crashed plugin");
-        reloadButton.setVisible(false);
-        addAndMakeVisible(reloadButton);
-
         // A card can hold more than one effect (the Dynamics card carries the
         // EQ and the compressor), so it carries one switch per effect instead
         // of the single bypass button. Each switch follows the strip
@@ -271,14 +259,13 @@ public:
             bypassButton.setEnabledState(true);
             removeButton.setEnabledState(true);
             const bool crashed = insert->failed.get();
-            reloadButton.setVisible(crashed);
             if (crashed) {
                 nameLabel.setText("Plugin crashed (" + juce::String::toHexString(insert->failExitCode.get()).paddedLeft('0', 8).toUpperCase() + ")", juce::dontSendNotification);
                 nameLabel.setColour(juce::Label::textColourId, juce::Colours::red);
             }
             if (!crashed) nameLabel.setColour(juce::Label::textColourId, theme::text());
             nameLabel.setTooltip(insert->pluginName.isNotEmpty() ? insert->pluginName : insert->pluginPath);
-            setTooltip("Drag the dots to reorder - click to open the plugin editor");
+            setTooltip("Drag to reorder - click to open the plugin editor");
         } else {
             nameLabel.setText("empty", juce::dontSendNotification);
             nameLabel.setColour(juce::Label::textColourId, theme::dim());
@@ -312,7 +299,6 @@ public:
         nameLabel.setTooltip("Add a VST3 plugin to this slot");
         bypassButton.setVisible(false);
         removeButton.setVisible(false);
-        reloadButton.setVisible(false);
         setTooltip("Click to add a VST3 plugin");
         repaint();
     }
@@ -335,7 +321,7 @@ public:
         bypassButton.setEnabledState(true);
         removeButton.setVisible(true);
         removeButton.setEnabledState(true);
-        setTooltip("Drag the dots to reorder - click to open effect settings");
+        setTooltip("Drag to reorder - click to open effect settings");
         repaint();
     }
 
@@ -446,8 +432,6 @@ public:
             return;
         }
         removeButton.setBounds(area.removeFromRight(18));
-        area.removeFromRight(2);
-        reloadButton.setBounds(area.removeFromRight(18));
         area.removeFromRight(2);
         bypassButton.setBounds(area.removeFromRight(18));
         area.removeFromRight(3);
@@ -610,7 +594,6 @@ private:
     double delaySampleRate = 0.0;
     MiniButton bypassButton{"B"};
     MiniButton removeButton{juce::String::fromUTF8("\xc3\x97")};
-    MiniButton reloadButton{"R"};
     MiniButton pairFirstButton{"EQ"};
     MiniButton pairSecondButton{"C"};
     CardSwitch pairFirst;
