@@ -1011,6 +1011,24 @@ TEST_CASE("the audio backend is visible on the strips and in the budget",
     CHECK(contains(budget, "deviceBackendTag(report_.clockDeviceType)"));
 }
 
+TEST_CASE("the clock output is marked with a blue strip dot", "[latency][ui]") {
+    const auto controlHeader = readSource("app/src/DeviceControl.h");
+    CHECK(contains(controlHeader, "void setClock("));
+
+    // The strip dot turns blue only for the output that owns the clock.
+    const auto control = readSource("app/src/DeviceControl.cpp");
+    CHECK(contains(control, "isClock) dot = theme::blue()"));
+
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "bool AudioEngine::isClockOutput"));
+
+    // Every output strip refresh re-reads the role, and a device choice
+    // refreshes the other strips so the dot moves with the clock.
+    const auto mixer = readSource("app/src/MixerComponent.cpp");
+    CHECK(contains(mixer, "deviceControl.setClock(audioEngine.isClockOutput(output.id))"));
+    CHECK(contains(mixer, "s->onDeviceChanged = [this] {"));
+}
+
 TEST_CASE("Force ASIO picks the interface and reports what it did", "[latency][asio]") {
     const auto engine = readSource("app/src/AudioEngine.cpp");
     const auto force = functionBody(engine, "juce::String AudioEngine::forceAsio");
@@ -1192,16 +1210,61 @@ TEST_CASE("clock loss promotes or falls back instead of ending the session",
     CHECK(contains(engine, "AudioEngine::handleClockLoss"));
     CHECK(contains(engine, "AudioEngine::startInternalClock"));
     CHECK(contains(engine, "Clock promoted to"));
+    // A promoted output with a different driver buffer must re-prepare the
+    // engine, or render() rejects every callback as oversized.
+    const auto loss = functionBody(engine, "void AudioEngine::handleClockLoss");
+    CHECK(contains(loss, "prepareToPlayImpl(promotedBuffer, true)"));
+    CHECK(contains(loss, "duplexActive_.store(false"));
 
     const auto refresh = functionBody(engine, "bool AudioEngine::refreshDeviceAvailability");
     CHECK(contains(refresh, "clockLost"));
     CHECK(contains(refresh, "handleClockLoss()"));
     CHECK(contains(refresh, "clockFailoverActive_"));
 
+    // A clock can vanish without a name to look up ("System Default") or with
+    // an error already on the strip, so the driver's own stopped callback and
+    // the callback heartbeat are the reliable signals.
+    const auto health = functionBody(engine, "bool AudioEngine::checkClockHealth");
+    CHECK(contains(health, "isCallbackStalled"));
+    CHECK(contains(health, "isDeviceStopped"));
+    CHECK(contains(health, "handleClockLoss()"));
+    CHECK(contains(readSource("app/src/MainComponent.cpp"), "checkClockHealth()"));
+    const auto stream = readSource("app/src/DeviceStream.cpp");
+    CHECK(contains(stream, "lastCallbackMs.store"));
+    CHECK(contains(stream, "deviceStopped_.store"));
+
     // A successful open gives the clock back and stops the fallback timer.
     const auto open = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
     CHECK(contains(open, "clockFailoverActive_ = false"));
     CHECK(contains(open, "stopInternalClock()"));
+
+    // A recovered first output reclaims the clock from a promoted output or
+    // the internal timer, at the same rate only.
+    const auto reclaim = functionBody(engine, "bool AudioEngine::maybeReclaimClock");
+    CHECK(contains(reclaim, "isOpeningDevices()"));
+    CHECK(contains(reclaim, "getAvailableOutputDevices()"));
+    CHECK(contains(reclaim, "pluginrack::canReclaimClock"));
+    CHECK(contains(reclaim, "reloadDevicesAsync"));
+    CHECK(contains(reclaim, "setRenderActive(false)"));
+    CHECK(contains(reclaim, "setRenderActive(true)"));
+    CHECK(contains(reclaim, "publishRenderOutputsLocked()"));
+    CHECK(contains(reclaim, "stopInternalClock()"));
+    CHECK(contains(reclaim, "isSilentDeviceName(output->outputDeviceName)"));
+    CHECK(contains(reclaim, "prepareToPlayImpl(reclaimedBuffer, true)"));
+    CHECK(contains(reclaim, "reclaimGate_.shouldAttempt"));
+    CHECK(contains(reclaim, "getCallbackCount()"));
+    CHECK_FALSE(contains(reclaim, "setRenderHook"));  // immutable, set at open()
+    CHECK(contains(reclaim, "device.quiet = true"));
+    CHECK(contains(reclaim, "Clock reclaimed by"));
+    CHECK(contains(readSource("app/src/MainComponent.cpp"), "maybeReclaimClock()"));
+    // The hook is installed once, before open() starts the callback, and the
+    // role moves only through the renderActive atomic.
+    const auto openBody = functionBody(engine, "juce::String AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(openBody, "newPlayback->setRenderHook"));
+    CHECK(contains(openBody, "newPlayback->setRenderActive(false)"));
+    // A background retry must not pop the device-error dialog on every try.
+    const auto reload = functionBody(engine, "void AudioEngine::reloadDevicesAsync");
+    CHECK(contains(reload, "!device.quiet"));
 }
 
 TEST_CASE("stream health drives the bounded auto-reload path", "[latency][health]") {

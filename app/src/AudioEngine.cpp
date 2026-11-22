@@ -69,6 +69,15 @@ constexpr int kClockOpenAttempts = 2;
 constexpr int kClockRetryDelayMs = 150;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
+// A clock callback that has not run for this long is treated as dead. Large
+// driver buffers still call back far more often than this; the grace only has
+// to absorb a busy machine or a sleep/resume hiccup.
+constexpr std::uint64_t kClockStallGraceMs = 2000;
+// Auto-reclaim: the first output is the preferred clock. Reopening a returned
+// endpoint is rate-limited so a dead device is not hammered every UI tick, and
+// bounded so an endpoint that cannot open at the session rate stops trying.
+constexpr std::uint32_t kReclaimRetryMs = 5000;
+constexpr int kReclaimMaxAttempts = 3;
 
 // A single-client driver reports its own bare wording ("No such device");
 // the engine's own message adds the endpoint after a colon. Both mean the same
@@ -1351,7 +1360,11 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
             for (auto& o2 : outputs) {
                 if (o2->output != nullptr) {
                     clockOutputId = o2->id;
-                    o2->output->setRenderHook([this](int n) { this->render(n); });
+                    // The hook is installed before every stream is opened; only
+                    // the role moves here. A clock renders and drains in the
+                    // same callback, so drop the independent-output headroom.
+                    o2->output->setTargetFillBlocks(0);
+                    o2->output->setRenderActive(true);
                     break;
                 }
             }
@@ -2481,6 +2494,7 @@ void copyStripFields(const LiveStrip& from, SavedStrip& to) {
     to.deEsserEffects = from.deEsserEffects;
     to.limiterEffects = from.limiterEffects;
     to.feedbackSuppressorEffects = from.feedbackSuppressorEffects;
+    to.spectralDenoiserEffects = from.spectralDenoiserEffects;
     to.chain = from.chain;
 }
 
@@ -2730,6 +2744,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         channel->deEsserEffects = savedChannel.deEsserEffects;
         channel->limiterEffects = savedChannel.limiterEffects;
         channel->feedbackSuppressorEffects = savedChannel.feedbackSuppressorEffects;
+        channel->spectralDenoiserEffects = savedChannel.spectralDenoiserEffects;
         for (const auto& e : channel->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->multibandProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->limiterProcessors.push_back(std::move(pr)); }
@@ -2829,6 +2844,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->deEsserEffects = savedOutput.deEsserEffects;
         output->limiterEffects = savedOutput.limiterEffects;
         output->feedbackSuppressorEffects = savedOutput.feedbackSuppressorEffects;
+        output->spectralDenoiserEffects = savedOutput.spectralDenoiserEffects;
         for (const auto& e : output->multibandEffects) { pluginrack::MultibandProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->multibandProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->deEsserEffects) { pluginrack::DeEsserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->deEsserProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->limiterEffects) { pluginrack::LimiterProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->limiterProcessors.push_back(std::move(pr)); }
@@ -3432,6 +3448,12 @@ juce::String AudioEngine::setOutputDevice(std::uint32_t outputId, const juce::St
         }
         prepareInputs();
     }
+    if (!error.isEmpty() && isClock) {
+        // Opening a replacement clock closes the previous stream first, so a
+        // refusal would otherwise leave every other output with no render
+        // driver at all. Promote one of them or fall back to the internal clock.
+        checkClockHealth();
+    }
     // The previous figure described the previous output chain.
     if (error.isEmpty()) resetLatencyMeasurement();
     return error;
@@ -3531,7 +3553,8 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
                 for (auto& o2 : outputs) {
                     if (o2->output != nullptr) {
                         clockOutputId = o2->id;
-                        o2->output->setRenderHook([this](int n) { this->render(n); });
+                        o2->output->setTargetFillBlocks(0);
+                        o2->output->setRenderActive(true);
                         break;
                     }
                 }
@@ -3558,12 +3581,13 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // below, inside stateLock, so a second render hook never runs.
 
     auto newPlayback = std::make_unique<OutputPlayback>();
-    if (isClock) {
-        newPlayback->setRenderHook([this](int n) { this->render(n); });
-        // open() starts this device's callbacks; stay inactive until the
-        // hand-off so no second render hook can run alongside prevOutput.
-        newPlayback->setRenderActive(false);
-    }
+    // Every stream gets the same hook before open() starts its callback. Only
+    // the stream holding the clock role is active, so a non-clock callback
+    // just drains its FIFO. Keeping the hook immutable means the audio thread
+    // never observes a torn std::function, and a clock hand-off is one atomic
+    // store instead of a live closure assignment.
+    newPlayback->setRenderHook([this](int n) { this->render(n); });
+    newPlayback->setRenderActive(false);
 
     juce::String err;
     const auto openName = isSystemDefaultName(deviceName) ? juce::String() : deviceName;
@@ -3695,7 +3719,17 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     if (openErr.isNotEmpty()) {
         const juce::ScopedLock sl(stateLock);
         out->output = std::move(prevOutput);
-        if (out->output != nullptr) out->output->setRenderActive(true);
+        // A clock that failed to open cannot feed its duplex inputs; leaving
+        // the flag set would make those channels wait forever for a callback
+        // that no longer exists.
+        if (isClock) {
+            duplexDeviceName_.clear();
+            duplexActive_.store(false, std::memory_order_release);
+        }
+        // A restored stream is closed, so this is mostly belt and braces. Do
+        // not leave a non-clock stream active: every stream now carries a
+        // render hook and would double-drive the session.
+        if (out->output != nullptr) out->output->setRenderActive(isClock);
         // Nothing is playing: keep the name the user assigned so the strip and
         // the saved scene still say which device is missing, instead of
         // dropping back to "Choose device" with only an error line.
@@ -3866,6 +3900,8 @@ void AudioEngine::handleClockLoss() {
     int lastRate = 48000;
     pluginrack::ClockFailoverDecision decision;
     juce::String promotedName;
+    int promotedBuffer = 0;
+    const auto nowMs = juce::Time::getMillisecondCounter();
     {
         const juce::ScopedLock lock(stateLock);
         lastRate = static_cast<int>(std::lround(
@@ -3874,31 +3910,54 @@ void AudioEngine::handleClockLoss() {
         for (const auto& output : outputs) {
             if (output->id == lost) continue;
             pluginrack::ClockCandidate candidate;
+            // Promoting a stream that already stopped (a second unplugged
+            // interface, for example) would only move the silence: it has no
+            // callback to drive the engine. Treat it as unavailable so the
+            // free-running internal clock takes over instead.
+            const auto* stream = output->output.get();
+            const bool live = stream != nullptr && !stream->isDeviceStopped()
+                              && !stream->isCallbackStalled(nowMs, kClockStallGraceMs);
             candidate.outputId = output->id;
-            candidate.clockCapable = output->output != nullptr;
-            candidate.deviceOpen = output->output != nullptr;
+            candidate.clockCapable = live;
+            candidate.deviceOpen = live;
             candidate.sampleRate =
-                output->output != nullptr
-                    ? static_cast<int>(std::lround(output->output->getSampleRate()))
-                    : 0;
+                live ? static_cast<int>(std::lround(stream->getSampleRate())) : 0;
             candidates.push_back(candidate);
         }
         decision = pluginrack::chooseClockFailover(candidates, lost, lastRate);
+        // Whatever the decision, the lost stream must stop acting as a render
+        // driver. If it is only stalled and later resumes, leaving it active
+        // would let it render in parallel with the promoted stream or the
+        // internal timer, doubling every push.
+        for (auto& old : outputs) {
+            if (old->id == lost && old->output != nullptr) {
+                old->output->setRenderActive(false);
+            }
+        }
+        // A duplex clock also owned the capture callback. Its buffers stop
+        // updating (and may be freed with the device), so stop the channels
+        // reading them; they fall back to their own capture.
+        duplexActive_.store(false, std::memory_order_release);
+        duplexDeviceName_.clear();
+        duplexInputBuffers_ = nullptr;
+        duplexInputBufferCount_ = 0;
+        for (auto& c : channels) {
+            c->duplexInput = false;
+            c->duplexInputChannels = 0;
+        }
         if (decision.action == pluginrack::ClockAction::Promote) {
             for (auto& output : outputs) {
                 if (output->id != decision.outputId || output->output == nullptr) continue;
-                for (auto& old : outputs) {
-                    if (old->id == lost && old->output != nullptr) {
-                        old->output->setRenderActive(false);
-                    }
-                }
                 // The promoted stream already owns an open device; it only
-                // needs to become the render driver. FIFOs are re-primed by
-                // the next block, reusing the epoch path so no block repeats.
-                output->output->setRenderHook([this](int n) { this->render(n); });
+                // needs to become the render driver. Its FIFO backlog was
+                // headroom for an independent output clock, so drop it to the
+                // clock's zero target instead of paying that latency forever.
+                output->output->setTargetFillBlocks(0);
+                // The hook was installed before the stream was opened.
                 output->output->setRenderActive(true);
                 clockOutputId = output->id;
                 promotedName = output->outputDeviceName;
+                promotedBuffer = output->output->getBufferSize();
                 break;
             }
         } else {
@@ -3911,6 +3970,22 @@ void AudioEngine::handleClockLoss() {
     // callback that misses the lock pays for the write with silence.
     if (decision.action == pluginrack::ClockAction::Promote) {
         stopInternalClock();
+        // The promoted output can have a different driver buffer from the clock
+        // it replaces. The render ceiling and plugin buffers must follow the
+        // stream that now drives the session, or render() would reject its
+        // blocks as oversized and push silence. A device job runs this on a
+        // worker, and plugins must be prepared on the message thread only.
+        if (promotedBuffer > 0 && promotedBuffer != currentBufferSize) {
+            if (isOpeningDevices()) {
+                auto alive = prepareAliveToken_;
+                juce::MessageManager::callAsync([this, alive, promotedBuffer] {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    prepareToPlayImpl(promotedBuffer, true);
+                });
+            } else {
+                prepareToPlayImpl(promotedBuffer, true);
+            }
+        }
         if (promotedName.isNotEmpty())
             juce::Logger::writeToLog("Clock promoted to " + promotedName);
     } else {
@@ -3921,6 +3996,193 @@ void AudioEngine::handleClockLoss() {
     }
 }
 
+bool AudioEngine::checkClockHealth() {
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    bool clockLost = false;
+    {
+        const juce::ScopedLock lock(stateLock);
+        bool otherOutputOpen = false;
+        for (const auto& output : outputs) {
+            if (output->id == clockOutputId) {
+                const auto* stream = output->output.get();
+                clockLost = stream == nullptr
+                            || stream->isDeviceStopped()
+                            || stream->isCallbackStalled(nowMs, kClockStallGraceMs);
+                if (clockLost && output->outputError.isEmpty()) {
+                    const auto name = isSilentDeviceName(output->outputDeviceName)
+                                          ? systemDefaultDeviceName()
+                                          : output->outputDeviceName;
+                    output->outputError = "Clock device stopped: " + name;
+                }
+            } else if (output->output != nullptr) {
+                otherOutputOpen = true;
+            }
+        }
+        // A session with no other open output has nothing to keep alive; the
+        // strips already report the missing clock. Do not start a timer that
+        // renders into nothing.
+        if (clockLost && !otherOutputOpen) clockLost = false;
+    }
+    if (!clockLost || clockFailoverActive_) return false;
+    clockFailoverActive_ = true;
+    handleClockLoss();
+    clockFailoverActive_ = false;
+    return true;
+}
+
+bool AudioEngine::maybeReclaimClock() {
+    if (isOpeningDevices()) return false;
+
+    std::uint32_t preferredId = 0;
+    juce::String preferredName;
+    juce::String preferredLabel;
+    bool reclaimed = false;
+    int reclaimedBuffer = 0;
+    std::uint32_t oldClockId = 0;
+
+    {
+        const juce::ScopedLock lock(stateLock);
+        if (outputs.empty()) return false;
+
+        // Mirror the opener's clock choice: the first output by id that has a
+        // real device assigned. An earlier strip set to "None - silent" does
+        // not hold the clock role, so it must not block the wait either.
+        Output* preferred = nullptr;
+        for (auto& output : outputs) {
+            if (isSilentDeviceName(output->outputDeviceName)) continue;
+            if (preferred == nullptr || output->id < preferred->id) preferred = output.get();
+        }
+        if (preferred == nullptr) return false;
+        preferredId = preferred->id;
+        preferredName = preferred->outputDeviceName;
+        preferredLabel = preferred->name;
+        auto* stream = preferred->output.get();
+
+        // System Default is a moving target: after a change it may name a
+        // different endpoint, so it is not reclaimed by name. The OS default
+        // path still covers it through the normal device selection.
+        if (isSystemDefaultName(preferredName)) {
+            reclaimGate_.reset();
+            return false;
+        }
+
+        // Same 32-bit millisecond clock the callback stamps; HiRes has a
+        // different epoch and cannot be compared with it.
+        const auto nowHi = juce::Time::getMillisecondCounter();
+        const bool live = stream != nullptr && !stream->isDeviceStopped()
+                          && !stream->isCallbackStalled(nowHi, kClockStallGraceMs);
+        // open() seeds the heartbeat, so a just-reopened stream can look live
+        // before its driver has called back once. Do not promote it until a
+        // real callback has arrived; the fallback keeps playing meanwhile.
+        const bool seenCallback = live && stream->getCallbackCount() > 0;
+        const int streamRate =
+            stream != nullptr ? juce::roundToInt(stream->getSampleRate()) : 0;
+        const int engineRate = juce::roundToInt(currentSampleRate);
+        const bool liveSameRate = pluginrack::canReclaimClock(
+            stream != nullptr, seenCallback, streamRate, engineRate);
+
+        if (clockOutputId == preferredId && live) {
+            // Already the clock; do not fight an open that is still starting
+            // (its first callback may be a buffer period away).
+            reclaimGate_.onSuccess();
+            return false;
+        }
+
+        if (liveSameRate) {
+            // Do not touch the stream here: the old driver still owns the
+            // render role. Stop it, demote it and activate this stream in one
+            // ordered hand-off below.
+            oldClockId = clockOutputId;
+            reclaimedBuffer = stream->getBufferSize();
+            reclaimed = true;
+        } else if (stream != nullptr && live) {
+            // Open but not reclaimable yet: another rate class, or its first
+            // callback has not arrived. Reclaim must never change the session
+            // rate, and a still-starting clock must not be reopened.
+            reclaimGate_.reset();
+            return false;
+        }
+    }
+
+    if (reclaimed) {
+        const bool blockChange = reclaimedBuffer > 0
+                                 && reclaimedBuffer != currentBufferSize;
+        // A larger block can be prepared while the old driver still runs: the
+        // ceiling stays at the old size until the hosts are ready, then rises,
+        // and the old blocks remain valid. A smaller block must wait until
+        // after the hand-off, because prepareToPlayImpl lowers the ceiling
+        // immediately and would reject the old driver's oversized blocks.
+        const bool grew = blockChange && reclaimedBuffer > currentBufferSize;
+        if (grew) prepareToPlayImpl(reclaimedBuffer, true);
+
+        // Stop the free-running timer before the new clock starts, so the two
+        // drivers never render the same block. stopTimer() can wait for a
+        // render that needs stateLock, so it cannot run under the lock.
+        stopInternalClock();
+
+        {
+            const juce::ScopedLock lock(stateLock);
+            for (auto& output : outputs) {
+                if (output->output == nullptr) continue;
+                if (output->id == oldClockId && output->id != preferredId) {
+                    output->output->setRenderActive(false);
+                    // Demoted outputs go back to the same headroom a normal
+                    // non-clock open uses, so Low Latency Mode keeps its depth.
+                    output->output->setTargetFillBlocks(
+                        lowLatencyOutputs_.load(std::memory_order_relaxed) ? 2 : 4);
+                } else if (output->id == preferredId) {
+                    // The hook was installed before open(); this stream was
+                    // inactive, so the depth and the role change together with
+                    // no callback rendering between them.
+                    output->output->setTargetFillBlocks(0);
+                    output->output->setRenderActive(true);
+                    output->outputError.clear();
+                }
+            }
+            clockOutputId = preferredId;
+            publishRenderOutputsLocked();
+        }
+
+        // The new stream now drives at its native block, which the old ceiling
+        // still admits. Shrink the graph after the switch.
+        if (blockChange && !grew)
+            prepareToPlayImpl(reclaimedBuffer, true);
+        else if (!blockChange)
+            prepareInputs();  // a duplex clock loss released these captures
+
+        reclaimGate_.onSuccess();
+        juce::Logger::writeToLog("audio: Clock reclaimed by " + preferredName);
+        return true;
+    }
+
+    // No usable stream yet: reopen the preferred endpoint once its name is
+    // back in the cached enumeration. A missing device is never hammered.
+    const auto present = getAvailableOutputDevices();
+    if (present.isEmpty()) return false;
+    if (present.indexOf(preferredName, true) < 0) {
+        // Gone: the next appearance is a fresh episode with a fresh budget.
+        reclaimGate_.onAbsent();
+        return false;
+    }
+
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    if (!reclaimGate_.shouldAttempt(preferredName.toStdString(), nowMs,
+                                    kReclaimRetryMs, kReclaimMaxAttempts))
+        return false;
+
+    ReloadableDevice device;
+    device.label = preferredLabel;
+    device.deviceName = preferredName;
+    device.stripId = preferredId;
+    device.isInput = false;
+    // A missing endpoint can still be in the cached enumeration for a few
+    // seconds. Do not interrupt playback with a dialog for every retry; the
+    // strip already carries the driver error.
+    device.quiet = true;
+    reloadDevicesAsync({device});
+    return false;
+}
+
 void AudioEngine::startInternalClock(int sampleRate) {
     if (sampleRate <= 0) sampleRate = 48000;
     if (!internalClock_) {
@@ -3928,10 +4190,12 @@ void AudioEngine::startInternalClock(int sampleRate) {
     }
     const int block = maxBlockFrames_ > 0 ? maxBlockFrames_ : juce::jmax(1, currentBufferSize);
     internalClock_->configure(block, static_cast<double>(sampleRate));
+    internalClockActive_.store(true, std::memory_order_relaxed);
 }
 
 void AudioEngine::stopInternalClock() {
     if (internalClock_ != nullptr) internalClock_->stopTimer();
+    internalClockActive_.store(false, std::memory_order_relaxed);
 }
 
 void AudioEngine::recordDeviceCapabilities(const juce::String& endpoint, bool input,
@@ -3979,17 +4243,23 @@ juce::String AudioEngine::getClockDescription() const {
     // Called from the UI timer while the device opener may be rewriting these
     // strings, so every read here happens under the lock.
     const juce::ScopedLock lock(stateLock);
+    const auto khzValue = currentSampleRate / 1000.0;
+    const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
+                         ? juce::String((int)std::round(khzValue))
+                         : juce::String(khzValue, 1);
     if (clockOutputId == 0) {
+        // The fallback timer is a real clock: keep reporting it, or the header
+        // would claim there is no output while every strip is still playing.
+        if (internalClockActive_.load(std::memory_order_relaxed)) {
+            return "Internal clock  -  " + khz + " kHz  -  "
+                 + juce::String(currentBufferSize) + " smp";
+        }
         return "No output device - click a master strip";
     }
     for (const auto& o : outputs) {
         if (o->id == clockOutputId) {
             const auto device = isSilentDeviceName(o->outputDeviceName) ? systemDefaultDeviceName()
                                                               : o->outputDeviceName;
-            const auto khzValue = currentSampleRate / 1000.0;
-            const auto khz = std::abs(khzValue - std::round(khzValue)) < 0.001
-                                 ? juce::String((int)std::round(khzValue))
-                                 : juce::String(khzValue, 1);
             auto desc = o->name + "  -  " + device + "  -  " + khz + " kHz  -  "
                       + juce::String(currentBufferSize) + " smp";
             if (o->outputDeviceType.isNotEmpty())
@@ -4635,6 +4905,11 @@ juce::String AudioEngine::getClockOutputDeviceName() const {
     return {};
 }
 
+bool AudioEngine::isClockOutput(std::uint32_t outputId) const {
+    const juce::ScopedLock lock(stateLock);
+    return outputId != 0 && clockOutputId == outputId;
+}
+
 AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     DeviceSettings settings;
     settings.inputBuffer = requestedInputBufferSize_;
@@ -4925,8 +5200,16 @@ void AudioEngine::reloadDeviceAsync(const ReloadableDevice& device) {
 
 void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& devices) {
     if (devices.empty()) return;
-    // The stream that produced the last measurement is being replaced.
-    resetLatencyMeasurement();
+    // A background reclaim retry must not disturb the visible latency readout
+    // or the opening banner; only user-visible reloads reset that state.
+    bool anyVisible = false;
+    for (const auto& device : devices) {
+        if (!device.quiet) {
+            anyVisible = true;
+            break;
+        }
+    }
+    if (anyVisible) resetLatencyMeasurement();
     startDeviceJob([this, devices](const std::function<bool()>& shouldExit) {
         // A single-device Reload is an explicit request too: re-probe the mode
         // instead of trusting the cached answer, like Reload All does.
@@ -4938,7 +5221,7 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
         for (const auto& device : devices) {
             if (shouldExit()) break;
             const auto status = "reloading " + device.label;
-            beginDeviceOpen(status);
+            if (!device.quiet) beginDeviceOpen(status);
             // Single attempt: a device that refuses stays silent and is
             // reported, instead of being retried with a 400 ms pause.
             const auto error = device.isInput
@@ -4946,10 +5229,17 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
                                                                /*forceReopen=*/true)
                                    : setOutputDeviceImpl(device.stripId, device.deviceName,
                                                          currentSampleRate);
-            endDeviceOpen(status);
-            if (error.isNotEmpty()) failures.add(device.label + ": " + error);
+            if (!device.quiet) endDeviceOpen(status);
+            if (error.isNotEmpty() && !device.quiet)
+                failures.add(device.label + ": " + error);
             deviceOpenProgress_.fetch_add(1);
         }
+
+        // A failed clock reload closes the old stream before trying the new
+        // endpoint. Hand the render role to a live output or the internal
+        // clock now, so the other devices do not stay silent until the next UI
+        // availability poll.
+        checkClockHealth();
 
         clearDeviceOpens();
         modeCacheBypass_.store(false, std::memory_order_relaxed);
@@ -5191,17 +5481,27 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     }
     for (auto& helper : inputHelpers) helper.join();
 
+    // The saved clock endpoint can be gone (unplugged or disabled since the
+    // scene was saved). Its refusal must not silence every other output:
+    // promote a live one or fall back to the internal clock before reporting.
+    const bool clockRecovered = checkClockHealth();
+
     // Every stream was attempted exactly once. Report each refusal against the
     // strip it belongs to; the failing device is already closed and silent.
     for (std::size_t i = 0; i < outputResults.size(); ++i) {
         if (outputResults[i].isEmpty()) continue;
         const auto label = "Output \"" + outputsWanted[i].label + "\" ("
                          + outputsWanted[i].name + ")";
-        if (i == 0)
-            errors += label + " could not be opened as the clock, so nothing can play: "
-                    + outputResults[i] + "\n";
-        else
+        if (i == 0) {
+            errors += label + " could not be opened as the clock";
+            if (clockRecovered)
+                errors += "; playback continues on " + getClockDescription();
+            else
+                errors += ", so nothing can play";
+            errors += ": " + outputResults[i] + "\n";
+        } else {
             errors += label + ": " + outputResults[i] + "\n";
+        }
     }
     for (std::size_t i = 0; i < inputResults.size(); ++i) {
         if (inputResults[i].isEmpty()) continue;

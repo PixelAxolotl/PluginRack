@@ -16,6 +16,9 @@ public:
     // opened in, drawn as a small tag so the backend is visible per strip.
     void setBackendType(const juce::String& type) { backendType = type; updateTooltip(); repaint(); }
     void setError(const juce::String& e) { error = e; updateTooltip(); repaint(); }
+    // Blue status dot on the output strip that currently drives the engine
+    // clock, so the clock device is identifiable at a glance.
+    void setClock(bool c) { if (isClock == c) return; isClock = c; updateTooltip(); repaint(); }
     void setOnClick(std::function<void()> cb) { onClick = std::move(cb); }
     void setOnRename(std::function<void()> cb) { onRename = std::move(cb); }
 
@@ -34,6 +37,7 @@ private:
     juce::String deviceName;
     juce::String backendType;
     juce::String error;
+    bool isClock = false;
     std::function<void()> onClick;
     std::function<void()> onRename;
     bool hovered = false;

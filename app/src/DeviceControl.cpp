@@ -29,6 +29,7 @@ DeviceControl::DeviceControl() {
 void DeviceControl::updateTooltip() {
     juce::String text = title;
     if (deviceName.isNotEmpty()) text += "\n" + deviceName;
+    if (isClock) text += "\nClock output";
     if (error.isNotEmpty()) text += "\n" + error;
     text += "\nRight-click to rename - Click to choose device";
     setTooltip(text);
@@ -68,6 +69,7 @@ void DeviceControl::paint(juce::Graphics& g) {
     {
         juce::Colour dot = theme::dim(); // none
         if (error.isNotEmpty()) dot = theme::red();
+        else if (isClock) dot = theme::blue();
         else if (deviceName.isNotEmpty() && !isSilentDeviceName(deviceName)) dot = theme::green();
         auto dr = right.removeFromLeft(8).toFloat();
         auto dotR = juce::Rectangle<float>(dr.getX() + (dr.getWidth() - 6.0f) / 2.0f,

@@ -19,6 +19,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
         deviceControl.setDeviceName(deviceState.deviceName);
         deviceControl.setBackendType(deviceState.deviceType);
         deviceControl.setError(deviceState.error);
+        deviceControl.setClock(audioEngine.isClockOutput(output.id));
     }
     meter.setStereo(output.layout != pluginrack::ChannelLayout::Mono);
 
@@ -54,6 +55,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
                     safe->deviceControl.setDeviceName(deviceState.deviceName);
                     safe->deviceControl.setBackendType(deviceState.deviceType);
                     safe->deviceControl.setError(deviceState.error);
+                    // A device choice can move the clock role, including the
+                    // internal-clock fallback on a failed open. Re-read every
+                    // output strip so the blue clock dot follows it.
+                    if (safe->onDeviceChanged) safe->onDeviceChanged();
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }
@@ -627,6 +632,7 @@ void MixerComponent::OutputStrip::refresh() {
     deviceControl.setDeviceName(deviceState.deviceName);
     deviceControl.setBackendType(deviceState.deviceType);
     deviceControl.setError(deviceState.error);
+    deviceControl.setClock(audioEngine.isClockOutput(output.id));
     const bool mono = output.layout == pluginrack::ChannelLayout::Mono;
     modeCombo.setSelectedId(mono ? 1 : 2, juce::dontSendNotification);
     meter.setStereo(!mono);
@@ -1257,6 +1263,12 @@ void MixerComponent::rebuildOutputStrips() {
         s->onRenamed = [this] {
             rebuild();
             if (onStructureChanged) onStructureChanged();
+        };
+        s->onDeviceChanged = [this] {
+            // Only output strips carry the clock dot; refreshing inputs here
+            // would needlessly resize their combos.
+            for (auto* strip : outputStrips)
+                if (strip != nullptr) strip->refresh();
         };
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), true);

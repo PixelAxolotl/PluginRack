@@ -88,6 +88,7 @@ private:
 
         std::function<void()> onRemoveRequested;
         std::function<void()> onRenamed;
+        std::function<void()> onDeviceChanged;
         std::function<void()> onSelected;
         std::function<void()> onDoubleClicked;
 

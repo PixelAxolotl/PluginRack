@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <pluginrack/AudioTelemetry.h>
+#include <pluginrack/ClockFailover.h>
 #include <pluginrack/DeviceCache.h>
 #include <pluginrack/EqEngine.h>
 #include <pluginrack/LatencyProfile.h>
@@ -470,6 +471,9 @@ public:
         juce::String deviceName;
         std::uint32_t stripId = 0;
         bool isInput = false;
+        // Background recovery attempts keep their driver error on the strip
+        // but must not raise a modal "devices could not be opened" dialog.
+        bool quiet = false;
     };
     std::vector<ReloadableDevice> getReloadableDevices() const;
     // Reopens one device on the background opener. If it refuses, the current
@@ -520,6 +524,9 @@ public:
     // The device name behind the clock output; empty when no output owns the
     // clock. I/O uses it to name the stream the measurement travels through.
     juce::String getClockOutputDeviceName() const;
+    // True for the single output strip whose stream currently drives the
+    // engine clock; the mixer paints its status dot blue.
+    bool isClockOutput(std::uint32_t outputId) const;
     juce::StringArray getAvailableInputDevices() const;
     juce::StringArray getAvailableOutputDevices() const;
     // ASIO drivers this build can reach; empty means "Force ASIO" is a no-op.
@@ -542,6 +549,16 @@ public:
     // the marker; a successful open clears it. Returns true when any strip
     // changed. Cheap enough for a UI timer: enumeration is cached.
     bool refreshDeviceAvailability();
+    // Cheap companion to refreshDeviceAvailability for the fast UI timer: no
+    // enumeration. Notices the clock stream that stopped or went silent
+    // (unplugged, disabled, system default switched, or failed to open) and
+    // promotes another output or the internal clock so every other device keeps
+    // playing. Returns true when the clock changed.
+    bool checkClockHealth();
+    // Gives the clock role back to the first output when its endpoint returns.
+    // Message-thread only; no-op while a device job is running. Returns true
+    // when the clock changed.
+    bool maybeReclaimClock();
     // Loads the VST3 on a worker and installs it on the message thread:
     // instantiation blocks for as long as the plugin needs to initialise, and
     // doing that here froze the window. pluginUniqueId selects the class
@@ -979,7 +996,13 @@ private:
     std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
     std::unique_ptr<InternalClock> internalClock_;
+    // Read by the UI to describe the fallback without touching the timer
+    // object, which is created and stopped on opener/message threads.
+    std::atomic<bool> internalClockActive_{false};
     bool clockFailoverActive_ = false;
+    // Auto-reclaim watch state. Message thread only: the device job excludes
+    // the tick that calls maybeReclaimClock(), so no lock is needed for these.
+    pluginrack::ReclaimGate reclaimGate_;
     mutable juce::CriticalSection deviceCacheLock_;
     pluginrack::DeviceCache deviceCache_;
 

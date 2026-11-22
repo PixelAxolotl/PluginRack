@@ -837,6 +837,9 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                   int duplexInputChannels) {
     close();
     closing_.store(false, std::memory_order_relaxed);
+    deviceStopped_.store(false, std::memory_order_relaxed);
+    lastCallbackMs.store(0, std::memory_order_relaxed);
+    callbackCount.store(0, std::memory_order_relaxed);
     error.clear();
 
     // One attempt in the preferred device type (shared, or exclusive when it
@@ -923,11 +926,17 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                          std::memory_order_relaxed);
 
     manager.addAudioCallback(this);
+    // Seed the watchdog clock: a device that opens but never delivers a
+    // callback is treated as dead after the grace period, not as healthy
+    // forever just because the endpoint still enumerates.
+    lastCallbackMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     return {};
 }
 
 void OutputPlayback::close() {
     closing_.store(true, std::memory_order_relaxed);
+    deviceStopped_.store(true, std::memory_order_relaxed);
+    lastCallbackMs.store(0, std::memory_order_relaxed);
     manager.removeAudioCallback(this);
     manager.closeAudioDevice();
     duplex_.store(false, std::memory_order_relaxed);
@@ -1111,6 +1120,9 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
         return;
     }
 
+    lastCallbackMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+    callbackCount.fetch_add(1, std::memory_order_relaxed);
+
     currentOutputChannels = outputChannelData;
     currentNumOutputChannels = numOutputChannels;
 
@@ -1286,6 +1298,8 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
 }
 
 void OutputPlayback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
+    deviceStopped_.store(false, std::memory_order_relaxed);
+    lastCallbackMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     if (device != nullptr) {
         sampleRate = device->getCurrentSampleRate();
         bufferSize = device->getCurrentBufferSizeSamples();
@@ -1296,4 +1310,7 @@ void OutputPlayback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     }
 }
 
-void OutputPlayback::audioDeviceStopped() {}
+void OutputPlayback::audioDeviceStopped() {
+    deviceStopped_.store(true, std::memory_order_relaxed);
+    lastCallbackMs.store(0, std::memory_order_relaxed);
+}

@@ -123,8 +123,28 @@ Each channel and output strip has a device menu: **System Default**, **None -
 silent**, the available WASAPI/ASIO devices, and the app's own device types.
 The first output with a real device becomes the clock; its sample rate and render
 block drive the engine. Individual devices may use different driver buffer sizes;
-the bounded FIFOs bridge those callbacks. Inputs are shared per device, so several
-channels can capture the same endpoint.
+the bounded FIFOs bridge those callbacks. The output strip that currently owns the
+clock shows a blue status dot (it turns red if that device reports an open error).
+Inputs are shared per device, so several channels can capture the same endpoint.
+
+If the clock device disappears or stops delivering callbacks (unplugged,
+disabled, or the system default switched), the engine promotes the next live
+output at the same rate. When no output qualifies it keeps rendering on an
+internal clock at the last live rate, so the other outputs keep playing. The
+strips show the missing clock device and the toolbar reports the internal clock.
+
+When the first output's endpoint comes back, it reclaims the clock
+automatically. The engine reopens it at the session's current sample rate and,
+once its callback is live, hands the clock role back from the promoted output
+or the internal clock. A silent strip is skipped. A strip left on **System
+Default** is not reclaimed by name, because the OS default can point at a
+different endpoint after a change; choose the endpoint explicitly to have it
+reclaim the clock. Reclaim only happens at the same rate; a device that cannot
+run at that rate keeps the fallback playing and reports its error. If another
+output held the clock while the first output was away, an input that had been
+fed by the clock's duplex callback returns as an independent capture; a
+single-client ASIO driver may refuse that second client, so reload the clock
+device to restore its duplex input.
 
 The **I/O** view shows the same strips as the Mixer with an **Inputs** / **Outputs**
 tab switch, so either side can fill the window on its own. Device assignment is
@@ -413,8 +433,10 @@ slow driver is visible instead of looking like a hang.
 Each endpoint is attempted **exactly once**. There is no device-type fallback
 chain, no default-rate retry, and no second pass: if an endpoint refuses, its
 stream stays closed and silent, the strip goes red, and the message names the
-strip, the endpoint and the driver error. The first output is the clock, so if
-it cannot be opened nothing can play and the message says so. Exclusive mode
+strip, the endpoint and the driver error. The first output is the clock. If it
+cannot be opened, the engine promotes the next live output or falls back to an
+internal clock at the last live rate, so the other devices keep playing instead
+of going silent with it. Exclusive mode
 adds its more expensive format probe and is only used when explicitly enabled.
 Reloading a single device avoids paying that cost for every stream.
 

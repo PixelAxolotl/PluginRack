@@ -4,6 +4,7 @@
 
 #include <pluginrack/AudioTelemetry.h>
 #include <pluginrack/CaptureCursor.h>
+#include <pluginrack/ClockFailover.h>
 #include <pluginrack/DelayTargetController.h>
 #include <pluginrack/DeviceTypePolicy.h>
 #include <pluginrack/InputDelayPlan.h>
@@ -232,6 +233,28 @@ public:
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
     juce::String getActiveDeviceType() const { return activeDeviceType_; }
 
+    // Liveness for the engine's clock watchdog. The device callback stamps the
+    // time it last ran, so a stream whose driver stopped calling back (device
+    // unplugged, disabled in the OS, or the system default switched) is
+    // detectable without waiting for a name-based enumeration.
+    std::uint64_t getLastCallbackMs() const {
+        return lastCallbackMs.load(std::memory_order_relaxed);
+    }
+    // Callbacks actually delivered since open(). A freshly opened stream is
+    // not yet live even though open() seeds the heartbeat, so the reclaim path
+    // waits for the first real callback before promoting it.
+    std::uint64_t getCallbackCount() const {
+        return callbackCount.load(std::memory_order_relaxed);
+    }
+    bool isCallbackStalled(std::uint64_t nowMs, std::uint64_t graceMs) const {
+        return pluginrack::callbackStalled(getLastCallbackMs(), nowMs, graceMs);
+    }
+    // JUCE reports a driver that stopped (unplugged, disabled, or closed by
+    // the OS) here, which is the fastest signal that the clock is gone.
+    bool isDeviceStopped() const {
+        return deviceStopped_.load(std::memory_order_relaxed);
+    }
+
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     std::uint64_t getOutputUnderruns() const { return outputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getOutputDroppedFrames() const { return outputDroppedFrames.load(std::memory_order_relaxed); }
@@ -245,6 +268,9 @@ public:
                                std::memory_order_relaxed);
     }
 
+    // Install before open() adds the device callback: the audio thread reads
+    // the hook without a lock, so it is never reassigned on a live stream.
+    // setRenderActive() is the atomic hand-off used after that.
     void setRenderHook(std::function<void(int)> hook) { renderHook = std::move(hook); }
     void setRenderActive(bool active) { renderActive = active; }
     // Duplex only: called at the top of each callback with the captured input
@@ -300,6 +326,12 @@ private:
     // until the device thread stops, but it must not read or count a FIFO the
     // engine no longer feeds.
     std::atomic<bool> closing_{false};
+    // Watchdog liveness (see getLastCallbackMs / isDeviceStopped). Both are
+    // written only by the device callback and close(); read by the message
+    // thread's clock watchdog.
+    std::atomic<std::uint64_t> lastCallbackMs{0};
+    std::atomic<std::uint64_t> callbackCount{0};
+    std::atomic<bool> deviceStopped_{false};
     std::atomic<std::uint64_t> outputUnderruns{0};
     std::atomic<std::uint64_t> outputDroppedFrames{0};
     std::atomic<std::uint64_t> outputLowWatermarks{0};
@@ -313,7 +345,9 @@ private:
     bool lowWatermarkActive = false;
     float lastPushedSample[2] = {0.0f, 0.0f};
     std::function<void(int)> renderHook;
-    std::atomic<bool> renderActive{true};
+    // Off until the engine makes this stream the clock. Every stream carries
+    // the same immutable hook, so a promoted output only flips this atomic.
+    std::atomic<bool> renderActive{false};
     // Duplex mode: capture and playback share one driver client, so the input
     // arrives in the same callback that produces the output. The hook hands the
     // input pointers to the engine, and push() writes straight to the device.

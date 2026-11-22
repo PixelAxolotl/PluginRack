@@ -367,6 +367,14 @@ void MainComponent::timerCallback() {
             if (deviceErrors.isNotEmpty())
                 showError("Some audio devices could not be opened:\n" + deviceErrors);
         }
+        // The clock stream can stop between the slower name scans (unplugged,
+        // disabled, or closed by the OS). Check its heartbeat every tick so
+        // the other outputs hand over to a promoted output or the internal
+        // clock instead of going silent for up to ten seconds.
+        if (audioEngine.checkClockHealth()) router.refreshDeviceStrips();
+        // The preferred first output takes the clock back after its endpoint
+        // returns (promoted output) or is reopened (internal-clock fallback).
+        if (audioEngine.maybeReclaimClock()) router.refreshDeviceStrips();
         // With no clock output the strips already say so on their own device
         // rows; repeating it as a warning in the header only adds noise over
         // the output strips. The Menu keeps the full clock line.
