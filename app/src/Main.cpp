@@ -413,7 +413,8 @@ public:
                 else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
                 else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
-                else if (tok == "multiband" || tok == "deesser" || tok == "limiter") shotEffect = tok;
+                else if (tok == "multiband" || tok == "deesser" || tok == "limiter"
+                         || tok == "spectral" || tok == "feedback") shotEffect = tok;
                 else if (tok.containsOnly("0123456789")) {
                     if (!haveW) { shotW = juce::jmax(1, tok.getIntValue()); haveW = true; }
                     else shotH = juce::jmax(1, tok.getIntValue());
@@ -436,6 +437,10 @@ public:
                                 static_cast<MultibandWindow*>(focusedEffect)->timerCallback();
                             else if (shotEffect == "deesser")
                                 static_cast<DeEsserWindow*>(focusedEffect)->timerCallback();
+                            else if (shotEffect == "spectral")
+                                static_cast<SpectralDenoiserWindow*>(focusedEffect)->timerCallback();
+                            else if (shotEffect == "feedback")
+                                static_cast<FeedbackSuppressorWindow*>(focusedEffect)->timerCallback();
                             else
                                 static_cast<LimiterWindow*>(focusedEffect)->timerCallback();
                             focusedEffect->repaint();
@@ -449,6 +454,12 @@ public:
                         afterInsert();
                     } else if (shotEffect == "limiter") {
                         focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::Limiter);
+                        afterInsert();
+                    } else if (shotEffect == "spectral") {
+                        focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::SpectralDenoiser);
+                        afterInsert();
+                    } else if (shotEffect == "feedback") {
+                        focusedEffect = comp->focusDiagnosticsEffect(pluginrack::ChainItemType::FeedbackSuppressor);
                         afterInsert();
                     }
                 }

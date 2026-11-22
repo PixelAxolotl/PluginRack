@@ -384,6 +384,13 @@ void MultibandWindow::timerCallback() {
     curve.setGainReduction(gainReductionDb);
 }
 
+void MultibandWindow::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    theme::ui::drawWindowHeader(
+        g, getLocalBounds().reduced(theme::ui::kEffectPad)
+               .removeFromTop(theme::ui::kEffectHeaderH));
+}
+
 void MultibandWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;

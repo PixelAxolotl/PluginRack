@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <initializer_list>
+#include <utility>
 using namespace pluginrack;
 
 namespace {
@@ -716,11 +718,39 @@ void FeedbackSuppressorWindow::timerCallback() {
     graph.repaint();
 }
 
+void FeedbackSuppressorWindow::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    theme::ui::drawWindowHeader(
+        g, getLocalBounds().reduced(theme::ui::kEffectPad)
+               .removeFromTop(theme::ui::kEffectHeaderH));
+}
+
 void FeedbackSuppressorWindow::resized() {
     content.setBounds(getLocalBounds());
     auto area = content.getLocalBounds().reduced(10);
-    modeLabel.setBounds(area.removeFromTop(20));
-    area.removeFromTop(4);
+
+    // Title and Enable share the header bar, like the denoiser and EQ windows.
+    const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
+    modeLabel.setBounds(header.title.reduced(12, 0));
+    // No preset box in this window, so Enable takes the bar's right end instead
+    // of leaving the preset slot as a gap.
+    enableButton.setBounds(header.enable.translated(theme::ui::kEffectPresetW
+                                                        + theme::ui::kEffectHeaderGap,
+                                                    0));
+    area.removeFromTop(6);
+
+    // The meters sit in a tall right-hand column and keep the channel-strip
+    // proportion (roughly 1:16, width to height), so gain reads the same way
+    // here as it does on the rack instead of as a squat box.
+    const bool wide = area.getWidth() >= 620;
+    const int meterWidth = juce::jlimit(wide ? 20 : 16, wide ? 46 : 30,
+                                        juce::roundToInt(area.getHeight() / 16.0f));
+    const int meterGap = wide ? 8 : 6;
+    auto meters = area.removeFromRight(meterWidth * 2 + meterGap);
+    area.removeFromRight(wide ? 12 : 8);
+    inputMeter.setBounds(meters.removeFromLeft(meterWidth));
+    meters.removeFromLeft(meterGap);
+    outputMeter.setBounds(meters.removeFromLeft(meterWidth));
 
     auto analyzerRow = area.removeFromTop(24);
     analyzerLabel.setBounds(analyzerRow.removeFromLeft(62));
@@ -735,97 +765,50 @@ void FeedbackSuppressorWindow::resized() {
     }
     area.removeFromTop(6);
 
-    // Wide (docked / full-size) layout: a controls rail on the left and the
-    // RTA taking all remaining space. The compact floating window stacks the
-    // RTA above a single control row instead.
-    if (area.getWidth() >= 620) {
-        auto rail = area.removeFromLeft(230);
-        graph.setBounds(area);
-        enableButton.setBounds(rail.removeFromTop(24).removeFromLeft(100));
-        rail.removeFromTop(6);
+    // Every knob lives in three-per-row rows across the bottom of the window,
+    // so the order and placement match the other effect windows instead of a
+    // rail down the side.
+    const int targetRowHeight = juce::jlimit(wide ? 72 : 54, wide ? 92 : 76,
+                                             (area.getHeight() - (wide ? 140 : 110) - 12) / 4);
+    const int rowsHeight = juce::jmin(area.getHeight(), targetRowHeight * 4 + 12);
+    auto knobRows = area.removeFromBottom(rowsHeight);
+    const int rowHeight = juce::jmax(0, (knobRows.getHeight() - 12) / 4);
+    const int rowGap = 4;
+    graph.setBounds(area);
 
-        auto topKnobs = rail.removeFromTop(84);
-        theme::ui::placeWindowKnob(topKnobs.removeFromLeft(76), strengthLabel, strength);
-        theme::ui::placeWindowKnob(topKnobs.removeFromLeft(76), attenuationLabel, attenuation);
-        theme::ui::placeWindowKnob(topKnobs, sensitivityLabel, sensitivity);
+    auto placeRow = [](juce::Rectangle<int> row,
+                       std::initializer_list<std::pair<juce::Label*, juce::Slider*>> knobs) {
+        const int cellWidth = row.getWidth() / static_cast<int>(knobs.size());
+        for (auto& knob : knobs) {
+            auto cell = row.removeFromLeft(cellWidth);
+            theme::ui::placeWindowKnob(
+                cell.withSizeKeepingCentre(juce::jmin(150, cell.getWidth()), cell.getHeight()),
+                *knob.first, *knob.second);
+        }
+    };
 
-        rail.removeFromTop(4);
-        auto bandKnobs = rail.removeFromTop(84);
-        theme::ui::placeWindowKnob(bandKnobs.removeFromLeft(76), highPassLabel, highPass);
-        theme::ui::placeWindowKnob(bandKnobs.removeFromLeft(76), lowPassLabel, lowPass);
-        theme::ui::placeWindowKnob(bandKnobs, gainReductionMultiplierLabel,
-                                   gainReductionMultiplier);
+    placeRow(knobRows.removeFromTop(rowHeight),
+             {{&strengthLabel, &strength}, {&attenuationLabel, &attenuation},
+              {&sensitivityLabel, &sensitivity}});
+    knobRows.removeFromTop(rowGap);
+    placeRow(knobRows.removeFromTop(rowHeight),
+             {{&highPassLabel, &highPass}, {&lowPassLabel, &lowPass},
+              {&gainReductionMultiplierLabel, &gainReductionMultiplier}});
+    knobRows.removeFromTop(rowGap);
+    placeRow(knobRows.removeFromTop(rowHeight),
+             {{&attackLabel, &attack}, {&holdLabel, &hold}, {&releaseLabel, &release}});
+    knobRows.removeFromTop(rowGap);
 
-        rail.removeFromTop(4);
-        auto envelopeKnobs = rail.removeFromTop(84);
-        theme::ui::placeWindowKnob(envelopeKnobs.removeFromLeft(76), attackLabel, attack);
-        theme::ui::placeWindowKnob(envelopeKnobs.removeFromLeft(76), holdLabel, hold);
-        theme::ui::placeWindowKnob(envelopeKnobs, releaseLabel, release);
-
-        rail.removeFromTop(4);
-        auto confirmKnobs = rail.removeFromTop(84);
-        theme::ui::placeWindowKnob(confirmKnobs.removeFromLeft(76),
-                                   detectionDelayLabel, detectionDelay);
-
-        rail.removeFromTop(6);
-        const int availableForMeters = juce::jmax(0, rail.getHeight() - 4);
-        const int infoHeight = juce::jmin(64, juce::jmax(0, availableForMeters - 44));
-        const int metersHeight = juce::jmax(0, juce::jmin(90, availableForMeters - infoHeight));
-        auto meters = rail.removeFromTop(metersHeight);
-        inputMeter.setBounds(meters.removeFromLeft(62));
-        meters.removeFromLeft(16);
-        outputMeter.setBounds(meters.removeFromLeft(62));
-
-        auto infoArea = rail.removeFromBottom(infoHeight);
-        infoLabel.setBounds(infoArea.reduced(0, 2));
-        infoLabel.setJustificationType(juce::Justification::topLeft);
-        infoLabel.setVisible(infoHeight >= 30);
-    } else {
-        const int graphHeight = juce::jlimit(80, 150, area.getHeight() * 35 / 100);
-        graph.setBounds(area.removeFromTop(graphHeight));
-        area.removeFromTop(4);
-
-        auto left = area.removeFromLeft(juce::jmin(220, area.getWidth() * 55 / 100));
-        const int rowHeight = juce::jlimit(48, 82, (left.getHeight() - 12) / 4);
-        auto topKnobs = left.removeFromTop(rowHeight);
-        theme::ui::placeWindowKnob(topKnobs.removeFromLeft(topKnobs.getWidth() / 3),
-                                   strengthLabel, strength);
-        theme::ui::placeWindowKnob(topKnobs.removeFromLeft(topKnobs.getWidth() / 2),
-                                   attenuationLabel, attenuation);
-        theme::ui::placeWindowKnob(topKnobs, sensitivityLabel, sensitivity);
-        left.removeFromTop(4);
-        auto bandKnobs = left.removeFromTop(rowHeight);
-        theme::ui::placeWindowKnob(bandKnobs.removeFromLeft(bandKnobs.getWidth() / 3),
-                                   highPassLabel, highPass);
-        theme::ui::placeWindowKnob(bandKnobs.removeFromLeft(bandKnobs.getWidth() / 2),
-                                   lowPassLabel, lowPass);
-        theme::ui::placeWindowKnob(bandKnobs, gainReductionMultiplierLabel,
-                                   gainReductionMultiplier);
-        left.removeFromTop(4);
-        auto envelopeKnobs = left.removeFromTop(rowHeight);
-        theme::ui::placeWindowKnob(envelopeKnobs.removeFromLeft(envelopeKnobs.getWidth() / 3),
-                                   attackLabel, attack);
-        theme::ui::placeWindowKnob(envelopeKnobs.removeFromLeft(envelopeKnobs.getWidth() / 2),
-                                   holdLabel, hold);
-        theme::ui::placeWindowKnob(envelopeKnobs, releaseLabel, release);
-        left.removeFromTop(4);
-        auto confirmKnobs = left.removeFromTop(rowHeight);
-        theme::ui::placeWindowKnob(confirmKnobs.removeFromLeft(confirmKnobs.getWidth() / 2),
-                                   detectionDelayLabel, detectionDelay);
-
-        auto controls = area.reduced(4, 0);
-        enableButton.setBounds(controls.removeFromTop(22).removeFromLeft(86));
-        controls.removeFromTop(6);
-        const int infoReserve = juce::jmin(72, juce::jmax(0, controls.getHeight() - 44));
-        const int metersHeight = juce::jmax(0, juce::jmin(92, controls.getHeight() - infoReserve));
-        auto meters = controls.removeFromTop(metersHeight);
-        inputMeter.setBounds(meters.removeFromLeft(52));
-        meters.removeFromLeft(10);
-        outputMeter.setBounds(meters.removeFromLeft(52));
-
-        auto infoArea = controls.removeFromBottom(infoReserve);
-        infoLabel.setBounds(infoArea.reduced(2, 0));
-        infoLabel.setJustificationType(juce::Justification::topRight);
-        infoLabel.setVisible(infoReserve >= 30);
-    }
+    // Confirm shares the last row with the preset notes: one knob plus the text
+    // that says what the preset is doing, rather than an empty third cell.
+    auto confirmRow = knobRows.removeFromTop(rowHeight);
+    const int third = confirmRow.getWidth() / 3;
+    auto confirmCell = confirmRow.removeFromLeft(third);
+    theme::ui::placeWindowKnob(
+        confirmCell.withSizeKeepingCentre(juce::jmin(150, confirmCell.getWidth()),
+                                          confirmCell.getHeight()),
+        detectionDelayLabel, detectionDelay);
+    infoLabel.setBounds(confirmRow.reduced(8, 4));
+    infoLabel.setJustificationType(juce::Justification::bottomRight);
+    infoLabel.setVisible(true);
 }

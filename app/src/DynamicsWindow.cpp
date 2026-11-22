@@ -331,6 +331,13 @@ void DynamicsWindow::syncControls() {
     enableButton.setToggleState(!effect.bypassed, juce::dontSendNotification);
 }
 
+void DynamicsWindow::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    theme::ui::drawWindowHeader(
+        g, getLocalBounds().reduced(theme::ui::kEffectPad)
+               .removeFromTop(theme::ui::kEffectHeaderH));
+}
+
 void DynamicsWindow::resized() {
     content.setBounds(getLocalBounds());
     auto area = content.getLocalBounds().reduced(theme::ui::kEffectPad);

@@ -596,6 +596,16 @@ void SpectralDenoiserWindow::setBypassed(bool b) {
     enableButton.setToggleState(!b, juce::dontSendNotification);
 }
 
+void SpectralDenoiserWindow::paint(juce::Graphics& g) {
+    // The name and Enable live in the header row, so the bar is drawn at the
+    // exact rect resized() hands them: the text always sits inside it instead
+    // of hanging below the panel.
+    g.fillAll(theme::bg());
+    theme::ui::drawWindowHeader(
+        g, getLocalBounds().reduced(theme::ui::kEffectPad)
+               .removeFromTop(theme::ui::kEffectHeaderH));
+}
+
 void SpectralDenoiserWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;
@@ -604,7 +614,11 @@ void SpectralDenoiserWindow::resized() {
     auto area = installedContent->getLocalBounds().reduced(theme::ui::kEffectPad);
     const auto header = theme::ui::layoutEffectHeader(area.removeFromTop(theme::ui::kEffectHeaderH));
     modeLabel.setBounds(header.title.reduced(12, 0));
-    enableButton.setBounds(header.enable);
+    // No preset box in this window, so Enable takes the bar's right end instead
+    // of leaving the preset slot as a gap.
+    enableButton.setBounds(header.enable.translated(theme::ui::kEffectPresetW
+                                                        + theme::ui::kEffectHeaderGap,
+                                                    0));
 
     area.removeFromTop(10);
     auto topRow = area.removeFromTop(28);

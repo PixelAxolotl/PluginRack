@@ -33,6 +33,7 @@ public:
                    const pluginrack::DynamicsEffect* gate = nullptr);
     ~DynamicsWindow() override = default;
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void timerCallback() override;
 
     // Mirrors a bypass change made on the strip so the panel cannot re-apply a

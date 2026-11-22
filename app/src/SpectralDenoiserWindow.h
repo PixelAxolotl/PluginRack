@@ -63,6 +63,7 @@ public:
     ~SpectralDenoiserWindow() override = default;
 
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void timerCallback() override;
     void setBypassed(bool b);
     void closeButtonPressed() override;

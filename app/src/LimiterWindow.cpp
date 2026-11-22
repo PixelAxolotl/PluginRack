@@ -111,6 +111,13 @@ void LimiterWindow::timerCallback() {
     graph.repaint();
 }
 
+void LimiterWindow::paint(juce::Graphics& g) {
+    g.fillAll(theme::bg());
+    theme::ui::drawWindowHeader(
+        g, getLocalBounds().reduced(theme::ui::kEffectPad)
+               .removeFromTop(theme::ui::kEffectHeaderH));
+}
+
 void LimiterWindow::resized() {
     auto* installedContent = getContentComponent();
     if (installedContent == nullptr) return;

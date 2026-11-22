@@ -64,6 +64,7 @@ public:
                              double sampleRateHz = 48000.0);
     ~FeedbackSuppressorWindow() override = default;
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void timerCallback() override;
     void setBypassed(bool b);
     void closeButtonPressed() override { if (onClose) onClose(); }

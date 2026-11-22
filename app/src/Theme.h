@@ -264,7 +264,8 @@ inline constexpr int kEffectPad = 8;
 inline constexpr int kEffectHeaderH = 36;
 inline constexpr int kEffectTitleW = 250;
 inline constexpr int kEffectPresetW = 120;
-inline constexpr int kEffectHeaderGap = 6;
+inline constexpr int kEffectHeaderGap = 12;
+inline constexpr int kEffectHeaderInset = 8;
 inline constexpr int kEffectEnableW = 72;
 
 struct EffectHeaderBounds {
@@ -278,9 +279,14 @@ struct EffectHeaderBounds {
 inline EffectHeaderBounds layoutEffectHeader(juce::Rectangle<int> header) {
     EffectHeaderBounds bounds;
     bounds.title = header.removeFromLeft(kEffectTitleW);
-    bounds.preset = header.removeFromRight(kEffectPresetW);
+    // Keep the button pair off the bar's right edge; without this the preset
+    // box sits flush against the panel border.
+    header.removeFromRight(kEffectHeaderInset);
+    // Buttons are inset from the bar's edges so they read as controls inside
+    // the header rather than as blocks that fill it.
+    bounds.preset = header.removeFromRight(kEffectPresetW).reduced(0, 4);
     header.removeFromRight(kEffectHeaderGap);
-    bounds.enable = header.removeFromRight(kEffectEnableW);
+    bounds.enable = header.removeFromRight(kEffectEnableW).reduced(0, 4);
     return bounds;
 }
 
