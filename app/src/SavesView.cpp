@@ -16,7 +16,7 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
 
     defButton.setClickingTogglesState(true);
     defButton.setToggleState(isDefault, juce::dontSendNotification);
-    defButton.setTooltip("Set as default save");
+    defButton.setTooltip("Load this save at startup");
     defButton.onClick = [this] { if (onSetDefault) onSetDefault(); };
     addAndMakeVisible(defButton);
 
@@ -133,7 +133,12 @@ void SavesView::rebuild() {
         };
         row->onLoad = [this, name] { loadSave(name); };
         row->onSetDefault = [this, name] {
-            SceneBridge::setDefaultSaveName(name);
+            // A real toggle: switching the active default off clears it, so the
+            // next launch restores the last exit autosave instead of this save.
+            if (SceneBridge::getDefaultSaveName().equalsIgnoreCase(name))
+                SceneBridge::setDefaultSaveName({});
+            else
+                SceneBridge::setDefaultSaveName(name);
             rebuild();
         };
         row->onRename = [this, name] { promptRename(name); };
