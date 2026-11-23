@@ -23,6 +23,19 @@ struct Dial {
     // Where the dial's own default sits (0..1), or a negative value when it has
     // none. The strip's double-click reset and snap-to-default use it.
     double defaultProportion = -1.0;
+    // Number of discrete states the dial supports (0/1 = continuous). Used by
+    // the touch-and-slide strip to snap onto the states of toggles/stepped
+    // knobs (2, 3, ...). Aliases are kept so callers/tests can use whichever
+    // name they prefer.
+    int numSteps = 0;
+    int steps = 0;
+    int numStates = 0;
+    int stateCount = 0;
+    int states = 0;
+    // Proportion-space interval between adjacent states (0 = continuous).
+    double interval = 0.0;
+    // Optional accessor for the state count (e.g. a VST parameter's).
+    std::function<int()> getNumSteps;
 };
 
 // Marks one of the app's sliders as the dial the strip should drive.

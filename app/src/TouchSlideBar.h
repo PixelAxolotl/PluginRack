@@ -28,7 +28,7 @@ public:
 private:
     void timerCallback() override;
     juce::Rectangle<int> trackBounds() const;
-    void applyProportion(double proportion);
+    void applyProportion(double proportion, bool snap = true);
 
     double dragStartProportion = 0.0;
     int dragStartY = 0;

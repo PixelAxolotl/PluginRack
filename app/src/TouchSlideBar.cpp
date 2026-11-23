@@ -117,12 +117,16 @@ void TouchSlideBar::mouseDrag(const juce::MouseEvent& e) {
     const auto track = trackBounds();
     const double span = juce::jmax(1.0, static_cast<double>(track.getHeight()));
     const double travelled = static_cast<double>(dragStartY - e.getPosition().y) / span;
-    applyProportion(dragStartProportion + travelled);
+    // Follow the finger exactly while dragging; snapping happens on release.
+    applyProportion(dragStartProportion + travelled, false);
 }
 
 void TouchSlideBar::mouseUp(const juce::MouseEvent&) {
     dragging = false;
     slider_touch::endDriving();
+    // Snap onto the discrete states (and the default) now that the gesture ended.
+    if (auto* dial = slider_touch::current())
+        applyProportion(dial->getProportion(), true);
     repaint();
 }
 
@@ -141,14 +145,39 @@ void TouchSlideBar::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWhe
     applyProportion(dial->getProportion() + static_cast<double>(wheel.deltaY) * 0.05);
 }
 
-void TouchSlideBar::applyProportion(double proportion) {
+void TouchSlideBar::applyProportion(double proportion, bool snap) {
     if (auto* dial = slider_touch::current()) {
         double target = juce::jlimit(0.0, 1.0, proportion);
-        // Snap onto the default so it can be hit exactly by touch.
-        if (dial->defaultProportion >= 0.0
-            && std::abs(target - dial->defaultProportion) <= kSnapWindow) {
-            target = dial->defaultProportion;
+
+        if (snap) {
+            // Discrete source (toggle / stepped knob): snap onto the nearest state so
+            // a 2-state toggle can only land on its two positions, a 3-state knob on
+            // its three, and so on. Works for any state count.
+            int stateCount = 0;
+            if (dial->getNumSteps) stateCount = dial->getNumSteps();
+            if (stateCount <= 1) {
+                if (dial->numSteps > 1) stateCount = dial->numSteps;
+                else if (dial->steps > 1) stateCount = dial->steps;
+                else if (dial->numStates > 1) stateCount = dial->numStates;
+                else if (dial->stateCount > 1) stateCount = dial->stateCount;
+                else if (dial->states > 1) stateCount = dial->states;
+            }
+            if (stateCount > 1 && stateCount < 1000000) {
+                const double step = 1.0 / static_cast<double>(stateCount - 1);
+                target = std::round(target / step) * step;
+                target = juce::jlimit(0.0, 1.0, target);
+            } else if (dial->interval > 0.0 && dial->interval <= 1.0) {
+                target = std::round(target / dial->interval) * dial->interval;
+                target = juce::jlimit(0.0, 1.0, target);
+            }
+
+            // Snap onto the default so it can be hit exactly by touch.
+            if (dial->defaultProportion >= 0.0
+                && std::abs(target - dial->defaultProportion) <= kSnapWindow) {
+                target = dial->defaultProportion;
+            }
         }
+
         dial->setProportion(target);
     }
     repaint();

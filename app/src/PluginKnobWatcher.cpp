@@ -106,5 +106,22 @@ void PluginKnobWatcher::bind(int parameterIndex) {
     dial.defaultProportion =
         juce::jlimit(0.0, 1.0, static_cast<double>(parameter->getDefaultValue()));
 
+    // Stepped/discrete parameters (toggles, mode switches, ...) get their state
+    // count so the touch-and-slide strip can snap onto their positions.
+    int steps = parameter->getNumSteps();
+    if (steps < 2 || steps >= 1000000) steps = 0;
+    dial.numSteps = steps;
+    dial.steps = steps;
+    dial.numStates = steps;
+    dial.stateCount = steps;
+    dial.states = steps;
+    dial.interval = (steps > 1) ? (1.0 / static_cast<double>(steps - 1)) : 0.0;
+    dial.getNumSteps = [state, parameter] {
+        if (!state->alive) return 0;
+        int n = parameter->getNumSteps();
+        if (n < 2 || n >= 1000000) return 0;
+        return n;
+    };
+
     slider_touch::recordDial(std::move(dial));
 }
