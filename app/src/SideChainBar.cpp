@@ -189,6 +189,11 @@ void SideChainBar::rebuildSourceIds() {
         sourceIdCombo.setSelectedItemIndex(0, juce::dontSendNotification);
     }
     sourcesButton.setVisible(source == pluginrack::SideChainSource::Bus);
+    // setVisible() does not run the parent's layout, and resized() only gives
+    // the Sources button bounds while it is visible. Re-lay the bar here or a
+    // newly shown button keeps its stale zero-size bounds until the next
+    // window resize.
+    resized();
 }
 
 void SideChainBar::refreshValues() {
