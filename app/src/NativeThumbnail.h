@@ -19,6 +19,80 @@ void* pluginWindowOf(juce::Component& editor);
 // window cannot be captured or came back as one flat colour.
 juce::Image captureWindow(void* windowHandle, int targetWidth);
 
+// Puts the plugin's native window at the top of its sibling stack. Plugin
+// views are separate HWNDs, so JUCE's own component z-order does not move
+// them; the outgoing editor needs this to stay above an incoming one while
+// the new editor attaches.
+void raiseWindow(void* windowHandle);
+
+// Puts the plugin's native window at the bottom of its sibling stack, so the
+// outgoing editor stays visible on top while the incoming one is created and
+// laid out. The new window keeps painting underneath and is raised by the
+// reveal.
+void lowerWindow(void* windowHandle);
+
+// Places a window directly below another sibling, without showing or moving
+// it. Used to put the incoming editor behind the outgoing one before it is
+// shown, so the OS cannot composite an unpainted frame on top.
+void placeWindowBelow(void* windowHandle, void* siblingHandle);
+
+// Hides a plugin's native window (and the view inside it) without touching
+// the JUCE component. The incoming editor is kept hidden while it is fitted:
+// a VST3 view paints white at its unscaled size until it has handled the
+// resize, and the outgoing editor stays on screen meanwhile.
+void hideWindow(void* windowHandle);
+void showWindowNoActivate(void* windowHandle);
+
+// Shrinks |target|'s window region to the overlap with |cover| (both are
+// top-level, sibling windows). Used so an incoming editor that has not been
+// scaled yet cannot show its unscaled white/black overflow around the editor
+// it is replacing.
+void clipWindowToWindow(void* targetHandle, void* coverHandle);
+void clearWindowClip(void* windowHandle);
+
+// Hides visible JUCE child windows of the app that sit above its top edge.
+// Some plugins create their editor window at its natural size and leave it
+// parked off screen; because it is a child of the app window, the OS
+// composites its unpainted white surface over the top bar. Returns the number
+// of windows hidden (usually 0).
+int hideOffscreenJuceChildren(void* mainWindowHandle, int* visibleJuceChildren = nullptr);
+
+// Hides every visible JUCE window of the app whose rectangle intersects
+// |screenRect|, except |keepWindow|. Some plugins expose their editor as more
+// than one native window; hiding only the window returned by pluginWindowOf()
+// leaves another copy on screen (the "two plugins at once" / white-bar bug).
+// Pass keepWindow = nullptr to hide everything in the rectangle.
+juce::Rectangle<int> windowRect(void* windowHandle);
+
+// Captures a rectangle of the desktop (physical pixels). Used to freeze the
+// outgoing editor as a still image while a new one is prepared, so the bay
+// never shows an empty/white window during the swap.
+juce::Image captureScreenRegion(int x, int y, int width, int height);
+
+// Renders the whole window (including child windows) with PrintWindow. Unlike
+// captureWindow() this is safe to call for a window owned by the caller and
+// keeps near-uniform results, because it is used for a full-window freeze
+// frame rather than a thumbnail.
+juce::Image captureWindowForOverlay(void* windowHandle);
+
+// Shrinks a window to a 1x1 region so it keeps painting while staying invisible.
+void clipWindowToTiny(void* windowHandle);
+
+int hideJuceWindowsInRect(void* mainWindowHandle, void* keepWindow,
+                          void* keepWindow2, int left, int top, int right,
+                          int bottom);
+
+// Hide every visible top-level window of the main window's process except the
+// main window and up to two kept handles. A plugin editor can create its own
+// top-level window at the screen origin while it is being created; that window
+// never intersects the bay, so the rect-based hide above cannot catch it.
+int hideOtherProcessWindows(void* mainWindowHandle, void* keepWindow, void* keepWindow2);
+
+// Flushes the window's pending paint immediately. A newly raised plugin
+// window has not painted yet, and its first frame is black; painting it in
+// the same message turn as the reveal keeps that frame off the screen.
+void repaintWindowNow(void* windowHandle);
+
 // A plain top-level window kept directly below the app window. Plugin windows
 // are re-parented into it, so they keep painting normally for PrintWindow while
 // the app window covers them. This is the only way to keep a VST3 window out of

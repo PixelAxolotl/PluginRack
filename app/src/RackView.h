@@ -40,6 +40,7 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    void paintOverChildren(juce::Graphics& g) override;
     void visibilityChanged() override;
     void rebuild();
     void mouseDown(const juce::MouseEvent& e) override;
@@ -89,6 +90,8 @@ public:
     void insertBuiltIn(pluginrack::ChainItem item, int chainIndex) override;
     void eraseBuiltIn(pluginrack::ChainItem item) override;
     bool insertActivated(AudioEngine::InsertSlot* insert) override;
+    // Temporary test hook: activates the next insert in the chain.
+
 
 private:
     AudioEngine::Channel* currentChannel();
@@ -108,8 +111,15 @@ private:
     void ensureSelection();
     void refreshHeader();
     void refreshSlots();
+    void layoutSlots();
     int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
+    // While a replacement editor is being fitted, keeps its native window
+    // behind the outgoing one and clips it to that editor's rectangle.
+    void maskIncomingWindow();
+    // Hides stray JUCE child windows a plugin parks above the app while its
+    // editor is being resized (their unpainted surface shows over the top bar).
+    void hideOffscreenPluginWindows();
     // Shows the side-chain strip for the focused VST insert, or hides it when
     // a built-in panel owns the bay.
     void updateSideChainBar();
@@ -317,6 +327,35 @@ private:
     // Set while layoutDockedEditor() is inside setBounds, so the editor's own
     // resize callbacks cannot recurse back into it.
     bool layingOutDockedEditor = false;
+    // True from the moment a replacement editor is added until it is revealed:
+    // layoutDockedEditor() keeps its native window below the outgoing editor,
+    // which is what keeps the bay from going black while the new one attaches.
+    double swapStartedAt = 0.0;
+    // For a few seconds after a swap, keep hiding any plugin window that is
+    // not the docked editor: some plugins re-show their old view asynchronously
+    // after we hide it, which leaves a second (white) UI beside the new one.
+    double swapGuardUntilMs = 0.0;
+    bool swappingEditor = false;
+    // True once the replacement's native window has been shown behind the old
+    // editor. The layout passes must not hide it again after that.
+    bool editorWindowShown = false;
+    // The editor being retired by the current swap. Layout passes use it to
+    // keep the incoming window directly below it, so plugin-driven re-shows
+    // during scaling cannot put an unpainted frame on top.
+    juce::Component::SafePointer<juce::Component> swapOutgoing;
+    // Still frame of the bay taken at the start of a swap. While it is active
+    // both native editors are hidden and this image is painted in their place,
+    // so the user never sees two UIs, a white window or an empty black bay.
+    juce::Image frozenBayImage;
+    bool frozenBayActive = false;
+    // Native window shown over the bay while a swap is prepared. It sits above
+    // every plugin window, so the user sees the outgoing editor's still frame
+    // instead of two UIs, a white unscaled window or a black gap.
+    std::unique_ptr<juce::ImageComponent> frozenOverlay;
+    // While set, every timer tick hides plugin windows parked above the app:
+    // some editors create a natural-size child window and leave it off screen,
+    // where its unpainted surface shows as a white bar over the top bar.
+    double offscreenGuardUntilMs = 0.0;
     // A plugin may size itself after being placed; a couple of corrective passes
     // are enough, and more would fight one that insists on its own minimum.
     int dockedEditorLayoutPasses = 0;

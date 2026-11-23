@@ -766,6 +766,33 @@ void RackView::refreshSlots() {
     startMiniTimer();
 }
 
+void RackView::layoutSlots() {
+    // Re-place the existing cards after a resize. Rebuilding them here would
+    // throw away every mini view (and its cached thumbnail) on any window
+    // resize, and it is the expensive part of laying the dock out.
+    const int width = juce::jmax(0, slotViewport.getWidth() - 2 * kSlotInset);
+    int y = kSlotInset;
+    for (auto* slot : slots) {
+        if (slot == nullptr) continue;
+        slot->setBounds(kSlotInset, y, width, slot->preferredHeight());
+        y += slot->preferredHeight() + kSlotGap;
+    }
+    // Selecting an insert does not rebuild the cards (resized() only calls this
+    // layout), so the highlight has to be refreshed here or the click appears to
+    // do nothing until the next structural change.
+    for (const auto& [id, card] : vstCards)
+        if (card != nullptr)
+            card->setSelected(dockedHost != nullptr && focusedInsertId == id);
+    slotContent.setSize(juce::jmax(0, slotViewport.getWidth()), juce::jmax(0, y));
+    if (chainDropTarget >= 0) {
+        chainMarker.setBounds(kSlotInset, chainBoundaryY(chainDropTarget), width, 2);
+        chainMarker.setVisible(true);
+        chainMarker.toFront(false);
+    } else {
+        chainMarker.setVisible(false);
+    }
+}
+
 void RackView::visibilityChanged() {
     if (isShowing()) startMiniTimer();
     else {
@@ -868,6 +895,27 @@ void RackView::timerCallback() {
     // JUCE re-syncs a plugin's native window whenever the plugin resizes itself;
     // keep it parked inside the bay.
     if (dockedEditor != nullptr) layoutDockedEditor();
+    // For a couple of seconds after an editor change, a plugin may create a
+    // natural-size window parked above the app; hide it before the OS paints
+    // its white surface over the top bar.
+    if (juce::Time::getMillisecondCounterHiRes() < offscreenGuardUntilMs)
+        hideOffscreenPluginWindows();
+    // A plugin can re-show the previous editor's native window a moment after
+    // the swap, leaving it beside the new one. Keep only the docked editor's
+    // window visible inside the app for a few seconds after every switch.
+    if (dockedEditor != nullptr && !swappingEditor
+        && juce::Time::getMillisecondCounterHiRes() < swapGuardUntilMs) {
+        if (auto* peer = getPeer()) {
+            const auto wr = nativedisplay::windowRect(peer->getNativeHandle());
+            const int hidden = nativedisplay::hideJuceWindowsInRect(
+                peer->getNativeHandle(), nativedisplay::pluginWindowOf(*dockedEditor),
+                nullptr, wr.getX(), wr.getY(), wr.getRight(), wr.getBottom());
+            if (hidden > 0) {
+                juce::Logger::writeToLog("rack: guard hid " + juce::String(hidden));
+                swapGuardUntilMs = juce::Time::getMillisecondCounterHiRes() + 1000.0;
+            }
+        }
+    }
     const int fps = juce::jlimit(1, 60, audioEngine.getRackThumbnailFps());
     if (fps != miniTimerHz) {
         miniTimerHz = fps;
@@ -1082,6 +1130,9 @@ void RackView::timerCallback() {
         }
     }
 
+    // The incoming editor's native window is hidden until it is revealed, so
+    // the plugin cannot raise a half-drawn window over the outgoing editor.
+
     // The focused VST's card shows what its editor looks like. JUCE hands out
     // one editor per processor, so a live thumbnail and the bay cannot
     // coexist; and a hosted VST3 editor paints itself into its own window, so
@@ -1092,6 +1143,7 @@ void RackView::timerCallback() {
     // starved every other message (the window froze while audio kept running).
     const bool wantsThumbnail = dockedEditor != nullptr && focusedInsertId != 0
                                 && !eqFocused && !dynamicsFocused
+                                && !swappingEditor
                                 && dockedEditor->isShowing();
     const auto previewMode = audioEngine.getRackPreviewMode();
     const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
@@ -1156,9 +1208,19 @@ namespace {
 // its own thread, so this is a stability budget: a rack that keeps eight UIs
 // alive froze the app, and the plugins here are heavy.
 constexpr std::size_t kMaxHiddenPreviews = 4;
+// Background preview editors are native windows parked at their unscaled size.
+// Some plugins (Ozone, Ripeness, KERN CHECK) also create extra top-level
+// windows that ignore the parking, so the previews leak over the app as white
+// rectangles and duplicate plugin UIs. Keep them off until they can be hosted
+// without native windows.
+constexpr bool kEnableHiddenPreviews = false;
 } // namespace
 
 void RackView::refreshHiddenPreviews(int targetWidth, bool everyStrip) {
+    if (!kEnableHiddenPreviews) {
+        if (!hiddenPreviews.empty()) clearHiddenPreviews();
+        return;
+    }
     const auto* inserts = currentInserts();
     if (inserts == nullptr || inserts->empty()) {
         if (hiddenPreviews.empty()) return;
@@ -1449,6 +1511,8 @@ void RackView::refreshEditor() {
     }
     if (focus == nullptr) {
         closeDockedEditor();
+        swappingEditor = false;
+        editorWindowShown = false;
         noEditorLabel.setText("No plugins - click + Add VST3 above", juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(false);
@@ -1475,13 +1539,133 @@ void RackView::refreshEditor() {
         resized();
         return;
     }
-    closeDockedEditor();
+    // Keep the current editor on screen while its replacement is created and
+    // laid out. Removing it first leaves the bay empty for the whole time the
+    // message thread spends building the new editor (200-400 ms on some
+    // plugins), which the user sees as a flash.
+    auto* previousEditor = dockedEditor;
+    auto* previousHost = dockedHost;
+    double swapPhaseStart = juce::Time::getMillisecondCounterHiRes();
+    if (previousEditor != nullptr) {
+        previousEditor->removeComponentListener(this);
+        // Freeze what is on screen right now. Both native editors are hidden
+        // for the rest of the swap, so this still frame is what keeps the bay
+        // looking unchanged instead of flashing black or showing two UIs.
+        if (auto* peer = getPeer()) {
+            const auto bay = editorHolder.getScreenBounds();
+            const auto scale = peer->getPlatformScaleFactor();
+            auto* mainWindow = peer->getNativeHandle();
+            const auto windowPixels = nativedisplay::windowRect(mainWindow);
+            // Stray natural-size plugin windows can be parked just above the
+            // app during a switch. A screen grab would bake them into the
+            // freeze frame, so clear them before capturing.
+            nativedisplay::hideOffscreenJuceChildren(peer->getNativeHandle(), nullptr);
+            // Capture the window as it appears on screen. PrintWindow renders
+            // JUCE's own child components black (they do not answer WM_PRINT),
+            // so it cannot be used for a whole-window freeze. The app is the
+            // active window here (the user just clicked an insert), so a screen
+            // copy is complete and correctly aligned.
+            auto whole = nativedisplay::captureScreenRegion(
+                windowPixels.getX(), windowPixels.getY(), windowPixels.getWidth(),
+                windowPixels.getHeight());
+            if (whole.isNull())
+                whole = nativedisplay::captureWindowForOverlay(mainWindow);
+            if (!whole.isNull()) {
+                const auto bayPixels = juce::Rectangle<int>(
+                    juce::roundToInt(bay.getX() * scale), juce::roundToInt(bay.getY() * scale),
+                    juce::roundToInt(bay.getWidth() * scale),
+                    juce::roundToInt(bay.getHeight() * scale)).translated(-windowPixels.getX(),
+                                                                      -windowPixels.getY());
+                frozenBayImage = whole.getClippedImage(
+                    bayPixels.getIntersection(whole.getBounds()));
+            }
+            if (frozenBayImage.isNull())
+                frozenBayImage = nativedisplay::captureScreenRegion(
+                    juce::roundToInt(bay.getX() * scale), juce::roundToInt(bay.getY() * scale),
+                    juce::roundToInt(bay.getWidth() * scale),
+                    juce::roundToInt(bay.getHeight() * scale));
+            frozenBayActive = !frozenBayImage.isNull();
+            if (frozenBayActive) {
+                // Put the still frame in its own always-on-top native window.
+                // JUCE paints below plugin windows, so a component-level image
+                // would be covered by whatever native window the plugin shows
+                // during creation; this window is guaranteed to be above them.
+                frozenOverlay = std::make_unique<juce::ImageComponent>();
+                // Freeze the whole window, not just the bay: a plugin's native
+                // window can be taller than its fitted editor and paint above
+                // the bay, over the side-chain/top bar. Covering the full app
+                // area hides every stray window until the swap completes.
+                const bool wholeWindow = !whole.isNull() && windowPixels.getWidth() > 0;
+                frozenOverlay->setImage(wholeWindow ? whole : frozenBayImage);
+                frozenOverlay->setImagePlacement(juce::RectanglePlacement::stretchToFit);
+                frozenOverlay->setInterceptsMouseClicks(false, false);
+                frozenOverlay->setOpaque(true);
+                frozenOverlay->setAlwaysOnTop(true);
+                frozenOverlay->addToDesktop(juce::ComponentPeer::windowIgnoresMouseClicks
+                                            | juce::ComponentPeer::windowIsTemporary);
+                if (wholeWindow)
+                    frozenOverlay->setBounds(juce::Rectangle<int>(
+                        juce::roundToInt(windowPixels.getX() / scale),
+                        juce::roundToInt(windowPixels.getY() / scale),
+                        juce::roundToInt(windowPixels.getWidth() / scale),
+                        juce::roundToInt(windowPixels.getHeight() / scale)));
+                else
+                    frozenOverlay->setBounds(editorHolder.getScreenBounds());
+                frozenOverlay->setVisible(true);
+                frozenOverlay->toFront(false);
+                if (auto* overlayPeer = frozenOverlay->getPeer()) {
+                    overlayPeer->performAnyPendingRepaintsNow();
+                    // The still frame covers the window from now on, so hide
+                    // every plugin window underneath it. Some plugins (Ozone,
+                    // Ripeness) show their UI through extra top-level windows
+                    // that the ordinary hide calls never reach; they would
+                    // otherwise stay visible beside the incoming editor.
+                    nativedisplay::hideJuceWindowsInRect(peer->getNativeHandle(), nullptr,
+                                                         overlayPeer->getNativeHandle(),
+                                                         windowPixels.getX(), windowPixels.getY(),
+                                                         windowPixels.getRight(),
+                                                         windowPixels.getBottom());
+                    nativedisplay::hideOtherProcessWindows(peer->getNativeHandle(), nullptr,
+                                                           overlayPeer->getNativeHandle());
+                }
+            }
+        }
+    }
+    if (previousEditor != nullptr) {
+        swapStartedAt = swapPhaseStart;
+        juce::Logger::writeToLog(
+            "rack: swap freeze "
+            + juce::String(juce::Time::getMillisecondCounterHiRes() - swapPhaseStart, 1)
+            + " ms active=" + juce::String(frozenBayActive ? 1 : 0));
+    }
+    dockedEditor = nullptr;
+    dockedHost = nullptr;
+    dockedEditorNaturalSize = {};
+    dockedEditorScale = 1.0f;
+    applyingDockedEditorScale = false;
+    dockedEditorLayoutPasses = 0;
+    knobWatcher.clear();
+    thumbnailWorker.clearRequest();
+    // The old editor belongs to a different plugin instance, so it may stay
+    // docked during the build. An editor a floating window reparented away is
+    // owned by that window: never delete it here.
+    const auto retirePrevious = [this, previousEditor, previousHost] {
+        if (previousEditor == nullptr) return;
+        if (auto* parent = previousEditor->getParentComponent()) {
+            if (parent != &editorHolder) return;
+            parent->removeChildComponent(previousEditor);
+        }
+        destroyEditorWhenIdle(previousEditor, previousHost);
+    };
 
     dockedHost = &focus->pluginHost;
     dockedHost->closeFloatingEditor();
     dockedEditor = dockedHost->createEditorForDock();
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
+        swappingEditor = false;
+        editorWindowShown = false;
+        retirePrevious();
         // No GUI: there is nothing to dock or touch (the card still shows the
         // plugin's name and its bypass switch).
         noEditorLabel.setText("This plugin has no editor", juce::dontSendNotification);
@@ -1497,6 +1681,9 @@ void RackView::refreshEditor() {
     // layout pass ever feeds back into the size it scales from.
     dockedEditorNaturalSize = dockedEditor->getBounds();
     dockedEditorScale = 1.0f;
+    juce::Logger::writeToLog("rack: natural "
+                             + juce::String(dockedEditorNaturalSize.getWidth()) + "x"
+                             + juce::String(dockedEditorNaturalSize.getHeight()));
 
     noEditorLabel.setVisible(false);
     noEditorBypass.setVisible(false);
@@ -1505,10 +1692,305 @@ void RackView::refreshEditor() {
         return juce::String(juce::Time::getMillisecondCounterHiRes() - dockStart, 1);
     };
     dockedEditorLayoutPasses = 0;
+    swappingEditor = previousEditor != nullptr;
+    swapOutgoing = previousEditor;
+    juce::Logger::writeToLog(
+        "rack: swap create "
+        + juce::String(juce::Time::getMillisecondCounterHiRes() - swapStartedAt, 1) + " ms");
+    editorWindowShown = false;
+    offscreenGuardUntilMs = juce::Time::getMillisecondCounterHiRes() + 2500.0;
     dockedEditor->addComponentListener(this);
-    editorHolder.addAndMakeVisible(dockedEditor);
+    // createEditorAndMakeActive() may leave the editor visible already. Taking
+    // it out of the hierarchy's paint path before adding it is what keeps its
+    // native window from being created over the outgoing editor during the
+    // blocking layout below.
+    if (swappingEditor)
+        dockedEditor->setVisible(false);
+    editorHolder.addChildComponent(dockedEditor);
+    // A plugin's view is a separate HWND, and a newly created VST3 view paints
+    // white at its initial (unscaled) size until it has handled the fit. When
+    // an editor is being swapped in, keep the component itself invisible while
+    // the layout runs: making it visible creates and shows its native window,
+    // and the layout pass below blocks the message thread long enough for that
+    // window (at its natural size, on top) to be composited over the outgoing
+    // editor. The window is created afterwards, already parked outside the
+    // holder, and only then is the fit applied to a visible editor.
+    if (swappingEditor)
+        // Park far above the window: the VST3 view creates its native window at
+        // the plugin's natural size, which is taller than the fitted component,
+        // so parking by the component height still left its bottom edge inside
+        // the app flashing over the top bar.
+        dockedEditor->setTopLeftPosition(0, -4000);
+    else
+        dockedEditor->setVisible(true);
+    if (previousEditor != nullptr && previousEditor->getParentComponent() == &editorHolder) {
+        previousEditor->toFront(false);
+        if (auto* window = nativedisplay::pluginWindowOf(*previousEditor))
+            nativedisplay::raiseWindow(window);
+    }
     knobWatcher.setPlugin(pluginInstance);
-    resized();
+    // Hide the incoming view before the blocking layout runs, not just after:
+    // the host is created as soon as the component is parented, and any frame
+    // it composites from here until `editorWindowShown` must stay off screen.
+    if (swappingEditor && !editorWindowShown)
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+    // A selection swap does not change any geometry outside the bay. Running
+    // the full resized() here re-lays the whole rack (100-250 ms on some
+    // sessions); only the insert cards' selection state and the docked editor
+    // need touching.
+    if (swappingEditor) {
+        layoutSlots();
+        layoutDockedEditor();
+    } else {
+        resized();
+    }
+    if (swappingEditor && !editorWindowShown) {
+        dockedEditor->setVisible(true);
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+        // Apply the scale now that the editor is visible but still off-screen:
+        // the first layout ran with the editor hidden and did not touch it, so
+        // the plugin never created a view over the outgoing editor.
+        applyDockedEditorFit(editorHolder.getLocalBounds());
+        layoutDockedEditor();
+    }
+    if (swappingEditor) {
+        juce::Logger::writeToLog(
+            "rack: swap layout "
+            + juce::String(juce::Time::getMillisecondCounterHiRes() - swapStartedAt, 1) + " ms");
+    }
+    // Keep the outgoing editor on screen until the incoming one has been
+    // fitted and has painted. The incoming window is hidden meanwhile, so its
+    // unscaled white/black frames cannot show at all. Once the editor reports
+    // its fitted size for two consecutive ticks (or the cap expires), hide the
+    // old window and show the new one in the same message turn: only one
+    // plugin is ever visible.
+    if (previousEditor != nullptr && previousEditor->getParentComponent() == &editorHolder) {
+        struct SwapState { int ticks = 0; int total = 0; int shownTicks = 0; int captures = 0;
+                           bool shown = false; bool capturePending = false; };
+        auto state = std::make_shared<SwapState>();
+        auto poll = std::make_shared<std::function<void()>>();
+        auto finish = std::make_shared<std::function<void()>>();
+        juce::Component::SafePointer<RackView> safeSwap(this);
+        auto* incoming = dockedEditor;
+        auto* outgoing = previousEditor;
+        auto retire = retirePrevious;
+        auto* holder = &editorHolder;
+        *finish = [safeSwap, incoming, outgoing, retire, state]() {
+            auto* self = safeSwap.getComponent();
+            if (self == nullptr) return;
+            if (self->dockedEditor != incoming || outgoing->getParentComponent() != &self->editorHolder) {
+                retire();
+                return;
+            }
+            juce::Logger::writeToLog(
+                "rack: swap done "
+                + juce::String(juce::Time::getMillisecondCounterHiRes() - self->swapStartedAt, 1)
+                + " ms ticks=" + juce::String(state->shownTicks)
+                + " captures=" + juce::String(state->captures));
+            self->swappingEditor = false;
+            self->editorWindowShown = false;
+            self->swapOutgoing = nullptr;
+            self->swapGuardUntilMs = juce::Time::getMillisecondCounterHiRes() + 3000.0;
+            // The incoming editor is already in the bay and has painted behind
+            // the outgoing one. Reveal it in the same message turn as the old
+            // one is hidden, so no blank frame is composited in between.
+            self->layoutDockedEditor();
+            // Hide every other native window in the bay (including the
+            // outgoing editor and any copy the plugin created behind our back)
+            // before revealing the incoming one, so exactly one UI is visible.
+            auto* incomingWindow = nativedisplay::pluginWindowOf(*incoming);
+            if (auto* peer = self->getPeer()) {
+                const auto windowPixels = nativedisplay::windowRect(peer->getNativeHandle());
+                void* overlayWindow = nullptr;
+                if (self->frozenOverlay != nullptr)
+                    if (auto* overlayPeer = self->frozenOverlay->getPeer())
+                        overlayWindow = overlayPeer->getNativeHandle();
+                nativedisplay::hideJuceWindowsInRect(peer->getNativeHandle(), incomingWindow,
+                                                     overlayWindow, windowPixels.getX(),
+                                                     windowPixels.getY(), windowPixels.getRight(),
+                                                     windowPixels.getBottom());
+            }
+            if (auto* peer = self->getPeer()) {
+                void* overlayWindow = nullptr;
+                if (self->frozenOverlay != nullptr)
+                    if (auto* overlayPeer = self->frozenOverlay->getPeer())
+                        overlayWindow = overlayPeer->getNativeHandle();
+                // Hide any top-level window the outgoing editor left at the
+                // screen origin; those are the copies that cover the left side
+                // during a switch.
+                nativedisplay::hideOtherProcessWindows(peer->getNativeHandle(), incomingWindow,
+                                                       overlayWindow);
+            }
+            if (auto* editorPeer = incoming->getPeer())
+                if (editorPeer != self->editorHolder.getPeer())
+                    nativedisplay::showWindowNoActivate(editorPeer->getNativeHandle());
+            if (incomingWindow != nullptr) {
+                nativedisplay::clearWindowClip(incomingWindow);
+                incoming->toFront(false);
+                nativedisplay::showWindowNoActivate(incomingWindow);
+                nativedisplay::raiseWindow(incomingWindow);
+                // Some plugins (Ripeness) create their root at the natural size
+                // and do not follow a later host resize, leaving their UI in the
+                // top-left of a white window. Bounce the bounds once while the
+                // editor is visible so the wrapper sends a fresh onSize.
+                const auto revealed = incoming->getBounds();
+                incoming->setBounds(revealed.withWidth(revealed.getWidth() + 1));
+                incoming->setBounds(revealed);
+                nativedisplay::repaintWindowNow(incomingWindow);
+            }
+            if (auto* outgoingWindow = nativedisplay::pluginWindowOf(*outgoing))
+                nativedisplay::hideWindow(outgoingWindow);
+            if (self->frozenBayActive) {
+                // The incoming UI is on screen now; drop the still frame in the
+                // same turn so there is no blank gap between the two.
+                self->frozenOverlay.reset();
+                self->frozenBayActive = false;
+                self->frozenBayImage = {};
+                self->repaint(self->editorHolder.getBounds());
+            }
+            // The incoming plugin can park a natural-size window above the app
+            // while it re-renders after the reveal; that window is what shows
+            // as a white bar over the top bar.
+            self->hideOffscreenPluginWindows();
+            retire();
+        };
+        *poll = [safeSwap, incoming, outgoing, retire, state, poll, finish, holder]() mutable {
+            auto* self = safeSwap.getComponent();
+            if (self == nullptr) return;
+            if (self->dockedEditor != incoming || outgoing->getParentComponent() != holder) {
+                // Superseded by another selection: the newer swap owns the
+                // incoming editor, so only retire the one this swap owned.
+                retire();
+                return;
+            }
+            auto* incomingWindow = nativedisplay::pluginWindowOf(*incoming);
+            auto* outgoingWindow = nativedisplay::pluginWindowOf(*outgoing);
+            // The editor may own a top-level peer of its own (the unscaled
+            // window that paints white). It is created lazily after the first
+            // layout pass, so re-apply the mask every tick, not only around
+            // the fit.
+            self->maskIncomingWindow();
+            if (state->shown) {
+                // The new window is on screen behind the old one. It only
+                // produces its first frame when it is actually visible, so
+                // wait for the capture worker to see real pixels, then flip.
+                if (!self->frozenBayActive && outgoingWindow != nullptr && incomingWindow != nullptr) {
+                    nativedisplay::placeWindowBelow(incomingWindow, outgoingWindow);
+                    // The incoming host can still be at its natural size here;
+                    // keep its region inside the outgoing editor so its
+                    // unscaled overflow (white band) cannot show around it.
+                    nativedisplay::clipWindowToWindow(incomingWindow, outgoingWindow);
+                    nativedisplay::raiseWindow(outgoingWindow);
+                    outgoing->toFront(false);
+                }
+                ++state->shownTicks;
+                // PrintWindow is the only reliable paint signal for a VST3
+                // view: GPU views never answer WM_PAINT. The worker runs it
+                // off the message thread and the callback arrives async. Give
+                // it a few ticks first so an all-background frame is not taken
+                // for a finished one.
+                // While the frozen frame covers the whole window, the swap is
+                // invisible; a fixed short settle is enough for the incoming
+                // view to produce its first frame. PrintWindow on a hidden or
+                // clipped view can take hundreds of ms and then time out, which
+                // is what made the switch feel slow.
+                const int captureFrom = 6;
+                if (!self->frozenBayActive && !state->capturePending && state->captures < 12
+                    && state->shownTicks >= captureFrom && incomingWindow != nullptr) {
+                    ++state->captures;
+                    state->capturePending = true;
+                    auto finishCopy = finish;
+                    self->thumbnailWorker.request(incomingWindow, 16,
+                        [state, finishCopy](juce::Image captured) mutable {
+                            state->capturePending = false;
+                            if (captured.isValid() && !captured.isNull())
+                                (*finishCopy)();
+                        });
+                }
+                if (state->shownTicks >= (self->frozenBayActive ? 4 : 20)) {
+                    (*finish)();
+                    return;
+                }
+                juce::Timer::callAfterDelay(16, [poll] { (*poll)(); });
+                return;
+            }
+            // JUCE/the plugin can re-show the view during a resize; keep it
+            // hidden until it is fitted, so it cannot peek over the old editor.
+            if (incomingWindow != nullptr) {
+                nativedisplay::hideWindow(incomingWindow);
+                if (outgoingWindow != nullptr) {
+                    // The host can be recreated by the plugin while it is being
+                    // fitted; re-apply the mask every tick, not just after the
+                    // fit, so a fresh unscaled window cannot show its white
+                    // overflow around the outgoing editor.
+                    nativedisplay::placeWindowBelow(incomingWindow, outgoingWindow);
+                    nativedisplay::clipWindowToWindow(incomingWindow, outgoingWindow);
+                    nativedisplay::raiseWindow(outgoingWindow);
+                }
+            }
+            const auto visual = self->dockedEditorVisualBounds();
+            const auto bay = holder->getLocalBounds();
+            const bool fitted = visual.getWidth() > 0 && visual.getHeight() > 0
+                && visual.getWidth() <= bay.getWidth() + 4
+                && visual.getHeight() <= bay.getHeight() + 4;
+            state->ticks = fitted ? state->ticks + 1 : 0;
+            if (state->ticks >= 2 || ++state->total >= 25) {
+                // The incoming editor has an accepted size now. Move it into the
+                // bay while its native window is still hidden, then show it
+                // directly below the old one: the old editor stays the only
+                // visible UI while the new one renders its first frame.
+                juce::Logger::writeToLog(
+                    "rack: swap fitted at "
+                    + juce::String(juce::Time::getMillisecondCounterHiRes() - self->swapStartedAt, 1)
+                    + " ms ticks=" + juce::String(state->total));
+                if (incomingWindow != nullptr) {
+                    self->editorWindowShown = true;
+                    self->layoutDockedEditor();
+                    if (self->frozenBayActive) {
+                        // The overlay window covers the bay, so let the incoming
+                        // window show and paint underneath it. finish() removes
+                        // the overlay in the same turn the old editor is hidden.
+                        nativedisplay::showWindowNoActivate(incomingWindow);
+                    } else {
+                        nativedisplay::hideWindow(incomingWindow);
+                        if (outgoingWindow != nullptr)
+                            nativedisplay::placeWindowBelow(incomingWindow, outgoingWindow);
+                        nativedisplay::showWindowNoActivate(incomingWindow);
+                        if (outgoingWindow != nullptr) {
+                            nativedisplay::placeWindowBelow(incomingWindow, outgoingWindow);
+                            nativedisplay::clipWindowToWindow(incomingWindow, outgoingWindow);
+                            nativedisplay::raiseWindow(outgoingWindow);
+                        }
+                    }
+                }
+                // The layout passes must not hide it or move it out of the bay
+                // again; the swap flag stays set so the thumbnail timer does not
+                // replace the readiness capture.
+                self->editorWindowShown = true;
+                if (!self->frozenBayActive && outgoingWindow != nullptr) {
+                    nativedisplay::raiseWindow(outgoingWindow);
+                    outgoing->toFront(false);
+                }
+                state->shown = true;
+                juce::Timer::callAfterDelay(16, [poll] { (*poll)(); });
+                return;
+            }
+            juce::Timer::callAfterDelay(16, [poll] { (*poll)(); });
+        };
+        juce::Timer::callAfterDelay(16, [poll] { (*poll)(); });
+    } else {
+        // Nothing to mask (first editor, or the old one was floating). The
+        // incoming window was never hidden in this case.
+        swappingEditor = false;
+        editorWindowShown = false;
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor)) {
+            nativedisplay::raiseWindow(window);
+            nativedisplay::repaintWindowNow(window);
+        }
+        retirePrevious();
+    }
     // Some plugins create their own native window at their preferred size
     // and put it back after it has been placed. Re-apply the bay fit once
     // the plugin has settled instead of fighting it in a resize loop.
@@ -1522,6 +2004,7 @@ void RackView::refreshEditor() {
             if (safe == nullptr) return;
             safe->dockedEditorLayoutPasses = 0;
             safe->layoutDockedEditor();
+            safe->hideOffscreenPluginWindows();
         });
     }
     // Docking a native plugin UI is the slow part of adding one (some editors
@@ -1542,13 +2025,88 @@ void RackView::updateSideChainBar() {
     sideChainBar.setTarget(focus, selectedIsOutput, static_cast<std::uint32_t>(selectedId));
 }
 
+void RackView::maskIncomingWindow() {
+    if (!swappingEditor || swapOutgoing == nullptr || dockedEditor == nullptr)
+        return;
+
+    hideOffscreenPluginWindows();
+
+    if (frozenBayActive) {
+        // The bay is covered by the overlay window, so nothing under it can be
+        // seen. Keep the incoming editor (once it exists) so it can paint, and
+        // hide every other plugin window in the bay, including the top-level
+        // copies that pluginWindowOf() does not return.
+        hideOffscreenPluginWindows();
+        if (auto* peer = getPeer()) {
+            auto* incoming = editorWindowShown ? nativedisplay::pluginWindowOf(*dockedEditor) : nullptr;
+            void* overlayWindow = nullptr;
+            if (frozenOverlay != nullptr)
+                if (auto* overlayPeer2 = frozenOverlay->getPeer())
+                    overlayWindow = overlayPeer2->getNativeHandle();
+            const auto windowPixels = nativedisplay::windowRect(peer->getNativeHandle());
+            nativedisplay::hideJuceWindowsInRect(peer->getNativeHandle(), incoming, overlayWindow,
+                                                 windowPixels.getX(), windowPixels.getY(),
+                                                 windowPixels.getRight(),
+                                                 windowPixels.getBottom());
+            // The incoming editor may also open an own top-level window at the
+            // screen origin while it is created; keep every such stray hidden
+            // while the frozen frame is on screen.
+            nativedisplay::hideOtherProcessWindows(peer->getNativeHandle(), incoming, overlayWindow);
+        }
+        return;
+    }
+
+    // Some plugins (Ozone, Ripeness) expose their UI through a second native
+    // window that pluginWindowOf() never returns. Those windows ignore every
+    // hide/raise below, which is what leaves two plugins visible at once and
+    // the white bar over the top bar. Hide everything in the bay except the
+    // editors we intend to show: the outgoing one always, plus the incoming
+    // one once it is parked behind it.
+    if (auto* peer = getPeer()) {
+        auto* outgoing = nativedisplay::pluginWindowOf(*swapOutgoing);
+        auto* incoming = editorWindowShown ? nativedisplay::pluginWindowOf(*dockedEditor) : nullptr;
+        const auto bay = editorHolder.getScreenBounds();
+        nativedisplay::hideJuceWindowsInRect(peer->getNativeHandle(), outgoing, incoming,
+                                             bay.getX(), bay.getY(),
+                                             bay.getRight(), bay.getBottom());
+    }
+
+    if (editorWindowShown) return;
+    auto* incoming = nativedisplay::pluginWindowOf(*dockedEditor);
+    auto* outgoing = nativedisplay::pluginWindowOf(*swapOutgoing);
+    if (incoming == nullptr || outgoing == nullptr) return;
+    // Keep only the part of the incoming native window that overlaps the
+    // editor it replaces. An unscaled VST3 view is wider/taller than the bay,
+    // and its white unpainted overflow otherwise shows over the output column.
+    nativedisplay::placeWindowBelow(incoming, outgoing);
+    nativedisplay::clipWindowToWindow(incoming, outgoing);
+    nativedisplay::raiseWindow(outgoing);
+}
+
+void RackView::hideOffscreenPluginWindows() {
+    if (auto* peer = getPeer())
+        nativedisplay::hideOffscreenJuceChildren(peer->getNativeHandle(), nullptr);
+}
+
 void RackView::layoutDockedEditor() {
     if (dockedEditor == nullptr || layingOutDockedEditor) return;
     const juce::ScopedValueSetter<bool> guard(layingOutDockedEditor, true);
     const auto bay = editorHolder.getLocalBounds();
     if (bay.isEmpty()) return;
 
-    applyDockedEditorFit(bay);
+    // Hide before the fit and the bounds write: creating or resizing the
+    // native window can take a whole frame, and an unpainted window on top of
+    // the outgoing editor is exactly the black flash being removed.
+    if (swappingEditor && !editorWindowShown)
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+
+    // Applying the content scale makes a VST3 wrapper create and show its view.
+    // While an editor is being swapped in and has not been made visible yet,
+    // leave the scale alone: the first layout after this one applies it while
+    // the new window is already parked outside the bay and hidden.
+    if (!swappingEditor || editorWindowShown)
+        applyDockedEditorFit(bay);
 
     // What the editor paints now: a VST3 re-sizes itself when its content scale
     // changes, while a software-drawn editor keeps its own size and is scaled
@@ -1559,19 +2117,47 @@ void RackView::layoutDockedEditor() {
         juce::jmax(1, juce::jmin(visual.getWidth(), bay.getWidth())),
         juce::jmax(1, juce::jmin(visual.getHeight(), bay.getHeight())));
 
+    auto placement = fitted;
+    // While an editor is first being built, keep its native window parked
+    // outside the bay: it is created during the bounds write below and may show
+    // itself before we can hide it again. Once it has been shown (behind the
+    // outgoing editor) it moves into the bay and stays there, so the frame it
+    // paints while covered is the one the reveal shows.
+    if (swappingEditor && !editorWindowShown)
+        placement.setPosition(0, -4000);
+
     if (!dockedEditor->getTransform().isIdentity()) {
         // The transform scales away from the component's top-left, so the
         // position is what puts the scaled drawing in the middle.
-        if (dockedEditor->getPosition() != fitted.getPosition())
-            dockedEditor->setTopLeftPosition(fitted.getPosition());
-    } else if (dockedEditor->getBounds() != fitted) {
+        if (dockedEditor->getPosition() != placement.getPosition())
+            dockedEditor->setTopLeftPosition(placement.getPosition());
+    } else if (dockedEditor->getBounds() != placement) {
         // Writing sizes never deadlocks on its own: the fit itself is
         // synchronous here, and the pass cap below stops the layout from
         // re-entering through componentMovedOrResized().
-        dockedEditor->setBounds(fitted);
-        juce::Logger::writeToLog("rack: editor placed " + fitted.toString() + " in bay "
+        dockedEditor->setBounds(placement);
+        juce::Logger::writeToLog("rack: editor placed " + placement.toString() + " in bay "
                                  + bay.toString());
     }
+    // The plugin's native window is created when the editor first gets its
+    // bounds, i.e. inside this call. Hide it straight away while a swap is in
+    // progress, before this message turn can paint its unpainted surface over
+    // the outgoing editor.
+    if (swappingEditor && !editorWindowShown)
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+
+    // A plugin re-shows its view when its content scale changes. While a swap
+    // is in progress, put the incoming window straight back below the outgoing
+    // editor so that re-show cannot expose an unpainted frame.
+    if (swappingEditor && editorWindowShown && swapOutgoing != nullptr) {
+        if (auto* incoming = nativedisplay::pluginWindowOf(*dockedEditor))
+            if (auto* outgoing = nativedisplay::pluginWindowOf(*swapOutgoing)) {
+                nativedisplay::placeWindowBelow(incoming, outgoing);
+                nativedisplay::raiseWindow(outgoing);
+            }
+    }
+    maskIncomingWindow();
 }
 
 void RackView::applyDockedEditorFit(const juce::Rectangle<int>& bay) {
@@ -1590,6 +2176,10 @@ void RackView::applyDockedEditorFit(const juce::Rectangle<int>& bay) {
     // the plugin UI on every pixel.
     if (fit <= 0.0f || std::abs(fit - dockedEditorScale) < 0.01f) return;
 
+    if (swappingEditor && !editorWindowShown)
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+
     const auto before = dockedEditorVisualBounds();
     {
         // The plugin re-sizes itself inside this call, and that resize is ours:
@@ -1604,6 +2194,27 @@ void RackView::applyDockedEditorFit(const juce::Rectangle<int>& bay) {
     const bool rescaled = after.getWidth() != before.getWidth()
                        || after.getHeight() != before.getHeight();
     dockedEditorScale = rescaled ? fit : 1.0f;
+    juce::Logger::writeToLog("rack: fit " + juce::String(fit, 3) + " natural "
+                             + juce::String(naturalWidth) + "x" + juce::String(naturalHeight)
+                             + " before " + before.toString() + " after " + after.toString()
+                             + " rescaled=" + juce::String(rescaled ? 1 : 0));
+    // A VST3 wrapper may show the view when its content scale changes. Keep it
+    // hidden while this editor is still the incoming one in a swap.
+    if (swappingEditor && !editorWindowShown)
+        if (auto* window = nativedisplay::pluginWindowOf(*dockedEditor))
+            nativedisplay::hideWindow(window);
+
+    // A plugin re-shows its view when its content scale changes. While a swap
+    // is in progress, put the incoming window straight back below the outgoing
+    // editor so that re-show cannot expose an unpainted frame.
+    if (swappingEditor && editorWindowShown && swapOutgoing != nullptr) {
+        if (auto* incoming = nativedisplay::pluginWindowOf(*dockedEditor))
+            if (auto* outgoing = nativedisplay::pluginWindowOf(*swapOutgoing)) {
+                nativedisplay::placeWindowBelow(incoming, outgoing);
+                nativedisplay::raiseWindow(outgoing);
+            }
+    }
+    maskIncomingWindow();
 }
 
 juce::Rectangle<int> RackView::dockedEditorVisualBounds() const {
@@ -1663,6 +2274,12 @@ void RackView::closeDockedEditor() {
     // (and with it the processor) can be destroyed.
     knobWatcher.clear();
     thumbnailWorker.clearRequest();
+    swappingEditor = false;
+    editorWindowShown = false;
+    swapOutgoing = nullptr;
+    frozenOverlay.reset();
+    frozenBayActive = false;
+    frozenBayImage = {};
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
         return;
@@ -2533,7 +3150,7 @@ void RackView::resized() {
     insertsHeader.setBounds(pa.removeFromTop(16));
     pa.removeFromTop(4);
     slotViewport.setBounds(pa);
-    refreshSlots();
+    layoutSlots();
 
     // Keep embedded editors inside the framed center bay. The viewport and
     // its child editors paint opaque surfaces, so using the panel bounds
@@ -2617,6 +3234,15 @@ void RackView::resized() {
         b->setBounds(ra.getX(), y, ra.getWidth(), btnH);
         y += btnH + btnGap;
     }
+}
+
+void RackView::paintOverChildren(juce::Graphics& g) {
+    if (!frozenBayActive || frozenBayImage.isNull()) return;
+    // The frozen frame is painted last: both native editors are hidden while a
+    // swap is in flight, so this is what the bay shows instead of going black.
+    const auto target = editorHolder.getBounds();
+    g.drawImage(frozenBayImage, target.toFloat(),
+                juce::RectanglePlacement::stretchToFit, false);
 }
 
 void RackView::paint(juce::Graphics& g) {
@@ -3124,3 +3750,4 @@ bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     refreshEditor();
     return true;
 }
+
