@@ -150,6 +150,16 @@ private:
     // True while a staged restore owns the rig: a save then would capture the
     // half-replaced strips, so the caller shows the message and stops.
     bool refuseSaveWhileRestoring();
+    // Debounced autosave: a cheap poll notices edits, then last.json is
+    // written once, 30 seconds after the last edit, so a process that never
+    // reaches shutdown() still leaves the session on disk.
+    void pollSceneChanges();
+    // Slow full-scene comparison for plugins that change state without
+    // notifying a parameter (preset load, program change).
+    void checkFullSceneSafetyNet();
+    // Writes last.json once the debounce expires, unless the scene already
+    // matches what is on disk.
+    void autosaveIfChanged();
     void loadScene(bool showMissingMessage);
     // Applies a parsed scene synchronously and returns plugin load errors.
     // Diagnostics and tests use this blocking form; the UI goes through
@@ -180,6 +190,25 @@ private:
     std::atomic<bool> sceneLoading_{false};
     // Counts UI ticks between device-availability checks (see timerCallback).
     int availabilityTicks_ = 0;
+    // Autosave is a debounce: the cheap poll notices an edit (a structural
+    // change or a knob moved inside a plugin editor) and the scene is written
+    // once, kAutosaveIntervalMs after the last edit. The full-scene check is a
+    // slow safety net for plugins that change state without notifying a
+    // parameter. The saved fingerprint stops a redundant write when an edit is
+    // undone back to what is already on disk.
+    double nextScenePollMs_ = 0.0;
+    double nextFullSceneCheckMs_ = 0.0;
+    double lastSceneChangeMs_ = 0.0;
+    bool sceneChangedSinceSave_ = false;
+    bool haveChangeBaseline_ = false;
+    juce::uint64 lastStructureHash_ = 0;
+    juce::uint64 lastPluginRevision_ = 0;
+    juce::uint64 lastSavedHash_ = 0;
+    juce::uint64 lastSavedSize_ = 0;
+    bool haveSavedBaseline_ = false;
+    juce::uint64 lastObservedHash_ = 0;
+    juce::uint64 lastObservedSize_ = 0;
+    bool haveObservedBaseline_ = false;
     // Startup: the audio restore is queued from the first paint, never from
     // the constructor, so the window is on screen before any device work.
     bool audioInitQueued_ = false;

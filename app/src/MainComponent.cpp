@@ -7,7 +7,29 @@
 #include "PluginLibrary.h"
 #include "SceneBridge.h"
 
+#include <pluginrack/SceneCodec.h>
+
 namespace {
+// How long the scene must stay unchanged before the autosave writes it.
+// Debounced so a busy edit session produces one write, not one every 30 s.
+constexpr double kAutosaveIntervalMs = 30000.0;
+
+// Cheap change detection: serializes the scene structure without any plugin
+// state blobs. Once a second is enough to notice an edit and does not enter
+// plugin code, so it cannot cause an audio dropout.
+constexpr double kScenePollIntervalMs = 1000.0;
+
+// FNV-1a over the serialized scene. The JSON embeds every plugin's state blob
+// and is only built for the comparison, so keep the digest cheap.
+juce::uint64 sceneFingerprint(const std::string& text) {
+    juce::uint64 hash = 1469598103934665603ull;
+    for (const unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
 // The toolbar logo: the mint-on-dark app icon, decoded once and shared by
 // every ToolbarComponent. Binary data keeps it inside the exe, so the header
 // never depends on a loose file next to it.
@@ -333,6 +355,9 @@ MainComponent::MainComponent()
     // starting it from the constructor ran it before the window had drawn,
     // which is what made startup look like a hang.
     startTimerHz(4);
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    nextScenePollMs_ = nowMs + kScenePollIntervalMs;
+    nextFullSceneCheckMs_ = nowMs + kAutosaveIntervalMs;
     timerCallback(); // populate the toolbar readouts before the first tick
     setSize(1600, 900);
 }
@@ -431,6 +456,21 @@ void MainComponent::timerCallback() {
     if (!hasError && (report.underruns + report.overruns) > 0) hasError = true;
     if (!hasError) hasError = !audioEngine.getDeviceErrors().empty();
     toolbar.setHasError(hasError);
+
+    // Autosave is a debounce, not a repeating snapshot. The cheap poll runs at
+    // 1 Hz and only notices edits; the scene is captured and written once,
+    // kAutosaveIntervalMs after the last one. The slow full-scene check is a
+    // safety net for plugins that change state without a parameter callback.
+    // Time-based rather than tick-based so the early returns above cannot make
+    // the interval drift.
+    pollSceneChanges();
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (nowMs >= nextFullSceneCheckMs_) {
+        nextFullSceneCheckMs_ = nowMs + kAutosaveIntervalMs;
+        checkFullSceneSafetyNet();
+    }
+    if (sceneChangedSinceSave_ && nowMs - lastSceneChangeMs_ >= kAutosaveIntervalMs)
+        autosaveIfChanged();
 }
 
 void MainComponent::selectView(AppView view) {
@@ -907,6 +947,120 @@ void MainComponent::saveSceneOnExit() {
         juce::Logger::writeToLog("exit autosave failed: " + error);
         SceneBridge::writeSaveFailureNote(error);
     }
+}
+
+void MainComponent::pollSceneChanges() {
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (nowMs < nextScenePollMs_) return;
+    nextScenePollMs_ = nowMs + kScenePollIntervalMs;
+
+    // A restore replaces the rig wholesale; the scene it installs is the new
+    // baseline, not an edit that should be autosaved. While one runs this poll
+    // is often not reached at all (timerCallback returns early), so the reset
+    // also happens on the first poll after it finishes.
+    if (sceneLoading_ || audioEngine.isSceneRestoreActive()) {
+        haveChangeBaseline_ = false;
+        haveObservedBaseline_ = false;
+        sceneChangedSinceSave_ = false;
+        return;
+    }
+    if (audioEngine.isOpeningDevices()) return;
+    if (audioEngine.getChannels().empty() || audioEngine.getOutputs().empty()) return;
+
+    // Structural half of the scene only: no plugin state capture, so this is
+    // safe to run once a second while audio plays.
+    const auto structureHash =
+        sceneFingerprint(pluginrack::toJson(audioEngine.makeScene(false)));
+    const auto pluginRevision = audioEngine.getPluginEditRevision();
+    if (!haveChangeBaseline_) {
+        lastStructureHash_ = structureHash;
+        lastPluginRevision_ = pluginRevision;
+        haveChangeBaseline_ = true;
+        return;
+    }
+    if (structureHash == lastStructureHash_ && pluginRevision == lastPluginRevision_)
+        return;
+
+    lastStructureHash_ = structureHash;
+    lastPluginRevision_ = pluginRevision;
+    lastSceneChangeMs_ = nowMs;
+    if (!sceneChangedSinceSave_) {
+        sceneChangedSinceSave_ = true;
+        juce::Logger::writeToLog("autosave: change detected, saving after 30 s of quiet");
+    }
+}
+
+void MainComponent::checkFullSceneSafetyNet() {
+    if (sceneLoading_ || audioEngine.isSceneRestoreActive() || audioEngine.isOpeningDevices())
+        return;
+    if (audioEngine.getChannels().empty() || audioEngine.getOutputs().empty()) return;
+
+    // The only path that captures plugin state on a timer. A plugin that loads
+    // a preset without touching a parameter is invisible to the cheap poll, so
+    // this runs every 30 s and treats any difference as an edit.
+    const auto scene = audioEngine.makeScene();
+    const auto json = pluginrack::toJson(scene);
+    const auto fingerprint = sceneFingerprint(json);
+    const auto size = static_cast<juce::uint64>(json.size());
+    if (!haveObservedBaseline_) {
+        lastObservedHash_ = fingerprint;
+        lastObservedSize_ = size;
+        haveObservedBaseline_ = true;
+        return;
+    }
+    if (fingerprint == lastObservedHash_ && size == lastObservedSize_) return;
+
+    lastObservedHash_ = fingerprint;
+    lastObservedSize_ = size;
+    if (!sceneChangedSinceSave_) {
+        lastSceneChangeMs_ = juce::Time::getMillisecondCounterHiRes();
+        sceneChangedSinceSave_ = true;
+        juce::Logger::writeToLog("autosave: scene changed without a parameter notification");
+    }
+}
+
+void MainComponent::autosaveIfChanged() {
+    // A restore or device open owns the rig: capturing now would mix the old
+    // and new strips, or save a half-built output list. Leave the pending
+    // change in place; the next quiet interval retries it.
+    if (sceneLoading_ || audioEngine.isSceneRestoreActive() || audioEngine.isOpeningDevices())
+        return;
+    if (audioEngine.getChannels().empty() || audioEngine.getOutputs().empty())
+        return;
+
+    auto scene = audioEngine.makeScene();
+    const auto json = pluginrack::toJson(scene);
+    const auto fingerprint = sceneFingerprint(json);
+    const auto size = static_cast<juce::uint64>(json.size());
+
+    // This capture is also the newest full-scene observation, or the safety
+    // net would report the just-saved scene as a change on its next run.
+    lastObservedHash_ = fingerprint;
+    lastObservedSize_ = size;
+    haveObservedBaseline_ = true;
+
+    if (haveSavedBaseline_ && fingerprint == lastSavedHash_ && size == lastSavedSize_) {
+        // The edit was undone back to what is already on disk.
+        sceneChangedSinceSave_ = false;
+        juce::Logger::writeToLog("autosave: scene matches the save, write skipped");
+        return;
+    }
+    // Errors are logged, not surfaced in a dialog: this runs while the user is
+    // playing, and an exit save remains the second line of defence. No failure
+    // note here, so a transient autosave failure does not make the next launch
+    // claim the previous quit was lost.
+    const auto error = SceneBridge::saveLast(scene);
+    if (error.isNotEmpty()) {
+        juce::Logger::writeToLog("autosave failed: " + error);
+        // Retry after another quiet interval instead of on every tick.
+        lastSceneChangeMs_ = juce::Time::getMillisecondCounterHiRes();
+        return;
+    }
+    haveSavedBaseline_ = true;
+    lastSavedHash_ = fingerprint;
+    lastSavedSize_ = size;
+    sceneChangedSinceSave_ = false;
+    juce::Logger::writeToLog("autosave: wrote last scene");
 }
 
 void MainComponent::refreshViews() {

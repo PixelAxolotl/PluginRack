@@ -789,7 +789,14 @@ public:
     bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
     double getMeasuredLatencyMs() const;
 
-    pluginrack::Scene makeScene() const;
+    // includePluginState=false builds the structural half of the scene only:
+    // strips, routes, buses and device settings, without asking every plugin
+    // for its state blob. The autosave polls this cheap form to notice edits.
+    pluginrack::Scene makeScene(bool includePluginState = true) const;
+    // Sum of the live inserts' parameter-edit counters. Compared by the
+    // autosave so a knob turned inside a plugin editor counts as a change
+    // without capturing any plugin state.
+    std::uint64_t getPluginEditRevision() const;
     // Rebuilds strips, plugins, and devices from a saved scene. MUST run on
     // the JUCE message thread: plugin instantiation, editor-window
     // destruction with the old strips, and strip swapping are message-thread

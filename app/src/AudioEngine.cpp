@@ -2502,7 +2502,8 @@ void copyStripFields(const LiveStrip& from, SavedStrip& to) {
 // only what the scene file stores.
 template <typename LiveInserts>
 std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
-                                           std::vector<pluginrack::InsertSlot>& saved) {
+                                           std::vector<pluginrack::InsertSlot>& saved,
+                                           bool includePluginState = true) {
     std::vector<const PluginHost*> hosts;
     hosts.reserve(inserts.size());
     for (const auto& insert : inserts) {
@@ -2517,8 +2518,10 @@ std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
         slot.sideChainTap = insert->sideChainTap;
         slot.sideChainGainDb = insert->sideChainGainDb.get();
         // A failed insert has no live instance to ask for state; write back
-        // the blob the scene supplied.
-        slot.pluginState = insert->savedPluginState.toStdString();
+        // the blob the scene supplied. The structural token used for change
+        // detection skips it: a missing plugin's blob can be large and is
+        // already covered by the full capture taken when a save is due.
+        if (includePluginState) slot.pluginState = insert->savedPluginState.toStdString();
         saved.push_back(std::move(slot));
         hosts.push_back(&insert->pluginHost);
     }
@@ -2527,7 +2530,7 @@ std::vector<const PluginHost*> copyInserts(const LiveInserts& inserts,
 
 } // namespace
 
-pluginrack::Scene AudioEngine::makeScene() const {
+pluginrack::Scene AudioEngine::makeScene(bool includePluginState) const {
     pluginrack::Scene scene;
     // Plugin state capture is plugin code of unbounded length, and render()
     // only waits a few yields for stateLock before it pushes silence. Record
@@ -2551,7 +2554,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
             savedChannel.trimDb = channel->trimDb.get();
             savedChannel.pan = channel->pan.get();
             savedChannel.soloed = channel->soloed.get();
-            channelHosts.push_back(copyInserts(channel->inserts, savedChannel.inserts));
+            channelHosts.push_back(
+                copyInserts(channel->inserts, savedChannel.inserts, includePluginState));
             scene.channels.push_back(std::move(savedChannel));
         }
         for (const auto& output : outputs) {
@@ -2561,7 +2565,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
             // therefore stays OutputKind::Physical.
             savedOutput.deviceId = output->outputDeviceName.toStdString();
             savedOutput.flipped = output->flipped.get();
-            outputHosts.push_back(copyInserts(output->inserts, savedOutput.inserts));
+            outputHosts.push_back(
+                copyInserts(output->inserts, savedOutput.inserts, includePluginState));
             scene.outputs.push_back(std::move(savedOutput));
         }
         for (const auto& route : routes) {
@@ -2590,6 +2595,8 @@ pluginrack::Scene AudioEngine::makeScene() const {
         scene.audio = getDeviceSettings();
     }
 
+    if (!includePluginState) return scene;
+
     // Capture the live parameter/program state so reopening the scene does not
     // reset every insert to its defaults. Runs unlocked: this is the part that
     // enters plugin code.
@@ -2610,6 +2617,19 @@ pluginrack::Scene AudioEngine::makeScene() const {
         }
     }
     return scene;
+}
+
+std::uint64_t AudioEngine::getPluginEditRevision() const {
+    // stateLock keeps the live insert list stable while the atomics are read.
+    const juce::ScopedLock lock(stateLock);
+    std::uint64_t revision = 0;
+    for (const auto& channel : channels)
+        for (const auto& insert : channel->inserts)
+            revision += insert->pluginHost.getParameterRevision();
+    for (const auto& output : outputs)
+        for (const auto& insert : output->inserts)
+            revision += insert->pluginHost.getParameterRevision();
+    return revision;
 }
 
 juce::String AudioEngine::restoreScene(const pluginrack::Scene& scene, bool openDevicesNow) {

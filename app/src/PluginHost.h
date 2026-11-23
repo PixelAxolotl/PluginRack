@@ -31,7 +31,7 @@ bool record(const juce::String& path, int exitCode, std::uint32_t insertId);
 int clear(); // returns how many entries dropped
 } // namespace PluginFaultGuard
 
-class PluginHost {
+class PluginHost : private juce::AudioProcessorParameter::Listener {
 public:
     // Result of instantiating a VST3 file. The instance is shared so it can be
     // built on a worker thread (instantiation blocks for as long as the plugin
@@ -164,6 +164,12 @@ public:
     // not keep it across insert removal - the rack's generic parameter panel
     // re-reads it on every refresh for exactly that reason.
     juce::AudioPluginInstance* getInstance() const;
+    // Monotonic count of parameter edits made since the instance was adopted.
+    // The autosave uses it to notice knobs turned inside a plugin editor
+    // without capturing the (comparatively expensive) plugin state blob.
+    std::uint64_t getParameterRevision() const {
+        return parameterRevision_.load(std::memory_order_relaxed);
+    }
     // Lock-free cached latency: refreshed on load/prepare/bypass so the
     // latency report never blocks on pluginLock.
     int getLatencySamples() const;
@@ -180,8 +186,14 @@ public:
     void closeEditorWindow(juce::DocumentWindow* window);
 
 private:
+    void parameterValueChanged(int parameterIndex, float newValue) override;
+    void parameterGestureChanged(int parameterIndex, bool gestureIsStarting) override;
+    void attachParameterListeners();
+    void detachParameterListeners();
+
     std::shared_ptr<juce::AudioPluginInstance> plugin;
     mutable juce::CriticalSection pluginLock;
+    std::atomic<std::uint64_t> parameterRevision_{0};
     juce::MidiBuffer midiBuffer;
     juce::String pluginPath;
     juce::String pluginName;

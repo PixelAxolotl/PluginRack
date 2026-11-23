@@ -236,8 +236,38 @@ PluginHost::~PluginHost() {
     editorWindow = nullptr;
     const juce::ScopedLock lock(pluginLock);
     if (plugin != nullptr) {
+        // The parameters belong to the instance, so the listener relationship
+        // must not outlive it.
+        detachParameterListeners();
         plugin->releaseResources();
     }
+}
+
+void PluginHost::parameterValueChanged(int, float) {
+    // Called from the plugin's UI or audio thread. The counter is only read by
+    // the message-thread autosave, so a relaxed increment is enough.
+    parameterRevision_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PluginHost::parameterGestureChanged(int, bool) {
+    // Some plugins commit a knob only on release, and a gesture is still a
+    // user edit even if the value has not moved yet.
+    parameterRevision_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PluginHost::attachParameterListeners() {
+    // Requires pluginLock (the instance must not be replaced mid-iteration).
+    if (plugin == nullptr) return;
+    for (auto* parameter : plugin->getParameters())
+        if (parameter != nullptr) parameter->addListener(this);
+}
+
+void PluginHost::detachParameterListeners() {
+    // Requires pluginLock. Detaching before the instance is replaced keeps a
+    // stale listener from firing into a destroyed host.
+    if (plugin == nullptr) return;
+    for (auto* parameter : plugin->getParameters())
+        if (parameter != nullptr) parameter->removeListener(this);
 }
 
 bool PluginHost::hasPlugin() const {
@@ -359,8 +389,10 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
 bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
     auto host = childHost_.load(std::memory_order_acquire);
     if (host == nullptr || parameterIndex < 0) return false;
-    return host->setParameter(static_cast<std::uint32_t>(parameterIndex),
-                              juce::jlimit(0.0f, 1.0f, normalisedValue));
+    const bool sent = host->setParameter(static_cast<std::uint32_t>(parameterIndex),
+                                         juce::jlimit(0.0f, 1.0f, normalisedValue));
+    if (sent) parameterRevision_.fetch_add(1, std::memory_order_relaxed);
+    return sent;
 }
 
 void PluginHost::stopChildHost() {
@@ -843,12 +875,14 @@ void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase
     juce::ignoreUnused(stateBase64, pluginUniqueId);
     const juce::ScopedLock lock(pluginLock);
     if (plugin != nullptr) {
+        detachParameterListeners();
         plugin->releaseResources();
     }
     pluginPath = loaded.path;
     pluginName = loaded.name;
     sideChainChannels_.store(loaded.sideChainChannels, std::memory_order_relaxed);
     plugin = loaded.instance;
+    attachParameterListeners();
     const auto prepareStart = juce::Time::getMillisecondCounterHiRes();
     const double preparedRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
     const int preparedBlock = currentBufferSize > 0 ? currentBufferSize : 512;
