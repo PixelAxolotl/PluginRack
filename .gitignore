@@ -10,6 +10,7 @@ graphify-out/
 
 # AI agent artifacts and working files
 .opencode/
+AGENTS.md
 .cloud-attachments/
 .claude/
 .cursor/
