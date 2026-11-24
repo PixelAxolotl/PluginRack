@@ -173,7 +173,18 @@ void DeEsserWindow::setBypassed(bool b) { effect.bypassed = b; enableButton.setT
 void DeEsserWindow::setAnalyzerMode(int m) { if (m == 0) stopTimer(); else startTimer(33); }
 
 void DeEsserWindow::timerCallback() {
-    if (pullAnalyzerTap) pullAnalyzerTap(tapL.data(), tapR.data(), kAnalyzerFftSize);
+    // Two pulls of the same buffers: the gain-reduction trace models the
+    // sibilance detector's input, so it reads the pre-effect ring; the RTA
+    // shows what the de-esser actually passed, so it reads the post ring.
+    if (pullAnalyzerTap) pullAnalyzerTap(false, tapL.data(), tapR.data(), kAnalyzerFftSize);
+    // Sibilance-band level, not broadband RMS: a 440 Hz voice at -6 dB
+    // must not hide a quiet 6 kHz sibilance from the detector (or the bar).
+    const float levelDb = deEsserBandLevelDb(
+        tapL.data(), tapR.data(), kAnalyzerFftSize, effect, sampleRateHz,
+        detS1L, detS2L, detS1R, detS2R);
+    gainReductionDb = std::abs(deEsserStaticGainDb(levelDb, effect));
+
+    if (pullAnalyzerTap) pullAnalyzerTap(true, tapL.data(), tapR.data(), kAnalyzerFftSize);
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const std::size_t idx = static_cast<std::size_t>(i);
         fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
@@ -189,12 +200,6 @@ void DeEsserWindow::timerCallback() {
         float& held = spectrumAvg[bin];
         held += (fresh - held) * (fresh > held ? 0.6f : 0.15f);
     }
-    // Sibilance-band level, not broadband RMS: a 440 Hz voice at -6 dB
-    // must not hide a quiet 6 kHz sibilance from the detector (or the bar).
-    const float levelDb = deEsserBandLevelDb(
-        tapL.data(), tapR.data(), kAnalyzerFftSize, effect, sampleRateHz,
-        detS1L, detS2L, detS1R, detS2R);
-    gainReductionDb = std::abs(deEsserStaticGainDb(levelDb, effect));
     graph.setFrequencyData(FrequencyTraceData{
         {}, spectrumAvg,
         makeDeEsserGainReductionTrace(effect, gainReductionDb, spectrumAvg.size()),

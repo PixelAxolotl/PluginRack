@@ -71,11 +71,6 @@ juce::var parseObject(const juce::String& json) {
     return parsed;
 }
 
-float blockPeak(const juce::AudioBuffer<float>& buffer, int channel, int frames) {
-    if (channel >= buffer.getNumChannels() || frames <= 0) return 0.0f;
-    return buffer.getMagnitude(channel, 0, frames);
-}
-
 } // namespace
 
 int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
@@ -190,12 +185,22 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
     juce::MidiBuffer midi;
     juce::AudioBuffer<float> scratch(2, pluginHostIpc::kMaxBlockFrames);
     std::uint64_t lastSequence = 0;
+    // Highest parameter sequence number this host has applied. A delivered
+    // message skipping a number means the parent dropped an edit (ring full),
+    // which only a full state push can repair.
+    std::uint64_t lastAppliedParamSeq = 0;
     double currentRate = sampleRate;
     int currentBufferSize = blockSize;
 
     const auto applyParams = [&] {
         pluginHostIpc::ParamMsg msg;
         while (pluginHostIpc::paramRingPop(params->toHost, msg)) {
+            if (pluginHostIpc::paramSeqGapped(lastAppliedParamSeq, msg.seq)) {
+                // Counted where the loss is seen: the parent watches this
+                // counter and resyncs state; the gap itself is not replayable.
+                params->toHost.paramGapCount.fetch_add(1, std::memory_order_acq_rel);
+            }
+            lastAppliedParamSeq = msg.seq;
             const auto index = static_cast<int>(msg.id);
             auto& parameters = plugin->getParameters();
             if (index >= 0 && index < parameters.size()) {
@@ -271,6 +276,14 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                     plugin->setStateInformation(decoded.getData(),
                                                 static_cast<int>(decoded.getSize()));
                     block->latencySamples = plugin->getLatencySamples();
+                    // A full state supersedes every parameter edit queued
+                    // before it: drain the stale entries, then take the
+                    // producer's current sequence as applied so the next
+                    // delivered message is not read as a new gap.
+                    pluginHostIpc::ParamMsg stale;
+                    while (pluginHostIpc::paramRingPop(params->toHost, stale)) {}
+                    lastAppliedParamSeq =
+                        params->toHost.producerSeq.load(std::memory_order_acquire);
                     reply = okReply();
                     break;
                 }
@@ -347,15 +360,9 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                 // The app's own torn guard rejects the payload and plays dry.
             } else {
                 juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), 2, 0, frames);
-                const auto peakInL = blockPeak(view, 0, frames);
-                const auto peakInR = blockPeak(view, 1, frames);
                 applyParams();
                 midi.clear();
                 plugin->processBlock(view, midi);
-                block->peakInL = peakInL;
-                block->peakInR = peakInR;
-                block->peakOutL = blockPeak(view, 0, frames);
-                block->peakOutR = blockPeak(view, 1, frames);
                 // Write-back with the same guard: mark odd, copy, mark even.
                 block->blockSequence = block->blockSequence + 1;
                 for (int i = 0; i < frames; ++i) {
@@ -387,5 +394,4 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
         // Both set in the same wake-up: the second event stays signalled and
         // the next iteration services it, so nothing is missed.
     }
-    return 0;
 }

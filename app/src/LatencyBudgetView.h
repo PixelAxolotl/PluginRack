@@ -123,6 +123,8 @@ public:
 
 private:
     static constexpr int kRowH = 15;
-    static constexpr int kRows = 12;
+    // 12 data rows + room for the two-line clock-bridge hint (drawn at row 11
+    // spanning kRowH*2): 13 rows = 195 px so both hint lines render unclipped.
+    static constexpr int kRows = 13;
     AudioEngine::LatencyReport report_{};
 };

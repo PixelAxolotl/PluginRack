@@ -51,14 +51,21 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
 
     deviceControl.setOnClick([this] {
         const auto current = audioEngine.getChannelDeviceState(channel.id);
+        const std::uint32_t channelId = channel.id;
+        // The strip is rebuilt (and the engine Channel freed) on every
+        // structure change, while the popup and a device open can outlive it.
+        // The popup and worker only hold the engine (which outlives the
+        // strips) and a safe pointer for the UI half.
+        auto* engine = &audioEngine;
+        juce::Component::SafePointer<ChannelStrip> safe(this);
         DeviceMenu::showDeviceMenu(true, deviceControl, current.deviceName,
                                   audioEngine.getAvailableInputDevices(),
-                                  [this](juce::String chosen) {
-            const std::uint32_t channelId = channel.id;
-            juce::Thread::launch([this, channelId, chosen] {
-                const auto err = audioEngine.setChannelInputDevice(channelId, chosen);
-                juce::MessageManager::callAsync([this, err] {
-                    refreshInput();
+                                  [engine, channelId, safe](juce::String chosen) {
+            juce::Thread::launch([engine, channelId, chosen, safe] {
+                const auto err = engine->setChannelInputDevice(channelId, chosen);
+                juce::MessageManager::callAsync([safe, err] {
+                    if (safe == nullptr) return;
+                    safe->refreshInput();
                     if (err.isNotEmpty()) {
                         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
                     }
@@ -222,8 +229,15 @@ void ChannelStrip::openMultibandWindow() {
     multibandWindow->applyWeighting = [safe](int weighting) {
         if (safe != nullptr) safe->audioEngine.setChannelMultibandRtaWeighting(safe->channel.id, weighting);
     };
-    multibandWindow->onClose = [safe] { if (safe != nullptr && safe->multibandWindow) { auto* w = safe->multibandWindow; safe->multibandWindow = nullptr; delete w; } };
-    multibandWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) { if (safe != nullptr) safe->channel.multibandTap.snapshot(true, l, r, n); };
+    multibandWindow->onClose = [safe] {
+        if (safe != nullptr && safe->multibandWindow) {
+            safe->channel.multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* w = safe->multibandWindow;
+            safe->multibandWindow = nullptr;
+            delete w;
+        }
+    };
+    multibandWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) { if (safe != nullptr) safe->channel.multibandTap.snapshot(post, l, r, n); };
     channel.multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 void ChannelStrip::openDeEsserWindow() {
@@ -250,8 +264,15 @@ void ChannelStrip::openDeEsserWindow() {
     deEsserWindow->applyWeighting = [safe](int weighting) {
         if (safe != nullptr) safe->audioEngine.setChannelDeEsserRtaWeighting(safe->channel.id, weighting);
     };
-    deEsserWindow->onClose = [safe] { if (safe != nullptr && safe->deEsserWindow) { auto* w = safe->deEsserWindow; safe->deEsserWindow = nullptr; delete w; } };
-    deEsserWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) { if (safe != nullptr) safe->channel.deEsserTap.snapshot(true, l, r, n); };
+    deEsserWindow->onClose = [safe] {
+        if (safe != nullptr && safe->deEsserWindow) {
+            safe->channel.deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* w = safe->deEsserWindow;
+            safe->deEsserWindow = nullptr;
+            delete w;
+        }
+    };
+    deEsserWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) { if (safe != nullptr) safe->channel.deEsserTap.snapshot(post, l, r, n); };
     channel.deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
 void ChannelStrip::openLimiterWindow() {
@@ -271,9 +292,16 @@ void ChannelStrip::openLimiterWindow() {
             safe->audioEngine.setChannelLimiters(safe->channel.id, effects);
             safe->refreshInserts();
         });
-    limiterWindow->onClose = [safe] { if (safe != nullptr && safe->limiterWindow) { auto* w = safe->limiterWindow; safe->limiterWindow = nullptr; delete w; } };
-    limiterWindow->pullAnalyzerTap = [safe](bool /*postEq*/, float* l, float* r, int n) {
-        if (safe != nullptr) safe->channel.limiterTap.snapshot(true, l, r, n);
+    limiterWindow->onClose = [safe] {
+        if (safe != nullptr && safe->limiterWindow) {
+            safe->channel.limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
+            auto* w = safe->limiterWindow;
+            safe->limiterWindow = nullptr;
+            delete w;
+        }
+    };
+    limiterWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) {
+        if (safe != nullptr) safe->channel.limiterTap.snapshot(post, l, r, n);
     };
     channel.limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
@@ -283,7 +311,6 @@ void ChannelStrip::openFeedbackSuppressorWindow() {
     if (channel.feedbackSuppressorEffects.empty()) {
         auto effects = channel.feedbackSuppressorEffects;
         effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
-        channel.feedbackSuppressorEffects = effects;
         audioEngine.setChannelFeedbackSuppressors(channel.id, effects);
         audioEngine.ensureChannelChainItem(channel.id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
     }
@@ -301,7 +328,6 @@ void ChannelStrip::openFeedbackSuppressorWindow() {
             } else {
                 effectedit::applyEdit(effects, effect, bypassChanged);
             }
-            safe->channel.feedbackSuppressorEffects = effects;
             safe->audioEngine.setChannelFeedbackSuppressors(safe->channel.id, effects);
             safe->refreshInserts();
         }, channel.feedbackSuppressorRtaOffsetDb, channel.feedbackSuppressorRtaWeighting,
@@ -339,7 +365,6 @@ void ChannelStrip::openSpectralDenoiserWindow() {
     if (channel.spectralDenoiserEffects.empty()) {
         auto effects = channel.spectralDenoiserEffects;
         effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
-        channel.spectralDenoiserEffects = effects;
         audioEngine.setChannelSpectralDenoisers(channel.id, effects);
         audioEngine.ensureChannelChainItem(channel.id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
     }
@@ -357,7 +382,6 @@ void ChannelStrip::openSpectralDenoiserWindow() {
             } else {
                 effectedit::applyEdit(effects, effect, bypassChanged);
             }
-            safe->channel.spectralDenoiserEffects = effects;
             safe->audioEngine.setChannelSpectralDenoisers(safe->channel.id, effects);
             safe->refreshInserts();
         });
@@ -405,15 +429,17 @@ void ChannelStrip::openDynamicsWindow(pluginrack::DynamicsEffectType type) {
             delete window;
         }
     };
-    // Same method as every other RTA; its own tap so the compressor's
-    // output is what its graph shows, not the strip end or a later plugin.
-    dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+    // Same method as every other RTA; its own tap so the compressor's own
+    // signal is what its graph shows, not the strip end or a later plugin.
+    // The dot and GR gauge model the dynamics' input, so the window pulls the
+    // pre ring; `post` is forwarded for any caller that wants the output.
+    dynamicsWindow->pullAnalyzerTap = [safe](bool post, float* left, float* right, int frames) {
         if (safe != nullptr) {
-            safe->channel.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
-            safe->channel.dynamicsTap.snapshot(true, left, right, frames);
+            safe->channel.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
+            safe->channel.dynamicsTap.snapshot(post, left, right, frames);
         }
     };
-    channel.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    channel.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
     dynamicsWindow->setVisible(true);
 }
 
@@ -479,6 +505,15 @@ void ChannelStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->audioEngine.setChannelEqBypassed(safe->channel.id, false);
         safe->audioEngine.setChannelEqPhaseFlip(safe->channel.id, flipped);
+    };
+    // Whole-EQ enable: seed from the strip's bypass flag (the ctor defaults to
+    // enabled, which would lie about a bypassed scene) and persist clicks
+    // through the engine; the strip's EQ card follows immediately.
+    window->setEqEnabled(!channel.eqBypassed.get());
+    window->applyEnabled = [safe](bool enabled) {
+        if (safe == nullptr) return;
+        safe->audioEngine.setChannelEqBypassed(safe->channel.id, !enabled);
+        safe->refreshInserts();
     };
     eqWindow = window;
     window->onCloseRequest = [safe] {
@@ -889,12 +924,6 @@ void ChannelStrip::setPluginBypass(std::uint32_t insertId, bool bypassed) {
 
 void ChannelStrip::reloadPlugin(std::uint32_t insertId) {
     audioEngine.reloadInsert(channel.id, insertId);
-    refreshAfterInsertChange();
-}
-
-void ChannelStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
-    audioEngine.moveChannelChainItem(channel.id, {pluginrack::ChainItemType::Insert, insertId},
-                                     targetIndex);
     refreshAfterInsertChange();
 }
 

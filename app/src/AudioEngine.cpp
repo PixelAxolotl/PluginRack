@@ -113,48 +113,69 @@ void setWasapiProbeCapEnvironment(bool enabled, int channels) {
 // Effects whose chain entry is missing run here. That covers scenes saved
 // before per-strip ordering existed. Removal sets the effect's bypassed flag,
 // so a removed effect stays silent through this path until picked again,
-// which unbypasses it.
+// which unbypasses it. The tap (nullptr for a family with no analyzer tap)
+// gets the same pre/post writes the chain loop makes, so an editor on such a
+// scene still shows the signal instead of a frozen ring.
 template <typename Effect, typename Processor>
 void processNewMissing(const std::vector<pluginrack::ChainItem>& chain,
     const std::vector<Effect>& effects, std::vector<Processor>& processors,
-    pluginrack::ChainItemType type, float* left, float* right, int frames) noexcept {
+    pluginrack::ChainItemType type, float* left, float* right, int frames,
+    AudioEngine::AnalyzerTap* tap) noexcept {
     const std::size_t count = std::min(effects.size(), processors.size());
     for (std::size_t i = 0; i < count; ++i) {
         const pluginrack::ChainItem item{type, effects[i].id};
         if (effects[i].bypassed) continue;
-        if (std::find(chain.begin(), chain.end(), item) == chain.end())
+        if (std::find(chain.begin(), chain.end(), item) == chain.end()) {
+            if (tap != nullptr) tap->writeTap(false, left, right, frames);
             processors[i].process(left, right, frames);
+            if (tap != nullptr) tap->writeTap(true, left, right, frames);
+        }
     }
 }
 
-void processEffectsMissingFromChain(
-    const std::vector<pluginrack::ChainItem>& chain,
-    const std::vector<pluginrack::DynamicsEffect>& effects,
-    std::vector<pluginrack::DynamicsProcessor>& processors, float* left, float* right,
-    int frames) noexcept {
-    const std::size_t count = std::min(effects.size(), processors.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        const pluginrack::ChainItem item{pluginrack::ChainItemType::Dynamics, effects[i].id};
-        if (effects[i].bypassed) continue;
-        if (std::find(chain.begin(), chain.end(), item) == chain.end())
-            processors[i].process(left, right, frames);
+// One built-in family re-prepared for the current clock. A size change
+// rebuilds the vector so processors keep index alignment with effects (the
+// chain looks processors up by effect index); a matched vector is prepared
+// in place, which is what a sample-rate change needs: every processor's
+// cached tables (limiter lookahead, multiband crossovers, denoiser FFT) are
+// recomputed, and the following setEffect re-syncs the caches prepare()
+// reads from the old effect copy. SpectralDenoiserProcessor::prepare keeps
+// the learned profile: it lives in the effect struct and prepare()
+// resamples it from profileSampleRate.
+template <typename Processor, typename Effect>
+void prepareProcessorFamily(std::vector<Processor>& processors,
+                            const std::vector<Effect>& effects, double sampleRate) {
+    if (processors.size() != effects.size()) {
+        processors.clear();
+        processors.reserve(effects.size());
+        for (const auto& effect : effects) {
+            Processor processor;
+            processor.prepare(sampleRate);
+            processor.setEffect(effect);
+            processors.push_back(std::move(processor));
+        }
+        return;
+    }
+    for (std::size_t i = 0; i < processors.size(); ++i) {
+        processors[i].prepare(sampleRate);
+        processors[i].setEffect(effects[i]);
     }
 }
 
-
-// Per-built-in output taps: one mode gate per tap, set by the owning
-// window (and cleared on close). setPluginTap() below flips the whole set.
-enum class PluginTapKind { Eq, Dynamics, Multiband, DeEsser, Limiter };
-
-template <typename Strip>
-void setPluginTap(Strip& strip, PluginTapKind kind, std::uint32_t mode) noexcept {
-    switch (kind) {
-        case PluginTapKind::Eq: strip.eqTap.setMode(mode); break;
-        case PluginTapKind::Dynamics: strip.dynamicsTap.setMode(mode); break;
-        case PluginTapKind::Multiband: strip.multibandTap.setMode(mode); break;
-        case PluginTapKind::DeEsser: strip.deEsserTap.setMode(mode); break;
-        case PluginTapKind::Limiter: strip.limiterTap.setMode(mode); break;
-    }
+// Every built-in family a strip owns, prepared together for a new clock.
+// Called for each channel, output and bus from prepareToPlayImpl under
+// stateLock. EqEngine::prepare only stores the rate and recomputes cached
+// coefficients; bands set via setChannelEq and the delay set via
+// setChannelEqDelay survive a rate change.
+template <typename StripType>
+void prepareStripProcessors(StripType& strip, double sampleRate) {
+    strip.eq.prepare(sampleRate);
+    prepareProcessorFamily(strip.effectProcessors, strip.effects, sampleRate);
+    prepareProcessorFamily(strip.multibandProcessors, strip.multibandEffects, sampleRate);
+    prepareProcessorFamily(strip.deEsserProcessors, strip.deEsserEffects, sampleRate);
+    prepareProcessorFamily(strip.limiterProcessors, strip.limiterEffects, sampleRate);
+    prepareProcessorFamily(strip.feedbackSuppressorProcessors, strip.feedbackSuppressorEffects, sampleRate);
+    prepareProcessorFamily(strip.spectralDenoiserProcessors, strip.spectralDenoiserEffects, sampleRate);
 }
 
 // Picks the class a menu row stood for. Falls back to the bundle's first class
@@ -315,20 +336,7 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
             for (auto& point : channel->tapPoints) {
                 point.ring.prepare(pluginrack::kMaxTapDelaySamples + maxBlockFrames_ + 2);
             }
-            // EqEngine::prepare only stores the rate/size and recomputes cached
-            // coefficients; bands set via setChannelEq and the delay set via
-            // setChannelEqDelay survive a rate change.
-            channel->eq.prepare(currentSampleRate, maxBlockFrames_);
-            if (channel->effectProcessors.size() != channel->effects.size()) {
-                channel->effectProcessors.clear();
-                channel->effectProcessors.reserve(channel->effects.size());
-                for (const auto& effect : channel->effects) {
-                    pluginrack::DynamicsProcessor processor;
-                    processor.prepare(currentSampleRate);
-                    processor.setEffect(effect);
-                    channel->effectProcessors.push_back(std::move(processor));
-                }
-            }
+            prepareStripProcessors(*channel, prepareRate);
             for (auto& insert : channel->inserts) {
                 insert->sideChainBuffer.setSize(2, maxBlockFrames_, false, true, true);
                 insert->sideChainBuffer.clear();
@@ -343,17 +351,7 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
             output->preInsertTap.clear();
             output->postFaderTap.setSize(2, maxBlockFrames_, false, true, true);
             output->postFaderTap.clear();
-            output->eq.prepare(currentSampleRate, maxBlockFrames_);
-            if (output->effectProcessors.size() != output->effects.size()) {
-                output->effectProcessors.clear();
-                output->effectProcessors.reserve(output->effects.size());
-                for (const auto& effect : output->effects) {
-                    pluginrack::DynamicsProcessor processor;
-                    processor.prepare(currentSampleRate);
-                    processor.setEffect(effect);
-                    output->effectProcessors.push_back(std::move(processor));
-                }
-            }
+            prepareStripProcessors(*output, prepareRate);
             for (auto& insert : output->inserts) {
                 insert->sideChainBuffer.setSize(2, maxBlockFrames_, false, true, true);
                 insert->sideChainBuffer.clear();
@@ -369,17 +367,7 @@ void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs) {
             bus->postFaderTap.setSize(2, maxBlockFrames_, false, true, true);
             bus->postFaderTap.clear();
             bus->compensation.prepare(pluginrack::kMaxTapDelaySamples + maxBlockFrames_ + 2);
-            bus->eq.prepare(currentSampleRate, maxBlockFrames_);
-            if (bus->effectProcessors.size() != bus->effects.size()) {
-                bus->effectProcessors.clear();
-                bus->effectProcessors.reserve(bus->effects.size());
-                for (const auto& effect : bus->effects) {
-                    pluginrack::DynamicsProcessor processor;
-                    processor.prepare(currentSampleRate);
-                    processor.setEffect(effect);
-                    bus->effectProcessors.push_back(std::move(processor));
-                }
-            }
+            prepareStripProcessors(*bus, prepareRate);
             for (auto& insert : bus->inserts) {
                 insert->sideChainBuffer.setSize(2, maxBlockFrames_, false, true, true);
                 insert->sideChainBuffer.clear();
@@ -523,7 +511,6 @@ void AudioEngine::render(int frames) {
     // renderBlockFrames_, which only rises once the plugins are prepared for
     // the new device block.
     if (renderBlockFrames_ > 0 && frames > renderBlockFrames_) {
-        oversizedBlockCount_.fetch_add(1, std::memory_order_relaxed);
         pushSilenceToOutputsLocked(frames);
         recordRenderTelemetry(frames, elapsedNanos(),
                               pluginrack::AudioTelemetry::flagOversized, 0);
@@ -673,12 +660,23 @@ void AudioEngine::render(int frames) {
                     point->ring.push(block.getReadPointer(0), block.getReadPointer(1), count);
                 }
                 channel->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
-                for (const auto& item : channel->chain) {
+                for (std::size_t itemIndex = 0; itemIndex < channel->chain.size();
+                     ++itemIndex) {
+                    const auto& item = channel->chain[itemIndex];
                     if (item.type == pluginrack::ChainItemType::Eq) {
+                        // EQWindow's Pre mode reads the input side, so the pre
+                        // ring is written before process() and the post ring
+                        // after - the same rule as every other built-in tap.
+                        channel->eqTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         if (!channel->eqBypassed.get())
                             channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), count);
                         channel->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+                        // Detector taps: the pre ring is written immediately
+                        // before the effect runs so the panel's dot and GR
+                        // meter model the true input level; the post ring
+                        // keeps the output for anything that wants it.
+                        channel->dynamicsTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         auto effect = std::find_if(channel->effects.begin(), channel->effects.end(),
                                                    [id = item.id](const auto& value) { return value.id == id; });
                         if (effect != channel->effects.end()) {
@@ -689,14 +687,20 @@ void AudioEngine::render(int frames) {
                         }
                         channel->dynamicsTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else if (item.type == pluginrack::ChainItemType::Multiband) {
+                        channel->multibandTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         auto f = std::find_if(channel->multibandEffects.begin(), channel->multibandEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->multibandEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->multibandEffects.begin()); if (i < channel->multibandProcessors.size()) channel->multibandProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->multibandTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+                        channel->deEsserTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         auto f = std::find_if(channel->deEsserEffects.begin(), channel->deEsserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->deEsserEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->deEsserEffects.begin()); if (i < channel->deEsserProcessors.size()) channel->deEsserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->deEsserTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                     } else if (item.type == pluginrack::ChainItemType::Limiter) {
+                        // LimiterWindow derives its GR trace from inputDb minus
+                        // outputDb across both rings: without the pre write the
+                        // input side is stale and GR reads zero forever.
+                        channel->limiterTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                         auto f = std::find_if(channel->limiterEffects.begin(), channel->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                         if (f != channel->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-channel->limiterEffects.begin()); if (i < channel->limiterProcessors.size()) channel->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                         channel->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
@@ -748,22 +752,33 @@ void AudioEngine::render(int frames) {
                     // escaped one plugin must not reach the next one's state or
                     // the mix bus.
                     scrubRange(channel->buffer, start, count);
-                    if (auto* point = findTapPoint(
-                            *channel, pluginrack::Tap{pluginrack::Tap::Kind::Item, item.id})) {
-                        point->ring.push(block.getReadPointer(0), block.getReadPointer(1), count);
+                    // An Item tap resolves to the first chain row with its id
+                    // (Scene.h firstChainItemIndex), the same row
+                    // tapLatencySamples measures. Built-in families mint ids
+                    // independently, so a later row of another family can share
+                    // the id; pushing there too would leave the ring holding
+                    // that row's signal while the latency came from the first.
+                    if (static_cast<int>(itemIndex)
+                        == pluginrack::firstChainItemIndex(channel->chain, item.id)) {
+                        if (auto* point = findTapPoint(
+                                *channel, pluginrack::Tap{pluginrack::Tap::Kind::Item, item.id})) {
+                            point->ring.push(block.getReadPointer(0), block.getReadPointer(1), count);
+                        }
                     }
                 }
                 // Older scenes can have effects without their dynamics chain
                 // entries. Keep those effects live instead of showing a working
                 // but inaudible UI.
-                processEffectsMissingFromChain(channel->chain, channel->effects,
-                                               channel->effectProcessors,
-                                               block.getWritePointer(0), block.getWritePointer(1), count);
-                processNewMissing(channel->chain, channel->multibandEffects, channel->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count);
-                processNewMissing(channel->chain, channel->deEsserEffects, channel->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
-                processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
-processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
-                processNewMissing(channel->chain, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count);
+                processNewMissing(channel->chain, channel->effects,
+                                  channel->effectProcessors,
+                                  pluginrack::ChainItemType::Dynamics,
+                                  block.getWritePointer(0), block.getWritePointer(1), count,
+                                  &channel->dynamicsTap);
+                processNewMissing(channel->chain, channel->multibandEffects, channel->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count, &channel->multibandTap);
+                processNewMissing(channel->chain, channel->deEsserEffects, channel->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count, &channel->deEsserTap);
+                processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count, &channel->limiterTap);
+                processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count, &channel->feedbackTap);
+                processNewMissing(channel->chain, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count, nullptr);
                 channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(channel->buffer, start, count);
             }
@@ -804,7 +819,7 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
             const auto bus = std::find_if(buses.begin(), buses.end(),
                                           [&route](const auto& b) { return b != nullptr && b->id == route->busId; });
             if (bus != buses.end() && *bus != nullptr) {
-                maxBusLatency = juce::jmax(maxBusLatency, chainLatencySamples(**bus));
+                maxBusLatency = juce::jmax(maxBusLatency, chainLatencySamples(**bus, currentSampleRate));
             }
         }
         maxBusLatency = juce::jmin(maxBusLatency, pluginrack::kMaxTapDelaySamples);
@@ -839,8 +854,9 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
         if (sendGainL == 0.0f && sendGainR == 0.0f) continue;
         int delay = 0;
         if (compensate) {
-            delay = juce::jmax(0, chainLatencySamples(sourceChannel)
-                                      - tapLatencySamples(sourceChannel, send->tap));
+            delay = juce::jmax(0, chainLatencySamples(sourceChannel, currentSampleRate)
+                                       - tapLatencySamples(sourceChannel, send->tap,
+                                                            currentSampleRate));
         }
         const auto* source = compensate ? tapSource(sourceChannel, send->tap, delay)
                                         : &sourceChannel.postFaderTap;
@@ -870,10 +886,15 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
         strip->analyzerTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
         for (const auto& item : strip->chain) {
             if (item.type == pluginrack::ChainItemType::Eq) {
+                strip->eqTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 if (!strip->eqBypassed.get())
                     strip->eq.process(block.getWritePointer(0), block.getWritePointer(1), count);
                 strip->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
             } else if (item.type == pluginrack::ChainItemType::Dynamics) {
+                // Detector taps: pre ring written immediately before the
+                // effect (panel dot/GR model the true input), post ring
+                // after. Same rule as the channel chain above.
+                strip->dynamicsTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 auto effect = std::find_if(strip->effects.begin(), strip->effects.end(),
                                            [id = item.id](const auto& value) { return value.id == id; });
                 if (effect != strip->effects.end()) {
@@ -884,14 +905,17 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
                 }
                 strip->dynamicsTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
             } else if (item.type == pluginrack::ChainItemType::Multiband) {
+                strip->multibandTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 auto f = std::find_if(strip->multibandEffects.begin(), strip->multibandEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                 if (f != strip->multibandEffects.end()) { const auto i = static_cast<std::size_t>(f-strip->multibandEffects.begin()); if (i < strip->multibandProcessors.size()) strip->multibandProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                 strip->multibandTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
             } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+                strip->deEsserTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 auto f = std::find_if(strip->deEsserEffects.begin(), strip->deEsserEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                 if (f != strip->deEsserEffects.end()) { const auto i = static_cast<std::size_t>(f-strip->deEsserEffects.begin()); if (i < strip->deEsserProcessors.size()) strip->deEsserProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                 strip->deEsserTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
             } else if (item.type == pluginrack::ChainItemType::Limiter) {
+                strip->limiterTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
                 auto f = std::find_if(strip->limiterEffects.begin(), strip->limiterEffects.end(), [id=item.id](const auto& v){return v.id==id;});
                 if (f != strip->limiterEffects.end()) { const auto i = static_cast<std::size_t>(f-strip->limiterEffects.begin()); if (i < strip->limiterProcessors.size()) strip->limiterProcessors[i].process(block.getWritePointer(0), block.getWritePointer(1), count); }
                 strip->limiterTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
@@ -937,13 +961,15 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
             scrubRange(strip->buffer, start, count);
         }
         // Older scenes can have effects without their dynamics chain entries.
-        processEffectsMissingFromChain(strip->chain, strip->effects, strip->effectProcessors,
-                                       block.getWritePointer(0), block.getWritePointer(1), count);
-        processNewMissing(strip->chain, strip->multibandEffects, strip->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count);
-        processNewMissing(strip->chain, strip->deEsserEffects, strip->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count);
-        processNewMissing(strip->chain, strip->limiterEffects, strip->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count);
-        processNewMissing(strip->chain, strip->feedbackSuppressorEffects, strip->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count);
-        processNewMissing(strip->chain, strip->spectralDenoiserEffects, strip->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count);
+        processNewMissing(strip->chain, strip->effects, strip->effectProcessors,
+                          pluginrack::ChainItemType::Dynamics,
+                          block.getWritePointer(0), block.getWritePointer(1), count,
+                          &strip->dynamicsTap);
+        processNewMissing(strip->chain, strip->multibandEffects, strip->multibandProcessors, pluginrack::ChainItemType::Multiband, block.getWritePointer(0), block.getWritePointer(1), count, &strip->multibandTap);
+        processNewMissing(strip->chain, strip->deEsserEffects, strip->deEsserProcessors, pluginrack::ChainItemType::DeEsser, block.getWritePointer(0), block.getWritePointer(1), count, &strip->deEsserTap);
+        processNewMissing(strip->chain, strip->limiterEffects, strip->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count, &strip->limiterTap);
+        processNewMissing(strip->chain, strip->feedbackSuppressorEffects, strip->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count, &strip->feedbackTap);
+        processNewMissing(strip->chain, strip->spectralDenoiserEffects, strip->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count, nullptr);
         strip->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
         scrubRange(strip->buffer, start, count);
     };
@@ -1012,7 +1038,7 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
         const float sendGainR = decibelsToGain(route->sendGainDbR.get());
         if (sendGainL == 0.0f && sendGainR == 0.0f) continue;
         const int busDelay = compensate
-            ? juce::jmax(0, maxBusLatency - chainLatencySamples(**bus))
+            ? juce::jmax(0, maxBusLatency - chainLatencySamples(**bus, currentSampleRate))
             : 0;
         const juce::AudioBuffer<float>* source = &(*bus)->buffer;
         if (busDelay > 0) {
@@ -1042,8 +1068,9 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
         }
         auto& sourceChannel = **channelIt;
         const int delay = compensate
-            ? juce::jmax(0, chainLatencySamples(sourceChannel)
-                                  - tapLatencySamples(sourceChannel, route->tap)
+            ? juce::jmax(0, chainLatencySamples(sourceChannel, currentSampleRate)
+                                  - tapLatencySamples(sourceChannel, route->tap,
+                                                      currentSampleRate)
                                   + maxBusLatency)
             : 0;
         const auto* source = compensate ? tapSource(sourceChannel, route->tap, delay)
@@ -1093,9 +1120,6 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
         if (outGain != 1.0f) {
             output->buffer.applyGain(0, 0, frames, outGain);
             output->buffer.applyGain(1, 0, frames, outGain);
-        }
-        if (output->muted.get()) {
-            output->buffer.clear(0, frames);
         }
         if (output->postFaderTap.getNumSamples() >= frames) {
             output->postFaderTap.copyFrom(0, 0, output->buffer, 0, 0, frames);
@@ -1204,12 +1228,9 @@ processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->f
     std::uint16_t renderFlags = 0;
     if (partial) {
         renderFlags |= pluginrack::AudioTelemetry::flagPartialRender;
-        partialRenders_.fetch_add(1, std::memory_order_relaxed);
     }
     if (scrubbedThisBlock > 0) {
         renderFlags |= pluginrack::AudioTelemetry::flagNonFiniteScrub;
-        scrubbedSamples_.fetch_add(static_cast<std::uint64_t>(scrubbedThisBlock),
-                                   std::memory_order_relaxed);
     }
     recordRenderTelemetry(frames, elapsedNanos(), renderFlags, clockFillFrames);
 }
@@ -1371,11 +1392,15 @@ juce::String AudioEngine::removeChannel(std::uint32_t channelId) {
     busSends.erase(std::remove_if(busSends.begin(), busSends.end(),
                                   [channelId](const auto& send) { return send->channelId == channelId; }),
                    busSends.end());
+    clearSideChainRefsLocked(pluginrack::SideChainSource::Channel, channelId);
     pruneUnusedCaptures();
     return {};
 }
 
 void AudioEngine::moveChannel(std::uint32_t channelId, int targetIndex) {
+    // The startup opener holds Channel* across a device probe; reordering the
+    // vector would invalidate it mid-probe. Same guard as addChannel.
+    if (isOpeningDevices()) return;
     const juce::ScopedLock lock(stateLock);
     const auto it = std::find_if(channels.begin(), channels.end(),
                                  [channelId](const auto& channel) {
@@ -1391,6 +1416,9 @@ void AudioEngine::moveChannel(std::uint32_t channelId, int targetIndex) {
 }
 
 void AudioEngine::moveOutput(std::uint32_t outputId, int targetIndex) {
+    // moveOutput swaps unique_ptrs inside `outputs` while background opener
+    // threads may hold Output* across a device probe. Same guard as addOutput.
+    if (isOpeningDevices()) return;
     const juce::ScopedLock lock(stateLock);
     const auto it = std::find_if(outputs.begin(), outputs.end(),
                                  [outputId](const auto& output) {
@@ -1431,7 +1459,7 @@ void AudioEngine::addChannel() {
     channel->outputTapRing.prepare(pluginrack::kMaxTapDelaySamples + currentBufferSize + 2);
     // Preallocate the EQ so internal bands match the member mirror: a strip
     // created mid-session is usable the moment the UI un-bypasses it.
-    channel->eq.prepare(currentSampleRate, currentBufferSize);
+    channel->eq.prepare(currentSampleRate);
     channel->eq.setBands(channel->eqBands);
     channel->eq.setDelayMs(channel->eqDelayMs);
     channel->effectProcessors.reserve(channel->effects.size());
@@ -1475,7 +1503,7 @@ void AudioEngine::addOutput() {
         output->colourHue = theme::randomStripHue(rng);
     }
     output->chain = defaultChain();
-    output->eq.prepare(currentSampleRate, currentBufferSize);
+    output->eq.prepare(currentSampleRate);
     output->eq.setBands(output->eqBands);
     output->eq.setDelayMs(output->eqDelayMs);
     output->effectProcessors.reserve(output->effects.size());
@@ -1540,6 +1568,7 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
                 break;
             }
         }
+        clearSideChainRefsLocked(pluginrack::SideChainSource::Output, outputId);
         if (wasClock) {
             // The duplex callback left with this output: stop the channels from
             // reading capture pointers that no longer update.
@@ -1636,7 +1665,7 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
                 insert->pluginPath = loaded.path;
                 insert->pluginName = loaded.name;
                 insert->pluginUniqueId = resolvedUniqueId;
-                insert->latencySamples = insert->pluginHost.getLatencySamples();
+                insert->latencySamples.store(insert->pluginHost.getLatencySamples());
 
                 if (getChildProcessDsp()) {
                     juce::String childError;
@@ -1678,26 +1707,38 @@ void AudioEngine::addPluginAsync(std::uint32_t channelId, const juce::File& file
 }
 
 void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) {
-    const juce::ScopedLock lock(stateLock);
-    auto* channel = findChannel(channelId);
-    if (channel == nullptr) {
-        return;
-    }
-    auto& inserts = channel->inserts;
-    for (auto it = inserts.begin(); it != inserts.end(); ++it) {
-        if ((*it)->id == insertId) {
-            retiredInserts_.push_back(std::move(*it));
-            inserts.erase(it);
-            channel->chain.erase(std::remove_if(channel->chain.begin(), channel->chain.end(),
-                                                [insertId](const auto& item) {
-                                                    return item.type == pluginrack::ChainItemType::Insert &&
-                                                           item.id == insertId;
-                                                }),
-                                 channel->chain.end());
+    std::unique_ptr<InsertSlot> removed;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* channel = findChannel(channelId);
+        if (channel == nullptr) {
             return;
         }
-
+        auto& inserts = channel->inserts;
+        for (auto it = inserts.begin(); it != inserts.end(); ++it) {
+            if ((*it)->id == insertId) {
+                removed = std::move(*it);
+                inserts.erase(it);
+                channel->chain.erase(std::remove_if(channel->chain.begin(), channel->chain.end(),
+                                                    [insertId](const auto& item) {
+                                                        return item.type == pluginrack::ChainItemType::Insert &&
+                                                               item.id == insertId;
+                                                    }),
+                                     channel->chain.end());
+                break;
+            }
+        }
     }
+    if (removed == nullptr) {
+        return;
+    }
+    // stateLock is released and render() can no longer reach this insert.
+    // Stopping it here reaps the VST3 instance and its child process instead of
+    // keeping both alive until shutdown. closeEditor runs on
+    // this (message) thread, then the unique_ptr destroys the slot.
+    removed->pluginHost.closeFloatingEditor();
+    removed->pluginHost.stopChildHost();
+    removed->pluginHost.releaseResources();
 }
 
 void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item) {
@@ -1706,8 +1747,8 @@ void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::Ch
     if (channel == nullptr) return;
     channel->chain.erase(std::remove(channel->chain.begin(), channel->chain.end(), item),
                          channel->chain.end());
-    // A removed effect must stay silent through processEffectsMissingFromChain
-    // until the user picks it again (which unbypasses it).
+    // A removed effect must stay silent through processNewMissing until the
+    // user picks it again (which unbypasses it).
     if (item.type == pluginrack::ChainItemType::Eq) {
         channel->eqBypassed = true;
     } else if (item.type == pluginrack::ChainItemType::Dynamics) {
@@ -1718,6 +1759,33 @@ void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::Ch
              ++i)
             if (channel->effects[i].id == item.id)
                 channel->effectProcessors[i].setEffect(channel->effects[i]);
+    } else if (item.type == pluginrack::ChainItemType::Multiband) {
+        for (auto& effect : channel->multibandEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->multibandEffects.size()
+                                && i < channel->multibandProcessors.size();
+             ++i)
+            if (channel->multibandEffects[i].id == item.id)
+                channel->multibandProcessors[i].setEffect(
+                    channel->multibandEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+        for (auto& effect : channel->deEsserEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->deEsserEffects.size()
+                                && i < channel->deEsserProcessors.size();
+             ++i)
+            if (channel->deEsserEffects[i].id == item.id)
+                channel->deEsserProcessors[i].setEffect(
+                    channel->deEsserEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::Limiter) {
+        for (auto& effect : channel->limiterEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < channel->limiterEffects.size()
+                                && i < channel->limiterProcessors.size();
+             ++i)
+            if (channel->limiterEffects[i].id == item.id)
+                channel->limiterProcessors[i].setEffect(
+                    channel->limiterEffects[i]);
     } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
         for (auto& effect : channel->feedbackSuppressorEffects)
             if (effect.id == item.id) effect.bypassed = true;
@@ -1773,6 +1841,33 @@ void AudioEngine::removeOutputChainItem(std::uint32_t outputId, pluginrack::Chai
              ++i)
             if (output->effects[i].id == item.id)
                 output->effectProcessors[i].setEffect(output->effects[i]);
+    } else if (item.type == pluginrack::ChainItemType::Multiband) {
+        for (auto& effect : output->multibandEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->multibandEffects.size()
+                                && i < output->multibandProcessors.size();
+             ++i)
+            if (output->multibandEffects[i].id == item.id)
+                output->multibandProcessors[i].setEffect(
+                    output->multibandEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::DeEsser) {
+        for (auto& effect : output->deEsserEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->deEsserEffects.size()
+                                && i < output->deEsserProcessors.size();
+             ++i)
+            if (output->deEsserEffects[i].id == item.id)
+                output->deEsserProcessors[i].setEffect(
+                    output->deEsserEffects[i]);
+    } else if (item.type == pluginrack::ChainItemType::Limiter) {
+        for (auto& effect : output->limiterEffects)
+            if (effect.id == item.id) effect.bypassed = true;
+        for (std::size_t i = 0; i < output->limiterEffects.size()
+                                && i < output->limiterProcessors.size();
+             ++i)
+            if (output->limiterEffects[i].id == item.id)
+                output->limiterProcessors[i].setEffect(
+                    output->limiterEffects[i]);
     } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {
         for (auto& effect : output->feedbackSuppressorEffects)
             if (effect.id == item.id) effect.bypassed = true;
@@ -1819,7 +1914,7 @@ void AudioEngine::setPluginBypassed(std::uint32_t channelId, std::uint32_t inser
     if (auto* insert = findInsert(channelId, insertId)) {
         insert->bypassed = bypassed;
         insert->pluginHost.refreshLatencyCache();
-        insert->latencySamples = insert->pluginHost.getLatencySamples();
+        insert->latencySamples.store(insert->pluginHost.getLatencySamples());
     }
 }
 
@@ -1854,7 +1949,7 @@ std::uint32_t AudioEngine::addBus(const juce::String& name) {
         bus->colourHue = theme::randomStripHue(rng);
     }
     bus->chain = defaultChain();
-    bus->eq.prepare(currentSampleRate, currentBufferSize);
+    bus->eq.prepare(currentSampleRate);
     bus->eq.setBands(bus->eqBands);
     bus->eq.setDelayMs(bus->eqDelayMs);
     bus->effectProcessors.reserve(bus->effects.size());
@@ -1875,6 +1970,23 @@ std::uint32_t AudioEngine::addBus(const juce::String& name) {
     return id;
 }
 
+void AudioEngine::clearSideChainRefsLocked(pluginrack::SideChainSource source,
+                                           std::uint32_t id) {
+    // Inserts naming a removed strip fall back to no side chain instead of
+    // pointing at an id that no longer exists. Requires stateLock.
+    const auto clear = [source, id](auto& inserts) {
+        for (auto& insert : inserts) {
+            if (insert->sideChainSource == source && insert->sideChainSourceId == id) {
+                insert->sideChainSource = pluginrack::SideChainSource::None;
+                insert->sideChainSourceId = 0;
+            }
+        }
+    };
+    for (auto& channel : channels) clear(channel->inserts);
+    for (auto& output : outputs) clear(output->inserts);
+    for (auto& bus : buses) clear(bus->inserts);
+}
+
 void AudioEngine::removeBus(std::uint32_t busId) {
     const juce::ScopedLock lock(stateLock);
     buses.erase(std::remove_if(buses.begin(), buses.end(),
@@ -1886,20 +1998,7 @@ void AudioEngine::removeBus(std::uint32_t busId) {
     busRoutes.erase(std::remove_if(busRoutes.begin(), busRoutes.end(),
                                    [busId](const auto& route) { return route->busId == busId; }),
                     busRoutes.end());
-    // Inserts naming the removed bus fall back to no side chain instead of
-    // pointing at an id that no longer exists.
-    const auto clearBusSource = [busId](auto& inserts) {
-        for (auto& insert : inserts) {
-            if (insert->sideChainSource == pluginrack::SideChainSource::Bus &&
-                insert->sideChainSourceId == busId) {
-                insert->sideChainSource = pluginrack::SideChainSource::None;
-                insert->sideChainSourceId = 0;
-            }
-        }
-    };
-    for (auto& channel : channels) clearBusSource(channel->inserts);
-    for (auto& output : outputs) clearBusSource(output->inserts);
-    for (auto& bus : buses) clearBusSource(bus->inserts);
+    clearSideChainRefsLocked(pluginrack::SideChainSource::Bus, busId);
 }
 
 void AudioEngine::setBusSend(std::uint32_t channelId, std::uint32_t busId,
@@ -1957,34 +2056,49 @@ void AudioEngine::setBusRoute(std::uint32_t busId, std::uint32_t outputId,
     busRoutes.push_back(std::move(route));
 }
 
-int AudioEngine::tapLatencySamples(const Channel& channel, const pluginrack::Tap& tap) {
+int AudioEngine::tapLatencySamples(const Channel& channel, const pluginrack::Tap& tap,
+                                   double sampleRate) {
     using Kind = pluginrack::Tap::Kind;
     if (tap.kind == Kind::Input) {
         return 0;
     }
-    int total = 0;
-    for (const auto& item : channel.chain) {
-        if (item.type == pluginrack::ChainItemType::Insert) {
-            for (const auto& insert : channel.inserts) {
-                if (insert->id == item.id) {
-                    total += insert->latencySamples;
-                    break;
-                }
+    // Same per-item rules as chainLatencySamples (see chainItemLatencySamples
+    // in AudioEngine.h); only the items up to and including the tapped one
+    // have run by the time the tap fires. The tapped item resolves through the
+    // shared identity rule (Scene.h firstChainItemIndex), exactly as the render
+    // push does: ids are minted per family, so a later row in another family
+    // can share the id and must not be the one this latency is measured at.
+    if (tap.kind == Kind::Item) {
+        const int index = pluginrack::firstChainItemIndex(channel.chain, tap.itemId);
+        if (index >= 0) {
+            int total = 0;
+            for (int i = 0; i <= index; ++i) {
+                total += chainItemLatencySamples(
+                    channel, channel.chain[static_cast<std::size_t>(i)], sampleRate);
             }
-        } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
-            for (const auto& effect : channel.spectralDenoiserEffects) {
-                if (effect.id == item.id && !effect.bypassed) {
-                    total += pluginrack::kSpectralDenoiserLatencySamples;
-                    break;
-                }
-            }
-        }
-        if (tap.kind == Kind::Item && item.id == tap.itemId) {
             return total;
         }
     }
-    // Output, or an item that left the chain: the send falls back to the end.
-    return total;
+    // Output, or an item that left the chain: the send falls back to the end,
+    // where the unchained-fallback effects have run too.
+    return chainLatencySamples(channel, sampleRate);
+}
+
+int AudioEngine::stripLatencySamples(const Channel& strip) const {
+    const juce::ScopedLock lock(stateLock);
+    return chainLatencySamples(strip, currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
+}
+
+int AudioEngine::stripLatencySamples(const Output& strip) const {
+    const juce::ScopedLock lock(stateLock);
+    return chainLatencySamples(strip, currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
+}
+
+int AudioEngine::stripTapLatencySamples(const Channel& channel,
+                                        const pluginrack::Tap& tap) const {
+    const juce::ScopedLock lock(stateLock);
+    return tapLatencySamples(
+        channel, tap, currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
 }
 
 void AudioEngine::ensureTapPoint(Channel& channel, const pluginrack::Tap& tap) {
@@ -2026,19 +2140,6 @@ void AudioEngine::setBusSendTap(std::uint32_t channelId, std::uint32_t busId,
     for (auto& send : busSends) {
         if (send->channelId != channelId || send->busId != busId) continue;
         send->tap = tap;
-        if (auto* channel = findChannel(channelId)) {
-            ensureTapPoint(*channel, tap);
-        }
-        return;
-    }
-}
-
-void AudioEngine::setSendTap(std::uint32_t channelId, std::uint32_t outputId,
-                             pluginrack::Tap tap) {
-    const juce::ScopedLock lock(stateLock);
-    for (auto& route : routes) {
-        if (route->channelId != channelId || route->outputId != outputId) continue;
-        route->tap = tap;
         if (auto* channel = findChannel(channelId)) {
             ensureTapPoint(*channel, tap);
         }
@@ -2096,7 +2197,7 @@ bool AudioEngine::reloadInsert(std::uint32_t channelId, std::uint32_t insertId) 
         insert->failed = false;
         insert->failExitCode = 0;
         insert->faultRecorded = false;
-        insert->latencySamples = insert->pluginHost.getLatencySamples();
+        insert->latencySamples.store(insert->pluginHost.getLatencySamples());
     }
     return ok;
 }
@@ -2161,7 +2262,7 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
                 insert->pluginPath = loaded.path;
                 insert->pluginName = loaded.name;
                 insert->pluginUniqueId = resolvedUniqueId;
-                insert->latencySamples = insert->pluginHost.getLatencySamples();
+                insert->latencySamples.store(insert->pluginHost.getLatencySamples());
 
                 if (getChildProcessDsp()) {
                     juce::String childError;
@@ -2203,26 +2304,36 @@ void AudioEngine::addOutputPluginAsync(std::uint32_t outputId, const juce::File&
 }
 
 void AudioEngine::removeOutputPlugin(std::uint32_t outputId, std::uint32_t insertId) {
-    const juce::ScopedLock lock(stateLock);
-    auto* output = findOutput(outputId);
-    if (output == nullptr) {
-        return;
-    }
-    auto& inserts = output->inserts;
-    for (auto it = inserts.begin(); it != inserts.end(); ++it) {
-        if ((*it)->id == insertId) {
-            retiredInserts_.push_back(std::move(*it));
-            inserts.erase(it);
-            output->chain.erase(std::remove_if(output->chain.begin(), output->chain.end(),
-                                               [insertId](const auto& item) {
-                                                   return item.type == pluginrack::ChainItemType::Insert &&
-                                                          item.id == insertId;
-                                               }),
-                                output->chain.end());
+    std::unique_ptr<InsertSlot> removed;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* output = findOutput(outputId);
+        if (output == nullptr) {
             return;
         }
-
+        auto& inserts = output->inserts;
+        for (auto it = inserts.begin(); it != inserts.end(); ++it) {
+            if ((*it)->id == insertId) {
+                removed = std::move(*it);
+                inserts.erase(it);
+                output->chain.erase(std::remove_if(output->chain.begin(), output->chain.end(),
+                                                   [insertId](const auto& item) {
+                                                       return item.type == pluginrack::ChainItemType::Insert &&
+                                                              item.id == insertId;
+                                                   }),
+                                    output->chain.end());
+                break;
+            }
+        }
     }
+    if (removed == nullptr) {
+        return;
+    }
+    // Reaped outside stateLock exactly like the channel path: unlinking the
+    // insert under the lock is what makes it safe to stop here.
+    removed->pluginHost.closeFloatingEditor();
+    removed->pluginHost.stopChildHost();
+    removed->pluginHost.releaseResources();
 }
 
 void AudioEngine::moveOutputChainItem(std::uint32_t outputId, pluginrack::ChainItem item,
@@ -2238,7 +2349,7 @@ void AudioEngine::setOutputPluginBypassed(std::uint32_t outputId, std::uint32_t 
     if (auto* insert = findOutputInsert(outputId, insertId)) {
         insert->bypassed = bypassed;
         insert->pluginHost.refreshLatencyCache();
-        insert->latencySamples = insert->pluginHost.getLatencySamples();
+        insert->latencySamples.store(insert->pluginHost.getLatencySamples());
     }
 }
 
@@ -2646,8 +2757,8 @@ void AudioEngine::setOutputEffects(
     }
 }
 
-template <typename Effect, typename Processor, typename Strip>
-void syncNewEffects(Strip* strip, const std::vector<Effect>& effects,
+template <typename Effect, typename Processor>
+void syncNewEffects(const std::vector<Effect>& effects,
                     std::vector<Effect>& stored, std::vector<Processor>& processors,
                     double rate) {
     stored = effects;
@@ -2663,68 +2774,67 @@ void syncNewEffects(Strip* strip, const std::vector<Effect>& effects,
         processor.setEffect(effect);
         processors.push_back(std::move(processor));
     }
-    (void)strip;
 }
 
 void AudioEngine::setChannelMultiband(std::uint32_t channelId, const std::vector<pluginrack::MultibandEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
-    syncNewEffects(channel, effects, channel->multibandEffects, channel->multibandProcessors, currentSampleRate);
+    syncNewEffects(effects, channel->multibandEffects, channel->multibandProcessors, currentSampleRate);
 }
 void AudioEngine::setOutputMultiband(std::uint32_t outputId, const std::vector<pluginrack::MultibandEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
-    syncNewEffects(output, effects, output->multibandEffects, output->multibandProcessors, currentSampleRate);
+    syncNewEffects(effects, output->multibandEffects, output->multibandProcessors, currentSampleRate);
 }
 void AudioEngine::setChannelDeEssers(std::uint32_t channelId, const std::vector<pluginrack::DeEsserEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
-    syncNewEffects(channel, effects, channel->deEsserEffects, channel->deEsserProcessors, currentSampleRate);
+    syncNewEffects(effects, channel->deEsserEffects, channel->deEsserProcessors, currentSampleRate);
 }
 void AudioEngine::setOutputDeEssers(std::uint32_t outputId, const std::vector<pluginrack::DeEsserEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
-    syncNewEffects(output, effects, output->deEsserEffects, output->deEsserProcessors, currentSampleRate);
+    syncNewEffects(effects, output->deEsserEffects, output->deEsserProcessors, currentSampleRate);
 }
 void AudioEngine::setChannelLimiters(std::uint32_t channelId, const std::vector<pluginrack::LimiterEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
-    syncNewEffects(channel, effects, channel->limiterEffects, channel->limiterProcessors, currentSampleRate);
+    syncNewEffects(effects, channel->limiterEffects, channel->limiterProcessors, currentSampleRate);
 }
 void AudioEngine::setOutputLimiters(std::uint32_t outputId, const std::vector<pluginrack::LimiterEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
-    syncNewEffects(output, effects, output->limiterEffects, output->limiterProcessors, currentSampleRate);
+    syncNewEffects(effects, output->limiterEffects, output->limiterProcessors, currentSampleRate);
 }
 void AudioEngine::setChannelFeedbackSuppressors(std::uint32_t channelId, const std::vector<pluginrack::FeedbackSuppressorEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
-    syncNewEffects(channel, effects, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, currentSampleRate);
+    syncNewEffects(effects, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, currentSampleRate);
 }
 void AudioEngine::setOutputFeedbackSuppressors(std::uint32_t outputId, const std::vector<pluginrack::FeedbackSuppressorEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
-    syncNewEffects(output, effects, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, currentSampleRate);
+    syncNewEffects(effects, output->feedbackSuppressorEffects, output->feedbackSuppressorProcessors, currentSampleRate);
 }
 void AudioEngine::setChannelSpectralDenoisers(std::uint32_t channelId, const std::vector<pluginrack::SpectralDenoiserEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* channel = findChannel(channelId);
     if (channel == nullptr) return;
-    syncNewEffects(channel, effects, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, currentSampleRate);
+    syncNewEffects(effects, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, currentSampleRate);
 }
 void AudioEngine::setOutputSpectralDenoisers(std::uint32_t outputId, const std::vector<pluginrack::SpectralDenoiserEffect>& effects) {
     const juce::ScopedLock lock(stateLock);
     auto* output = findOutput(outputId);
     if (output == nullptr) return;
-    syncNewEffects(output, effects, output->spectralDenoiserEffects, output->spectralDenoiserProcessors, currentSampleRate);
+    syncNewEffects(effects, output->spectralDenoiserEffects, output->spectralDenoiserProcessors, currentSampleRate);
 }
 
 namespace {
@@ -2980,8 +3090,9 @@ pluginrack::Scene AudioEngine::makeScene(bool includePluginState) const {
     // only waits a few yields for stateLock before it pushes silence. Record
     // the hosts under the lock and ask them for their state after it is
     // released. Safe because makeScene and every structural edit run on the
-    // message thread, and removePlugin parks retired slots instead of freeing
-    // them, so the recorded hosts stay alive until the capture finishes.
+    // message thread, so no slot can be reaped between the record and the
+    // capture: removePlugin frees the removed slot once it has released the
+    // lock, but it cannot start until this message-thread call returns.
     std::vector<std::vector<const PluginHost*>> channelHosts;
     std::vector<std::vector<const PluginHost*>> outputHosts;
     std::vector<std::vector<const PluginHost*>> busHosts;
@@ -3100,6 +3211,11 @@ std::uint64_t AudioEngine::getPluginEditRevision() const {
             revision += insert->pluginHost.getParameterRevision();
     for (const auto& output : outputs)
         for (const auto& insert : output->inserts)
+            revision += insert->pluginHost.getParameterRevision();
+    // Buses host inserts too; leaving them out made the autosave trigger blind
+    // to edits on bus plugins.
+    for (const auto& bus : buses)
+        for (const auto& insert : bus->inserts)
             revision += insert->pluginHost.getParameterRevision();
     return revision;
 }
@@ -3227,7 +3343,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         channel->feedbackSuppressorRtaOffsetDb = savedChannel.feedbackSuppressorRtaOffsetDb;
         channel->feedbackSuppressorRtaWeighting = savedChannel.feedbackSuppressorRtaWeighting;
         channel->eqBypassed = !savedChannel.eqEnabled;
-        channel->eq.prepare(sampleRate, bufferSize);
+        channel->eq.prepare(sampleRate);
         channel->eq.setBands(channel->eqBands);
         channel->eq.setDelayMs(channel->eqDelayMs);
         channel->eq.setPhaseFlip(channel->eqPhaseFlip.get());
@@ -3244,7 +3360,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : channel->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->spectralDenoiserProcessors.push_back(std::move(pr)); }
         // An empty saved chain is a real empty state (no effects loaded).
         // Scenes without per-strip ordering predate this field; their effects
-        // still run via processEffectsMissingFromChain, so a missing chain
+        // still run via processNewMissing, so a missing chain
         // degrades to the same audible behaviour without synthesising rows.
         channel->chain = savedChannel.chain;
         channel->effectProcessors.clear();
@@ -3327,7 +3443,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->feedbackSuppressorRtaOffsetDb = savedOutput.feedbackSuppressorRtaOffsetDb;
         output->feedbackSuppressorRtaWeighting = savedOutput.feedbackSuppressorRtaWeighting;
         output->eqBypassed = !savedOutput.eqEnabled;
-        output->eq.prepare(sampleRate, bufferSize);
+        output->eq.prepare(sampleRate);
         output->eq.setBands(output->eqBands);
         output->eq.setDelayMs(output->eqDelayMs);
         output->eq.setPhaseFlip(output->eqPhaseFlip.get());
@@ -3432,7 +3548,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         bus->feedbackSuppressorRtaOffsetDb = savedBus.feedbackSuppressorRtaOffsetDb;
         bus->feedbackSuppressorRtaWeighting = savedBus.feedbackSuppressorRtaWeighting;
         bus->eqBypassed = !savedBus.eqEnabled;
-        bus->eq.prepare(sampleRate, bufferSize);
+        bus->eq.prepare(sampleRate);
         bus->eq.setBands(bus->eqBands);
         bus->eq.setDelayMs(bus->eqDelayMs);
         bus->eq.setPhaseFlip(bus->eqPhaseFlip.get());
@@ -3559,7 +3675,7 @@ bool AudioEngine::loadNextPendingInsert() {
         // fallback for an insert that never loaded.
         load.insert->savedPluginState.clear();
     }
-    load.insert->latencySamples = load.insert->pluginHost.getLatencySamples();
+    load.insert->latencySamples.store(load.insert->pluginHost.getLatencySamples());
     if (getChildProcessDsp()) {
         juce::String childError;
         const bool ok = load.insert->pluginHost.loadChildHost(
@@ -3613,19 +3729,38 @@ juce::String AudioEngine::commitSceneRestore() {
         // the current maximum before they become visible.
         const int restoreFrames = juce::jmax(1, maxBlockFrames_);
         const double restoreRate = currentSampleRate > 0.0 ? currentSampleRate : job.sampleRate;
+        // Mirror prepareToPlayImpl's sizing exactly: render() indexes the tap
+        // and side-chain buffers of every strip type by the live block size,
+        // and only the bus loop used to re-size them here.
         for (auto& channel : job.channels) {
             channel->buffer.setSize(2, restoreFrames, false, false, false);
-            channel->eq.prepare(restoreRate, restoreFrames);
+            channel->preInsertTap.setSize(2, restoreFrames, false, false, false);
+            channel->postFaderTap.setSize(2, restoreFrames, false, false, false);
+            // Same re-prepare as prepareToPlayImpl: a clock reopen changes the
+            // rate, and every built-in family caches tables for it.
+            prepareStripProcessors(*channel, restoreRate);
+            for (auto& insert : channel->inserts) {
+                insert->sideChainBuffer.setSize(2, restoreFrames, false, false, false);
+            }
         }
         for (auto& output : job.outputs) {
             output->buffer.setSize(2, restoreFrames, false, false, false);
-            output->eq.prepare(restoreRate, restoreFrames);
+            output->preInsertTap.setSize(2, restoreFrames, false, false, false);
+            output->postFaderTap.setSize(2, restoreFrames, false, false, false);
+            prepareStripProcessors(*output, restoreRate);
+            for (auto& insert : output->inserts) {
+                insert->sideChainBuffer.setSize(2, restoreFrames, false, false, false);
+            }
         }
         for (auto& bus : job.buses) {
             bus->buffer.setSize(2, restoreFrames, false, false, false);
             bus->preInsertTap.setSize(2, restoreFrames, false, false, false);
             bus->postFaderTap.setSize(2, restoreFrames, false, false, false);
-            bus->eq.prepare(restoreRate, restoreFrames);
+            bus->compensation.prepare(pluginrack::kMaxTapDelaySamples + restoreFrames + 2);
+            prepareStripProcessors(*bus, restoreRate);
+            for (auto& insert : bus->inserts) {
+                insert->sideChainBuffer.setSize(2, restoreFrames, false, false, false);
+            }
         }
         oldChannels = std::move(channels);
         oldOutputs = std::move(outputs);
@@ -3855,7 +3990,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         // exact block comparison rejects every capture on the next pass and
         // reopens a device this process already holds open.
         if (it != inputCaptures_.end() && it->second.requestedChannels >= needed
-            && it->second.requestedBufferSize == requestedInputBufferSize_
+            && it->second.requestedBufferSize == requestedInputBufferSize_.load()
             && it->second.renderBlockFrames >= capacityReserveFrames) {
             reuse = it->second.capture;
         }
@@ -3920,11 +4055,11 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
     // (480 one time, 600 the next) and the read delay moved with it.
     const auto cachedCap = cachedCapabilities(deviceName);
     int bufferRequest =
-        pluginrack::inputBufferRequest(requestedInputBufferSize_, renderBlockFrames);
+        pluginrack::inputBufferRequest(requestedInputBufferSize_.load(), renderBlockFrames);
     // Cache-first hint: with the size on Auto, reuse the buffer this endpoint
     // negotiated last time. A refused size still falls through to the live
     // probe, so a stale entry can never wedge a device closed.
-    if (requestedInputBufferSize_ == 0) {
+    if (requestedInputBufferSize_.load() == 0) {
         if (cachedCap.has_value() && cachedCap->negotiatedBuffer > 0) {
             bufferRequest = cachedCap->negotiatedBuffer;
         }
@@ -3936,7 +4071,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
                                  useLowLatencyInput ? 1 : 2,
                                  inputPreferExclusive,
                                  capacityReserveFrames);
-    if (openErr.isNotEmpty() && requestedInputBufferSize_ == 0 && bufferRequest > 0) {
+    if (openErr.isNotEmpty() && requestedInputBufferSize_.load() == 0 && bufferRequest > 0) {
         // This device will not follow the engine's period. Its own default is
         // still valid, just less predictable; better than a silent strip.
         openErr = capture->open(isSystemDefaultName(deviceName) ? juce::String() : deviceName,
@@ -3976,7 +4111,7 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
             }
         }
         inputCaptures_[deviceName] = SharedInputCapture{capture, needed,
-                                                        requestedInputBufferSize_,
+                                                        requestedInputBufferSize_.load(),
                                                         capacityReserveFrames};
         pruneUnusedCaptures();
         // Configure before releasing stateLock. The channels above already
@@ -4115,28 +4250,36 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
                                               double engineRate) {
     AudioEngine::Output* out = findOutput(outputId);
     // findOutput also resolves buses; only a physical output can take a device.
-    if (out == nullptr || std::none_of(outputs.begin(), outputs.end(),
-                                       [outputId](const auto& o) { return o->id == outputId; })) {
-        return "The output no longer exists.";
-    }
-
+    // The physical-existence scan reads `outputs`, which moveOutput reorders on
+    // the message thread, so it has to run under stateLock like everything
+    // else this background opener touches.
+    bool missing = (out == nullptr);
     bool isClock = false;
     bool sharesClockInput = false;
     int renderBlockFrames = 0;
     {
         const juce::ScopedLock sl(stateLock);
-        // The startup opener can open several outputs at once. Read the clock
-        // role under the same lock that the clock hand-off updates it with;
-        // otherwise the first output's negotiation can race another worker's
-        // role check.
-        isClock = (clockOutputId == outputId) || (clockOutputId == 0);
-        renderBlockFrames = juce::jmax(currentBufferSize, kProbeRenderBlockFrames);
-        if (isClock) {
-            sharesClockInput = std::any_of(
-                channels.begin(), channels.end(), [&deviceName](const auto& channel) {
-                    return channel->inputDeviceName == deviceName;
-                });
+        if (!missing) {
+            missing = std::none_of(outputs.begin(), outputs.end(),
+                                   [outputId](const auto& o) { return o->id == outputId; });
         }
+        if (!missing) {
+            // The startup opener can open several outputs at once. Read the clock
+            // role under the same lock that the clock hand-off updates it with;
+            // otherwise the first output's negotiation can race another worker's
+            // role check.
+            isClock = (clockOutputId == outputId) || (clockOutputId == 0);
+            renderBlockFrames = juce::jmax(currentBufferSize, kProbeRenderBlockFrames);
+            if (isClock) {
+                sharesClockInput = std::any_of(
+                    channels.begin(), channels.end(), [&deviceName](const auto& channel) {
+                        return channel->inputDeviceName == deviceName;
+                    });
+            }
+        }
+    }
+    if (missing) {
+        return "The output no longer exists.";
     }
 
     if (isSilentDeviceName(deviceName)) {
@@ -4456,8 +4599,8 @@ juce::String AudioEngine::setDeviceBufferSize(int size) {
 
 juce::String AudioEngine::setInputBufferSize(int size) {
     if (isOpeningDevices()) return "Audio devices are still starting up. Try again in a moment.";
-    const int previous = requestedInputBufferSize_;
-    requestedInputBufferSize_ = size;
+    const int previous = requestedInputBufferSize_.load();
+    requestedInputBufferSize_.store(size);
     juce::String firstError;
     for (auto& channel : channels) {
         if (channel->inputDeviceName.isNotEmpty() &&
@@ -4470,7 +4613,7 @@ juce::String AudioEngine::setInputBufferSize(int size) {
     if (firstError.isNotEmpty() && previous != size) {
         // The device refused: put every capture back on the old size so the
         // setting that was working stays in effect.
-        requestedInputBufferSize_ = previous;
+        requestedInputBufferSize_.store(previous);
         for (auto& channel : channels) {
             if (channel->inputDeviceName.isNotEmpty() &&
                 !isSilentDeviceName(channel->inputDeviceName)) {
@@ -4851,11 +4994,6 @@ void AudioEngine::recordDeviceCapabilities(const juce::String& endpoint, bool in
     }
 }
 
-juce::String AudioEngine::getDeviceCacheJson() const {
-    const juce::ScopedLock lock(deviceCacheLock_);
-    return deviceCache_.toJson();
-}
-
 juce::String AudioEngine::getClockDescription() const {
     // Called from the UI timer while the device opener may be rewriting these
     // strings, so every read here happens under the lock.
@@ -5110,6 +5248,29 @@ int spectralDenoiserLatencySamples(const Strip& strip) {
     }
     return samples;
 }
+// Limiter and EQ contributions follow the same rules as
+// AudioEngine::chainItemLatencySamples so the budget view and the render
+// compensation can never disagree (plan Task 9).
+template <typename Strip>
+int stripLimiterLatencySamples(const Strip& strip, double sampleRate) {
+    int samples = 0;
+    for (const auto& effect : strip.limiterEffects) {
+        if (!effect.bypassed) samples += pluginrack::limiterLatencySamples(effect, sampleRate);
+    }
+    return samples;
+}
+template <typename Strip>
+int stripEqLatencySamples(const Strip& strip, double sampleRate) {
+    // The EQ delay line only runs from the Eq chain row (render's Eq branch),
+    // so a strip whose Eq has no row adds no delay even with eqDelayMs set.
+    const bool inChain = std::any_of(strip.chain.begin(), strip.chain.end(),
+                                     [](const pluginrack::ChainItem& item) {
+                                         return item.type == pluginrack::ChainItemType::Eq;
+                                     });
+    if (!inChain) return 0;
+    return pluginrack::eqLatencySamples(true, strip.eqBypassed.get(), strip.eqDelayMs,
+                                        sampleRate);
+}
 } // namespace
 
 AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
@@ -5152,15 +5313,17 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         if (inputBufferSize <= 0) inputBufferSize = currentBufferSize;
     }
 
+    const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
     int pluginSamples = 0;
     int maxInsertSamples = 0;
     std::uint32_t maxInsertId = 0;
     juce::String maxInsertName;
     if (inputChannel != nullptr && inputChannel->input != nullptr) {
         for (const auto& insert : inputChannel->inserts) {
-            pluginSamples += insert->latencySamples;
-            if (insert->latencySamples > maxInsertSamples) {
-                maxInsertSamples = insert->latencySamples;
+            const int insertSamples = insert->latencySamples.load();
+            pluginSamples += insertSamples;
+            if (insertSamples > maxInsertSamples) {
+                maxInsertSamples = insertSamples;
                 maxInsertId = insert->id;
                 maxInsertName = insert->pluginName;
             }
@@ -5172,6 +5335,8 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
             maxInsertId = 0xFFFFFFFFu;
             maxInsertName = "Spectral Denoiser";
         }
+        pluginSamples += stripLimiterLatencySamples(*inputChannel, sampleRate)
+                       + stripEqLatencySamples(*inputChannel, sampleRate);
     }
 
     int outputDeviceSamples = 0;
@@ -5189,9 +5354,10 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                 clockTargetFillFrames = output->output->getTargetFillFrames();
                 report.clockDeviceType = output->outputDeviceType;
                 for (const auto& insert : output->inserts) {
-                    pluginSamples += insert->latencySamples;
-                    if (insert->latencySamples > maxInsertSamples) {
-                        maxInsertSamples = insert->latencySamples;
+                    const int insertSamples = insert->latencySamples.load();
+                    pluginSamples += insertSamples;
+                    if (insertSamples > maxInsertSamples) {
+                        maxInsertSamples = insertSamples;
                         maxInsertId = insert->id;
                         maxInsertName = insert->pluginName;
                     }
@@ -5203,13 +5369,14 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
                     maxInsertId = 0xFFFFFFFFu;
                     maxInsertName = "Spectral Denoiser";
                 }
+                pluginSamples += stripLimiterLatencySamples(*output, sampleRate)
+                               + stripEqLatencySamples(*output, sampleRate);
                 valid = true;
                 break;
             }
         }
     }
 
-    const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 48000.0;
     // The capture read delay is part of the input device figure (see
     // DeviceStream); the output FIFO's actual fill is reported separately.
     const double fifoMs = outputFillFrames / sampleRate * 1000.0;
@@ -5249,7 +5416,6 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
             break;
         }
     }
-    report.requestedInputBufferSize = requestedInputBufferSize_;
     report.requestedOutputBufferSize = requestedOutputBufferSize_;
     report.inputBufferSize = inputBufferSize;
     report.outputBufferSize = outputBufferSize;
@@ -5271,12 +5437,9 @@ AudioEngine::LatencyReport AudioEngine::getLatencyReport() const {
         }
     }
     report.valid = valid;
-    report.approximate = true;
     report.measuredValid = latencyMeasuredValid_.load(std::memory_order_relaxed);
     report.measuredMs = report.measuredValid ? getMeasuredLatencyMs() : 0.0;
     report.measureFailed = latencyMeasureFailed_.load(std::memory_order_relaxed);
-    report.measuredAttempted = report.measuredValid || report.measureFailed
-        || latencyMeasureActive_.load(std::memory_order_relaxed);
     // What the model cannot explain: the part of the physical round trip that
     // is neither our queues nor the plugin chain. A large positive value is
     // the signature of hidden buffering (rate conversion, a virtual cable, a
@@ -5298,8 +5461,6 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
             diagnostics.inputOverruns += capture->getInputOverruns();
             diagnostics.inputUnderruns += capture->getInputUnderruns();
             diagnostics.inputDroppedFrames += capture->getInputDroppedFrames();
-            diagnostics.inputOccupancy = juce::jmax(diagnostics.inputOccupancy,
-                                                    capture->getOccupancy());
         }
     }
 
@@ -5308,8 +5469,6 @@ AudioEngine::FifoDiagnostics AudioEngine::getFifoDiagnostics() const {
             diagnostics.outputUnderruns += output->output->getOutputUnderruns();
             diagnostics.outputDroppedFrames += output->output->getOutputDroppedFrames();
             diagnostics.outputLowWatermarks += output->output->getOutputLowWatermarks();
-            diagnostics.outputOccupancy = juce::jmax(diagnostics.outputOccupancy,
-                                                     output->output->getOccupancy());
         }
     }
     diagnostics.renderMisses = renderMisses_.load(std::memory_order_relaxed);
@@ -5387,11 +5546,12 @@ AudioEngine::HighestLatencyInsert AudioEngine::getHighestLatencyInsert(std::uint
     if (ch == nullptr) return result;
     int maxLat = 0;
     for (const auto& ins : ch->inserts) {
-        if (ins->latencySamples > maxLat) {
-            maxLat = ins->latencySamples;
+        const int insLat = ins->latencySamples.load();
+        if (insLat > maxLat) {
+            maxLat = insLat;
             result.insertId = ins->id;
             result.name = ins->pluginName;
-            result.latencySamples = ins->latencySamples;
+            result.latencySamples = insLat;
         }
     }
     return result;
@@ -5535,7 +5695,7 @@ bool AudioEngine::isClockOutput(std::uint32_t outputId) const {
 
 AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     DeviceSettings settings;
-    settings.inputBuffer = requestedInputBufferSize_;
+    settings.inputBuffer = requestedInputBufferSize_.load();
     settings.outputBuffer = requestedOutputBufferSize_;
     settings.latencyTuningOptIn = latencyTuningOptIn_.load();
     settings.lowLatencyInput = lowLatencyInput_.load();
@@ -5549,14 +5709,12 @@ AudioEngine::DeviceSettings AudioEngine::getDeviceSettings() const {
     settings.slicedRender = slicedRender_.load();
     settings.nonFiniteScrub = nonFiniteScrub_.load();
     settings.healthReload = healthReload_.load();
-    settings.ladderRecovery = ladderRecovery_.load();
     settings.healthYellowUnderrunsPerMinute =
         healthYellowUnderrunsPerMinute_.load();
     settings.healthRedUnderrunsPerMinute =
         healthRedUnderrunsPerMinute_.load();
     settings.healthPinnedToEdgeMs = healthPinnedToEdgeMs_.load();
     settings.rackThumbnailFps = rackThumbnailFps_.load();
-    settings.rackPreviewMode = rackPreviewMode_;
     settings.watchedDevices = getWatchedDevices();
     return settings;
 }
@@ -5567,10 +5725,6 @@ void AudioEngine::setAutoReloadDevices(bool enabled) {
 
 void AudioEngine::setRackThumbnailFps(int fps) {
     rackThumbnailFps_.store(juce::jlimit(1, 60, fps));
-}
-
-void AudioEngine::setRackPreviewMode(pluginrack::RackPreviewMode mode) {
-    rackPreviewMode_ = mode;
 }
 
 void AudioEngine::setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices) {
@@ -5723,7 +5877,7 @@ std::vector<juce::String> AudioEngine::getAssignedInputDeviceNames() const {
 }
 
 void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
-    requestedInputBufferSize_ = settings.inputBuffer;
+    requestedInputBufferSize_.store(settings.inputBuffer);
     requestedOutputBufferSize_ = settings.outputBuffer;
     latencyTuningOptIn_.store(settings.latencyTuningOptIn);
     lowLatencyInput_.store(settings.latencyTuningOptIn && settings.lowLatencyInput);
@@ -5739,13 +5893,11 @@ void AudioEngine::applySettingsValues(const DeviceSettings& settings) {
     slicedRender_.store(settings.slicedRender);
     nonFiniteScrub_.store(settings.nonFiniteScrub);
     healthReload_.store(settings.healthReload);
-    ladderRecovery_.store(settings.ladderRecovery);
     healthYellowUnderrunsPerMinute_.store(settings.healthYellowUnderrunsPerMinute);
     healthRedUnderrunsPerMinute_.store(settings.healthRedUnderrunsPerMinute);
     healthPinnedToEdgeMs_.store(settings.healthPinnedToEdgeMs);
     applyHealthThresholdsToStreams();
     if (settings.rackThumbnailFps > 0) rackThumbnailFps_.store(settings.rackThumbnailFps);
-    rackPreviewMode_ = settings.rackPreviewMode;
     // Buffer and stream-mode changes replace every device, so a measurement
     // taken against the old configuration is no longer true.
     resetLatencyMeasurement();
@@ -5778,17 +5930,6 @@ void AudioEngine::setLatencyOption(LatencyOption option, bool enabled) {
                                || settings.minimalClockFifo
                                || settings.fullDuplexInput;
     applyDeviceSettings(settings);
-}
-
-bool AudioEngine::getLatencyOption(LatencyOption option) const {
-    switch (option) {
-        case LatencyOption::LowLatencyInput:   return lowLatencyInput_.load();
-        case LatencyOption::PreferExclusive:   return preferExclusive_.load();
-        case LatencyOption::LowLatencyOutputs: return lowLatencyOutputs_.load();
-        case LatencyOption::MinimalClockFifo:  return minimalClockFifo_.load();
-        case LatencyOption::FullDuplexInput:   return fullDuplexInput_.load();
-    }
-    return false;
 }
 
 void AudioEngine::reloadAllDevicesAsync() {
@@ -6047,7 +6188,6 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
             const auto retryError = setOutputDeviceImpl(outputsWanted.front().id,
                                                         outputsWanted.front().name, openRate);
             endDeviceOpen(status);
-            deviceOpenProgress_.fetch_add(1);
             juce::Logger::writeToLog("audio: clock retry " + juce::String(attempt)
                                      + (retryError.isEmpty() ? juce::String(" ok")
                                                              : " failed: " + retryError));
@@ -6100,6 +6240,12 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     }
 
     if (serializeForClock && !shouldExit()) {
+        // The clock just opened and may have negotiated a new rate; inputs
+        // joined after it must follow that rate, not the pre-open snapshot.
+        {
+            const juce::ScopedLock sl(stateLock);
+            openRate = currentSampleRate;
+        }
         launchInputs(openRate, forceInputs, inputResults, inputHelpers);
     }
     for (auto& helper : inputHelpers) helper.join();

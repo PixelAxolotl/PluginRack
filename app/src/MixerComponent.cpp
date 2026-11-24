@@ -250,13 +250,14 @@ void MixerComponent::OutputStrip::openMultibandWindow() {
     };
     multibandWindow->onClose = [safe] {
         if (safe != nullptr && safe->multibandWindow != nullptr) {
+            safe->output.multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
             auto* w = safe->multibandWindow;
             safe->multibandWindow = nullptr;
             delete w;
         }
     };
-    multibandWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) {
-        if (safe != nullptr) safe->output.multibandTap.snapshot(true, l, r, n);
+    multibandWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.multibandTap.snapshot(post, l, r, n);
     };
     output.multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
@@ -292,13 +293,14 @@ void MixerComponent::OutputStrip::openDeEsserWindow() {
     };
     deEsserWindow->onClose = [safe] {
         if (safe != nullptr && safe->deEsserWindow != nullptr) {
+            safe->output.deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
             auto* w = safe->deEsserWindow;
             safe->deEsserWindow = nullptr;
             delete w;
         }
     };
-    deEsserWindow->pullAnalyzerTap = [safe](float* l, float* r, int n) {
-        if (safe != nullptr) safe->output.deEsserTap.snapshot(true, l, r, n);
+    deEsserWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.deEsserTap.snapshot(post, l, r, n);
     };
     output.deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
@@ -326,13 +328,14 @@ void MixerComponent::OutputStrip::openLimiterWindow() {
         });
     limiterWindow->onClose = [safe] {
         if (safe != nullptr && safe->limiterWindow != nullptr) {
+            safe->output.limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
             auto* w = safe->limiterWindow;
             safe->limiterWindow = nullptr;
             delete w;
         }
     };
-    limiterWindow->pullAnalyzerTap = [safe](bool /*postEq*/, float* l, float* r, int n) {
-        if (safe != nullptr) safe->output.limiterTap.snapshot(true, l, r, n);
+    limiterWindow->pullAnalyzerTap = [safe](bool post, float* l, float* r, int n) {
+        if (safe != nullptr) safe->output.limiterTap.snapshot(post, l, r, n);
     };
     output.limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
 }
@@ -342,7 +345,6 @@ void MixerComponent::OutputStrip::openFeedbackSuppressorWindow() {
     if (output.feedbackSuppressorEffects.empty()) {
         auto effects = output.feedbackSuppressorEffects;
         effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
-        output.feedbackSuppressorEffects = effects;
         audioEngine.setOutputFeedbackSuppressors(output.id, effects);
         audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
     }
@@ -360,7 +362,6 @@ void MixerComponent::OutputStrip::openFeedbackSuppressorWindow() {
                 effects.push_back(effect);
             else
                 effectedit::applyEdit(effects, effect, bypassChanged);
-            safe->output.feedbackSuppressorEffects = effects;
             safe->audioEngine.setOutputFeedbackSuppressors(safe->output.id, effects);
             safe->refreshInserts();
         }, output.feedbackSuppressorRtaOffsetDb, output.feedbackSuppressorRtaWeighting,
@@ -398,7 +399,6 @@ void MixerComponent::OutputStrip::openSpectralDenoiserWindow() {
     if (output.spectralDenoiserEffects.empty()) {
         auto effects = output.spectralDenoiserEffects;
         effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
-        output.spectralDenoiserEffects = effects;
         audioEngine.setOutputSpectralDenoisers(output.id, effects);
         audioEngine.ensureOutputChainItem(output.id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
     }
@@ -416,7 +416,6 @@ void MixerComponent::OutputStrip::openSpectralDenoiserWindow() {
                 effects.push_back(effect);
             else
                 effectedit::applyEdit(effects, effect, bypassChanged);
-            safe->output.spectralDenoiserEffects = effects;
             safe->audioEngine.setOutputSpectralDenoisers(safe->output.id, effects);
             safe->refreshInserts();
         });
@@ -461,13 +460,15 @@ void MixerComponent::OutputStrip::openDynamicsWindow(pluginrack::DynamicsEffectT
             delete window;
         }
     };
-    dynamicsWindow->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+    // Dot and GR gauge read the dynamics' input, so the window pulls the pre
+    // ring; `post` is forwarded for any caller that wants the output.
+    dynamicsWindow->pullAnalyzerTap = [safe](bool post, float* left, float* right, int frames) {
         if (safe != nullptr) {
-            safe->output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
-            safe->output.dynamicsTap.snapshot(true, left, right, frames);
+            safe->output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
+            safe->output.dynamicsTap.snapshot(post, left, right, frames);
         }
     };
-    output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
     dynamicsWindow->setVisible(true);
 }
 
@@ -526,6 +527,14 @@ void MixerComponent::OutputStrip::openEqWindow() {
         if (safe == nullptr) return;
         safe->audioEngine.setOutputEqBypassed(outputId, false);
         safe->audioEngine.setOutputEqPhaseFlip(outputId, flipped);
+    };
+    // Whole-EQ enable: seed from the strip's bypass flag and persist clicks
+    // through the engine; the strip's EQ card follows immediately.
+    window->setEqEnabled(!output.eqBypassed.get());
+    window->applyEnabled = [safe, outputId](bool enabled) {
+        if (safe == nullptr) return;
+        safe->audioEngine.setOutputEqBypassed(outputId, !enabled);
+        safe->refreshInserts();
     };
     eqWindow = window;
     window->onCloseRequest = [safe] {
@@ -807,12 +816,6 @@ void MixerComponent::OutputStrip::setPluginBypass(std::uint32_t insertId, bool b
 
 void MixerComponent::OutputStrip::reloadPlugin(std::uint32_t insertId) {
     audioEngine.reloadInsert(output.id, insertId);
-    refreshAfterInsertChange();
-}
-
-void MixerComponent::OutputStrip::reorderInsert(std::uint32_t insertId, int targetIndex) {
-    audioEngine.moveOutputChainItem(output.id, {pluginrack::ChainItemType::Insert, insertId},
-                                    targetIndex);
     refreshAfterInsertChange();
 }
 
@@ -1293,6 +1296,9 @@ void MixerComponent::finishOutputDrag(std::uint32_t outputId, int sourceIndex) {
     juce::Component::SafePointer<MixerComponent> safe(this);
     juce::MessageManager::callAsync([safe, outputId, target] {
         if (safe == nullptr) return;
+        // A reorder during a startup open races the background device-open
+        // thread while it reads the output list; skip the move while busy.
+        if (safe->audioEngine.isOpeningDevices()) return;
         safe->audioEngine.moveOutput(outputId, target);
         safe->rebuild();
         if (safe->onStructureChanged) safe->onStructureChanged();

@@ -4,15 +4,6 @@
 #include <cmath>
 
 namespace pluginrack {
-namespace {
-
-// Band split crossovers share the Butterworth poles with every other filter.
-dsp::Biquad crossoverCoeffs(float freqHz, double rate, bool lowPass) noexcept {
-    return lowPass ? dsp::lowPass(freqHz, rate, dsp::kButterworthQ, 20.0)
-                   : dsp::highPass(freqHz, rate, dsp::kButterworthQ, 20.0);
-}
-
-} // namespace
 
 MultibandEffect makeDefaultMultibandEffect(std::uint32_t id) {
     MultibandEffect effect;
@@ -54,7 +45,6 @@ void MultibandProcessor::setEffect(const MultibandEffect& effect) {
 }
 
 void MultibandProcessor::reset() noexcept {
-    for (auto& st : lpStates_) st = {};
     for (auto& st : hpStates_) st = {};
     for (auto& env : envelopes_) env = {};
     autoMakeupDb_ = 0.0f;
@@ -71,14 +61,16 @@ void MultibandProcessor::rebuild() {
         }
     }
     const std::size_t xovers = static_cast<std::size_t>(bands - 1);
-    lpStates_.assign(xovers, {});
     hpStates_.assign(xovers, {});
-    lpCoeffs_.resize(xovers);
     hpCoeffs_.resize(xovers);
     for (std::size_t x = 0; x < xovers; ++x) {
-        const float freq = effect_.crossovers[x];
-        lpCoeffs_[x] = crossoverCoeffs(freq, sampleRate_, true);
-        hpCoeffs_[x] = crossoverCoeffs(freq, sampleRate_, false);
+        // Band split crossovers share the Butterworth poles with every other
+        // filter. Only the high-pass side runs: band 0 is the arithmetic
+        // complement of the first high-pass (see process()), so the LP/HP
+        // phase mismatch that produced a −93.6 dB null at the first crossover
+        // cannot exist, and half the biquads are gone.
+        hpCoeffs_[x] = dsp::highPass(effect_.crossovers[x], sampleRate_,
+                                     dsp::kButterworthQ, 20.0);
     }
     envelopes_.assign(static_cast<std::size_t>(bands), {});
     reductions_.assign(static_cast<std::size_t>(bands), 0.0f);
@@ -86,19 +78,23 @@ void MultibandProcessor::rebuild() {
 }
 
 void MultibandProcessor::reserveScratch(int frames) {
-    if (frames <= 0 || static_cast<int>(bufL_.size()) >= frames) return;
+    if (frames <= 0) return;
     // prepare() runs before setEffect(), when crossovers is still empty.
     // Allocate for the largest band count the validator allows (6 bands = 5
     // crossovers), or process() writes past these buffers once the real
     // effect arrives.
     constexpr std::size_t kMaxCrossovers = 5;
-    const std::size_t n = static_cast<std::size_t>(frames);
     const std::size_t xovers = std::max(kMaxCrossovers,
                                         effect_.crossovers.size());
+    const std::size_t n = std::max(static_cast<std::size_t>(frames),
+                                   bufL_.size());
+    // An effect with more crossovers than the previous one needs a wider
+    // scratch plane even when the frame count never grew — and vice versa,
+    // a longer block needs wider rows even when the plane already fits the
+    // old product. Both dimensions are checked before skipping.
+    if (bufL_.size() >= n && hpL_.size() >= n * xovers) return;
     bufL_.assign(n, 0.0f); bufR_.assign(n, 0.0f);
     outL_.assign(n, 0.0f); outR_.assign(n, 0.0f);
-    lpL_.assign(n * xovers, 0.0f);
-    lpR_.assign(n * xovers, 0.0f);
     hpL_.assign(n * xovers, 0.0f);
     hpR_.assign(n * xovers, 0.0f);
 }
@@ -107,20 +103,25 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
     if (left == nullptr || right == nullptr || frames <= 0 || effect_.bypassed) return;
     const int bands = static_cast<int>(effect_.bands.size());
     if (bands <= 0 || static_cast<int>(effect_.crossovers.size()) != bands - 1) return;
-    if (!prepared_ || static_cast<int>(lpStates_.size()) != bands - 1) rebuild();
+    if (!prepared_ || static_cast<int>(hpStates_.size()) != bands - 1) rebuild();
     if (!prepared_) return;
-    if (static_cast<int>(bufL_.size()) < frames) reserveScratch(frames);
     const int xovers = bands - 1;
+    if (static_cast<int>(bufL_.size()) < frames
+        || hpL_.size() < static_cast<std::size_t>(frames) * xovers) {
+        reserveScratch(frames);
+    }
+    // A single NaN/Inf sample must not poison the split or the envelopes for
+    // the rest of the session: silence non-finite input here and every buffer
+    // downstream stays finite.
+    for (int i = 0; i < frames; ++i) {
+        if (!std::isfinite(left[i])) left[i] = 0.0f;
+        if (!std::isfinite(right[i])) right[i] = 0.0f;
+    }
     for (int x = 0; x < xovers; ++x) {
-        float* pl = lpL_.data() + static_cast<std::size_t>(x) * frames;
-        float* pr = lpR_.data() + static_cast<std::size_t>(x) * frames;
         float* hl = hpL_.data() + static_cast<std::size_t>(x) * frames;
         float* hr = hpR_.data() + static_cast<std::size_t>(x) * frames;
-        for (int i = 0; i < frames; ++i) { pl[i] = left[i]; pr[i] = right[i]; hl[i] = left[i]; hr[i] = right[i]; }
-        auto& lps = lpStates_[static_cast<std::size_t>(x)];
+        for (int i = 0; i < frames; ++i) { hl[i] = left[i]; hr[i] = right[i]; }
         auto& hps = hpStates_[static_cast<std::size_t>(x)];
-        dsp::applyBiquad(pl, frames, lpCoeffs_[static_cast<std::size_t>(x)], lps.s1L, lps.s2L);
-        dsp::applyBiquad(pr, frames, lpCoeffs_[static_cast<std::size_t>(x)], lps.s1R, lps.s2R);
         dsp::applyBiquad(hl, frames, hpCoeffs_[static_cast<std::size_t>(x)], hps.s1L, hps.s2L);
         dsp::applyBiquad(hr, frames, hpCoeffs_[static_cast<std::size_t>(x)], hps.s1R, hps.s2R);
     }
@@ -132,11 +133,27 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
         const auto& band = effect_.bands[static_cast<std::size_t>(b)];
         const bool muted = activeSolo_ >= 0 && activeSolo_ != b;
         for (int i = 0; i < frames; ++i) {
-            float l = (b == 0) ? lpL_[static_cast<std::size_t>(i)] : hpL_[static_cast<std::size_t>(b - 1) * frames + i];
-            float r = (b == 0) ? lpR_[static_cast<std::size_t>(i)] : hpR_[static_cast<std::size_t>(b - 1) * frames + i];
-            if (b > 0 && b < bands - 1) {
-                l -= hpL_[static_cast<std::size_t>(b) * frames + i];
-                r -= hpR_[static_cast<std::size_t>(b) * frames + i];
+            float l = 0.0f;
+            float r = 0.0f;
+            if (b == 0) {
+                // Low band is the exact arithmetic complement of the first
+                // high-pass (with no crossovers it is the input itself), so
+                // the bands telescope to the input at every frequency and the
+                // Butterworth crossover null disappears.
+                if (xovers == 0) {
+                    l = left[i];
+                    r = right[i];
+                } else {
+                    l = left[i] - hpL_[static_cast<std::size_t>(i)];
+                    r = right[i] - hpR_[static_cast<std::size_t>(i)];
+                }
+            } else {
+                l = hpL_[static_cast<std::size_t>(b - 1) * frames + i];
+                r = hpR_[static_cast<std::size_t>(b - 1) * frames + i];
+                if (b < bands - 1) {
+                    l -= hpL_[static_cast<std::size_t>(b) * frames + i];
+                    r -= hpR_[static_cast<std::size_t>(b) * frames + i];
+                }
             }
             bufL_[static_cast<std::size_t>(i)] = l;
             bufR_[static_cast<std::size_t>(i)] = r;
@@ -166,6 +183,10 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
             const float targetGain = dsp::dbToGain(targetDb) * makeup;
             const float gainRate = targetGain < env.gain ? attack : release;
             env.gain += (targetGain - env.gain) * gainRate;
+            // Flush so a NaN parameter or a stray non-finite value cannot keep
+            // the envelope poisoned after the input is clean again.
+            dsp::flushState(env.env);
+            dsp::flushState(env.gain);
             grSum += -targetDb;
             bufL_[static_cast<std::size_t>(i)] *= env.gain;
             bufR_[static_cast<std::size_t>(i)] *= env.gain;
@@ -184,6 +205,7 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
         const float avgGr = totalGr / static_cast<float>(activeCount);
         const float rate = dsp::smoothingCoeff(sampleRate_, 200.0f);
         autoMakeupDb_ += (avgGr - autoMakeupDb_) * rate;
+        dsp::flushState(autoMakeupDb_);
         const float g = dsp::dbToGain(autoMakeupDb_);
         for (int i = 0; i < frames; ++i) { left[i] *= g; right[i] *= g; }
     }

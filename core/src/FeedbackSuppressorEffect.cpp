@@ -7,6 +7,8 @@
 #include <limits>
 #include <vector>
 
+#include "pluginrack/DspMath.h"
+
 namespace pluginrack {
 
 namespace {
@@ -154,10 +156,6 @@ FeedbackSuppressorEffect makeDefaultFeedbackSuppressorEffect(std::uint32_t id) {
 
 std::vector<FeedbackSuppressorEffect> defaultFeedbackSuppressorEffects() {
     return {makeDefaultFeedbackSuppressorEffect(1)};
-}
-
-float feedbackSuppressorStaticGainDb(float /*levelDb*/, const FeedbackSuppressorEffect& /*effect*/) {
-    return 0.0f;
 }
 
 void FeedbackSuppressorProcessor::prepare(double sampleRate) {
@@ -481,16 +479,10 @@ void FeedbackSuppressorProcessor::analyze() {
     // the single view is less noisy.
     if (analysisCount_ >= kHighAnalysisSize) {
         const int n = kHighAnalysisSize;
-        const int available = std::min(analysisCount_, n);
-        const int first = n - available;
         for (int i = 0; i < n; ++i) {
-            float sample = 0.0f;
-            if (i >= first) {
-                const int src = (analysisWrite_ - available + (i - first) + kLowAnalysisSize)
-                              % kLowAnalysisSize;
-                const auto index = static_cast<std::size_t>(src);
-                sample = 0.5f * (analysisBuffer_[0][index] + analysisBuffer_[1][index]);
-            }
+            const int src = (analysisWrite_ - n + i + kLowAnalysisSize) % kLowAnalysisSize;
+            const auto index = static_cast<std::size_t>(src);
+            const float sample = 0.5f * (analysisBuffer_[0][index] + analysisBuffer_[1][index]);
             const float w = 0.5f - 0.5f * std::cos(
                 2.0f * kPi * static_cast<float>(i) / static_cast<float>(n - 1));
             fftReal_[static_cast<std::size_t>(i)] = sample * w;
@@ -1149,8 +1141,10 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
         const int chunk = std::min(kAnalysisInterval, frames - start);
         for (int i = 0; i < chunk; ++i) {
             const int index = start + i;
-            const float inL = left[index];
-            const float inR = right[index];
+            // Sanitize at the read: a single non-finite sample used to enter
+            // the notch biquads and the analysis history and never leave.
+            const float inL = std::isfinite(left[index]) ? left[index] : 0.0f;
+            const float inR = std::isfinite(right[index]) ? right[index] : 0.0f;
 
             const double instantEnergy = static_cast<double>(inL) * inL
                                        + static_cast<double>(inR) * inR;
@@ -1198,17 +1192,22 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
                 notch.z1L = notch.b1 * dryL - notch.a1 * yL + notch.z2L;
                 notch.z2L = notch.b2 * dryL - notch.a2 * yL;
                 xL = dryL + gain * (yL - dryL);
+                dsp::flushState(notch.z1L);
+                dsp::flushState(notch.z2L);
 
                 const float yR = notch.b0 * dryR + notch.z1R;
                 notch.z1R = notch.b1 * dryR - notch.a1 * yR + notch.z2R;
                 notch.z2R = notch.b2 * dryR - notch.a2 * yR;
                 xR = dryR + gain * (yR - dryR);
+                dsp::flushState(notch.z1R);
+                dsp::flushState(notch.z2R);
 
                 if (notch.target > notch.envelope) {
                     notch.envelope = std::min(notch.target, notch.envelope + attackStep_);
                 } else if (notch.target < notch.envelope) {
                     notch.envelope = std::max(notch.target, notch.envelope - releaseStep_);
                 }
+                dsp::flushState(notch.envelope);
             }
             left[index] = xL;
             right[index] = xR;
@@ -1226,6 +1225,8 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
                         const float y = hpB0_[s] * hp + hpZ1_[c][s];
                         hpZ1_[c][s] = hpB1_[s] * hp - hpA1_[s] * y + hpZ2_[c][s];
                         hpZ2_[c][s] = hpB2_[s] * hp - hpA2_[s] * y;
+                        dsp::flushState(hpZ1_[c][s]);
+                        dsp::flushState(hpZ2_[c][s]);
                         hp = y;
                     }
                     float lp = hp;
@@ -1234,9 +1235,11 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
                         const float y = lpB0_[s] * lp + lpZ1_[c][s];
                         lpZ1_[c][s] = lpB1_[s] * lp - lpA1_[s] * y + lpZ2_[c][s];
                         lpZ2_[c][s] = lpB2_[s] * lp - lpA2_[s] * y;
+                        dsp::flushState(lpZ1_[c][s]);
+                        dsp::flushState(lpZ2_[c][s]);
                         lp = y;
                     }
-                    analysisBuffer_[c][static_cast<std::size_t>(analysisWrite_)] = lp;
+                    analysisBuffer_[c][static_cast<std::size_t>(analysisWrite_)] = std::isfinite(lp) ? lp : 0.0f;
                 }
                 analysisWrite_ = (analysisWrite_ + 1) % n;
                 if (analysisCount_ < n) ++analysisCount_;

@@ -17,7 +17,10 @@ struct LimiterEffect {
 
 LimiterEffect makeDefaultLimiterEffect(std::uint32_t id = 1);
 std::vector<LimiterEffect> defaultLimiterEffects();
-float limiterStaticGainDb(float levelDb, const LimiterEffect& effect);
+// Look-ahead delay in samples this limiter imposes on a strip (0 when
+// bypassed), for latency compensation. Uses effect.lookaheadMs clamped to
+// [0, 10] ms at the given rate; a non-positive or non-finite rate reports 0.
+int limiterLatencySamples(const LimiterEffect& effect, double sampleRate) noexcept;
 
 class LimiterProcessor {
 public:
@@ -26,7 +29,6 @@ public:
     void process(float* left, float* right, int frames) noexcept;
     void reset() noexcept;
     float gainReductionDb() const noexcept { return reductionDb_; }
-    float outputPeakDb() const noexcept { return peakDb_; }
 
 private:
     double sampleRate_ = 48000.0;
@@ -37,8 +39,6 @@ private:
     int delayWrite_ = 0;
     float gain_ = 1.0f;
     float reductionDb_ = 0.0f;
-    float peakDb_ = -60.0f;
-    float peakEnv_ = 0.0f;
     void ensureDelay();
     int lookaheadSamples() const noexcept;
 };

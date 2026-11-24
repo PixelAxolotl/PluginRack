@@ -816,3 +816,91 @@ TEST_CASE("spectral denoiser keeps non-finite input out of the chain") {
         REQUIRE(std::isfinite(sample));
     }
 }
+
+namespace {
+
+double rmsBounded(const std::vector<float>& samples, std::size_t begin, std::size_t end) {
+    double sum = 0.0;
+    std::size_t count = 0;
+    for (std::size_t i = begin; i < end && i < samples.size(); ++i) {
+        sum += static_cast<double>(samples[i]) * samples[i];
+        ++count;
+    }
+    return count == 0 ? 0.0 : std::sqrt(sum / static_cast<double>(count));
+}
+
+std::vector<float> tone1k(std::size_t size) {
+    std::vector<float> out(size);
+    for (std::size_t i = 0; i < size; ++i) {
+        out[i] = 0.4f * static_cast<float>(std::sin(
+            2.0 * 3.14159265358979323846 * 1000.0 * static_cast<double>(i) / kSampleRate));
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("spectral denoiser seeds the adaptive estimate in every bin") {
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.mode = pluginrack::SpectralDenoiserMode::Adaptive;
+    effect.reductionDb = 24.0f;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    const auto size = static_cast<std::size_t>(kSampleRate);
+    const auto input = tone1k(size);
+    auto left = input;
+    auto right = left;
+    processInBlocks(processor, left, right);
+
+    // The first adaptive frame must seed every bin's noise floor from its own
+    // power, so even the tone bins read SNR 0 and the mask closes toward the
+    // -24 dB floor within a few hops. When only bin 0 was seeded, the tone
+    // sailed through at nearly unity level in this early window.
+    const double early = rmsBounded(left, 1024, 4096);
+    const double reference = rmsBounded(input, 1024, 4096);
+    REQUIRE(early < reference * 0.5);
+    REQUIRE(processor.currentReductionDb() > 6.0f);
+}
+
+TEST_CASE("spectral denoiser forgets its adaptive estimate on reset") {
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.mode = pluginrack::SpectralDenoiserMode::Adaptive;
+    effect.reductionDb = 24.0f;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    const auto size = static_cast<std::size_t>(kSampleRate);
+    const auto input = tone1k(size);
+    {
+        auto left = input;
+        auto right = left;
+        processInBlocks(processor, left, right);
+        // The tone became its own noise floor: the mask is closed.
+        REQUIRE(processor.currentReductionDb() > 12.0f);
+    }
+
+    processor.reset();
+    // Reset drops the meter along with the estimate.
+    REQUIRE(processor.currentReductionDb() == Catch::Approx(0.0f));
+
+    std::vector<float> silence(9600, 0.0f);
+    auto silenceRight = silence;
+    processInBlocks(processor, silence, silenceRight);
+
+    auto left = input;
+    auto right = left;
+    processInBlocks(processor, left, right);
+
+    // After reset the seed flag must be cleared so the silence re-seeds a
+    // fresh floor; the returning tone is program material over silence and
+    // must pass at nearly full level, not stay buried under the stale
+    // tone-sized estimate. The min-over-bins meter is not a usable witness
+    // here: with the estimate re-seeded at kSilencePower, near-empty bins
+    // legitimately pin the minimum at the floor while the tone passes.
+    const double late = rmsBounded(left, size - 36000, size);
+    const double reference = rmsBounded(input, size - 36000, size);
+    REQUIRE(late > reference * 0.8);
+}

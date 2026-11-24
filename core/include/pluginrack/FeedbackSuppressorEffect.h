@@ -49,6 +49,12 @@ inline constexpr int kFeedbackSuppressorMinCuts = 1;
 inline constexpr int kFeedbackSuppressorMaxCuts = 8;
 inline constexpr int kFeedbackSuppressorDefaultCuts = 4;
 inline constexpr int kFeedbackSuppressorAnalysisSize = 2048;
+// The low band is analysed with a longer window than the high band (usable
+// bass resolution); the split is where detection switches windows. Shared
+// definitions so the UI response curve picks the same per-notch bin width
+// as FeedbackSuppressorProcessor (single source of truth).
+inline constexpr int kFeedbackSuppressorLowAnalysisSize = 8192;
+inline constexpr float kFeedbackSuppressorAnalysisSplitHz = 500.0f;
 
 // The detector gate is clocked by samples, not by host callbacks. Judging a
 // whole callback at once lets one quiet 64-frame block near a bass tone's zero
@@ -132,7 +138,6 @@ struct FeedbackSuppressorEffect {
 
 FeedbackSuppressorEffect makeDefaultFeedbackSuppressorEffect(std::uint32_t id = 1);
 std::vector<FeedbackSuppressorEffect> defaultFeedbackSuppressorEffects();
-float feedbackSuppressorStaticGainDb(float levelDb, const FeedbackSuppressorEffect& effect);
 
 class FeedbackSuppressorProcessor {
 public:
@@ -169,8 +174,8 @@ public:
 private:
     static constexpr int kMaxNotches = 8;
     static constexpr int kHighAnalysisSize = kFeedbackSuppressorAnalysisSize;
-    static constexpr int kLowAnalysisSize = 8192;
-    static constexpr float kAnalysisSplitHz = 500.0f;
+    static constexpr int kLowAnalysisSize = kFeedbackSuppressorLowAnalysisSize;
+    static constexpr float kAnalysisSplitHz = kFeedbackSuppressorAnalysisSplitHz;
     // The high-band FFT window is 2048 samples, but it can slide every 512
     // samples (about 10.7 ms at 48 kHz). The low-band FFT uses 8192 samples
     // (~5.9 Hz bins) for usable bass resolution while the high band keeps its

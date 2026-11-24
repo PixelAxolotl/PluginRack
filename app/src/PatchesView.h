@@ -18,7 +18,6 @@ public:
     void resized() override;
     void paint(juce::Graphics& g) override;
     void rebuild();
-    void mouseDown(const juce::MouseEvent& e) override;
 
 private:
     // Selection state. -1 = nothing selected.
@@ -80,8 +79,6 @@ private:
     // any bus pill it would otherwise cross (skipBus = the bus it connects to).
     float cableBow(juce::Point<float> from, juce::Point<float> to,
                    int skipBus) const;
-    int channelLatency(const AudioEngine::Channel& channel) const;
-    int tapLatency(const AudioEngine::Channel& channel, const pluginrack::Tap& tap) const;
     void deleteCable(const Cable& cable);
     void updateStatusText();
     void updateLayout();

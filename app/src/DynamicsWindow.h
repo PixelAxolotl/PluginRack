@@ -48,7 +48,11 @@ public:
     }
 
     std::function<void()> onClose;
-    std::function<void(float*, float*, int)> pullAnalyzerTap;
+    // post picks the engine ring: false is the pre-effect ring (the effect's
+    // own input), true the post-effect ring (its output). The tap runs in a
+    // non-off mode whenever this window is open, which keeps both rings
+    // current, so either value can be requested on any tick.
+    std::function<void(bool post, float*, float*, int)> pullAnalyzerTap;
 
 private:
     // Half-circle gain reduction meter; 0 dB at rest on the right, kMax on the left.

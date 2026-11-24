@@ -152,10 +152,7 @@ public:
     int rendererMode() const { return rendererMode_.load(std::memory_order_acquire); }
     ChildHostStatus childHostStatus() const;
     int childProcessId() const;
-    PluginProcessHost::Peaks childPeaks() const;
 
-    juce::String getPluginPath() const;
-    juce::String getPluginName() const;
     double getSampleRate() const;
     int getBufferSize() const;
 
@@ -195,8 +192,6 @@ private:
     mutable juce::CriticalSection pluginLock;
     std::atomic<std::uint64_t> parameterRevision_{0};
     juce::MidiBuffer midiBuffer;
-    juce::String pluginPath;
-    juce::String pluginName;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
     bool prepared = false;
@@ -223,6 +218,16 @@ private:
     std::atomic<bool> childFailed_{false};
 
     void noteChildMiss();
+
+    // Full-state recovery for parameter traffic the child could not receive.
+    // Coalesced: one pending flag, one async message-thread push. The state
+    // comes from the in-process editor instance (the child holds the stale
+    // one) and is pushed via setState, never from the audio thread - the
+    // shared alive flag keeps a queued callback off a destroyed host.
+    void scheduleParamResync();
+    juce::String editorStateAsBase64() const;
+    std::atomic<bool> paramResyncPending_{false};
+    std::shared_ptr<std::atomic<bool>> paramResyncAlive_{std::make_shared<std::atomic<bool>>(true)};
 
     juce::DocumentWindow* editorWindow = nullptr;
 

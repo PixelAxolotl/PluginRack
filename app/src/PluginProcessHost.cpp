@@ -360,25 +360,27 @@ bool PluginProcessHost::fetchBlock(juce::AudioBuffer<float>& output, int deadlin
     return true;
 }
 
-bool PluginProcessHost::setParameter(std::uint32_t parameterIndex, float value,
-                                     std::uint32_t flags) {
-    if (paramSection.data() == nullptr) return false;
+PluginProcessHost::ParameterPushResult PluginProcessHost::setParameter(
+    std::uint32_t parameterIndex, float value, std::uint32_t flags) {
+    ParameterPushResult result;
+    if (paramSection.data() == nullptr) return result;
     auto* params = static_cast<pluginHostIpc::ParamSection*>(paramSection.data());
     pluginHostIpc::ParamMsg msg;
     msg.id = parameterIndex;
     msg.value = value;
     msg.flags = flags;
-    return pluginHostIpc::paramRingPush(params->toHost, msg);
-}
-
-PluginProcessHost::Peaks PluginProcessHost::peaks() const {
-    Peaks result;
-    if (audioSection.data() == nullptr) return result;
-    const auto* block = static_cast<const pluginHostIpc::SharedAudioBlock*>(audioSection.data());
-    result.inL = block->peakInL;
-    result.inR = block->peakInR;
-    result.outL = block->peakOutL;
-    result.outR = block->peakOutR;
+    result.pushed = pluginHostIpc::paramRingPush(params->toHost, msg);
+    // A full ring is a lost edit by construction (the message is not in the
+    // ring; its sequence number was consumed).
+    if (!result.pushed) result.resyncNeeded = true;
+    // The child counts the sequence gaps it sees while draining. A new count
+    // means an edit was dropped earlier, so this push succeeding does not make
+    // the child correct: the caller hands it a full state instead.
+    const auto gaps = params->toHost.paramGapCount.load(std::memory_order_acquire);
+    if (gaps != lastParamGapCount) {
+        lastParamGapCount = gaps;
+        result.resyncNeeded = true;
+    }
     return result;
 }
 

@@ -51,7 +51,6 @@ public:
     void close();
 
     double getSampleRate() const { return sampleRate; }
-    juce::String getError() const { return error; }
     // Device type the last successful open() selected (e.g. "Windows Audio
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
     juce::String getActiveDeviceType() const { return activeDeviceType_; }
@@ -61,10 +60,9 @@ public:
     // once a starvation has taught this device that it needs more.
     void applyRenderBlockFrames(int blockFrames);
 
-    int inputChannelCount() const { return inputChannelCount_; }
-    // Total inputs the device itself provides; may exceed inputChannelCount(),
-    // which is capped to what the opener requested. Atomic because the opener
-    // writes it on its worker thread while the views read it.
+    // Total inputs the device itself provides; may exceed the channels the
+    // opener requested. Atomic because the opener writes it on its worker
+    // thread while the views read it.
     int availableInputCount() const { return availableInputCount_.load(std::memory_order_relaxed); }
     juce::String getInputError() const
     {
@@ -76,10 +74,6 @@ public:
 
     int getLatencySamples() const { return latencySamples.load(std::memory_order_relaxed); }
     int getDeviceBufferSize() const { return deviceBufferSize; }
-    double getOccupancy() const {
-        if (capacity <= 0) return 0.0;
-        return (double) readDelaySamples.load(std::memory_order_relaxed) / (double) capacity;
-    }
     std::uint64_t getInputOverruns() const { return inputOverruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputUnderruns() const { return inputUnderruns.load(std::memory_order_relaxed); }
     std::uint64_t getInputDroppedFrames() const { return inputDroppedFrames.load(std::memory_order_relaxed); }
@@ -112,7 +106,6 @@ public:
         latencyImpulseDetected.store(false, std::memory_order_relaxed);
     }
     bool isLatencyImpulseDetected() const { return latencyImpulseDetected.load(std::memory_order_relaxed); }
-    std::uint64_t getLatencyImpulseInputSample() const { return latencyImpulseInputSample.load(std::memory_order_relaxed); }
     // Captured samples between the impulse leaving the render callback and
     // the captured copy of it; 0 until the impulse is seen.
     std::uint64_t getLatencyRoundTripSamples() const {
@@ -133,6 +126,12 @@ public:
     void audioDeviceStopped() override;
 
 private:
+    // Raw capture point of the detected latency impulse. The public API
+    // reports the derived round trip (getLatencyRoundTripSamples()).
+    std::uint64_t getLatencyImpulseInputSample() const {
+        return latencyImpulseInputSample.load(std::memory_order_relaxed);
+    }
+
     juce::AudioDeviceManager manager;
     juce::AudioBuffer<float> storage;
     int capacity = 0;
@@ -161,7 +160,6 @@ private:
     // a sign the margin is too small; honouring them made loads inconsistent.
     std::atomic<std::uint32_t> openedAtMs_{0};
     double sampleRate = 0.0;
-    juce::String error;
     juce::String inputError;
     juce::String activeDeviceType_;
     int inputChannelCount_ = 0;
@@ -221,14 +219,8 @@ public:
 
     double getSampleRate() const { return sampleRate; }
     int getBufferSize() const { return bufferSize; }
-    double getOccupancy() const {
-        if (capacity <= 0) return 0.0;
-        return (double) fillFrames.load(std::memory_order_relaxed) /
-               (double) juce::jmax(1, capacity);
-    }
     int getFillFrames() const { return fillFrames.load(std::memory_order_relaxed); }
     int getTargetFillFrames() const { return targetFillFrames.load(std::memory_order_relaxed); }
-    juce::String getError() const { return error; }
     // Device type the last successful open() selected (e.g. "Windows Audio
     // (Low Latency Mode)"). Diagnostics only; empty while closed.
     juce::String getActiveDeviceType() const { return activeDeviceType_; }
@@ -278,7 +270,6 @@ public:
     void setDuplexInputHook(std::function<void(const float* const*, int)> hook) {
         duplexInputHook = std::move(hook);
     }
-    bool isDuplex() const { return duplex_.load(std::memory_order_relaxed); }
     int getDuplexInputChannels() const { return duplexInputChannels_.load(std::memory_order_relaxed); }
     int getDuplexInputLatencySamples() const { return deviceInputLatency_.load(std::memory_order_relaxed); }
     // Depth the FIFO is held at while this stream is actually being fed, in
@@ -295,7 +286,6 @@ public:
     // stuttering the last block. The next real push fades back in.
     void pushSilence(int frames);
 
-    float* const* getDeviceOutputChannels() const { return currentOutputChannels; }
     int getNumDeviceOutputChannels() const { return currentNumOutputChannels; }
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels, float* const* outputChannelData, int numOutputChannels, int numSamples, const juce::AudioIODeviceCallbackContext& context) override;
@@ -317,7 +307,6 @@ private:
     // target) while the message thread lowers it on a reopen.
     std::atomic<int> targetFillFrames{0};
     double sampleRate = 0.0;
-    juce::String error;
     juce::String activeDeviceType_;
     int deviceOutputLatency = 0;
     std::atomic<int> latencySamples{0};

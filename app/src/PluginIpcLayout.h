@@ -18,7 +18,14 @@
 //
 // On x64 the atomic<unsigned long long> members are lock-free and a zeroed
 // mapping is a valid initial state, which is what the app relies on when it
-// creates the section.
+// creates the section. SharedAudioBlock in PluginHostIpc.h is the exception
+// to the std::atomic rule: its sequence, responseSequence and blockSequence
+// are plain volatile std::uint64_t. Each has at most one writer at a time
+// (blockSequence alternates: the app writes it while publishing a block, the
+// host while acking, and the request/ack event handshake orders the two),
+// aligned 64-bit stores are never torn on x64, and readers only compare
+// counters or test blockSequence for even/odd, so volatile alone keeps them
+// honest across the event waits.
 
 #include <atomic>
 #include <cstddef>
@@ -50,6 +57,10 @@ struct ParamRing {
     std::atomic<std::uint64_t> tail{0}; // consumer publishes here
     std::atomic<std::uint64_t> producerSeq{0};
     std::atomic<std::uint64_t> consumerSeq{0};
+    // Consumer-side count of sequence gaps seen while draining: the parent
+    // watches it (along with its own failed pushes) to know when a dropped
+    // parameter edit needs a full state resync at the child.
+    std::atomic<std::uint64_t> paramGapCount{0};
     ParamMsg slots[kParamRingSlots];
 };
 
@@ -63,8 +74,12 @@ inline bool paramRingPush(ParamRing& ring, ParamMsg msg) {
     if (head - tail >= static_cast<std::uint64_t>(kParamRingSlots)) {
         // Full. Skipping the sequence number is deliberate: the receiver sees
         // the gap and asks for a full state resync instead of silently
-        // applying a stale parameter value.
-        ring.producerSeq.store(head + 1, std::memory_order_release);
+        // applying a stale parameter value. The counter advances by one per
+        // dropped message: the head did not move, so re-storing head + 1
+        // would collapse repeated drops onto the last delivered sequence and
+        // report them as "nothing lost".
+        const auto nextSeq = ring.producerSeq.load(std::memory_order_relaxed) + 1;
+        ring.producerSeq.store(nextSeq, std::memory_order_release);
         return false;
     }
     msg.seq = ring.producerSeq.load(std::memory_order_relaxed) + 1;
@@ -120,8 +135,8 @@ enum class ControlStatus : std::uint32_t {
     failed = 2   // could not do it (plugin rejected the state, no instance)
 };
 
-// Handshake states for ControlSection::hostReady.
-constexpr std::uint32_t kHostReadyPending = 0;
+// Handshake states for ControlSection::hostReady. Zero is the zeroed mapping
+// (still starting), so there is no named pending state.
 constexpr std::uint32_t kHostReadyLoaded = 1;
 constexpr std::uint32_t kHostReadyFailed = 2;
 

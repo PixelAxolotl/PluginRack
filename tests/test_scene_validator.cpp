@@ -96,12 +96,13 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 12;
+    scene.schemaVersion = pluginrack::kSchemaVersion + 1;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
     // The message must name the range the validator actually accepts.
-    REQUIRE(errors[0].message.find("expected 1 to 11") != std::string::npos);
+    REQUIRE(errors[0].message.find("expected 1 to " + std::to_string(pluginrack::kSchemaVersion)) !=
+            std::string::npos);
 }
 
 TEST_CASE("scene rejects an out-of-range right send level") {
@@ -696,6 +697,45 @@ TEST_CASE("insert cannot side-chain from its own channel") {
     slot.sideChainSource = pluginrack::SideChainSource::Channel;
     slot.sideChainSourceId = 1;
     scene.channels.front().inserts.push_back(slot);
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    bool feedback = false;
+    for (const auto& error : errors) {
+        if (error.message.find("feedback loop") != std::string::npos) feedback = true;
+    }
+    REQUIRE(feedback);
+}
+
+TEST_CASE("channel side-chaining a same-id bus is not self-feedback") {
+    // Ids are only unique per strip kind: channel 1 keying off bus 1 is a
+    // legal routing, but the shared numeric id used to read as a feedback
+    // loop and the scene was rejected.
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = pluginrack::kSchemaVersion;
+    pluginrack::Bus bus;
+    bus.id = 1;
+    bus.name = "keys";
+    scene.buses.push_back(bus);
+    pluginrack::InsertSlot slot;
+    slot.id = 5;
+    slot.sideChainSource = pluginrack::SideChainSource::Bus;
+    slot.sideChainSourceId = 1;
+    scene.channels.front().inserts.push_back(slot);
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
+TEST_CASE("bus insert cannot side-chain from its own bus") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = pluginrack::kSchemaVersion;
+    pluginrack::Bus bus;
+    bus.id = 1;
+    bus.name = "keys";
+    pluginrack::InsertSlot slot;
+    slot.id = 5;
+    slot.sideChainSource = pluginrack::SideChainSource::Bus;
+    slot.sideChainSourceId = 1;
+    bus.inserts.push_back(slot);
+    scene.buses.push_back(bus);
     const auto errors = pluginrack::validate(scene);
     REQUIRE_FALSE(errors.empty());
     bool feedback = false;

@@ -31,7 +31,6 @@ inline std::function<void()>& pluginRemovingHook() {
 // strips' VST inserts. The VST count is global (AudioEngine::kMaxInserts)
 // and the add button is the last row, so the list grows with the insert
 // count instead of sharing a fixed slot count.
-inline constexpr int kChainBuiltInSlots = 3;
 inline constexpr int kChainVstSlots = AudioEngine::kMaxInserts;
 
 // One built-in effect as a card switch.
@@ -46,11 +45,9 @@ class IInsertHost;
 
 // One add-plugin flow for every insert host: the plugin library menu anchored
 // to the clicked slot, then insertPlugin with its immediate error surfaced.
-void openPluginPicker(IInsertHost& host, juce::Component& anchor);
-
-// Same picker with the Built-In effects submenu. `chainIndex` is the slot row
-// the picker was opened from, so moving a built-in there lands where the user
-// clicked instead of wherever the effect happened to sit.
+// The menu also carries the Built-In effects submenu. `chainIndex` is the slot
+// row the picker was opened from, so moving a built-in there lands where the
+// user clicked instead of wherever the effect happened to sit.
 void openPluginPicker(IInsertHost& host, juce::Component& anchor, int chainIndex);
 
 class IInsertHost {
@@ -67,8 +64,6 @@ public:
     // no-op keeps unit-test hosts buildable.
     virtual void reloadPlugin(std::uint32_t /*insertId*/) {}
     virtual void refreshAfterInsertChange() = 0;
-    virtual void openPicker(juce::Component& anchor) { openPluginPicker(*this, anchor); }
-    virtual void reorderInsert(std::uint32_t /*insertId*/, int /*targetIndex*/) {}
     virtual void reorderChainItem(pluginrack::ChainItem /*item*/, int /*targetIndex*/) {}
     virtual void previewChainItem(int /*targetIndex*/) {}
     virtual void clearChainPreview() {}
@@ -88,23 +83,9 @@ public:
     virtual void insertBuiltIn(pluginrack::ChainItem /*item*/, int /*chainIndex*/) {}
 };
 
-inline void openPluginPicker(IInsertHost& host, juce::Component& anchor) {
+inline void openPluginPicker(IInsertHost& host, juce::Component& anchor, int chainIndex) {
     // The menu outlives this click, so the host is tracked through its other
     // base class: every host is a Component, and the cast back is checked.
-    juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
-    PluginMenu::showAddPluginMenu(anchor, [safeHost](const juce::File& file, int pluginUniqueId) {
-        if (safeHost == nullptr) return;
-        auto* target = dynamic_cast<IInsertHost*>(safeHost.getComponent());
-        if (target == nullptr) return;
-        const auto error = target->insertPlugin(file, pluginUniqueId);
-        if (error.isNotEmpty()) {
-            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                   "PluginRack", error);
-        }
-    });
-}
-
-inline void openPluginPicker(IInsertHost& host, juce::Component& anchor, int chainIndex) {
     juce::Component::SafePointer<juce::Component> safeHost(dynamic_cast<juce::Component*>(&host));
     PluginMenu::showAddPluginMenu(
         anchor,
@@ -499,13 +480,12 @@ public:
         // The handle lives in the header row only: the mini view below it is
         // for looking at, and clicking it must open the editor, not reorder.
         dragging = inHandle(e);
-        dragOffset = e.y;
         repaint();
         if (addSlot) {
             openPluginPicker(host, *this, slotIndex);
         } else if (builtIn && !dragging) {
             host.activateBuiltIn(chainItem);
-        } else if (!dragging && !host.insertActivated(insert)) {
+        } else if (!dragging && insert != nullptr && !host.insertActivated(insert)) {
             insert->pluginHost.showEditor();
         }
     }
@@ -586,7 +566,6 @@ private:
     bool dragging = false;
     bool selected = false;
     std::unique_ptr<InsertMiniView> mini;
-    int dragOffset = 0;
     int pendingTarget = -1;
     juce::Label indexLabel;
     juce::Label nameLabel;

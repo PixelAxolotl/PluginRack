@@ -33,13 +33,6 @@
 
 class PluginProcessHost {
 public:
-    struct Peaks {
-        float inL = 0.0f;
-        float inR = 0.0f;
-        float outL = 0.0f;
-        float outR = 0.0f;
-    };
-
     PluginProcessHost();
     ~PluginProcessHost();
 
@@ -75,9 +68,19 @@ public:
                      int blockSize);
     bool fetchBlock(juce::AudioBuffer<float>& output, int deadlineMs);
 
-    // Message thread. Pushes one parameter edit at the child; dropped messages
-    // leave a detectable sequence gap rather than silently reordering.
-    bool setParameter(std::uint32_t parameterIndex, float value, std::uint32_t flags = 0);
+    // Message thread. Pushes one parameter edit at the child. The two facts
+    // are reported separately: `pushed` says the edit entered the ring (so the
+    // caller may count it as made), `resyncNeeded` says a parameter edit was
+    // lost - this push overflowed the ring, or the child reported a new
+    // sequence gap while draining - and the caller must hand the child a full
+    // state instead. A successful push can still need a resync (the gap may
+    // belong to an earlier dropped edit).
+    struct ParameterPushResult {
+        bool pushed = false;
+        bool resyncNeeded = false;
+    };
+    ParameterPushResult setParameter(std::uint32_t parameterIndex, float value,
+                                     std::uint32_t flags = 0);
 
     bool isAlive() const;
     bool isDead() const;
@@ -85,9 +88,6 @@ public:
     int childProcessId() const;
     // Last state the child reported, used when a live fetch times out.
     const juce::String& lastKnownState() const { return lastKnownState_; }
-
-    // Peaks the child wrote for the last block it acked.
-    Peaks peaks() const;
 
     // Whatever the child wrote to stdout, for the failure path. Only call this
     // after the child has exited: the output pipe blocks while it is open and
@@ -121,6 +121,7 @@ private:
     pluginHostIpc::NamedEvent controlResponseEvent;
 
     std::uint64_t lastSubmitted = 0;
+    std::uint64_t lastParamGapCount = 0; // setParameter baseline, message thread only
     juce::CriticalSection controlLock_;
     bool launched = false;
     juce::String lastKnownState_;

@@ -234,23 +234,6 @@ juce::String SceneBridge::renameSave(const juce::String& oldName, const juce::St
     return {};
 }
 
-juce::String SceneBridge::moveSave(const juce::String& name, const juce::File& destinationDirectory) {
-    const auto clean = sanitizeSaveName(name);
-    if (clean.isEmpty() || isReservedSaveName(clean)) return "Invalid save name.";
-    if (!isValidSaveName(clean)) return "Invalid save name.";
-    const auto source = getSaveFile(clean);
-    if (!source.existsAsFile()) return "The save does not exist.";
-    if (!destinationDirectory.exists() && !destinationDirectory.createDirectory().wasOk())
-        return "Could not create the destination folder.";
-
-    const auto destination = destinationDirectory.getChildFile(source.getFileName());
-    if (destination.existsAsFile()) return "A file with that name already exists in the destination.";
-    if (!source.moveFileTo(destination)) return "Could not move the save.";
-
-    if (getDefaultSaveName().equalsIgnoreCase(clean)) setDefaultSaveName({});
-    return {};
-}
-
 juce::String SceneBridge::getDefaultSaveName() {
     const auto file = getScenesDirectory().getChildFile("default_save.txt");
     if (!file.existsAsFile()) return {};

@@ -52,9 +52,7 @@ private:
     struct Envelope { float env = 0.0f; float gain = 1.0f; };
     double sampleRate_ = 48000.0;
     MultibandEffect effect_;
-    std::vector<BiquadState> lpStates_;
     std::vector<BiquadState> hpStates_;
-    std::vector<dsp::Biquad> lpCoeffs_;
     std::vector<dsp::Biquad> hpCoeffs_;
     std::vector<Envelope> envelopes_;
     std::vector<float> reductions_;
@@ -62,8 +60,6 @@ private:
     std::vector<float> bufR_;
     std::vector<float> outL_;
     std::vector<float> outR_;
-    std::vector<float> lpL_;
-    std::vector<float> lpR_;
     std::vector<float> hpL_;
     std::vector<float> hpR_;
     float autoMakeupDb_ = 0.0f;

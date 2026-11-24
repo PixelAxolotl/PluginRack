@@ -102,16 +102,31 @@ void writeCrashReport(void* exceptionInfo) {
     // backtrace and the plugin path can allocate, so they are appended only
     // after the header is already durable.
     wchar_t path[MAX_PATH * 2] = {};
+    bool usedCrashDirectory = false;
     if (gCrashDirectory[0] != L'\0') {
         ::CreateDirectoryW(gCrashDirectory, nullptr);
-        swprintf_s(path, L"%s\\crash-%04u%02u%02u-%02u%02u%02u.txt", gCrashDirectory,
-                   now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-    } else {
+        // _snwprintf_s with _TRUNCATE (like the wcsncpy_s copy that fills
+        // gCrashDirectory at startup) never runs the CRT invalid-parameter
+        // handler on overflow - a plain swprintf_s would, which inside this
+        // unhandled-exception filter means a second crash instead of a
+        // report. A negative return means the directory did not fit: fall
+        // back to the temp path below.
+        usedCrashDirectory = _snwprintf_s(path, _countof(path), _TRUNCATE,
+                                          L"%s\\crash-%04u%02u%02u-%02u%02u%02u.txt",
+                                          gCrashDirectory, now.wYear, now.wMonth, now.wDay,
+                                          now.wHour, now.wMinute, now.wSecond)
+                             >= 0;
+    }
+    if (!usedCrashDirectory) {
+        // _TRUNCATE wrote a partial name above; start the fallback clean.
+        path[0] = L'\0';
         wchar_t temp[MAX_PATH] = {};
         const DWORD length = ::GetTempPathW(MAX_PATH, temp);
         if (length > 0 && length < MAX_PATH) {
-            swprintf_s(path, L"%scrash-%04u%02u%02u-%02u%02u%02u.txt", temp, now.wYear,
-                       now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+            // A short temp path plus the fixed file name always fits 2*MAX_PATH.
+            _snwprintf_s(path, _countof(path), _TRUNCATE,
+                         L"%scrash-%04u%02u%02u-%02u%02u%02u.txt", temp, now.wYear, now.wMonth,
+                         now.wDay, now.wHour, now.wMinute, now.wSecond);
         }
     }
     if (path[0] == L'\0') return;

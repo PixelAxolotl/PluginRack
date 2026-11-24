@@ -31,7 +31,7 @@ TEST_CASE("eq phase flip inverts the signal") {
         band.enabled = false; // flip only: no band may touch the block
     }
     EqEngine e;
-    e.prepare(44100, 512);
+    e.prepare(44100);
     e.setBands(bands);
     e.setPhaseFlip(true);
     REQUIRE(e.phaseFlip());
@@ -58,7 +58,7 @@ TEST_CASE("eq phase flip inverts the signal") {
 
 TEST_CASE("eq flat passes audio") {
     EqEngine e;
-    e.prepare(44100, 512);
+    e.prepare(44100);
     e.setBands(defaultEqBands());
     float L[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     float R[8] = {1, 0, 0, 0, 0, 0, 0, 0};
@@ -76,7 +76,7 @@ TEST_CASE("eq bypassed band is bit-identical") {
         band.enabled = false;
     }
     EqEngine e;
-    e.prepare(44100, 512);
+    e.prepare(44100);
     e.setBands(bands);
 
     constexpr int kFrames = 64;
@@ -97,7 +97,7 @@ TEST_CASE("eq HP removes DC") {
     auto bands = defaultEqBands();
     bands[0].solo = true; // solo rule: only the high-pass runs
     EqEngine e;
-    e.prepare(44100, 512);
+    e.prepare(44100);
     e.setBands(bands);
 
     constexpr int kFrames = 4096;
@@ -116,7 +116,7 @@ TEST_CASE("eq LP removes highs") {
     bands[6].enabled = true;
     bands[6].solo = true; // solo rule: only the low-pass runs
     EqEngine e;
-    e.prepare(44100, 512);
+    e.prepare(44100);
     e.setBands(bands);
 
     // Alternating samples are the Nyquist tone (22.05 kHz here), far above the
@@ -148,8 +148,8 @@ TEST_CASE("eq NaN params never NaN out") {
 
     EqEngine e;
     EqEngine reference;
-    e.prepare(44100, 512);
-    reference.prepare(44100, 512);
+    e.prepare(44100);
+    reference.prepare(44100);
     e.setBands(bands);
     reference.setBands(ref);
 
@@ -191,9 +191,9 @@ TEST_CASE("eq solo isolates band") {
     EqEngine soloed;
     EqEngine explicitBand;
     EqEngine allOff;
-    soloed.prepare(44100, 512);
-    explicitBand.prepare(44100, 512);
-    allOff.prepare(44100, 512);
+    soloed.prepare(44100);
+    explicitBand.prepare(44100);
+    allOff.prepare(44100);
     soloed.setBands(bands);
     explicitBand.setBands(only);
     allOff.setBands(bypassed);
@@ -222,7 +222,7 @@ TEST_CASE("eq solo isolates band") {
 
 TEST_CASE("eq delay shifts the signal by the requested samples") {
     EqEngine e;
-    e.prepare(48000.0, 512);
+    e.prepare(48000.0);
     auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false; // delay only: no band may touch the block
@@ -247,7 +247,7 @@ TEST_CASE("eq delay shifts the signal by the requested samples") {
 
 TEST_CASE("eq delay holds across render blocks") {
     EqEngine e;
-    e.prepare(48000.0, 512);
+    e.prepare(48000.0);
     auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
@@ -275,7 +275,7 @@ TEST_CASE("eq delay holds across render blocks") {
 
 TEST_CASE("eq zero delay is bit-identical") {
     EqEngine e;
-    e.prepare(48000.0, 512);
+    e.prepare(48000.0);
     e.setDelayMs(0.0f);
     auto bands = defaultEqBands();
     for (auto& band : bands) {
@@ -297,7 +297,7 @@ TEST_CASE("eq zero delay is bit-identical") {
 
 TEST_CASE("eq delay clamps to the 0-1 s range") {
     EqEngine e;
-    e.prepare(48000.0, 256);
+    e.prepare(48000.0);
 
     e.setDelayMs(5000.0f);
     REQUIRE(e.delayMs() == Catch::Approx(EqEngine::kMaxDelayMs));
@@ -311,7 +311,7 @@ TEST_CASE("eq delay clamps to the 0-1 s range") {
 
 TEST_CASE("eq delay change mid-stream glides without blowing up") {
     EqEngine e;
-    e.prepare(48000.0, 512);
+    e.prepare(48000.0);
     auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
@@ -344,7 +344,7 @@ TEST_CASE("extreme shelf settings stay finite") {
     // LowShelf with Q 3 and +12 dB used to push the RBJ radicand negative and
     // emit NaN coefficients, which the whole strip then rendered forever.
     EqEngine e;
-    e.prepare(48000.0, 512);
+    e.prepare(48000.0);
     auto bands = defaultEqBands();
     for (auto& band : bands) {
         band.enabled = false;
@@ -371,3 +371,63 @@ TEST_CASE("extreme shelf settings stay finite") {
         REQUIRE(std::fabs(L[static_cast<std::size_t>(i)]) < 8.0f);
     }
 }
+
+TEST_CASE("eq prepare resets biquad states") {
+    // A sample-rate change re-prepares every strip. Stale biquad state from
+    // the old rate used to leak into the first block after prepare(); the
+    // engine must start from zeroed filters, exactly like a fresh one.
+    constexpr int kFrames = 4096;
+    std::vector<float> signal(static_cast<std::size_t>(kFrames));
+    for (int i = 0; i < kFrames; ++i) {
+        const float t = static_cast<float>(i);
+        signal[static_cast<std::size_t>(i)] =
+            0.9f * std::sin(0.05f * t) + 0.3f * std::sin(0.9f * t) + 0.2f;
+    }
+
+    EqEngine warm;
+    warm.prepare(48000.0);
+    warm.setBands(defaultEqBands());
+    for (int off = 0; off < kFrames; off += 256) {
+        std::vector<float> L(signal.begin() + off, signal.begin() + off + 256);
+        std::vector<float> R = L;
+        warm.process(L.data(), R.data(), 256);
+    }
+
+    EqEngine fresh;
+    fresh.prepare(48000.0);
+    fresh.setBands(defaultEqBands());
+
+    // Re-prepare the warm engine mid-life and replay the identical signal.
+    warm.prepare(48000.0);
+    for (int off = 0; off < kFrames; off += 256) {
+        std::vector<float> La(signal.begin() + off, signal.begin() + off + 256);
+        std::vector<float> Ra = La;
+        std::vector<float> Lb(signal.begin() + off, signal.begin() + off + 256);
+        std::vector<float> Rb = Lb;
+        warm.process(La.data(), Ra.data(), 256);
+        fresh.process(Lb.data(), Rb.data(), 256);
+        for (int i = 0; i < 256; ++i) {
+            REQUIRE(La[static_cast<std::size_t>(i)] == Lb[static_cast<std::size_t>(i)]);
+            REQUIRE(Ra[static_cast<std::size_t>(i)] == Rb[static_cast<std::size_t>(i)]);
+        }
+    }
+}
+
+TEST_CASE("eq latency helper reports the delay line") {
+    // Freezing the compensation contract: only an enabled, un-bypassed delay
+    // counts, and the report never exceeds the delay-line cap.
+    REQUIRE(eqLatencySamples(false, false, 10.0f, 48000.0) == 0);
+    REQUIRE(eqLatencySamples(true, true, 10.0f, 48000.0) == 0);
+    REQUIRE(eqLatencySamples(true, false, 0.0f, 48000.0) == 0);
+    REQUIRE(eqLatencySamples(true, false, -5.0f, 48000.0) == 0);
+    REQUIRE(eqLatencySamples(true, false, kNan, 48000.0) == 0);
+    REQUIRE(eqLatencySamples(true, false, 1.0f, 0.0) == 0);
+    REQUIRE(eqLatencySamples(true, false, 1.0f, 48000.0) == 48);
+    REQUIRE(eqLatencySamples(true, false, 1.5f, 48000.0) == 72);
+    REQUIRE(eqLatencySamples(true, false, 20.0f, 96000.0) == 1920);
+    // kMaxDelayMs caps the ring; an over-cap request reports the cap, not the
+    // ask. That cap (48000 samples at 48 kHz) is the physical delay and sits
+    // above kMaxTapDelaySamples (16384), which only bounds tap compensation.
+    REQUIRE(eqLatencySamples(true, false, 5000.0f, 48000.0) == 48000);
+}
+

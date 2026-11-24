@@ -88,7 +88,6 @@ public:
     // Analyzer mode codes: the setAnalyzerTapMode callback forwards these to
     // AudioEngine::AnalyzerTap::setMode (kOff/kPre/kPost mirror).
     static constexpr int kAnalyzerOff = 0;
-    static constexpr int kAnalyzerPre = 1;
     static constexpr int kAnalyzerPost = 2;
     static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
 
@@ -120,6 +119,12 @@ public:
     std::function<void(bool flipped)> applyPhaseFlip;
     void setPhaseFlip(bool flipped);
 
+    // Whole-EQ enable wiring: the owner seeds the current state with
+    // setEqEnabled() (from the strip's eqBypassed) and persists clicks
+    // through applyEnabled, same contract as the delay knob.
+    std::function<void(bool enabled)> applyEnabled;
+    void setEqEnabled(bool enabled);
+
     // RTA display offset wiring: each +/- step calls this with the new offset,
     // in the same units the label shows (0 == the default view). The owner
     // stores it, so the analyzer looks the same in every EQ surface.
@@ -141,6 +146,8 @@ private:
     void timerCallback() override;
     void applyFromControls();
     void applyDelayFromControl();
+    void applyPreset(int presetId);
+    void markPresetCustom();
     void syncControls();
 
     EQCurveComponent curve;

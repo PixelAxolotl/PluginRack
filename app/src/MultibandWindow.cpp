@@ -141,7 +141,9 @@ MultibandWindow::MultibandWindow(const juce::String& title,
     styleRotary(threshold, -60.0, 0.0, " dB", theme::cyan());
     styleRotary(ratio, 1.0, 20.0, ":1", theme::green());
     styleRotary(attack, 0.1, 200.0, " ms", theme::amber());
-    styleRotary(release, 1.0, 1000.0, " ms", theme::violet());
+    // 10 ms floor: the engine clamps band release to std::max(band.releaseMs,
+    // 10.0f), so offering less would show a value the engine never honours.
+    styleRotary(release, 10.0, 1000.0, " ms", theme::violet());
     styleRotary(knee, 0.0, 24.0, " dB", theme::blue());
     styleRotary(makeup, -24.0, 24.0, " dB", theme::green());
 
@@ -351,8 +353,25 @@ void MultibandWindow::setAnalyzerMode(int mode) {
 }
 
 void MultibandWindow::timerCallback() {
-    if (pullAnalyzerTap) pullAnalyzerTap(tapL.data(), tapR.data(), kAnalyzerFftSize);
+    // Two pulls of the same buffers: the per-band gain-reduction bars model
+    // each band's compressor input, so they read the pre-effect ring; the RTA
+    // shows the multiband's output, so it reads the post ring.
+    if (pullAnalyzerTap) pullAnalyzerTap(false, tapL.data(), tapR.data(), kAnalyzerFftSize);
 
+    float sum = 0.0f;
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const float sample = (tapL[static_cast<std::size_t>(i)] + tapR[static_cast<std::size_t>(i)]) * 0.5f;
+        sum += sample * sample;
+    }
+    const float levelDb = 20.0f * std::log10(std::max(1.0e-5f, std::sqrt(sum / kAnalyzerFftSize)));
+    gainReductionDb.resize(effect.bands.size());
+    for (std::size_t i = 0; i < effect.bands.size(); ++i) {
+        const float gain = MultibandCurveComponent::compressionGainDb(levelDb, effect.bands[i]);
+        gainReductionDb[i] = std::max(0.0f, -gain);
+    }
+    curve.setGainReduction(gainReductionDb);
+
+    if (pullAnalyzerTap) pullAnalyzerTap(true, tapL.data(), tapR.data(), kAnalyzerFftSize);
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const std::size_t idx = static_cast<std::size_t>(i);
         fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
@@ -369,19 +388,6 @@ void MultibandWindow::timerCallback() {
         held += (fresh - held) * (fresh > held ? 0.6f : 0.15f);
     }
     curve.setSpectrum(spectrumAvg.data(), static_cast<int>(spectrumAvg.size()), sampleRateHz);
-
-    float sum = 0.0f;
-    for (int i = 0; i < kAnalyzerFftSize; ++i) {
-        const float sample = (tapL[static_cast<std::size_t>(i)] + tapR[static_cast<std::size_t>(i)]) * 0.5f;
-        sum += sample * sample;
-    }
-    const float levelDb = 20.0f * std::log10(std::max(1.0e-5f, std::sqrt(sum / kAnalyzerFftSize)));
-    gainReductionDb.resize(effect.bands.size());
-    for (std::size_t i = 0; i < effect.bands.size(); ++i) {
-        const float gain = MultibandCurveComponent::compressionGainDb(levelDb, effect.bands[i]);
-        gainReductionDb[i] = std::max(0.0f, -gain);
-    }
-    curve.setGainReduction(gainReductionDb);
 }
 
 void MultibandWindow::paint(juce::Graphics& g) {

@@ -252,6 +252,13 @@ void PluginLibrary::saveCache() {
 }
 
 void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool force) {
+    // The destructor waits for this job for a bounded time (30 s) and may
+    // still give up while a slow scanFile call runs. Copy the lifetime flag
+    // here - after this point the copy, not `alive` through a potentially
+    // dead `this`, is the only read of it - and re-check before every member
+    // touch that can follow a slow call.
+    const auto keepAlive = alive;
+
     juce::Array<juce::File> folders;
     if (onlyFolder != juce::File()) folders.add(onlyFolder);
     else folders = getScanFolders();
@@ -271,11 +278,12 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
     juce::Array<juce::PluginDescription> work;
     if (!clearAll) work = getPlugins();
 
+    if (!keepAlive->load()) return;
     progressTotal = bundles.size();
     progressDone = 0;
 
     for (int index = 0; index < bundles.size(); ++index) {
-        if (!alive->load()) return;
+        if (!keepAlive->load()) return;
         if (auto* job = juce::ThreadPoolJob::getCurrentThreadPoolJob())
             if (job->shouldExit()) return;
 
@@ -320,6 +328,9 @@ void PluginLibrary::runScan(const juce::File& onlyFolder, bool clearAll, bool fo
         if (juce::File::isAbsolutePath(path) && !juce::File(path).exists()) work.remove(i);
     }
 
+    // Last slow-call boundary: none of these member touches may run after the
+    // destructor has stopped waiting for this job.
+    if (!keepAlive->load()) return;
     progressDone = bundles.size();
     sortPlugins(work);
     {

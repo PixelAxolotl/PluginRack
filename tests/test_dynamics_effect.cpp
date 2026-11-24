@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -68,3 +69,33 @@ TEST_CASE("dynamics effect settings serialize") {
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->channels.front().effects.front() == effect);
 }
+
+TEST_CASE("dynamics recovers from a non-finite sample") {
+    // One NaN sample used to latch the envelope and gain forever: every later
+    // block came out silent or poisoned. Input sanitising plus state flushing
+    // must let the compressor keep working on the audio that follows.
+    pluginrack::DynamicsEffect effect;
+    effect.bypassed = false;
+    effect.thresholdDb = -18.0f;
+    effect.ratio = 4.0f;
+    pluginrack::DynamicsProcessor processor;
+    processor.prepare(48000.0);
+    processor.setEffect(effect);
+
+    std::vector<float> left(256, 0.0f);
+    std::vector<float> right(256, 0.0f);
+    left[0] = std::numeric_limits<float>::quiet_NaN();
+    right[4] = -std::numeric_limits<float>::infinity();
+    processor.process(left.data(), right.data(), 256);
+    for (int i = 0; i < 256; ++i) {
+        REQUIRE(std::isfinite(left[static_cast<std::size_t>(i)]));
+        REQUIRE(std::isfinite(right[static_cast<std::size_t>(i)]));
+    }
+
+    std::vector<float> loud(4800, 1.0f);
+    std::vector<float> loudR = loud;
+    processor.process(loud.data(), loudR.data(), static_cast<int>(loud.size()));
+    REQUIRE(std::isfinite(loud.back()));
+    REQUIRE(std::fabs(loud.back()) < 0.6f);
+}
+

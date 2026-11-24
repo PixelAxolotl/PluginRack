@@ -26,7 +26,11 @@ public:
     void setBypassed(bool b);
     void closeButtonPressed() override { if (onClose) onClose(); }
     std::function<void()> onClose;
-    std::function<void(float*, float*, int)> pullAnalyzerTap;
+    // post picks the engine ring: false is the pre-effect ring (the effect's
+    // own input), true the post-effect ring (its output). The tap runs in a
+    // non-off mode whenever this window is open, which keeps both rings
+    // current, so either value can be requested on any tick.
+    std::function<void(bool post, float*, float*, int)> pullAnalyzerTap;
     std::function<void(float offsetDb)> applySpectrumOffset;
     std::function<void(int weighting)> applyWeighting;
     void setAnalyzerMode(int m);

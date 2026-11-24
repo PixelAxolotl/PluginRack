@@ -1,7 +1,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "pluginrack/LimiterEffect.h"
@@ -48,4 +50,50 @@ TEST_CASE("limiter effect settings serialize") {
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
     REQUIRE(loaded.scene->channels.front().limiterEffects.front().id == 4);
+}
+
+TEST_CASE("limiter recovers from a non-finite sample") {
+    // The poison sample used to be written straight into the look-ahead ring
+    // and re-emerged a block later, so the strip output stayed NaN forever.
+    auto effect = pluginrack::makeDefaultLimiterEffect();
+    pluginrack::LimiterProcessor p;
+    p.prepare(48000.0);
+    p.setEffect(effect);
+
+    std::vector<float> L(256, 0.0f);
+    std::vector<float> R(256, 0.0f);
+    L[0] = std::numeric_limits<float>::quiet_NaN();
+    R[3] = -std::numeric_limits<float>::infinity();
+    p.process(L.data(), R.data(), 256);
+    for (int i = 0; i < 256; ++i) {
+        REQUIRE(std::isfinite(L[static_cast<std::size_t>(i)]));
+        REQUIRE(std::isfinite(R[static_cast<std::size_t>(i)]));
+    }
+    REQUIRE(std::isfinite(p.gainReductionDb()));
+
+    // Quiet audio afterwards must pass untouched at the look-ahead delay.
+    std::vector<float> quiet(4800, 0.1f);
+    std::vector<float> quietR = quiet;
+    p.process(quiet.data(), quietR.data(), static_cast<int>(quiet.size()));
+    REQUIRE(quiet.back() == Catch::Approx(0.1f).epsilon(0.05));
+}
+
+TEST_CASE("limiter latency helper reports the look-ahead delay") {
+    // Core and app share this one function for compensation math: bypassed
+    // strips add nothing, and the look-ahead is clamped exactly like the
+    // processor's delay ring.
+    auto effect = pluginrack::makeDefaultLimiterEffect(); // lookaheadMs 1.5
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 48000.0) == 72);
+    effect.bypassed = true;
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 48000.0) == 0);
+    effect.bypassed = false;
+    effect.lookaheadMs = 10.0f;
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 96000.0) == 960);
+    effect.lookaheadMs = 50.0f; // clamped to the 10 ms cap
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 48000.0) == 480);
+    effect.lookaheadMs = 0.0f;
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 48000.0) == 0);
+    // No usable rate means no delay line was ever sized; report nothing.
+    effect.lookaheadMs = 1.5f;
+    REQUIRE(pluginrack::limiterLatencySamples(effect, 0.0) == 0);
 }

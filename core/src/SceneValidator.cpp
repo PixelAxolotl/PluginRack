@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -634,7 +635,8 @@ std::vector<SceneError> validate(const Scene& scene) {
                                               " insert " + std::to_string(slot.id) +
                                               " side-chain references unknown channel " +
                                               std::to_string(slot.sideChainSourceId)});
-                    } else if (strip.id == slot.sideChainSourceId) {
+                    } else if (std::string_view(kind) == "channel" &&
+                               strip.id == slot.sideChainSourceId) {
                         errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
                                           std::string(kind) + " " + std::to_string(strip.id) +
                                               " insert " + std::to_string(slot.id) +
@@ -648,7 +650,8 @@ std::vector<SceneError> validate(const Scene& scene) {
                                               " insert " + std::to_string(slot.id) +
                                               " side-chain references unknown output " +
                                               std::to_string(slot.sideChainSourceId)});
-                    } else if (strip.id == slot.sideChainSourceId) {
+                    } else if (std::string_view(kind) == "output" &&
+                               strip.id == slot.sideChainSourceId) {
                         errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
                                           std::string(kind) + " " + std::to_string(strip.id) +
                                               " insert " + std::to_string(slot.id) +
@@ -662,6 +665,12 @@ std::vector<SceneError> validate(const Scene& scene) {
                                               " insert " + std::to_string(slot.id) +
                                               " side-chain references unknown bus " +
                                               std::to_string(slot.sideChainSourceId)});
+                    } else if (std::string_view(kind) == "bus" &&
+                               strip.id == slot.sideChainSourceId) {
+                        errors.push_back({SceneErrorCode::ValueOutOfRange, strip.id,
+                                          std::string(kind) + " " + std::to_string(strip.id) +
+                                              " insert " + std::to_string(slot.id) +
+                                              " side-chain taps its own bus (feedback loop)"});
                     }
                     break;
                 case SideChainSource::None:

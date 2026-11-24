@@ -33,10 +33,17 @@ EQWindow::EQWindow(const juce::String& title,
     presetCombo.addItem("Warm", 4);
     presetCombo.setSelectedId(1, juce::dontSendNotification);
     theme::ui::styleCombo(presetCombo);
+    presetCombo.onChange = [this] { applyPreset(presetCombo.getSelectedId()); };
     Component::addAndMakeVisible(presetCombo);
     theme::ui::styleButton(enableButton);
     enableButton.setClickingTogglesState(true);
     enableButton.setToggleState(true, juce::dontSendNotification);
+    enableButton.setTooltip("Enable or bypass the EQ");
+    enableButton.onClick = [this] {
+        // Engage/bypass the whole strip EQ through the owner, like every
+        // other built-in's Enable button (the engine call lives there).
+        if (applyEnabled) applyEnabled(enableButton.getToggleState());
+    };
     Component::addAndMakeVisible(enableButton);
 
     curve.setSampleRateHz(sampleRateHz); // live rate before the first paint
@@ -51,7 +58,11 @@ EQWindow::EQWindow(const juce::String& title,
         curve.setBands(bands);
     }
     curve.onBandsChanged = [this] {
+        markPresetCustom(); // a node drag is a manual edit
         if (applyBands) applyBands(curve.getBands());
+        // Any band edit engages the EQ (the owner clears the bypass flag),
+        // so the Enable button must not keep showing the old off state.
+        enableButton.setToggleState(true, juce::dontSendNotification);
         syncControls(); // node drag moved freq/gain: keep knobs in step
     };
     curve.onBandSelected = [this] { syncControls(); };
@@ -81,6 +92,7 @@ EQWindow::EQWindow(const juce::String& title,
         const int sel = curve.getSelectedBand();
         if (sel < 0 || sel >= static_cast<int>(bands.size())) return;
         bands[static_cast<std::size_t>(sel)].enabled = !bands[static_cast<std::size_t>(sel)].enabled;
+        markPresetCustom();
         commitBands(std::move(bands));
     });
     Component::addAndMakeVisible(bypassButton);
@@ -91,6 +103,7 @@ EQWindow::EQWindow(const juce::String& title,
         const int sel = curve.getSelectedBand();
         if (sel < 0 || sel >= static_cast<int>(bands.size())) return;
         bands[static_cast<std::size_t>(sel)].solo = !bands[static_cast<std::size_t>(sel)].solo;
+        markPresetCustom();
         commitBands(std::move(bands));
     });
     Component::addAndMakeVisible(soloButton);
@@ -388,7 +401,9 @@ void EQWindow::applyFromControls() {
     band.q = static_cast<float>(qKnob.getValue());
 
     curve.setBands(bands); // repaint with the new value
+    markPresetCustom();    // a knob edit left the preset shape
     if (applyBands) applyBands(curve.getBands());
+    enableButton.setToggleState(true, juce::dontSendNotification); // editing engages
 }
 
 void EQWindow::applyDelayFromControl() {
@@ -399,6 +414,42 @@ void EQWindow::commitBands(std::vector<pluginrack::EqBand> bands) {
     curve.setBands(bands);
     syncControls();
     if (applyBands) applyBands(curve.getBands());
+    // Every commit engages the EQ through the owner, so keep the Enable
+    // button truthful when a preset or toggle lands on a bypassed strip.
+    enableButton.setToggleState(true, juce::dontSendNotification);
+}
+
+void EQWindow::markPresetCustom() {
+    // Manual edits (knobs, node drags, band toggles) leave the preset shape,
+    // so the header combo falls back to Custom. Notification off: re-entrant
+    // onChange would re-apply a preset and undo the user's edit.
+    presetCombo.setSelectedId(1, juce::dontSendNotification);
+}
+
+void EQWindow::applyPreset(int presetId) {
+    if (presetId == 1) return; // Custom: nothing to write
+    auto bands = pluginrack::defaultEqBands();
+    if (presetId == 2) { // Flat: the factory points, high cut still bypassed
+        commitBands(std::move(bands));
+        return;
+    }
+    // The factory list is fixed: [0] HP 80, [1] low shelf 200, [2..4] peaks
+    // 500/1k/3k, [5] high shelf 8k, [6] LP 12k. Each preset rewrites its
+    // named slots and leaves the rest at default.
+    auto& peak3k = bands[static_cast<std::size_t>(4)];
+    auto& shelf8k = bands[static_cast<std::size_t>(5)];
+    if (presetId == 3) { // Presence: a touch of air above 3 k, brighter top
+        bands[static_cast<std::size_t>(0)] =
+            pluginrack::EqBand{pluginrack::EqType::HighPass, 80.0f, 0.0f, 0.707f, true, false};
+        peak3k = pluginrack::EqBand{pluginrack::EqType::Peak, 3000.0f, 2.5f, 1.0f, true, false};
+        shelf8k = pluginrack::EqBand{pluginrack::EqType::HighShelf, 8000.0f, 1.5f, 0.707f, true, false};
+    } else if (presetId == 4) { // Warm: low-shelf body, softened 3k and top
+        bands[static_cast<std::size_t>(1)] =
+            pluginrack::EqBand{pluginrack::EqType::LowShelf, 120.0f, 2.5f, 0.707f, true, false};
+        peak3k = pluginrack::EqBand{pluginrack::EqType::Peak, 3000.0f, -1.5f, 1.0f, true, false};
+        shelf8k = pluginrack::EqBand{pluginrack::EqType::HighShelf, 8000.0f, -1.0f, 0.707f, true, false};
+    }
+    commitBands(std::move(bands));
 }
 
 void EQWindow::toggleBandType() {
@@ -416,6 +467,7 @@ void EQWindow::toggleBandType() {
     } else {
         band.type = pluginrack::EqType::Peak;
     }
+    markPresetCustom();
     commitBands(std::move(bands));
 }
 
@@ -426,6 +478,7 @@ void EQWindow::toggleFilterBand(int index) {
     band.type = index == 0 ? pluginrack::EqType::HighPass : pluginrack::EqType::LowPass;
     band.enabled = !band.enabled;
     band.gainDb = 0.0f; // filter points ignore gain: keep the node on 0 dB
+    markPresetCustom();
     commitBands(std::move(bands));
 }
 
@@ -437,6 +490,12 @@ void EQWindow::setDelayMs(float delayMs) {
 
 void EQWindow::setPhaseFlip(bool flipped) {
     flipButton.setToggleState(flipped);
+}
+
+void EQWindow::setEqEnabled(bool enabled) {
+    // Owner seeds from the strip's eqBypassed at open; notification off so
+    // the seed never re-triggers applyEnabled.
+    enableButton.setToggleState(enabled, juce::dontSendNotification);
 }
 
 void EQWindow::syncControls() {

@@ -380,8 +380,10 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
 
         if (adaptive) {
             if (!noiseSeeded_) {
+                // Seed every bin from this frame. Setting the flag inside the
+                // loop used to mark the estimate seeded at bin 0, so bins
+                // 1..N tracked against a zero floor forever.
                 noise_[k] = std::max(power, kSilencePower);
-                noiseSeeded_ = true;
             } else if (power < noise_[k]) {
                 // Track falling noise quickly, rising program material slowly.
                 noise_[k] += 0.02f * (power - noise_[k]);
@@ -412,6 +414,14 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
             + (1.0f - linkAmount) * gainForPower(powerLeft);
         rawGainRight_[k] = linkAmount * linkedGain
             + (1.0f - linkAmount) * gainForPower(powerRight);
+    }
+
+    if (adaptive && !bypassed && !learning
+        && effect_.mode == SpectralDenoiserMode::Adaptive) {
+        // Marked once the whole frame has been seeded (bins above were filled
+        // from this frame's power). The old in-loop assignment flipped the
+        // flag at bin 0, so every higher bin started tracking against zero.
+        noiseSeeded_ = true;
     }
 
     if (learning) {

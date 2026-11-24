@@ -255,10 +255,12 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
     int totalLatency = 0;
     for (const auto& ch : channel) {
         if (ch->id == node.id) {
-            totalLatency = channelLatency(*ch);
+            totalLatency = audioEngine.stripLatencySamples(*ch);
             break;
         }
     }
+    const double engineRate = audioEngine.getSampleRate();
+    const double sampleRate = engineRate > 0.0 ? engineRate : 48000.0;
 
     g.setFont(theme::ui::captionFont());
     for (std::size_t i = 0; i < node.sockets.size(); ++i) {
@@ -273,14 +275,13 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
         int used = 0;
         for (const auto& ch : channel) {
             if (ch->id == node.id) {
-                used = tapLatency(*ch, socket.tap);
+                used = audioEngine.stripTapLatencySamples(*ch, socket.tap);
                 break;
             }
         }
         const int remaining = totalLatency - used;
         if (remaining > 0) {
-            const double ms = 1000.0 * static_cast<double>(remaining)
-                              / audioEngine.getSampleRate();
+            const double ms = 1000.0 * static_cast<double>(remaining) / sampleRate;
             g.setColour(theme::dim());
             g.drawText("+" + juce::String(ms, 1) + " ms",
                        node.box.getRight() - 78, rowY,
@@ -294,6 +295,8 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
 
 juce::Point<int> PatchesView::socketPoint(const Node& node,
                                           const pluginrack::Tap& tap) const {
+    // Sockets are deduped in rebuild(), so the first id match here is the one
+    // the engine resolves (pluginrack::firstChainItemIndex).
     for (const auto& socket : node.sockets) {
         if (socket.tap.kind == tap.kind &&
             (tap.kind != pluginrack::Tap::Kind::Item || socket.tap.itemId == tap.itemId)) {
@@ -339,49 +342,6 @@ float PatchesView::cableBow(juce::Point<float> from, juce::Point<float> to,
     float bow = 0.0f;
     for (int step = 0; step < 50 && crosses(bow); ++step) bow += 16.0f;
     return bow;
-}
-
-int PatchesView::channelLatency(const AudioEngine::Channel& channel) const {
-    int total = 0;
-    for (const auto& item : channel.chain) {
-        if (item.type == pluginrack::ChainItemType::Insert) {
-            for (const auto& insert : channel.inserts) {
-                if (insert->id == item.id) {
-                    total += insert->latencySamples;
-                    break;
-                }
-            }
-        } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
-            total += pluginrack::kSpectralDenoiserLatencySamples;
-        }
-    }
-    return total;
-}
-
-int PatchesView::tapLatency(const AudioEngine::Channel& channel,
-                            const pluginrack::Tap& tap) const {
-    if (tap.kind == pluginrack::Tap::Kind::Input) return 0;
-    int total = 0;
-    for (const auto& item : channel.chain) {
-        if (item.type == pluginrack::ChainItemType::Insert) {
-            for (const auto& insert : channel.inserts) {
-                if (insert->id == item.id) {
-                    total += insert->latencySamples;
-                    break;
-                }
-            }
-        } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
-            total += pluginrack::kSpectralDenoiserLatencySamples;
-        }
-        if (tap.kind == pluginrack::Tap::Kind::Item && item.id == tap.itemId) {
-            return total;
-        }
-    }
-    return channelLatency(channel);
-}
-
-void PatchesView::mouseDown(const juce::MouseEvent&) {
-    // Clicks land on the canvas child; kept for compatibility.
 }
 
 void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
@@ -685,7 +645,16 @@ void PatchesView::rebuild() {
         inputSocket.tap.kind = pluginrack::Tap::Kind::Input;
         inputSocket.label = "Input";
         node.sockets.push_back(inputSocket);
-        for (const auto& item : ch->chain) {
+        for (std::size_t i = 0; i < ch->chain.size(); ++i) {
+            const auto& item = ch->chain[i];
+            // A tap is keyed by chain id alone (Tap::Kind::Item) and the
+            // built-in families mint ids independently, so one strip can hold
+            // a Dynamics row and a Limiter row that are both id 1. The tap
+            // identity rule is the first matching row
+            // (pluginrack::firstChainItemIndex): a later row sharing the id
+            // could never be addressed, so the card does not offer it.
+            if (static_cast<int>(i) != pluginrack::firstChainItemIndex(ch->chain, item.id))
+                continue;
             Socket socket;
             socket.tap.kind = pluginrack::Tap::Kind::Item;
             socket.tap.itemId = item.id;

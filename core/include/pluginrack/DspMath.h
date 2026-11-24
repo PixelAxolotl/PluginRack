@@ -110,8 +110,9 @@ inline Biquad highPass(double freqHz, double sampleRateHz, double q = kButterwor
                      1.0 + alpha, -2.0 * cosW, 1.0 - alpha);
 }
 
-// Constant skirt gain, peak gain = Q. Unity 0 dB in the pass band, so a
-// de-esser can subtract it from the input and leave the rest untouched.
+// Constant 0 dB peak gain band-pass (b0 = alpha normalises the centre to
+// unity). Unity 0 dB in the pass band, so a de-esser can subtract it from
+// the input and leave the rest untouched.
 inline Biquad bandPass(double freqHz, double sampleRateHz, double q = kButterworthQ,
                        double minHz = 10.0, double maxHz = 20000.0) noexcept {
     const double f = clampFrequency(freqHz, sampleRateHz, minHz, maxHz);

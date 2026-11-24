@@ -89,11 +89,15 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 12})");
+    const std::string text =
+        R"({"schemaVersion": )" + std::to_string(pluginrack::kSchemaVersion + 1) + "}";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(text);
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
-    REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("expected 1 to 11"));
+    // The codec's upper bound must follow the single constant, not a literal.
+    REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring(
+        "expected 1 to " + std::to_string(pluginrack::kSchemaVersion)));
 }
 
 TEST_CASE("v2 scene with output inserts round-trips") {
@@ -469,7 +473,6 @@ TEST_CASE("scene audio settings round-trip") {
     audio.minimalClockFifo = true;
     audio.autoReloadDevices = true;
     audio.rackThumbnailFps = 24;
-    audio.rackPreviewMode = pluginrack::RackPreviewMode::Rotate;
     audio.watchedDevices.push_back(pluginrack::WatchedDevice{false, 2});
     audio.watchedDevices.push_back(pluginrack::WatchedDevice{true, 1});
     original.audio = audio;
@@ -494,7 +497,6 @@ TEST_CASE("scene v6 audio hardening round-trips") {
     audio.slicedRender = true;
     audio.nonFiniteScrub = true;
     audio.healthReload = true;
-    audio.ladderRecovery = true;
     audio.healthYellowUnderrunsPerMinute = 2.5;
     audio.healthRedUnderrunsPerMinute = 12.0;
     audio.healthPinnedToEdgeMs = 7500.0;
@@ -544,8 +546,7 @@ TEST_CASE("pre-v6 scenes never opt into audio hardening") {
         "audio": {
             "slicedRender": true,
             "nonFiniteScrub": true,
-            "healthReload": true,
-            "ladderRecovery": true
+            "healthReload": true
         }
     })");
     REQUIRE(loaded.errors.empty());
@@ -554,7 +555,6 @@ TEST_CASE("pre-v6 scenes never opt into audio hardening") {
     CHECK_FALSE(loaded.scene->audio->slicedRender);
     CHECK_FALSE(loaded.scene->audio->nonFiniteScrub);
     CHECK_FALSE(loaded.scene->audio->healthReload);
-    CHECK_FALSE(loaded.scene->audio->ladderRecovery);
 }
 
 TEST_CASE("legacy audio tuning keys do not opt into beta latency modes") {
@@ -580,15 +580,37 @@ TEST_CASE("legacy audio tuning keys do not opt into beta latency modes") {
     CHECK_FALSE(audio.fullDuplexInput);
 }
 
-TEST_CASE("a scene without a preview mode keeps selected-only previews") {
+TEST_CASE("legacy ladder-recovery and preview-mode keys still load") {
+    // Scenes saved before the fallback ladder and background previews were
+    // deleted still carry these keys. They are ignored, not rejected, so the
+    // rest of the scene must come back intact.
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({
-        "schemaVersion": 5,
-        "audio": {"rackThumbnailFps": 15}
+        "schemaVersion": 11,
+        "name": "legacy",
+        "sampleRate": 44100,
+        "bufferFrames": 512,
+        "channels": [{"id": 1, "name": "mic"}],
+        "outputs": [{"id": 1, "name": "mains"}],
+        "audio": {
+            "inputBuffer": 128,
+            "rackThumbnailFps": 24,
+            "ladderRecovery": true,
+            "rackPreviewMode": "Rotate"
+        }
     })");
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
+    CHECK(loaded.scene->name == "legacy");
+    CHECK(loaded.scene->sampleRate == 44100.0);
+    CHECK(loaded.scene->bufferFrames == 512);
+    REQUIRE(loaded.scene->channels.size() == 1);
+    CHECK(loaded.scene->channels.front().id == 1);
+    CHECK(loaded.scene->channels.front().name == "mic");
+    REQUIRE(loaded.scene->outputs.size() == 1);
+    CHECK(loaded.scene->outputs.front().name == "mains");
     REQUIRE(loaded.scene->audio.has_value());
-    CHECK(loaded.scene->audio->rackPreviewMode == pluginrack::RackPreviewMode::Selected);
+    CHECK(loaded.scene->audio->inputBuffer == 128);
+    CHECK(loaded.scene->audio->rackThumbnailFps == 24);
 }
 
 TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {

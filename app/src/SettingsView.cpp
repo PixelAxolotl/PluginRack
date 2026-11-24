@@ -258,8 +258,8 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     add(probeCapChannels);
 
-    const std::array<juce::ToggleButton*, 4> hardeningToggles {
-        &slicedRenderToggle, &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle,
+    const std::array<juce::ToggleButton*, 3> hardeningToggles {
+        &slicedRenderToggle, &scrubToggle, &healthReloadToggle,
     };
     for (auto* toggle : hardeningToggles) {
         theme::ui::styleToggle(*toggle);
@@ -286,14 +286,6 @@ SettingsView::SettingsView(AudioEngine& engine)
         "using the same three attempts five seconds apart as a hard error.");
     healthReloadToggle.onClick = [this] {
         staged_.healthReload = healthReloadToggle.getToggleState();
-        updatePendingState();
-    };
-    ladderRecoveryToggle.setTooltip(
-        "Lets the fallback ladder climb back one rung after ten clean minutes, "
-        "at most once every thirty minutes. Off in this stage so a transient "
-        "spike can never make an automatic controller oscillate.");
-    ladderRecoveryToggle.onClick = [this] {
-        staged_.ladderRecovery = ladderRecoveryToggle.getToggleState();
         updatePendingState();
     };
 
@@ -376,30 +368,6 @@ SettingsView::SettingsView(AudioEngine& engine)
         audioEngine.setRackThumbnailFps(rackThumbnailFpsCombo.getSelectedId());
     };
     add(rackThumbnailFpsCombo);
-
-    rackPreviewModeLabel.setFont(theme::ui::bodyFont());
-    rackPreviewModeLabel.setColour(juce::Label::textColourId, theme::text());
-    rackPreviewModeLabel.setTooltip(
-        "Which insert cards keep a live preview. Selected only is cheapest; "
-        "rotating refreshes background cards one at a time; all live keeps "
-        "every card moving and costs the most CPU.");
-    add(rackPreviewModeLabel);
-
-    theme::ui::styleCombo(rackPreviewModeCombo);
-    rackPreviewModeCombo.addItem("Selected only", 1);
-    rackPreviewModeCombo.addItem("Rotate background", 2);
-    rackPreviewModeCombo.addItem("All live", 3);
-    rackPreviewModeCombo.setTooltip(
-        "Background preview mode. Rotate and All live cost extra CPU.");
-    rackPreviewModeCombo.setScrollWheelEnabled(false);
-    rackPreviewModeCombo.onChange = [this] {
-        using pluginrack::RackPreviewMode;
-        const int id = rackPreviewModeCombo.getSelectedId();
-        audioEngine.setRackPreviewMode(id == 3 ? RackPreviewMode::AllLive
-                                     : id == 2 ? RackPreviewMode::Rotate
-                                               : RackPreviewMode::Selected);
-    };
-    add(rackPreviewModeCombo);
 
     peakHoldLabel.setFont(theme::ui::bodyFont());
     peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
@@ -603,7 +571,6 @@ void SettingsView::refresh() {
         slicedRenderToggle.setToggleState(staged_.slicedRender, juce::dontSendNotification);
         scrubToggle.setToggleState(staged_.nonFiniteScrub, juce::dontSendNotification);
         healthReloadToggle.setToggleState(staged_.healthReload, juce::dontSendNotification);
-        ladderRecoveryToggle.setToggleState(staged_.ladderRecovery, juce::dontSendNotification);
         const int healthId = staged_.healthYellowUnderrunsPerMinute >= 2.0
                                  ? 1
                                  : (staged_.healthRedUnderrunsPerMinute <= 5.0 ? 3 : 2);
@@ -611,7 +578,7 @@ void SettingsView::refresh() {
     }
     for (auto* toggle : { &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
                            &minimalClockFifoToggle, &fullDuplexToggle, &slicedRenderToggle,
-                           &scrubToggle, &healthReloadToggle, &ladderRecoveryToggle }) {
+                           &scrubToggle, &healthReloadToggle }) {
         toggle->setEnabled(!busy);
     }
     probeCapToggle.setEnabled(!busy);
@@ -668,14 +635,6 @@ void SettingsView::refresh() {
         if (rackThumbnailFpsCombo.indexOfItemId(thumbFps) < 0)
             rackThumbnailFpsCombo.addItem(juce::String(thumbFps) + " fps", thumbFps);
         rackThumbnailFpsCombo.setSelectedId(thumbFps, juce::dontSendNotification);
-    }
-    if (!rackPreviewModeCombo.isPopupActive()) {
-        using pluginrack::RackPreviewMode;
-        const auto mode = audioEngine.getRackPreviewMode();
-        rackPreviewModeCombo.setSelectedId(mode == RackPreviewMode::AllLive ? 3
-                                            : mode == RackPreviewMode::Rotate ? 2
-                                                                             : 1,
-                                            juce::dontSendNotification);
     }
     if (!peakHoldCombo.isPopupActive())
         peakHoldCombo.setSelectedId(LevelMeter::peakHoldMs(), juce::dontSendNotification);
@@ -1104,10 +1063,10 @@ int SettingsView::layoutBody(int width) {
         const int asioRowH = juce::jmax(theme::ui::kControlH, asioStatusH);
         constexpr int kToggleW = 430;
         constexpr int kToggleColGap = 24;
-        // Ten opt-in switches read as one list in a narrow window and as rows
+        // Nine opt-in switches read as one list in a narrow window and as rows
         // of two when the panel is wide enough to hold them side by side.
         const bool twoColumns = innerW >= 2 * kToggleW + kToggleColGap;
-        constexpr int kToggleCount = 10;
+        constexpr int kToggleCount = 9;
         const int toggleRows = twoColumns ? (kToggleCount + 1) / 2 : kToggleCount;
         const int togglesH = toggleRows * kToggleH + (toggleRows - 1) * kToggleGap;
         const int panelH = pad + togglesH + 6 + theme::ui::kControlH
@@ -1120,7 +1079,7 @@ int SettingsView::layoutBody(int width) {
             &lowLatencyInputToggle, &exclusiveToggle, &lowLatencyOutputsToggle,
             &minimalClockFifoToggle, &fullDuplexToggle,
             &slicedRenderToggle, &scrubToggle, &healthReloadToggle,
-            &ladderRecoveryToggle, &probeCapToggle,
+            &probeCapToggle,
         }};
         const int columnW = twoColumns ? (innerW - kToggleColGap) / 2 : innerW;
         for (int i = 0; i < (int) toggles.size(); ++i) {
@@ -1170,9 +1129,6 @@ int SettingsView::layoutBody(int width) {
         auto row = inner.removeFromTop(theme::ui::kControlH);
         rackThumbnailsLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         rackThumbnailFpsCombo.setBounds(row.removeFromLeft(90));
-        row.removeFromLeft(24);
-        rackPreviewModeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
-        rackPreviewModeCombo.setBounds(row.removeFromLeft(140));
 
         inner.removeFromTop(6);
         auto row2 = inner.removeFromTop(theme::ui::kControlH);

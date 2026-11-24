@@ -28,7 +28,11 @@ public:
     void setBypassed(bool bypassed);
     void closeButtonPressed() override { if (onClose) onClose(); }
     std::function<void()> onClose;
-    std::function<void(float*, float*, int)> pullAnalyzerTap;
+    // post picks the engine ring: false is the pre-effect ring (the effect's
+    // own input), true the post-effect ring (its output). The tap runs in a
+    // non-off mode whenever this window is open, which keeps both rings
+    // current, so either value can be requested on any tick.
+    std::function<void(bool post, float*, float*, int)> pullAnalyzerTap;
     std::function<void(float offsetDb)> applySpectrumOffset;
     std::function<void(int weighting)> applyWeighting;
     void setAnalyzerMode(int mode);
@@ -72,7 +76,6 @@ private:
     float spectrumOffsetDb = kTraceRtaDefaultOffsetDb;
     double sampleRateHz = 48000.0;
     int selectedBand = 0;
-    float liveGr = 0.0f;
     static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
     std::vector<float> tapL;
     std::vector<float> tapR;

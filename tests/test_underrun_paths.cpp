@@ -226,8 +226,10 @@ TEST_CASE("AudioEngine::render never allocates on the audio thread", "[underrun]
     // published playback snapshot instead of allocating a buffer.
     CHECK(countOccurrences(body, "pushSilenceToOutputs(frames)") >= 1);
     CHECK(contains(body, "pushSilenceToOutputsLocked(frames)"));
-    // Preserved semantics: oversized blocks are counted, lock loss is not.
-    CHECK(contains(body, "oversizedBlockCount_.fetch_add"));
+    // Preserved semantics: oversized blocks are silenced and skipped without
+    // touching plugins; lock loss is not counted as an oversized block.
+    CHECK(contains(body, "pluginrack::AudioTelemetry::flagOversized"));
+    CHECK(contains(body, "pushSilenceToOutputsLocked(frames)"));
     CHECK(contains(body, "lock.isLocked()"));
     CHECK(contains(body, "renderMisses_.fetch_add"));
 }
@@ -279,6 +281,171 @@ TEST_CASE("plugin prepare and release run outside the state lock",
     const auto release = functionBody(cpp, "void AudioEngine::releaseResources()");
     CHECK_FALSE(contains(release, "insert->pluginHost.releaseResources"));
     CHECK(contains(release, "host->releaseResources"));
+}
+
+TEST_CASE("prepareToPlay re-prepares every built-in processor family",
+          "[underrun][latency]") {
+    // A sample-rate change used to touch only the EQ: limiter lookahead,
+    // multiband crossovers and the denoiser FFT kept their old-rate tables.
+    // Every family must be prepared for the new clock, on all three strip
+    // kinds, through one shared helper.
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto prepare = functionBody(
+        cpp, "void AudioEngine::prepareToPlayImpl(int maxBlockFrames, bool openInputs)");
+    CHECK(contains(prepare, "prepareStripProcessors(*channel, prepareRate)"));
+    CHECK(contains(prepare, "prepareStripProcessors(*output, prepareRate)"));
+    CHECK(contains(prepare, "prepareStripProcessors(*bus, prepareRate)"));
+    CHECK_FALSE(contains(prepare, "channel->eq.prepare(currentSampleRate"));
+
+    const auto helper = functionBody(
+        cpp, "void prepareStripProcessors(StripType& strip, double sampleRate)");
+    CHECK(contains(helper, "strip.eq.prepare(sampleRate)"));
+    CHECK(contains(helper, "prepareProcessorFamily"));
+    for (const auto* processors : { "effectProcessors", "multibandProcessors",
+                                    "deEsserProcessors", "limiterProcessors",
+                                    "feedbackSuppressorProcessors",
+                                    "spectralDenoiserProcessors" }) {
+        INFO(processors);
+        CHECK(contains(helper, processors));
+    }
+
+    // Both paths of the family helper keep prepare/setEffect in order, so
+    // cached tables are recomputed for the new rate and re-synced.
+    const auto family = functionBody(
+        cpp, "void prepareProcessorFamily(std::vector<Processor>& processors,");
+    CHECK(contains(family, "processors[i].prepare(sampleRate);"));
+    CHECK(contains(family, "processors[i].setEffect(effects[i]);"));
+    CHECK(contains(family, "processor.prepare(sampleRate);"));
+    CHECK(contains(family, "processor.setEffect(effect);"));
+}
+
+TEST_CASE("taps and latency rules cover the paths render actually runs",
+          "[underrun][latency]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto header = readSource("app/src/AudioEngine.h");
+
+    // EQWindow's Pre mode reads the input side, so both chain copies must
+    // write the pre ring before the EQ processes, not only the post ring
+    // after it.
+    for (const auto* preWrite : { "channel->eqTap.writeTap(false", "strip->eqTap.writeTap(false" }) {
+        INFO(preWrite);
+        CHECK(contains(cpp, preWrite));
+    }
+    const auto channelPre = cpp.find("channel->eqTap.writeTap(false");
+    const auto channelRun = cpp.find("channel->eq.process(", channelPre);
+    REQUIRE(channelPre != std::string::npos);
+    CHECK(channelRun != std::string::npos);
+    CHECK(channelPre < channelRun);
+    const auto stripPre = cpp.find("strip->eqTap.writeTap(false");
+    const auto stripRun = cpp.find("strip->eq.process(", stripPre);
+    REQUIRE(stripPre != std::string::npos);
+    CHECK(stripRun != std::string::npos);
+    CHECK(stripPre < stripRun);
+
+    // Effects with no chain row still run through the fallback pass, so their
+    // windows must stay fed and their latency must reach the route delays.
+    CHECK(contains(cpp, "processNewMissing(channel->chain, channel->limiterEffects"));
+    CHECK(contains(cpp, "&channel->limiterTap);"));
+    CHECK(contains(cpp, "&strip->limiterTap);"));
+    const auto chainLatency = functionBody(header, "static int chainLatencySamples");
+    CHECK(contains(chainLatency, "pluginrack::limiterLatencySamples(effect, sampleRate)"));
+    CHECK(contains(chainLatency, "pluginrack::kSpectralDenoiserLatencySamples"));
+    CHECK(contains(chainLatency, "!effect.bypassed"));
+
+    // The EQ delay line only runs from an Eq chain row, so the report must not
+    // bill a delay that render never applies.
+    const auto eqHelper = functionBody(cpp, "int stripEqLatencySamples");
+    CHECK(contains(eqHelper, "pluginrack::ChainItemType::Eq"));
+    CHECK(contains(eqHelper, "if (!inChain) return 0;"));
+
+    // A staged restore can land on a new clock; the six built-in families
+    // must be re-prepared there exactly as in prepareToPlayImpl.
+    const auto commit = functionBody(cpp, "juce::String AudioEngine::commitSceneRestore");
+    CHECK(contains(commit, "prepareStripProcessors(*channel, restoreRate)"));
+    CHECK(contains(commit, "prepareStripProcessors(*output, restoreRate)"));
+    CHECK(contains(commit, "prepareStripProcessors(*bus, restoreRate)"));
+}
+
+TEST_CASE("an item tap pushes and bills the same chain row", "[underrun][latency]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto scene = readSource("core/include/pluginrack/Scene.h");
+
+    // One identity rule for Tap::Kind::Item, because every built-in family
+    // mints its own id 1: one strip can hold a Dynamics and a Limiter row that
+    // are both id 1.
+    const auto resolver = functionBody(scene, "int firstChainItemIndex");
+    CHECK(contains(resolver, "chain[static_cast<std::size_t>(i)].id == itemId"));
+    CHECK(contains(resolver, "return i;"));
+
+    // Latency bills the chain up to and including that row...
+    const auto latency = functionBody(cpp, "int AudioEngine::tapLatencySamples");
+    CHECK(contains(latency, "pluginrack::firstChainItemIndex(channel.chain, tap.itemId)"));
+    CHECK(contains(latency, "for (int i = 0; i <= index; ++i)"));
+
+    // ...and render only writes the ring at that same row, instead of at
+    // every row sharing the id (the later family's signal used to stay in the
+    // ring while the latency came from the first).
+    const auto render = functionBody(cpp, "void AudioEngine::render");
+    const auto guard =
+        render.find("pluginrack::firstChainItemIndex(channel->chain, item.id)");
+    const auto push = render.find("pluginrack::Tap{pluginrack::Tap::Kind::Item, item.id}");
+    REQUIRE(guard != std::string::npos);
+    REQUIRE(push != std::string::npos);
+    CHECK(guard < push);
+    CHECK(countOccurrences(render, "pluginrack::Tap{pluginrack::Tap::Kind::Item") == 1);
+
+    // The offline renderer follows the same rule: only the first row carrying
+    // an id publishes the item tap, and the id latches at that row's total.
+    const auto mixer = readSource("core/src/MixerEngine.cpp");
+    CHECK(contains(mixer, "pluginrack::firstChainItemIndex(source.chain, item.id)"));
+    CHECK(contains(mixer, "pluginrack::firstChainItemIndex(strip.chain, item.id)"));
+    CHECK(contains(mixer, "step.tapOwned"));
+}
+
+TEST_CASE("patches latency labels come from the engine's one rule table",
+          "[underrun][latency]") {
+    const auto patches = readSource("app/src/PatchesView.cpp");
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+
+    // The view no longer keeps its own Insert + denoiser count, which missed
+    // limiter look-ahead and the EQ delay line and read the first id match
+    // with its own rules.
+    CHECK_FALSE(contains(patches, "PatchesView::channelLatency"));
+    CHECK_FALSE(contains(patches, "PatchesView::tapLatency"));
+    CHECK_FALSE(contains(patches, "pluginrack::kSpectralDenoiserLatencySamples"));
+    CHECK(contains(patches, "audioEngine.stripLatencySamples(*ch)"));
+    CHECK(contains(patches, "audioEngine.stripTapLatencySamples(*ch, socket.tap)"));
+
+    // The accessor is the same chainLatencySamples table render compensates
+    // with, and the tap accessor the same Item resolution, so the "+X ms"
+    // residual stays in step with what the engine actually delays.
+    const auto stripLatency =
+        functionBody(cpp, "int AudioEngine::stripLatencySamples(const Channel& strip)");
+    CHECK(contains(stripLatency, "chainLatencySamples(strip,"));
+    const auto tapLatency =
+        functionBody(cpp, "int AudioEngine::stripTapLatencySamples(const Channel& channel,");
+    CHECK(contains(tapLatency, "tapLatencySamples("));
+}
+
+TEST_CASE("a built-in panel owns the editor bay until its card goes",
+          "[underrun][ui]") {
+    const auto rack = readSource("app/src/RackView.cpp");
+    const auto editor = functionBody(rack, "void RackView::refreshEditor");
+
+    // Opening a panel is followed by a rebuild so the new card appears; that
+    // rebuild must not close the panel it just created.
+    REQUIRE(editor.find("focusedEffectWindow != nullptr") != std::string::npos);
+    CHECK(contains(editor, "if (!backed)"));
+    CHECK(contains(editor, "closeEffectWindows();"));
+
+    // A panel is backed by its chain row, not the effect vector: removing a
+    // card only erases the row and marks the effect bypassed.
+    CHECK(contains(editor, "hasRow(pluginrack::ChainItemType::Multiband)"));
+    CHECK(contains(editor, "hasRow(pluginrack::ChainItemType::Limiter)"));
+
+    // Selection changes close the panel first, so it cannot follow the user
+    // onto another strip.
+    CHECK(contains(rack, "closeEffectWindows();"));
 }
 
 TEST_CASE("latency tuning options reach the device opens",
@@ -1088,9 +1255,9 @@ TEST_CASE("an Auto input buffer follows the clock instead of the driver's mood",
     // Auto must resolve to the render block, and a device that refuses that
     // size must fall back to its own default rather than leaving the strip
     // silent.
-    CHECK(contains(open, "pluginrack::inputBufferRequest(requestedInputBufferSize_, renderBlockFrames)"));
+    CHECK(contains(open, "pluginrack::inputBufferRequest(requestedInputBufferSize_.load(), renderBlockFrames)"));
     CHECK(contains(open, "err, bufferRequest,"));
-    CHECK(contains(open, "requestedInputBufferSize_ == 0 && bufferRequest > 0"));
+    CHECK(contains(open, "requestedInputBufferSize_.load() == 0 && bufferRequest > 0"));
     CHECK(contains(open, "err, 0,"));
 
     const auto policy = readSource("core/include/pluginrack/InputBufferPolicy.h");
@@ -1400,7 +1567,6 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
     CHECK(contains(codec, "\"slicedRender\""));
     CHECK(contains(codec, "\"nonFiniteScrub\""));
     CHECK(contains(codec, "\"healthReload\""));
-    CHECK(contains(codec, "\"ladderRecovery\""));
     CHECK(contains(codec, "if (schemaVersion < 6)"));
 
     const auto header = readSource("core/include/pluginrack/Scene.h");
@@ -1420,7 +1586,6 @@ TEST_CASE("scene v6 hardening switches are opt-in and persisted",
     CHECK(contains(settings, "slicedRenderToggle"));
     CHECK(contains(settings, "scrubToggle"));
     CHECK(contains(settings, "healthReloadToggle"));
-    CHECK(contains(settings, "ladderRecoveryToggle"));
     CHECK(contains(settings, "healthSensitivityCombo"));
     CHECK(contains(settings, "getHealthReloadDevices()"));
 }
@@ -1490,8 +1655,6 @@ TEST_CASE("the juce probe cap patch is shipped and applied", "[device][probe][bu
 TEST_CASE("scene swaps release plugin editors before their processors", "[app][ui][crash]") {
     const auto rack = readSource("app/src/RackView.cpp");
     const auto release = functionBody(rack, "void RackView::releaseEditorsNow");
-    CHECK(contains(release, "hiddenPreviews"));
-    CHECK(contains(release, "doomedPreviews"));
     CHECK(contains(release, "destroyDockEditor"));
     CHECK_FALSE(contains(release, "destroyEditorWhenIdle"));
 

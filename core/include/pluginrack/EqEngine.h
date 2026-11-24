@@ -27,6 +27,17 @@ struct EqBand {
 // for the high-pass and the low-pass.)
 std::vector<EqBand> defaultEqBands();
 
+// Delay-line latency the strip's EQ imposes, in samples, for latency
+// compensation: 0 when the EQ is off/bypassed or the delay is unset,
+// otherwise the requested milliseconds (clamped to EqEngine::kMaxDelayMs)
+// converted at the given rate. Shared with EqEngine::setDelayMs clamping so
+// the reported latency matches the line the engine actually applies.
+// This is the physical delay and can exceed kMaxTapDelaySamples (341 ms at
+// 48 kHz); tap compensation clamps to that cap separately, so a longer delay
+// is reported in full here but aligned only to the cap.
+int eqLatencySamples(bool eqEnabled, bool eqBypassed, float eqDelayMs,
+                     double sampleRate) noexcept;
+
 // Fixed seven-band stereo parametric EQ, DF-II transposed biquads, one state
 // per band per channel, followed by an optional delay line (0..kMaxDelayMs)
 // for time-aligning a channel or output. Coefficients are recomputed in
@@ -40,7 +51,7 @@ public:
     // non-zero setDelayMs() so an EQ that never delays keeps no extra memory.
     static constexpr float kMaxDelayMs = 1000.0f;
 
-    void prepare(double sampleRate, int maxBlock);
+    void prepare(double sampleRate);
     void setBands(const std::vector<EqBand>& bands);
     // Message thread, like setBands. The read distance glides to the new
     // value (one-pole, ~20 ms) so a knob drag never clicks; 0 ms skips the
@@ -71,7 +82,6 @@ private:
     void applyDelay(float* L, float* R, int n) noexcept;
 
     double sampleRate_ = 0.0; // 0.0 until prepared; process() is a no-op before
-    int maxBlock_ = 0;
     std::vector<EqBand> bands_;
     BandFilter filters_[kNumBands];
     int activeMask_ = 0;

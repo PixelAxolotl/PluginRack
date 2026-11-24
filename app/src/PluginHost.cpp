@@ -75,6 +75,15 @@ juce::CriticalSection& sharedFormatLock() {
     return lock;
 }
 
+// Serialises the crash-tracking slot writes: two workers loading plugins at
+// once must never copy into the same path buffer concurrently. The crash
+// handler (currentLoadingPlugin) stays lock-free - it can fire while this
+// lock is held, and it only reads published counters.
+juce::CriticalSection& loadGuardLock() {
+    static juce::CriticalSection lock;
+    return lock;
+}
+
 // Double-buffered so the crash handler can read the path while a worker writes
 // the next one: no allocation, no lock, and never a half-written string.
 constexpr std::size_t kMaxTrackedPath = 1024;
@@ -108,6 +117,7 @@ namespace PluginLoadGuard {
 
 void begin(const juce::File& file) {
     const auto path = file.getFullPathName();
+    const juce::ScopedLock lock(loadGuardLock());
     const int next = 1 - trackedIndex.load(std::memory_order_relaxed);
     tracking.store(false, std::memory_order_release);
     const auto* utf8 = path.toRawUTF8();
@@ -119,6 +129,7 @@ void begin(const juce::File& file) {
 }
 
 void end() {
+    const juce::ScopedLock lock(loadGuardLock());
     tracking.store(false, std::memory_order_release);
 }
 
@@ -231,6 +242,9 @@ PluginHost::PluginHost() {
 }
 
 PluginHost::~PluginHost() {
+    // A queued param resync callback must see this and drop instead of
+    // touching a half-destroyed host.
+    paramResyncAlive_->store(false, std::memory_order_release);
     stopChildHost();
     delete editorWindow;
     editorWindow = nullptr;
@@ -389,10 +403,51 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
 bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
     auto host = childHost_.load(std::memory_order_acquire);
     if (host == nullptr || parameterIndex < 0) return false;
-    const bool sent = host->setParameter(static_cast<std::uint32_t>(parameterIndex),
-                                         juce::jlimit(0.0f, 1.0f, normalisedValue));
-    if (sent) parameterRevision_.fetch_add(1, std::memory_order_relaxed);
-    return sent;
+    const auto result = host->setParameter(static_cast<std::uint32_t>(parameterIndex),
+                                           juce::jlimit(0.0f, 1.0f, normalisedValue));
+    // The edit counts as made the moment it entered the ring: the autosave
+    // must not miss a gesture just because the same call also queued a resync.
+    if (result.pushed) parameterRevision_.fetch_add(1, std::memory_order_relaxed);
+    if (result.resyncNeeded) scheduleParamResync();
+    return result.pushed;
+}
+
+void PluginHost::scheduleParamResync() {
+    // One pending resync at a time, and never on the audio thread: the ring
+    // overflow or the child-reported gap is noticed by a message-thread
+    // setChildParameter call, and the state push itself is a blocking control
+    // request. The shared flag lets the queued callback notice a host that
+    // died before it ran.
+    if (paramResyncPending_.exchange(true, std::memory_order_acq_rel)) return;
+    const auto alive = paramResyncAlive_;
+    juce::MessageManager::callAsync([this, alive] {
+        // The lifetime token is the first read: once the destructor flipped
+        // it, even paramResyncPending_ on this may already be gone.
+        if (!alive->load(std::memory_order_acquire)) return;
+        paramResyncPending_.store(false, std::memory_order_release);
+        auto host = childHost_.load(std::memory_order_acquire);
+        if (host == nullptr || host->isDead()) return;
+        // Read the state now, at push time, so every edit that arrived while
+        // the resync was coalescing is covered by this single snapshot.
+        const auto state = editorStateAsBase64();
+        if (state.isEmpty()) return; // no instance to take state from
+        juce::String error;
+        if (!host->setState(state, 5000, error)) {
+            juce::Logger::writeToLog("plugin: child param resync failed (" + error + ")");
+        }
+    });
+}
+
+juce::String PluginHost::editorStateAsBase64() const {
+    // The in-process instance owns the editor and the rack's knobs, so its
+    // state is the truth a child with missed edits must be returned to.
+    // Deliberately not getStateAsBase64(): that asks the child first, and the
+    // child is exactly the side holding the stale parameters.
+    const juce::ScopedLock lock(pluginLock);
+    if (plugin == nullptr) return {};
+    juce::MemoryBlock state;
+    plugin->getStateInformation(state);
+    return state.getSize() > 0 ? state.toBase64Encoding() : juce::String{};
 }
 
 void PluginHost::stopChildHost() {
@@ -418,11 +473,6 @@ PluginHost::ChildHostStatus PluginHost::childHostStatus() const {
 int PluginHost::childProcessId() const {
     auto host = childHost_.load(std::memory_order_acquire);
     return host != nullptr ? host->childProcessId() : 0;
-}
-
-PluginProcessHost::Peaks PluginHost::childPeaks() const {
-    auto host = childHost_.load(std::memory_order_acquire);
-    return host != nullptr ? host->peaks() : PluginProcessHost::Peaks{};
 }
 
 void PluginHost::editorBeingDeleted(juce::AudioProcessorEditor* ed) {
@@ -878,8 +928,6 @@ void PluginHost::adopt(const LoadedPlugin& loaded, const juce::String& stateBase
         detachParameterListeners();
         plugin->releaseResources();
     }
-    pluginPath = loaded.path;
-    pluginName = loaded.name;
     sideChainChannels_.store(loaded.sideChainChannels, std::memory_order_relaxed);
     plugin = loaded.instance;
     attachParameterListeners();
@@ -1070,16 +1118,6 @@ void PluginHost::noteChildMiss() {
     if (misses >= 3) {
         childFailed_.store(true, std::memory_order_release);
     }
-}
-
-juce::String PluginHost::getPluginPath() const {
-    const juce::ScopedLock lock(pluginLock);
-    return pluginPath;
-}
-
-juce::String PluginHost::getPluginName() const {
-    const juce::ScopedLock lock(pluginLock);
-    return pluginName;
 }
 
 double PluginHost::getSampleRate() const {

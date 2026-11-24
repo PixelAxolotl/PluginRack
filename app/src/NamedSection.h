@@ -79,7 +79,6 @@ public:
 
     bool isOpen() const { return view != nullptr; }
     void* data() const { return view; }
-    std::size_t size() const { return sectionSize; }
     unsigned long error() const { return lastError; }
 
     void close() {

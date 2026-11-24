@@ -42,10 +42,6 @@ struct SharedAudioBlock {
     double sampleRate = 0.0;
     // Written by the host before it bumps responseSequence, so a value read
     // after a matching ack belongs to the block that was just processed.
-    float peakInL = 0.0f;
-    float peakInR = 0.0f;
-    float peakOutL = 0.0f;
-    float peakOutR = 0.0f;
     std::int32_t latencySamples = 0;
     float interleave[kMaxBlockFrames * 2] = {};
 };

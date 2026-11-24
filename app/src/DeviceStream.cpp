@@ -415,7 +415,6 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                bool preferExclusive,
                                int capacityReserveFrames) {
     close();
-    error.clear();
     inputError.clear();
 
     const int numInputChannels = juce::jmax(2, numChannelsNeeded);
@@ -427,14 +426,12 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
                                               preferExclusive, pluginrack::StreamRole::Input,
                                               0);
     if (activeDeviceType_.isEmpty()) {
-        error = errorOut;
         return errorOut;
     }
 
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
         const auto msg = juce::String("Could not open input device.");
-        error = msg;
         errorOut = msg;
         close();
         return msg;
@@ -443,7 +440,6 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
     const double actual = dev->getCurrentSampleRate();
     if (engineSampleRate > 0.0 && std::abs(actual - engineSampleRate) > 0.5) {
         const auto msg = "Needs " + formatKhz(engineSampleRate) + " (device is " + formatKhz(actual) + ")";
-        error = msg;
         errorOut = msg;
         close();
         return msg;
@@ -694,7 +690,15 @@ bool InputCapture::pull(juce::AudioBuffer<float>& dest, int frames,
                 const auto base = (std::int64_t)std::floor(pos);
                 const float frac = static_cast<float>(pos - (double)base);
                 const int i0 = (int)(base % capacity);
-                const int i1 = (i0 + 1 == capacity) ? 0 : i0 + 1;
+                // The last sample never interpolates toward base + 1: that
+                // slot can sit one past the published window (a short block,
+                // or a window whose available count ends exactly at n) where
+                // the producer may be overwriting it. Gate on the sample
+                // index, not on window.fraction - an underrun re-primes the
+                // cursor to an integer position, so the window fraction can
+                // be 0 while the accumulated per-sample fraction is ~1. When
+                // that fraction is 0 the clamp changes nothing.
+                const int i1 = (s == n - 1) ? i0 : ((i0 + 1 == capacity) ? 0 : i0 + 1);
                 const float v0 = ring[i0];
                 out[s] = v0 + (ring[i1] - v0) * frac;
                 pos += window.ratio;
@@ -840,7 +844,6 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     deviceStopped_.store(false, std::memory_order_relaxed);
     lastCallbackMs.store(0, std::memory_order_relaxed);
     callbackCount.store(0, std::memory_order_relaxed);
-    error.clear();
 
     // One attempt in the preferred device type (shared, or exclusive when it
     // was explicitly enabled). A refusal is reported, never retried.
@@ -850,13 +853,11 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
                                               preferExclusive, role,
                                               duplexInputChannels);
     if (activeDeviceType_.isEmpty()) {
-        error = errorOut;
         return errorOut;
     }
     auto* dev = manager.getCurrentAudioDevice();
     if (dev == nullptr) {
         const auto msg = juce::String("Could not open output device.");
-        error = msg;
         errorOut = msg;
         close();
         return msg;
@@ -865,7 +866,6 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
     const double actual = dev->getCurrentSampleRate();
     if (engineSampleRate > 0.0 && std::abs(actual - engineSampleRate) > 0.5) {
         const auto msg = "Needs " + formatKhz(engineSampleRate) + " (device is " + formatKhz(actual) + ")";
-        error = msg;
         errorOut = msg;
         close();
         return msg;
@@ -1006,11 +1006,12 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
                                       std::memory_order_relaxed);
         return;
     }
+    // getFreeSpace() >= frames is checked above, so write() always covers all
+    // frames; an early return on a short block would commit the write anyway
+    // (the handle commits in its destructor) with no samples copied.
     auto writeHandle = fifo->write(frames);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
-    const int total = b1 + b2;
-    if (total != frames) return;
     const int srcChans = juce::jmax(1, src.getNumChannels());
     const int fade = pushFadeInPending ? juce::jmin(kDeclickSamples, frames) : 0;
 
@@ -1088,7 +1089,6 @@ void OutputPlayback::pushSilence(int frames) {
     auto writeHandle = fifo->write(frames);
     const int b1 = writeHandle.blockSize1;
     const int b2 = writeHandle.blockSize2;
-    if (b1 + b2 != frames) return;
     const int fade = juce::jmin(kDeclickSamples, frames);
     for (int ch = 0; ch < 2; ++ch) {
         float* dst = storage.getWritePointer(ch);

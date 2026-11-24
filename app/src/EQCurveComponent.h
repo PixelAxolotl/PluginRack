@@ -12,9 +12,9 @@
 // Pro-Q-style curve editor (Task 5) for the fixed seven-band EQ. Paints a
 // log-frequency grid (20 Hz - 20 kHz, +/-15 dB), one draggable node per band
 // in its band colour, and the combined magnitude response in yellow computed
-// from the same RBJ biquad transfer functions core/EqEngine.cpp applies
-// (formula duplicated here because EqEngine::computeCoeffs is private and
-// core is frozen; the active-band rule mirrors EqEngine::rebuild).
+// through core's pluginrack::dsp biquad builders — the exact maths EqEngine
+// applies, so the curve can never diverge from the audio (the active-band
+// rule mirrors EqEngine::rebuild).
 // The component owns the band state; EQWindow pushes edits through setBands
 // and persists them through onBandsChanged.
 class EQCurveComponent final : public juce::Component {

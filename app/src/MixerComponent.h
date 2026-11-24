@@ -27,7 +27,6 @@ public:
     explicit MixerComponent(AudioEngine& engine);
 
     void setSections(Sections sections);
-    Sections getSections() const { return sections_; }
 
     void resized() override;
     void rebuild();
@@ -76,7 +75,6 @@ private:
         void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
         void reloadPlugin(std::uint32_t insertId) override;
         void refreshAfterInsertChange() override;
-        void reorderInsert(std::uint32_t insertId, int targetIndex) override;
         void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
         void previewChainItem(int targetIndex) override;
         void clearChainPreview() override;

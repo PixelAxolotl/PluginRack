@@ -40,8 +40,6 @@ public:
                  int maxBlockFrames, std::string* error);
     void render(std::span<const AudioBlock> channelInputs,
                 std::span<AudioBlock> outputBlocks) noexcept;
-    int channelCount() const noexcept;
-    int outputCount() const noexcept;
     std::vector<std::uint32_t> failedPluginSlots() const;
     // Non-finite samples replaced with silence inside the render path,
     // including those scrubbed by the per-strip insert chains.
@@ -110,6 +108,9 @@ private:
         ChainItemType type = ChainItemType::Insert;
         std::size_t index = 0;
         std::uint32_t id = 0;
+        // Item taps resolve an id to the first chain row that carries it, so a
+        // later row repeating an id from another family must not push the ring.
+        bool tapOwned = true;
     };
 
     struct TapState {

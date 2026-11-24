@@ -448,7 +448,9 @@ void DynamicsWindow::syncGateControls() {
 
 void DynamicsWindow::timerCallback() {
     if (!pullAnalyzerTap) return;
-    pullAnalyzerTap(tapL.data(), tapR.data(), static_cast<int>(tapL.size()));
+    // Pre-effect tap: the dot and the gauge model the compressor's own input,
+    // so they must read the ring the engine writes before the processor runs.
+    pullAnalyzerTap(false, tapL.data(), tapR.data(), static_cast<int>(tapL.size()));
 
     float peak = 0.0f;
     for (std::size_t i = 0; i < tapL.size(); ++i)

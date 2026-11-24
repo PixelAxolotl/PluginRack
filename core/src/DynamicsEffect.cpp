@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 
 #include "pluginrack/DspMath.h"
 
@@ -46,10 +45,17 @@ void DynamicsProcessor::process(float* left, float* right, int frames) noexcept 
     const float makeup = dsp::dbToGain(effect_.makeupDb);
 
     for (int i = 0; i < frames; ++i) {
-        left[i] *= inputGain;
-        right[i] *= inputGain;
-        const float level = std::max(std::fabs(left[i]), std::fabs(right[i]));
+        // A single non-finite sample (or non-finite trim) must not poison the
+        // envelope for the rest of the session: silence it at the door.
+        float sL = left[i] * inputGain;
+        float sR = right[i] * inputGain;
+        if (!std::isfinite(sL)) sL = 0.0f;
+        if (!std::isfinite(sR)) sR = 0.0f;
+        left[i] = sL;
+        right[i] = sR;
+        const float level = std::max(std::fabs(sL), std::fabs(sR));
         envelope_ += (level - envelope_) * (level > envelope_ ? attack : release);
+        dsp::flushState(envelope_);
         const float levelDb = dsp::gainToDb(envelope_);
         float targetDb = 0.0f;
         if (gate) {
@@ -76,6 +82,7 @@ void DynamicsProcessor::process(float* left, float* right, int frames) noexcept 
         const float targetGain = dsp::dbToGain(targetDb) * makeup;
         const float gainRate = targetGain < gain_ ? attack : release;
         gain_ += (targetGain - gain_) * gainRate;
+        dsp::flushState(gain_);
         left[i] *= gain_;
         right[i] *= gain_;
     }

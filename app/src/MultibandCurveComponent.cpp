@@ -45,6 +45,10 @@ float MultibandCurveComponent::compressionGainDb(float inputDb,
                                                    const pluginrack::MultibandBand& band) {
     if (band.bypassed || !band.enabled || band.ratio <= 1.0f) return 0.0f;
     const float distance = (inputDb + band.inputGainDb) - band.thresholdDb;
+    // The expander has no knee in core (MultibandEffect.cpp): it attenuates
+    // only below the threshold, so it must skip the compressor knee branch.
+    if (band.mode == pluginrack::MultibandMode::Expand)
+        return distance < 0.0f ? std::min(0.0f, distance * (band.ratio - 1.0f)) : 0.0f;
     const float knee = std::max(0.0f, band.kneeDb);
     if (knee > 0.0f && distance > -knee * 0.5f && distance < knee * 0.5f) {
         const float width = distance + knee * 0.5f;
@@ -52,9 +56,7 @@ float MultibandCurveComponent::compressionGainDb(float inputDb,
     }
     if (distance > 0.0f)
         return distance * (1.0f / band.ratio - 1.0f);
-    return band.mode == pluginrack::MultibandMode::Expand
-        ? std::min(0.0f, distance * (band.ratio - 1.0f))
-        : 0.0f;
+    return 0.0f;
 }
 
 void MultibandCurveComponent::setEffect(const pluginrack::MultibandEffect& newEffect) {
@@ -231,7 +233,9 @@ void MultibandCurveComponent::paint(juce::Graphics& g) {
                    juce::roundToInt(graph.getY() - 18.0f), 56, 12, juce::Justification::centred);
     }
 
-    const float legendY = graph.getY() - 20.0f;
+    // Inside the graph's top-left: the old graph.getY() - 20.0f drew the legend
+    // above the panel edge (clipped at 0) and on top of the crossover labels.
+    const float legendY = graph.getY() + 4.0f;
     g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
     g.setColour(theme::cyan());
     g.drawText("TARGET", juce::roundToInt(graph.getX() + 4.0f),

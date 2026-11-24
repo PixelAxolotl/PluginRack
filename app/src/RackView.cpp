@@ -20,8 +20,13 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engi
     nameLabel.setJustificationType(juce::Justification::centredLeft);
     nameLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     nameLabel.setColour(juce::Label::textColourId, theme::text());
-    nameLabel.setInterceptsMouseClicks(false, false);
     nameLabel.setTooltip("Right-click to rename");
+    // The label keeps its default click interception and forwards its own
+    // events here: the label must see the mouse for the tooltip, and
+    // RackView::mouseDown needs e.originalComponent == &nameLabel for the
+    // rename. JUCE de-duplicates the listener list, so the parent callback
+    // fires once, not again via propagation.
+    nameLabel.addMouseListener(this, false);
     addAndMakeVisible(nameLabel);
 
     subLabel.setJustificationType(juce::Justification::centredLeft);
@@ -128,6 +133,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engi
         const int newId = comboIds[(size_t)i];
         const bool newOut = comboIsOutput[(size_t)i] != 0;
         if (newId == selectedId && newOut == selectedIsOutput) return;
+        closeEffectWindows();
         closeEqWindow();
         closeDynamicsWindow();
         selectedId = newId;
@@ -245,12 +251,7 @@ RackView::~RackView() {
     closeDynamicsWindow();
     // Stop the capture worker before the editor it captures goes away.
     thumbnailWorker.stop();
-    clearHiddenPreviews();
     closeDockedEditor();
-    if (previewHostWindow != nullptr) {
-        nativedisplay::destroyHiddenHost(previewHostWindow);
-        previewHostWindow = nullptr;
-    }
 }
 
 std::uint32_t RackView::selectedChainId() const {
@@ -264,7 +265,6 @@ void RackView::setSelectedChannel(int channelId, bool isOutput) {
     // The dynamics panel is bound to the strip it was opened on; leaving it up
     // would push its edits into whatever strip becomes selected next.
     closeDynamicsWindow();
-    hiddenCursor = 0;
     selectedId = channelId;
     selectedIsOutput = isOutput;
     focusedInsertId = 0;
@@ -272,12 +272,12 @@ void RackView::setSelectedChannel(int channelId, bool isOutput) {
     rebuild();
 }
 
-AudioEngine::Channel* RackView::currentChannel() {
+AudioEngine::Channel* RackView::currentChannel() const {
     if (selectedIsOutput || selectedId < 0) return nullptr;
     return audioEngine.getChannelById(static_cast<std::uint32_t>(selectedId));
 }
 
-AudioEngine::Output* RackView::currentOutput() {
+AudioEngine::Output* RackView::currentOutput() const {
     if (!selectedIsOutput || selectedId < 0) return nullptr;
     const auto id = static_cast<std::uint32_t>(selectedId);
     if (auto* out = audioEngine.getOutputById(id)) return out;
@@ -515,28 +515,18 @@ const pluginrack::DynamicsEffect* RackView::dynamicsEffectFor(std::uint32_t item
 }
 
 const std::vector<pluginrack::ChainItem>* RackView::currentChain() const {
-    if (selectedId < 0) return nullptr;
-    const auto id = static_cast<std::uint32_t>(selectedId);
-    if (!selectedIsOutput) {
-        for (const auto& channel : audioEngine.getChannels())
-            if (channel->id == id) return &channel->chain;
-    } else {
-        for (const auto& output : audioEngine.getOutputs())
-            if (output->id == id) return &output->chain;
-    }
+    // Delegate through the strip resolvers so buses are covered too: they are
+    // Output objects currentOutput() already finds (the old duplicate loops
+    // scanned getOutputs() only, leaving drag-reorder and insert/erase
+    // dead on a bus).
+    if (const auto* channel = currentChannel()) return &channel->chain;
+    if (const auto* output = currentOutput()) return &output->chain;
     return nullptr;
 }
 
 const std::vector<pluginrack::DynamicsEffect>* RackView::currentEffects() const {
-    if (selectedId < 0) return nullptr;
-    const auto id = static_cast<std::uint32_t>(selectedId);
-    if (!selectedIsOutput) {
-        for (const auto& channel : audioEngine.getChannels())
-            if (channel->id == id) return &channel->effects;
-    } else {
-        for (const auto& output : audioEngine.getOutputs())
-            if (output->id == id) return &output->effects;
-    }
+    if (const auto* channel = currentChannel()) return &channel->effects;
+    if (const auto* output = currentOutput()) return &output->effects;
     return nullptr;
 }
 
@@ -905,10 +895,6 @@ void RackView::startMiniTimer() {
 void RackView::timerCallback() {
     if (!isShowing()) {
         releaseMiniTap();
-        // The preview host is a window of its own; leaving it shown while this
-        // view is hidden puts a black rectangle over the desktop.
-        if (previewHostWindow != nullptr)
-            nativedisplay::destroyHiddenHost(previewHostWindow), previewHostWindow = nullptr;
         return;
     }
     // JUCE re-syncs a plugin's native window whenever the plugin resizes itself;
@@ -1164,7 +1150,6 @@ void RackView::timerCallback() {
                                 && !eqFocused && !dynamicsFocused
                                 && !swappingEditor
                                 && dockedEditor->isShowing();
-    const auto previewMode = audioEngine.getRackPreviewMode();
     const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
     if (wantsThumbnail) {
         if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
@@ -1201,18 +1186,6 @@ void RackView::timerCallback() {
     } else {
         thumbnailWorker.clearRequest();
     }
-
-    // Background previews: one card per turn, at a quarter of the focused
-    // rate, so the bay stays responsive while the rest catch up. Rotate stays
-    // on the selected strip; AllLive also reaches the other strips, so their
-    // cards are already current when you switch to them.
-    if (previewMode == pluginrack::RackPreviewMode::Selected) {
-        hiddenTick = 0;
-        clearHiddenPreviews();
-    } else if (++hiddenTick >= 4) {
-        hiddenTick = 0;
-        refreshHiddenPreviews(targetWidth, previewMode == pluginrack::RackPreviewMode::AllLive);
-    }
 }
 
 void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail) {
@@ -1220,174 +1193,6 @@ void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thum
     vstThumbs[insertId] = thumbnail;
     if (const auto card = vstCards.find(insertId); card != vstCards.end())
         if (auto* mini = card->second->miniView()) mini->setVstSnapshot(thumbnail);
-}
-
-namespace {
-// How many background editors may exist at once. Each is a live plugin UI on
-// its own thread, so this is a stability budget: a rack that keeps eight UIs
-// alive froze the app, and the plugins here are heavy.
-constexpr std::size_t kMaxHiddenPreviews = 4;
-// Background preview editors are native windows parked at their unscaled size.
-// Some plugins (Ozone, Ripeness, KERN CHECK) also create extra top-level
-// windows that ignore the parking, so the previews leak over the app as white
-// rectangles and duplicate plugin UIs. Keep them off until they can be hosted
-// without native windows.
-constexpr bool kEnableHiddenPreviews = false;
-} // namespace
-
-void RackView::refreshHiddenPreviews(int targetWidth, bool everyStrip) {
-    if (!kEnableHiddenPreviews) {
-        if (!hiddenPreviews.empty()) clearHiddenPreviews();
-        return;
-    }
-    const auto* inserts = currentInserts();
-    if (inserts == nullptr || inserts->empty()) {
-        if (hiddenPreviews.empty()) return;
-        clearHiddenPreviews();
-        return;
-    }
-
-    // A hidden editor is owned by its insert's PluginHost. The engine destroys
-    // those hosts on erase and scene restore, so retire anything that no
-    // longer exists before touching a pointer.
-    const auto stillExists = [this, inserts, everyStrip](std::uint32_t id) {
-        const auto inStrip = std::any_of(inserts->begin(), inserts->end(),
-                                         [id](const auto& insert) { return insert->id == id; });
-        if (inStrip) return true;
-        if (!everyStrip) return false;
-        for (const auto& channel : audioEngine.getChannels())
-            for (const auto& insert : channel->inserts)
-                if (insert->id == id) return true;
-        for (const auto& output : audioEngine.getOutputs())
-            for (const auto& insert : output->inserts)
-                if (insert->id == id) return true;
-        return false;
-    };
-    for (auto it = hiddenPreviews.begin(); it != hiddenPreviews.end();) {
-        if (stillExists(it->first)) {
-            ++it;
-        } else {
-            retireHiddenPreview(it->first);
-            it = hiddenPreviews.begin();
-        }
-    }
-
-    // One capture per turn, round-robin over the eligible inserts.
-    std::vector<std::pair<std::uint32_t, PluginHost*>> candidates;
-    const auto consider = [&](AudioEngine::InsertSlot& insert) {
-        if (insert.id == focusedInsertId) return;
-        if (hiddenPreviewFailed.count(insert.id) != 0) return;
-        candidates.emplace_back(insert.id, &insert.pluginHost);
-    };
-    for (const auto& insert : *inserts) consider(*insert);
-    if (everyStrip) {
-        for (const auto& channel : audioEngine.getChannels())
-            for (const auto& insert : channel->inserts) consider(*insert);
-        for (const auto& output : audioEngine.getOutputs())
-            for (const auto& insert : output->inserts) consider(*insert);
-    }
-    if (candidates.empty()) return;
-
-    hiddenCursor = (hiddenCursor + 1) % candidates.size();
-    const auto [insertId, host] = candidates[hiddenCursor];
-
-    auto& slot = hiddenPreviews[insertId];
-    if (slot.editor == nullptr) {
-        // The cap counts editors that already exist; this turn's new one has
-        // to fit too, or a big rack would spawn one UI per insert.
-        if (hiddenPreviews.size() > kMaxHiddenPreviews) {
-            hiddenPreviews.erase(insertId);
-            return;
-        }
-        slot.host = host;
-        slot.editor = host->createEditorForDock();
-        if (slot.editor == nullptr) {
-            // No GUI, or the plugin refuses a second editor. Freeze the card
-            // rather than retrying this insert on every turn.
-            hiddenPreviewFailed.insert(insertId);
-            hiddenPreviews.erase(insertId);
-            return;
-        }
-        addAndMakeVisible(slot.editor);
-        slot.editor->setVisible(true);
-        // Read the plugin's own size after it has attached, then park it out
-        // of sight at that size. A visible VST3 re-sizes itself here, so the
-        // parked bounds must be applied after the visibility change.
-        slot.naturalSize = slot.editor->getLocalBounds();
-        if (slot.naturalSize.getWidth() < 32 || slot.naturalSize.getHeight() < 32)
-            slot.naturalSize = { 0, 0, 640, 400 };
-    }
-    // A plugin is free to resize itself; keep it parked out of sight instead
-    // of letting it paint over the app.
-    // Park inside our own area, hidden behind the app window. A window placed
-    // off-screen renders nothing to PrintWindow, which is why background
-    // captures came back empty.
-    const auto parked = juce::Rectangle<int>(0, 0,
-                                             slot.naturalSize.getWidth(),
-                                             slot.naturalSize.getHeight());
-    if (slot.editor->getBounds() != parked)
-        slot.editor->setBounds(parked);
-
-    if (auto* pluginWindow = nativedisplay::pluginWindowOf(*slot.editor)) {
-        // Keep the plugin's own window out of sight: JUCE makes it a child of
-        // the app window, and a child always paints above its parent's
-        // content. Re-parenting it into a window that sits *below* the app
-        // leaves it invisible while it keeps rendering for the capture.
-        if (previewHostWindow == nullptr) previewHostWindow = nativedisplay::createHiddenHost();
-        nativedisplay::parkBehindApp(pluginWindow,
-                                     getTopLevelComponent()->getWindowHandle(),
-                                     previewHostWindow);
-        juce::Component::SafePointer<RackView> safe(this);
-        thumbnailWorker.request(pluginWindow, targetWidth,
-                                [safe, insertId](juce::Image thumbnail) {
-            if (safe == nullptr) return;
-            if (thumbnail.isNull()) {
-                // Report once per insert: an empty capture is why a card would
-                // keep showing "open to capture preview".
-                if (safe->emptyCaptureLogged.insert(insertId).second)
-                    juce::Logger::writeToLog("rack: preview capture empty for insert "
-                                             + juce::String(insertId));
-                return;
-            }
-            safe->applyVstThumbnail(insertId, thumbnail);
-        });
-    } else {
-        const auto bounds = slot.editor->getLocalBounds();
-        if (!bounds.isEmpty()) {
-            const float scale = juce::jlimit(0.02f, 1.0f,
-                                             static_cast<float>(targetWidth)
-                                                 / static_cast<float>(bounds.getWidth()));
-            applyVstThumbnail(insertId,
-                              slot.editor->createComponentSnapshot(bounds, true, scale));
-        }
-    }
-}
-
-void RackView::retireHiddenPreview(std::uint32_t insertId) {
-    const auto it = hiddenPreviews.find(insertId);
-    if (it == hiddenPreviews.end()) return;
-    auto* editor = it->second.editor;
-    auto* host = it->second.host;
-    hiddenPreviews.erase(it);
-    hiddenPreviewFailed.erase(insertId);
-    if (editor == nullptr) return;
-    // Stop new captures of this window, then delete it once the worker is
-    // idle. Blocking here would deadlock: PrintWindow asks this thread to
-    // paint.
-    thumbnailWorker.clearRequest();
-    doomedPreviews[insertId] = { editor, host };
-    destroyEditorWhenIdle(editor, host, insertId);
-}
-
-void RackView::clearHiddenPreviews() {
-    hiddenPreviewFailed.clear();
-    if (hiddenPreviews.empty()) return;
-    thumbnailWorker.clearRequest();
-    for (auto& [id, slot] : hiddenPreviews) {
-        doomedPreviews[id] = { slot.editor, slot.host };
-        destroyEditorWhenIdle(slot.editor, slot.host, id);
-    }
-    hiddenPreviews.clear();
 }
 
 void RackView::releaseEditorsNow() {
@@ -1410,13 +1215,6 @@ void RackView::releaseEditorsNow() {
                 "rack: editor released after its processor; leaking it");
         }
     };
-
-    for (auto& entry : hiddenPreviews) destroyEditor(entry.second.editor, entry.second.host);
-    hiddenPreviews.clear();
-    hiddenPreviewFailed.clear();
-
-    for (auto& entry : doomedPreviews) destroyEditor(entry.second.editor, entry.second.host);
-    doomedPreviews.clear();
 
     if (dockedEditor == nullptr) {
         dockedHost = nullptr;
@@ -1444,16 +1242,15 @@ void RackView::releaseEditorsNow() {
     destroyEditor(editor, host);
 }
 
-void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host,
-                                     std::uint32_t insertId) {
+void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host) {
     if (editor == nullptr) return;
     juce::Component::SafePointer<juce::AudioProcessorEditor> safe(editor);
     juce::Component::SafePointer<RackView> self(this);
-    juce::Timer::callAfterDelay(80, [self, safe, host, insertId] {
+    juce::Timer::callAfterDelay(80, [self, safe, host] {
         if (self == nullptr || safe == nullptr) return;
         if (self->thumbnailWorker.isCapturing()) {
             // Still printing this window; try again on a later turn.
-            self->destroyEditorWhenIdle(safe.getComponent(), host, insertId);
+            self->destroyEditorWhenIdle(safe.getComponent(), host);
             return;
         }
         auto* component = safe.getComponent();
@@ -1469,19 +1266,50 @@ void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginH
             juce::Logger::writeToLog(
                 "rack: deferred editor outlived its processor; leaking it");
         }
-        if (insertId != 0 && self->doomedPreviews.erase(insertId) != 0) {
-            // The processor is free again: the bay can dock its editor now.
-            self->refreshEditor();
-        }
     });
 }
 
 void RackView::refreshEditor() {
-    // Any refresh means the bay is being reassigned. A built-in panel left
-    // docked here would otherwise stay visible above the incoming VST editor
-    // (or keep the bay from showing it at all).
-    if (focusedEffectWindow != nullptr)
-        closeEffectWindows();
+    // A built-in panel owns the bay until it is closed: the card list rebuilds
+    // that follow opening one must not tear the panel down again. Selection
+    // changes close it first (setSelectedChannel / the strip combo), so the
+    // panel here always belongs to the strip on screen.
+    if (focusedEffectWindow != nullptr) {
+        auto* ch = selectedIsOutput ? nullptr : currentChannel();
+        auto* out = selectedIsOutput ? currentOutput() : nullptr;
+        // Removing the card leaves the effect object in the strip (only its
+        // chain row goes and it is marked bypassed), so the panel's backing is
+        // its chain row, not the effect vector.
+        const auto hasRow = [ch, out](pluginrack::ChainItemType type) {
+            const auto matches = [type](const auto& item) { return item.type == type; };
+            if (ch != nullptr) return std::any_of(ch->chain.begin(), ch->chain.end(), matches);
+            if (out != nullptr) return std::any_of(out->chain.begin(), out->chain.end(), matches);
+            return false;
+        };
+        const bool backed =
+            multibandWindow != nullptr
+                ? hasRow(pluginrack::ChainItemType::Multiband)
+            : deEsserWindow != nullptr
+                ? hasRow(pluginrack::ChainItemType::DeEsser)
+            : limiterWindow != nullptr
+                ? hasRow(pluginrack::ChainItemType::Limiter)
+            : feedbackSuppressorWindow != nullptr
+                ? hasRow(pluginrack::ChainItemType::FeedbackSuppressor)
+            : spectralDenoiserWindow != nullptr
+                ? hasRow(pluginrack::ChainItemType::SpectralDenoiser)
+                : false;
+        if (!backed) {
+            closeEffectWindows();
+        } else {
+            hideDockedEditor();
+            noEditorLabel.setVisible(false);
+            noEditorBypass.setVisible(false);
+            if (focusedEffectWindow->getParentComponent() != &editorHolder)
+                editorHolder.addAndMakeVisible(focusedEffectWindow);
+            resized();
+            return;
+        }
+    }
 
     if (eqFocused && eqWindow != nullptr) {
         hideDockedEditor();
@@ -1519,14 +1347,6 @@ void RackView::refreshEditor() {
             focus = inserts->front().get();
             focusedInsertId = focus->id;
         }
-    }
-    // JUCE hands out one editor per plugin: while this insert's preview editor
-    // is still being deleted, asking for another would fail with "no editor".
-    // destroyEditorWhenIdle() calls back here once the delete is done.
-    if (focus != nullptr && doomedPreviews.count(focus->id) != 0) {
-        noEditorLabel.setVisible(false);
-        noEditorBypass.setVisible(false);
-        return;
     }
     if (focus == nullptr) {
         closeDockedEditor();
@@ -2418,6 +2238,14 @@ void RackView::focusEq() {
             safe->audioEngine.setChannelEqBypassed(channelId, false);
             safe->audioEngine.setChannelEqDelay(channelId, delayMs);
         };
+        // Whole-EQ enable: seed from the channel's bypass flag, persist
+        // clicks through the engine, and keep the card badge in step.
+        window->setEqEnabled(!ch->eqBypassed.get());
+        window->applyEnabled = [safe](bool enabled) {
+            if (safe == nullptr) return;
+            safe->audioEngine.setChannelEqBypassed(safe->selectedChainId(), !enabled);
+            safe->refreshSlots();
+        };
         eqWindow = window;
         eqFocused = true;
         hideDockedEditor();
@@ -2465,6 +2293,13 @@ void RackView::focusEq() {
             safe->audioEngine.setOutputEqBypassed(outputId, false);
             safe->audioEngine.setOutputEqDelay(outputId, delayMs);
         };
+        // Whole-EQ enable, same contract as the channel branch above.
+        window->setEqEnabled(!out->eqBypassed.get());
+        window->applyEnabled = [safe, outputId](bool enabled) {
+            if (safe == nullptr) return;
+            safe->audioEngine.setOutputEqBypassed(outputId, !enabled);
+            safe->refreshSlots();
+        };
         eqWindow = window;
         eqFocused = true;
         hideDockedEditor();
@@ -2509,40 +2344,78 @@ void RackView::focusMultiband() {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    auto* channel = currentChannel();
-    if (channel == nullptr) return;
+
+    const bool isOutput = selectedIsOutput;
+    auto* channel = isOutput ? nullptr : currentChannel();
+    auto* output = isOutput ? currentOutput() : nullptr;
+    if (channel == nullptr && output == nullptr) return;
 
     juce::Component::SafePointer<RackView> safe(this);
-    if (channel->multibandEffects.empty()) {
+    if (isOutput) {
+        if (output->multibandEffects.empty()) {
+            auto effects = output->multibandEffects;
+            effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
+            audioEngine.setOutputMultiband(output->id, effects);
+            audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::Multiband, 1});
+        }
+    } else if (channel->multibandEffects.empty()) {
         auto effects = channel->multibandEffects;
         effects.push_back(pluginrack::makeDefaultMultibandEffect(1));
         audioEngine.setChannelMultiband(channel->id, effects);
-        channel->chain.push_back({pluginrack::ChainItemType::Multiband, 1});
         audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::Multiband, 1});
     }
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    // The engine setters copy the vector into the strip under the state lock,
+    // so front() below already reads the effect the empty-check added.
+    const auto& stripName = isOutput ? output->name : channel->name;
+    const auto& initial = isOutput ? output->multibandEffects : channel->multibandEffects;
     auto* window = new MultibandWindow(
-        "Multiband Compressor - " + channel->name, channel->multibandEffects.front(),
-        [safe](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
+        "Multiband Compressor - " + stripName, initial.front(),
+        [safe, isOutput](const pluginrack::MultibandEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
-            auto* currentChannel = safe->currentChannel();
-            if (currentChannel == nullptr) return;
-            auto effects = currentChannel->multibandEffects;
-            effectedit::applyEdit(effects, effect, bypassChanged);
-            safe->audioEngine.setChannelMultiband(currentChannel->id, effects);
-        }, channel->multibandRtaOffsetDb, channel->multibandRtaWeighting, liveRateHz);
-    window->applySpectrumOffset = [safe](float offsetDb) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->audioEngine.setChannelMultibandRtaOffset(safe->currentChannel()->id, offsetDb);
+            if (isOutput) {
+                auto* out = safe->currentOutput();
+                if (out == nullptr) return;
+                auto effects = out->multibandEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setOutputMultiband(out->id, effects);
+            } else {
+                auto* ch = safe->currentChannel();
+                if (ch == nullptr) return;
+                auto effects = ch->multibandEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setChannelMultiband(ch->id, effects);
+            }
+        }, isOutput ? output->multibandRtaOffsetDb : channel->multibandRtaOffsetDb,
+        isOutput ? output->multibandRtaWeighting : channel->multibandRtaWeighting,
+        liveRateHz);
+    window->applySpectrumOffset = [safe, isOutput](float offsetDb) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputMultibandRtaOffset(out->id, offsetDb);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelMultibandRtaOffset(ch->id, offsetDb);
+        }
     };
-    window->applyWeighting = [safe](int weighting) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->audioEngine.setChannelMultibandRtaWeighting(safe->currentChannel()->id, weighting);
+    window->applyWeighting = [safe, isOutput](int weighting) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputMultibandRtaWeighting(out->id, weighting);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelMultibandRtaWeighting(ch->id, weighting);
+        }
     };
-    channel->multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
-    window->pullAnalyzerTap = [safe](float* l, float* r, int n) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->currentChannel()->multibandTap.snapshot(true, l, r, n);
+    if (isOutput) output->multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    else channel->multibandTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe, isOutput](bool post, float* l, float* r, int n) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput()) out->multibandTap.snapshot(post, l, r, n);
+        } else {
+            if (auto* ch = safe->currentChannel()) ch->multibandTap.snapshot(post, l, r, n);
+        }
     };
     window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
     multibandWindow = window;
@@ -2557,40 +2430,76 @@ void RackView::focusDeEsser() {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    auto* channel = currentChannel();
-    if (channel == nullptr) return;
+
+    const bool isOutput = selectedIsOutput;
+    auto* channel = isOutput ? nullptr : currentChannel();
+    auto* output = isOutput ? currentOutput() : nullptr;
+    if (channel == nullptr && output == nullptr) return;
 
     juce::Component::SafePointer<RackView> safe(this);
-    if (channel->deEsserEffects.empty()) {
+    if (isOutput) {
+        if (output->deEsserEffects.empty()) {
+            auto effects = output->deEsserEffects;
+            effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
+            audioEngine.setOutputDeEssers(output->id, effects);
+            audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::DeEsser, 1});
+        }
+    } else if (channel->deEsserEffects.empty()) {
         auto effects = channel->deEsserEffects;
         effects.push_back(pluginrack::makeDefaultDeEsserEffect(1));
         audioEngine.setChannelDeEssers(channel->id, effects);
-        channel->chain.push_back({pluginrack::ChainItemType::DeEsser, 1});
         audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::DeEsser, 1});
     }
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    const auto& stripName = isOutput ? output->name : channel->name;
+    const auto& initial = isOutput ? output->deEsserEffects : channel->deEsserEffects;
     auto* window = new DeEsserWindow(
-        "De-esser - " + channel->name, channel->deEsserEffects.front(),
-        [safe](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
+        "De-esser - " + stripName, initial.front(),
+        [safe, isOutput](const pluginrack::DeEsserEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
-            auto* currentChannel = safe->currentChannel();
-            if (currentChannel == nullptr) return;
-            auto effects = currentChannel->deEsserEffects;
-            effectedit::applyEdit(effects, effect, bypassChanged);
-            safe->audioEngine.setChannelDeEssers(currentChannel->id, effects);
-        }, channel->deEsserRtaOffsetDb, channel->deEsserRtaWeighting, liveRateHz);
-    window->applySpectrumOffset = [safe](float offsetDb) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->audioEngine.setChannelDeEsserRtaOffset(safe->currentChannel()->id, offsetDb);
+            if (isOutput) {
+                auto* out = safe->currentOutput();
+                if (out == nullptr) return;
+                auto effects = out->deEsserEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setOutputDeEssers(out->id, effects);
+            } else {
+                auto* ch = safe->currentChannel();
+                if (ch == nullptr) return;
+                auto effects = ch->deEsserEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setChannelDeEssers(ch->id, effects);
+            }
+        }, isOutput ? output->deEsserRtaOffsetDb : channel->deEsserRtaOffsetDb,
+        isOutput ? output->deEsserRtaWeighting : channel->deEsserRtaWeighting,
+        liveRateHz);
+    window->applySpectrumOffset = [safe, isOutput](float offsetDb) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputDeEsserRtaOffset(out->id, offsetDb);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelDeEsserRtaOffset(ch->id, offsetDb);
+        }
     };
-    window->applyWeighting = [safe](int weighting) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->audioEngine.setChannelDeEsserRtaWeighting(safe->currentChannel()->id, weighting);
+    window->applyWeighting = [safe, isOutput](int weighting) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputDeEsserRtaWeighting(out->id, weighting);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelDeEsserRtaWeighting(ch->id, weighting);
+        }
     };
-    channel->deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
-    window->pullAnalyzerTap = [safe](float* l, float* r, int n) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->currentChannel()->deEsserTap.snapshot(true, l, r, n);
+    if (isOutput) output->deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    else channel->deEsserTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe, isOutput](bool post, float* l, float* r, int n) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput()) out->deEsserTap.snapshot(post, l, r, n);
+        } else {
+            if (auto* ch = safe->currentChannel()) ch->deEsserTap.snapshot(post, l, r, n);
+        }
     };
     window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
     deEsserWindow = window;
@@ -2605,37 +2514,64 @@ void RackView::focusLimiter() {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    auto* channel = currentChannel();
-    if (channel == nullptr) return;
+
+    const bool isOutput = selectedIsOutput;
+    auto* channel = isOutput ? nullptr : currentChannel();
+    auto* output = isOutput ? currentOutput() : nullptr;
+    if (channel == nullptr && output == nullptr) return;
 
     juce::Component::SafePointer<RackView> safe(this);
-    if (channel->limiterEffects.empty()) {
+    if (isOutput) {
+        if (output->limiterEffects.empty()) {
+            auto effects = output->limiterEffects;
+            effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
+            audioEngine.setOutputLimiters(output->id, effects);
+            audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::Limiter, 1});
+        }
+    } else if (channel->limiterEffects.empty()) {
         auto effects = channel->limiterEffects;
         effects.push_back(pluginrack::makeDefaultLimiterEffect(1));
         audioEngine.setChannelLimiters(channel->id, effects);
-        channel->chain.push_back({pluginrack::ChainItemType::Limiter, 1});
         audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::Limiter, 1});
     }
+    const auto& stripName = isOutput ? output->name : channel->name;
+    const auto& initial = isOutput ? output->limiterEffects : channel->limiterEffects;
     auto* window = new LimiterWindow(
-        "Limiter - " + channel->name, channel->limiterEffects.front(),
-        [safe](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
+        "Limiter - " + stripName, initial.front(),
+        [safe, isOutput](const pluginrack::LimiterEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
-            auto* currentChannel = safe->currentChannel();
-            if (currentChannel == nullptr) return;
-            auto effects = currentChannel->limiterEffects;
-            effectedit::applyEdit(effects, effect, bypassChanged);
-            safe->audioEngine.setChannelLimiters(currentChannel->id, effects);
+            if (isOutput) {
+                auto* out = safe->currentOutput();
+                if (out == nullptr) return;
+                auto effects = out->limiterEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setOutputLimiters(out->id, effects);
+            } else {
+                auto* ch = safe->currentChannel();
+                if (ch == nullptr) return;
+                auto effects = ch->limiterEffects;
+                effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setChannelLimiters(ch->id, effects);
+            }
         });
-    channel->limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
-    window->pullAnalyzerTap = [safe](bool /*postEq*/, float* l, float* r, int n) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->currentChannel()->limiterTap.snapshot(true, l, r, n);
+    if (isOutput) output->limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    else channel->limiterTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe, isOutput](bool post, float* l, float* r, int n) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput()) out->limiterTap.snapshot(post, l, r, n);
+        } else {
+            if (auto* ch = safe->currentChannel()) ch->limiterTap.snapshot(post, l, r, n);
+        }
     };
     window->onClose = [safe] { if (safe != nullptr) safe->closeEffectWindows(); };
     limiterWindow = window;
     focusedEffectWindow = window;
     hideDockedEditor();
     editorHolder.addAndMakeVisible(window);
+    // Same as the Multiband/De-esser focus paths: opening here can have just
+    // added the limiter, and the card list must show it before the layout.
+    rebuild();
     resized();
 }
 
@@ -2643,52 +2579,98 @@ void RackView::focusFeedbackSuppressor() {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    auto* channel = currentChannel();
-    if (channel == nullptr) return;
+
+    const bool isOutput = selectedIsOutput;
+    auto* channel = isOutput ? nullptr : currentChannel();
+    auto* output = isOutput ? currentOutput() : nullptr;
+    if (channel == nullptr && output == nullptr) return;
     juce::Component::SafePointer<RackView> safe(this);
-    if (channel->feedbackSuppressorEffects.empty()) {
+    if (isOutput) {
+        if (output->feedbackSuppressorEffects.empty()) {
+            auto effects = output->feedbackSuppressorEffects;
+            effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
+            audioEngine.setOutputFeedbackSuppressors(output->id, effects);
+            audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
+        }
+    } else if (channel->feedbackSuppressorEffects.empty()) {
         auto effects = channel->feedbackSuppressorEffects;
         effects.push_back(pluginrack::makeDefaultFeedbackSuppressorEffect(1));
-        channel->feedbackSuppressorEffects = effects;
         audioEngine.setChannelFeedbackSuppressors(channel->id, effects);
-        channel->chain.push_back({pluginrack::ChainItemType::FeedbackSuppressor, 1});
         audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::FeedbackSuppressor, 1});
     }
     const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    const auto& stripName = isOutput ? output->name : channel->name;
+    const auto& initial = isOutput ? output->feedbackSuppressorEffects : channel->feedbackSuppressorEffects;
     auto* window = new FeedbackSuppressorWindow(
-        "Feedback Suppressor - " + channel->name, channel->feedbackSuppressorEffects.front(),
-        [safe](const pluginrack::FeedbackSuppressorEffect& effect, bool bypassChanged) {
+        "Feedback Suppressor - " + stripName, initial.front(),
+        [safe, isOutput](const pluginrack::FeedbackSuppressorEffect& effect, bool bypassChanged) {
             if (safe == nullptr) return;
-            auto* currentChannel = safe->currentChannel();
-            if (currentChannel == nullptr) return;
-            auto effects = currentChannel->feedbackSuppressorEffects;
-            const auto it = std::find_if(effects.begin(), effects.end(), [&effect](const auto& e) {
-                return e.id == effect.id;
-            });
-            if (it == effects.end())
-                effects.push_back(effect);
-            else
-                effectedit::applyEdit(effects, effect, bypassChanged);
-            currentChannel->feedbackSuppressorEffects = effects;
-            safe->audioEngine.setChannelFeedbackSuppressors(currentChannel->id, effects);
-        }, channel->feedbackSuppressorRtaOffsetDb, channel->feedbackSuppressorRtaWeighting,
+            if (isOutput) {
+                auto* out = safe->currentOutput();
+                if (out == nullptr) return;
+                auto effects = out->feedbackSuppressorEffects;
+                const auto it = std::find_if(effects.begin(), effects.end(), [&effect](const auto& e) {
+                    return e.id == effect.id;
+                });
+                if (it == effects.end())
+                    effects.push_back(effect);
+                else
+                    effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setOutputFeedbackSuppressors(out->id, effects);
+            } else {
+                auto* ch = safe->currentChannel();
+                if (ch == nullptr) return;
+                auto effects = ch->feedbackSuppressorEffects;
+                const auto it = std::find_if(effects.begin(), effects.end(), [&effect](const auto& e) {
+                    return e.id == effect.id;
+                });
+                if (it == effects.end())
+                    effects.push_back(effect);
+                else
+                    effectedit::applyEdit(effects, effect, bypassChanged);
+                safe->audioEngine.setChannelFeedbackSuppressors(ch->id, effects);
+            }
+        }, isOutput ? output->feedbackSuppressorRtaOffsetDb : channel->feedbackSuppressorRtaOffsetDb,
+        isOutput ? output->feedbackSuppressorRtaWeighting : channel->feedbackSuppressorRtaWeighting,
         liveRateHz);
-    window->applySpectrumOffset = [safe](float offsetDb) {
-        if (safe == nullptr || safe->currentChannel() == nullptr) return;
-        safe->audioEngine.setChannelFeedbackSuppressorRtaOffset(safe->currentChannel()->id, offsetDb);
+    window->applySpectrumOffset = [safe, isOutput](float offsetDb) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputFeedbackSuppressorRtaOffset(out->id, offsetDb);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelFeedbackSuppressorRtaOffset(ch->id, offsetDb);
+        }
     };
-    window->applyWeighting = [safe](int weighting) {
-        if (safe == nullptr || safe->currentChannel() == nullptr) return;
-        safe->audioEngine.setChannelFeedbackSuppressorRtaWeighting(safe->currentChannel()->id, weighting);
+    window->applyWeighting = [safe, isOutput](int weighting) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput())
+                safe->audioEngine.setOutputFeedbackSuppressorRtaWeighting(out->id, weighting);
+        } else if (auto* ch = safe->currentChannel()) {
+            safe->audioEngine.setChannelFeedbackSuppressorRtaWeighting(ch->id, weighting);
+        }
     };
-    channel->feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
-    window->pullAnalyzerTap = [safe](bool postEq, float* l, float* r, int n) {
-        if (safe != nullptr && safe->currentChannel() != nullptr)
-            safe->currentChannel()->feedbackTap.snapshot(postEq, l, r, n);
+    if (isOutput) output->feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    else channel->feedbackTap.setMode(AudioEngine::AnalyzerTap::kPost);
+    window->pullAnalyzerTap = [safe, isOutput](bool postEq, float* l, float* r, int n) {
+        if (safe == nullptr) return;
+        if (isOutput) {
+            if (auto* out = safe->currentOutput()) out->feedbackTap.snapshot(postEq, l, r, n);
+        } else {
+            if (auto* ch = safe->currentChannel()) ch->feedbackTap.snapshot(postEq, l, r, n);
+        }
     };
-    window->pullNotches = [safe](float* f, float* d, int n) {
-        if (safe == nullptr || safe->currentChannel() == nullptr) return 0;
-        return safe->audioEngine.getChannelFeedbackNotches(safe->currentChannel()->id, f, d, n);
+    window->pullNotches = [safe, isOutput](float* f, float* d, int n) {
+        if (safe == nullptr) return 0;
+        if (isOutput) {
+            const auto* out = safe->currentOutput();
+            if (out == nullptr) return 0;
+            return safe->audioEngine.getOutputFeedbackNotches(out->id, f, d, n);
+        }
+        const auto* ch = safe->currentChannel();
+        if (ch == nullptr) return 0;
+        return safe->audioEngine.getChannelFeedbackNotches(ch->id, f, d, n);
     };
     window->onClose = [safe] {
         if (safe == nullptr) return;
@@ -2700,6 +2682,9 @@ void RackView::focusFeedbackSuppressor() {
     focusedEffectWindow = window;
     hideDockedEditor();
     editorHolder.addAndMakeVisible(window);
+    // Opening here can have just added the suppressor; the card list must show
+    // it before the layout, like the other focus paths.
+    rebuild();
     resized();
 }
 
@@ -2720,9 +2705,7 @@ void RackView::focusSpectralDenoiser() {
         if (output->spectralDenoiserEffects.empty()) {
             auto effects = output->spectralDenoiserEffects;
             effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
-            output->spectralDenoiserEffects = effects;
             audioEngine.setOutputSpectralDenoisers(output->id, effects);
-            output->chain.push_back({pluginrack::ChainItemType::SpectralDenoiser, 1});
             audioEngine.ensureOutputChainItem(output->id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
         }
         stripId = output->id;
@@ -2733,9 +2716,7 @@ void RackView::focusSpectralDenoiser() {
         if (channel->spectralDenoiserEffects.empty()) {
             auto effects = channel->spectralDenoiserEffects;
             effects.push_back(pluginrack::makeDefaultSpectralDenoiserEffect(1));
-            channel->spectralDenoiserEffects = effects;
             audioEngine.setChannelSpectralDenoisers(channel->id, effects);
-            channel->chain.push_back({pluginrack::ChainItemType::SpectralDenoiser, 1});
             audioEngine.ensureChannelChainItem(channel->id, {pluginrack::ChainItemType::SpectralDenoiser, 1});
         }
         stripId = channel->id;
@@ -2755,7 +2736,6 @@ void RackView::focusSpectralDenoiser() {
                     [&effect](const auto& e) { return e.id == effect.id; });
                 if (it == effects.end()) effects.push_back(effect);
                 else effectedit::applyEdit(effects, effect, bypassChanged);
-                output->spectralDenoiserEffects = effects;
                 safe->audioEngine.setOutputSpectralDenoisers(output->id, effects);
             } else {
                 auto* channel = safe->currentChannel();
@@ -2765,7 +2745,6 @@ void RackView::focusSpectralDenoiser() {
                     [&effect](const auto& e) { return e.id == effect.id; });
                 if (it == effects.end()) effects.push_back(effect);
                 else effectedit::applyEdit(effects, effect, bypassChanged);
-                channel->spectralDenoiserEffects = effects;
                 safe->audioEngine.setChannelSpectralDenoisers(channel->id, effects);
             }
         });
@@ -2808,13 +2787,6 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         return std::find_if(effects.begin(), effects.end(),
                             [type](const auto& effect) { return effect.type == type; });
     };
-    // The panel edits its own effect and the strip's gate, so apply matches on
-    // the id it was handed rather than on the opened type.
-    const auto findEffectById = [](std::vector<pluginrack::DynamicsEffect>& effects,
-                                   std::uint32_t id) {
-        return std::find_if(effects.begin(), effects.end(),
-                            [id](const auto& effect) { return effect.id == id; });
-    };
     const auto findGate = [](std::vector<pluginrack::DynamicsEffect>& effects) {
         return std::find_if(effects.begin(), effects.end(), [](const auto& effect) {
             return effect.type == pluginrack::DynamicsEffectType::Gate;
@@ -2828,7 +2800,7 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         auto gateIt = findGate(ch->effects);
         auto* window = new DynamicsWindow(
             effectName() + " - " + ch->name, *it,
-            [safe, findEffectById](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
+            [safe](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
                 if (safe == nullptr) return;
                 auto* channel = safe->currentChannel();
                 if (channel == nullptr) return;
@@ -2838,16 +2810,17 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
                 safe->refreshDynamicsButtons();
             },
             gateIt != ch->effects.end() ? &*gateIt : nullptr);
-        // The Dynamics RTA reads the compressor/gate output (dynamicsTap),
-        // so it shows the dynamics' own signal, not the strip input.
-        window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+        // The dot and GR gauge model the dynamics' own input, so the window
+        // pulls the pre ring; `post` is forwarded for any caller that wants
+        // the compressor/gate output.
+        window->pullAnalyzerTap = [safe](bool post, float* left, float* right, int frames) {
             if (safe == nullptr) return;
             if (auto* channel = safe->currentChannel()) {
-                channel->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
-                channel->dynamicsTap.snapshot(true, left, right, frames);
+                channel->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
+                channel->dynamicsTap.snapshot(post, left, right, frames);
             }
         };
-        ch->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+        ch->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
         dynamicsWindow = window;
     } else if (auto* out = currentOutput()) {
         auto it = findEffect(out->effects);
@@ -2855,7 +2828,7 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
         auto gateIt = findGate(out->effects);
         auto* window = new DynamicsWindow(
             effectName() + " - " + out->name, *it,
-            [safe, findEffectById](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
+            [safe](const pluginrack::DynamicsEffect& effect, bool bypassChanged) {
                 if (safe == nullptr) return;
                 auto* output = safe->currentOutput();
                 if (output == nullptr) return;
@@ -2865,14 +2838,14 @@ void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
                 safe->refreshDynamicsButtons();
             },
             gateIt != out->effects.end() ? &*gateIt : nullptr);
-        window->pullAnalyzerTap = [safe](float* left, float* right, int frames) {
+        window->pullAnalyzerTap = [safe](bool post, float* left, float* right, int frames) {
             if (safe == nullptr) return;
             if (auto* output = safe->currentOutput()) {
-                output->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
-                output->dynamicsTap.snapshot(true, left, right, frames);
+                output->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
+                output->dynamicsTap.snapshot(post, left, right, frames);
             }
         };
-        out->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPost);
+        out->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kPre);
         dynamicsWindow = window;
     } else {
         return;
@@ -3072,7 +3045,7 @@ void RackView::refreshOutputButtons() {
         }
         btn->setToggleState(on, juce::dontSendNotification);
         const int idx = (int)i;
-        btn->onClick = [this, ch, outId, idx] {
+        btn->onClick = [this, outId, idx] {
             if (currentChannel() == nullptr) return;
             auto* b = outputButtons[idx];
             const bool on = b->getToggleState();
@@ -3090,12 +3063,6 @@ void RackView::refreshOutputButtons() {
 
 void RackView::rebuild() {
     ensureSelection();
-    // Every preview editor is owned by an insert's PluginHost: a scene
-    // restore or an outside-rack erase destroys those hosts before this
-    // rebuild runs, so retire all previews first. Otherwise a stale editor
-    // blocks the fresh one JUCE allows per processor, or its host pointer
-    // dangles into a freed insert.
-    clearHiddenPreviews();
     const bool hasChain = selectedId >= 0;
     emptyLabel.setVisible(!hasChain);
     touchBar.setVisible(hasChain);
@@ -3477,22 +3444,6 @@ void RackView::reloadPlugin(std::uint32_t insertId) {
     refreshSlots();
 }
 
-void RackView::reorderInsert(std::uint32_t insertId, int targetIndex) {
-    if (selectedIsOutput)
-        audioEngine.moveOutputChainItem(selectedId, {pluginrack::ChainItemType::Insert, insertId},
-                                        targetIndex);
-    else
-        audioEngine.moveChannelChainItem(selectedId, {pluginrack::ChainItemType::Insert, insertId},
-                                         targetIndex);
-    juce::Component::SafePointer<RackView> safe(this);
-    juce::MessageManager::callAsync([safe] {
-        if (safe == nullptr) return;
-        safe->chainDropTarget = -1;
-        safe->refreshSlots();
-        if (safe->onStructureChanged) safe->onStructureChanged();
-    });
-}
-
 int RackView::chainBoundaryY(int targetIndex) const {
     if (chainRowCount <= 0) return 2;
     const int target = juce::jlimit(0, chainRowCount, targetIndex);
@@ -3811,9 +3762,6 @@ void RackView::refreshAfterInsertChange() {
     if (!found) {
         focusedInsertId = (inserts != nullptr && !inserts->empty()) ? inserts->back()->id : 0;
     }
-    // Same ownership rule as rebuild(): the insert list changed, so any
-    // preview editor may belong to a removed insert.
-    clearHiddenPreviews();
     refreshSlots();
     refreshEditor();
     juce::Component::SafePointer<RackView> safe(this);
@@ -3832,9 +3780,6 @@ bool RackView::insertActivated(AudioEngine::InsertSlot* insert) {
     closeEffectWindows();
     closeEqWindow();
     closeDynamicsWindow();
-    // The newly focused insert gets the bay's live editor; a hidden editor
-    // for the same insert would be a second owner, which JUCE forbids.
-    retireHiddenPreview(insert->id);
     focusedInsertId = insert->id;
     refreshEditor();
     return true;

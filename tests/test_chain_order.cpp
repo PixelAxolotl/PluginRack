@@ -118,3 +118,23 @@ TEST_CASE("a paired card moves to the top as one block") {
                                                  vstItem(11)};
     CHECK(chain == expected);
 }
+
+TEST_CASE("an item tap resolves to the first chain row with its id") {
+    // Tap::Kind::Item carries only an id, and every built-in family mints its
+    // own id 1. The identity rule is the first row whose id matches: that is
+    // the row the engine pushes into the ring and the row whose delay it
+    // bills, so content and latency cannot come from different rows.
+    const std::vector<ChainItem> chain{{ChainItemType::Dynamics, 1},
+                                       {ChainItemType::Eq, 0},
+                                       {ChainItemType::Limiter, 1}};
+    CHECK(pluginrack::firstChainItemIndex(chain, 1) == 0);
+    CHECK(pluginrack::firstChainItemIndex(chain, 0) == 1);
+    CHECK(pluginrack::firstChainItemIndex(chain, 7) == -1);
+
+    // The rule follows chain order, not the family: once the limiter row is
+    // first, id 1 is the limiter and the dynamics row is unreachable.
+    const std::vector<ChainItem> flipped{{ChainItemType::Limiter, 1},
+                                         {ChainItemType::Dynamics, 1}};
+    CHECK(pluginrack::firstChainItemIndex(flipped, 1) == 0);
+    CHECK(pluginrack::firstChainItemIndex(std::vector<ChainItem>{}, 1) == -1);
+}

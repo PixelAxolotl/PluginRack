@@ -39,11 +39,17 @@ double responseDbAt(double freq, const std::array<float, 8>& freqs,
     const double w = 2.0 * juce::MathConstants<double>::pi * freq / sampleRate;
     const std::complex<double> z1 = std::polar(1.0, -w);
     const std::complex<double> z2 = z1 * z1;
-    const double analysisBinWidth = sampleRate / pluginrack::kFeedbackSuppressorAnalysisSize;
     double db = 0.0;
     for (int i = 0; i < count; ++i) {
         const double notchHz = freqs[static_cast<std::size_t>(i)];
         const double attenuationDb = depthsDb[static_cast<std::size_t>(i)];
+        // Match the processor's per-notch analysis bin width: the low band
+        // (below kAnalysisSplitHz) is detected with the 8192-sample window, so
+        // its notch Q must use the narrower bin the engine actually used, not
+        // the high band's 2048-sample width.
+        const double analysisBinWidth = notchHz < pluginrack::kFeedbackSuppressorAnalysisSplitHz
+            ? sampleRate / pluginrack::kFeedbackSuppressorLowAnalysisSize
+            : sampleRate / pluginrack::kFeedbackSuppressorAnalysisSize;
         const double a = std::pow(10.0, -attenuationDb / 40.0);
         const double w0 = 2.0 * juce::MathConstants<double>::pi * notchHz / sampleRate;
         const double q = static_cast<double>(pluginrack::feedbackSuppressorNotchQ(
@@ -123,7 +129,11 @@ double detectorFilterDbAt(double freq, float highPassHz, float lowPassHz,
 } // namespace
 
 void FeedbackSuppressorGraph::setNotches(const float* freqs, const float* depthsDb, int count) {
-    notchCount = juce::jlimit(0, static_cast<int>(notchFreqs.size()), count);
+    // No frequencies means nothing to plot: clear rather than read nullptr.
+    // depthsDb falling back to 0 dB is harmless, so only it stays optional.
+    notchCount = freqs == nullptr
+                     ? 0
+                     : juce::jlimit(0, static_cast<int>(notchFreqs.size()), count);
     for (int i = 0; i < notchCount; ++i) {
         const auto index = static_cast<std::size_t>(i);
         notchFreqs[index] = freqs[i];

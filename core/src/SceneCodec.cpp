@@ -469,22 +469,6 @@ void from_json(const nlohmann::json& j, ChainItemType& type) {
     else throw nlohmann::json::other_error::create(503, "unknown ChainItemType '" + name + "'", &j);
 }
 
-void to_json(nlohmann::json& j, RackPreviewMode mode) {
-    switch (mode) {
-        case RackPreviewMode::Selected: j = "Selected"; break;
-        case RackPreviewMode::Rotate: j = "Rotate"; break;
-        case RackPreviewMode::AllLive: j = "AllLive"; break;
-    }
-}
-
-void from_json(const nlohmann::json& j, RackPreviewMode& mode) {
-    const auto name = j.get<std::string>();
-    if (name == "Selected") mode = RackPreviewMode::Selected;
-    else if (name == "Rotate") mode = RackPreviewMode::Rotate;
-    else if (name == "AllLive") mode = RackPreviewMode::AllLive;
-    else throw nlohmann::json::other_error::create(503, "unknown RackPreviewMode '" + name + "'", &j);
-}
-
 void to_json(nlohmann::json& j, const ChainItem& item) {
     j = nlohmann::json{{"type", item.type}, {"id", item.id}};
 }
@@ -767,11 +751,9 @@ void to_json(nlohmann::json& j, const AudioSettings& settings) {
         {"autoReloadDevices", settings.autoReloadDevices},
         {"watchedDevices", settings.watchedDevices},
         {"rackThumbnailFps", settings.rackThumbnailFps},
-        {"rackPreviewMode", settings.rackPreviewMode},
         {"slicedRender", settings.slicedRender},
         {"nonFiniteScrub", settings.nonFiniteScrub},
         {"healthReload", settings.healthReload},
-        {"ladderRecovery", settings.ladderRecovery},
         {"wasapiProbeCapEnabled", settings.wasapiProbeCapEnabled},
         {"wasapiProbeCapChannels", settings.wasapiProbeCapChannels},
         {"healthYellowUnderrunsPerMinute", settings.healthYellowUnderrunsPerMinute},
@@ -794,7 +776,6 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     settings.slicedRender = j.value("slicedRender", false);
     settings.nonFiniteScrub = j.value("nonFiniteScrub", false);
     settings.healthReload = j.value("healthReload", false);
-    settings.ladderRecovery = j.value("ladderRecovery", false);
     settings.wasapiProbeCapEnabled = j.value("wasapiProbeCapEnabled", false);
     // Clamp defensively: the validator reports an out-of-range value, but a
     // hand-edited file must not reach the backend outside [2, 64].
@@ -811,9 +792,8 @@ void from_json(const nlohmann::json& j, AudioSettings& settings) {
     // Absent in scenes written before rack thumbnails existed: the default
     // rate is what those sessions were already running at.
     settings.rackThumbnailFps = j.value("rackThumbnailFps", 15);
-    if (j.contains("rackPreviewMode")) {
-        j.at("rackPreviewMode").get_to(settings.rackPreviewMode);
-    }
+    // A legacy "rackPreviewMode" (and any other retired key) is ignored here:
+    // nlohmann only reads the keys it is asked for, so an older scene loads.
     if (j.contains("watchedDevices")) {
         j.at("watchedDevices").get_to(settings.watchedDevices);
     }
@@ -841,9 +821,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 11) {
+        if (schemaVersion < 1 || schemaVersion > kSchemaVersion) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 to 11");
+                                    ", expected 1 to " + std::to_string(kSchemaVersion));
             return result;
         }
         Scene scene;
@@ -942,7 +922,6 @@ SceneLoadResult fromJson(std::string_view text) {
                 settings.slicedRender = false;
                 settings.nonFiniteScrub = false;
                 settings.healthReload = false;
-                settings.ladderRecovery = false;
             }
             // v7 fields are opt-in: a pre-v7 save never turns the probe cap on.
             if (schemaVersion < 7) {

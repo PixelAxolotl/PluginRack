@@ -8,7 +8,6 @@ namespace slider_touch {
 
 namespace {
 
-juce::Component::SafePointer<juce::Slider> lastSlider;
 std::optional<Dial> lastDial;
 std::function<void()> observer;
 bool driving = false;
@@ -86,7 +85,6 @@ public:
 } // namespace
 
 void record(juce::Slider& slider) {
-    lastSlider = &slider;
     juce::Component::SafePointer<juce::Slider> safe(&slider);
 
     Dial dial;
@@ -119,13 +117,11 @@ void record(juce::Slider& slider) {
 }
 
 void recordDial(Dial dial) {
-    lastSlider = nullptr;
     lastDial = std::move(dial);
     if (observer) observer();
 }
 
 void clear() {
-    lastSlider = nullptr;
     lastDial.reset();
     if (observer) observer();
 }

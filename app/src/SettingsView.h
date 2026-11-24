@@ -115,7 +115,6 @@ private:
     juce::ToggleButton slicedRenderToggle { "Deadline-aware sliced rendering" };
     juce::ToggleButton scrubToggle { "Scrub non-finite samples at inserts" };
     juce::ToggleButton healthReloadToggle { "Reload streams that stay yellow/red" };
-    juce::ToggleButton ladderRecoveryToggle { "Allow fallback ladder to recover one rung" };
     // Preset rows for the health thresholds; the exact values travel with the
     // scene, so a session restores the sensitivity it was left with.
     juce::Label healthSensitivityLabel { "", "Health sensitivity" };
@@ -132,10 +131,6 @@ private:
     // the engine (no Apply step) because it is not a stream option.
     juce::Label rackThumbnailsLabel { "", "Rack thumbnails" };
     juce::ComboBox rackThumbnailFpsCombo;
-    // Which inserts keep live previews: focused card only, slow rotation, or
-    // one hidden editor per insert. Applied straight to the engine too.
-    juce::Label rackPreviewModeLabel { "", "Background previews" };
-    juce::ComboBox rackPreviewModeCombo;
     // How long a meter holds its peak line. Session-wide, applied at once.
     juce::Label peakHoldLabel { "", "Peak hold" };
     juce::ComboBox peakHoldCombo;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -78,11 +79,31 @@ struct ChainItem {
     bool operator==(const ChainItem&) const = default;
 };
 
+// The one identity rule for Tap::Kind::Item. Built-in families mint ids
+// independently, so a Dynamics row and a Limiter row on the same strip can
+// both be id 1; the tap carries no type, so "the first chain row whose id
+// matches" is what identifies it. The live engine resolves both the ring it
+// writes (AudioEngine::render) and the latency it bills
+// (AudioEngine::tapLatencySamples) through this function, so a tap's signal
+// and its delay always come from the same row. Returns -1 when no row matches.
+inline int firstChainItemIndex(const std::vector<ChainItem>& chain,
+                               std::uint32_t itemId) {
+    for (int i = 0; i < static_cast<int>(chain.size()); ++i) {
+        if (chain[static_cast<std::size_t>(i)].id == itemId) return i;
+    }
+    return -1;
+}
+
 // A point in a channel's audio path that a send taps. Input is the trimmed
 // signal before the chain, Output is the post-fader signal, and Item is the
 // output of one chain item (identified by ChainItem::id so reordering the
 // chain keeps the tap on the same processor). Output is the default, which
 // reproduces the pre-schema-10 behaviour.
+//
+// Item ids are not unique across families: every built-in family mints its own
+// id 1. The tap therefore means the first chain row with that id, per
+// firstChainItemIndex above; that is the row whose output the engine pushes
+// into the tap ring and whose delay it bills.
 struct Tap {
     enum class Kind { Input, Item, Output };
 
@@ -211,12 +232,6 @@ struct WatchedDevice {
     bool operator==(const WatchedDevice&) const = default;
 };
 
-// How the Rack view keeps insert-card previews fresh for plugins that are
-// not docked in the center bay. Selected keeps today's behavior (only the
-// focused card is live); Rotate cycles background cards one at a time;
-// AllLive keeps a hidden editor per insert and refreshes each at low rate.
-enum class RackPreviewMode { Selected, Rotate, AllLive };
-
 // The audio engine settings a session is tuned with: buffer sizes, the
 // low-latency trade-offs, and whether watched devices reopen themselves after
 // an error. Saved with the scene so a load restores the same running setup.
@@ -243,7 +258,6 @@ struct AudioSettings {
     bool slicedRender = false;
     bool nonFiniteScrub = false;
     bool healthReload = false;
-    bool ladderRecovery = false;
     // Scene v7: opt-in cap for JUCE's WASAPI channel-count probe. Off by
     // default; pre-v7 saves never turn it on.
     bool wasapiProbeCapEnabled = false;
@@ -257,8 +271,6 @@ struct AudioSettings {
     // second. Not an audio stream option, but it saves and loads with the
     // rest so a session comes back looking the way it was left.
     int rackThumbnailFps = 15;
-    // Which inserts keep live previews. Display only, saved like the rate.
-    RackPreviewMode rackPreviewMode = RackPreviewMode::Selected;
 
     bool operator==(const AudioSettings&) const = default;
 };

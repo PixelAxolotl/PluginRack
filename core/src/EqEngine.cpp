@@ -30,9 +30,27 @@ std::vector<EqBand> defaultEqBands() {
     };
 }
 
-void EqEngine::prepare(double sampleRate, int maxBlock) {
+int eqLatencySamples(bool eqEnabled, bool eqBypassed, float eqDelayMs,
+                     double sampleRate) noexcept {
+    if (!eqEnabled || eqBypassed || !(eqDelayMs > 0.0f) || !std::isfinite(eqDelayMs)
+        || !(sampleRate > 0.0)) {
+        return 0;
+    }
+    // Same clamp the engine applies: setDelayMs bounds the requested delay to
+    // [0, kMaxDelayMs], and ensureDelayLine sizes the ring for exactly that.
+    const float bounded = std::min(eqDelayMs, EqEngine::kMaxDelayMs);
+    return static_cast<int>(std::lround(static_cast<double>(bounded) * 0.001 * sampleRate));
+}
+
+void EqEngine::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
-    maxBlock_ = maxBlock;
+    // Restart the filter history along with the delay line: every other
+    // built-in processor flushes its states on prepare(), and stale biquad
+    // memory from the previous rate leaks into the first block after a
+    // device or rate change.
+    for (auto& filter : filters_) {
+        filter.s1L = filter.s2L = filter.s1R = filter.s2R = 0.0f;
+    }
     delaySmooth_ = sampleRate_ > 0.0
                        ? static_cast<float>(1.0 - std::exp(-1.0 / (kDelaySmoothSeconds * sampleRate_)))
                        : 0.0f;

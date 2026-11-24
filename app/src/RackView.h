@@ -6,7 +6,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <set>
 #include <vector>
 
 #include "AudioEngine.h"
@@ -54,12 +53,10 @@ public:
     // destructor calls back into its processor, so the processor must
     // still be alive when it is deleted.
     void closeDockedEditor();
-    // Releases every background preview editor too, for the same reason.
-    void clearHiddenPreviews();
     // Synchronous form used before the engine destroys a strip (scene restore,
-    // plugin removal): deletes the docked, hidden-preview and queued-preview
-    // editors now, while their processors are still alive. The deferred form
-    // above only queues a timer, which is too late for a scene swap.
+    // plugin removal): deletes the docked editor now, while its processor is
+    // still alive. The deferred form above only queues a timer, which is too
+    // late for a scene swap.
     void releaseEditorsNow();
     // Releases the docked editor only when its insert is gone from the engine.
     // A structure change (adding an insert) must not tear a live editor down and
@@ -67,9 +64,7 @@ public:
     // teardown of an editor that was just created.
     void releaseOrphanedDockedEditor();
 
-    bool hasChainSelected() const { return selectedId >= 0; }
     std::uint32_t selectedChainId() const;
-    bool selectedChainIsOutput() const { return selectedIsOutput; }
     // Buses are Output objects with their own ids, so the rack treats a bus as
     // an output everywhere except the side-chain owner kind and its subtitle.
     bool isSelectedBus() const {
@@ -86,7 +81,6 @@ public:
     void setPluginBypass(std::uint32_t insertId, bool bypassed) override;
     void reloadPlugin(std::uint32_t insertId) override;
     void refreshAfterInsertChange() override;
-    void reorderInsert(std::uint32_t insertId, int targetIndex) override;
     void reorderChainItem(pluginrack::ChainItem item, int targetIndex) override;
     void previewChainItem(int targetIndex) override;
     void clearChainPreview() override;
@@ -96,12 +90,12 @@ public:
     void insertBuiltIn(pluginrack::ChainItem item, int chainIndex) override;
     void eraseBuiltIn(pluginrack::ChainItem item) override;
     bool insertActivated(AudioEngine::InsertSlot* insert) override;
-    // Temporary test hook: activates the next insert in the chain.
-
 
 private:
-    AudioEngine::Channel* currentChannel();
-    AudioEngine::Output* currentOutput();
+    // Const like the accessors built on them: they only read selection state
+    // and reach the engine through its reference member, never mutate RackView.
+    AudioEngine::Channel* currentChannel() const;
+    AudioEngine::Output* currentOutput() const;
     const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* currentInserts() const;
     const std::vector<pluginrack::ChainItem>* currentChain() const;
     const std::vector<pluginrack::DynamicsEffect>* currentEffects() const;
@@ -173,16 +167,10 @@ private:
     AudioEngine::AnalyzerTap* currentPluginTap(pluginrack::ChainItemType type);
     void releaseMiniTap();
     void applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail);
-    // Background previews: one capture per turn. Rotate keeps the selected
-    // strip's cards fresh; AllLive reaches every strip. Editors stay alive and
-    // parked off-screen instead of being rebuilt, which is what crashed.
-    void refreshHiddenPreviews(int targetWidth, bool everyStrip);
-    void retireHiddenPreview(std::uint32_t insertId);
     // Deletes a plugin editor once the capture worker is idle. Never blocks:
     // PrintWindow needs the message thread to pump, so a blocking wait here
     // would deadlock against the worker.
-    void destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host,
-                               std::uint32_t insertId = 0);
+    void destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginHost* host);
     bool pluginHostAlive(PluginHost* host) const;
 
     AudioEngine& audioEngine;
@@ -376,34 +364,6 @@ private:
     // by what the previous snapshot actually cost.
     juce::uint32 lastSnapshotMs = 0;
     int lastSnapshotCostMs = 0;
-    // Background previews: a hidden editor per insert, parked far off-screen
-    // at the plugin's own size. Off-screen (not 1x1) matters: a VST3 editor
-    // re-sizes itself when it becomes visible, and a window sitting under the
-    // UI captures as one flat colour. Editors stay alive so a heavy plugin UI
-    // is not torn down and rebuilt on every turn - that churn crashed.
-    struct HiddenPreview {
-        juce::AudioProcessorEditor* editor = nullptr;
-        PluginHost* host = nullptr;
-        juce::Rectangle<int> naturalSize;
-    };
-    std::map<std::uint32_t, HiddenPreview> hiddenPreviews;
-    // Editors whose delete is waiting for the capture worker. JUCE hands out
-    // one editor per plugin, so the bay must not ask for a new one for this
-    // insert until the old editor is really gone.
-    struct DoomedPreview {
-        juce::AudioProcessorEditor* editor = nullptr;
-        PluginHost* host = nullptr;
-    };
-    std::map<std::uint32_t, DoomedPreview> doomedPreviews;
-    // A plugin that refuses an editor is remembered, so it is not retried.
-    std::set<std::uint32_t> hiddenPreviewFailed;
-    // Inserts whose background capture came back empty, logged once each.
-    std::set<std::uint32_t> emptyCaptureLogged;
-    std::size_t hiddenCursor = 0;
-    int hiddenTick = 0;
-    // Top-level window kept below the app window; background plugin windows are
-    // re-parented into it so they render unseen. Created on first use.
-    void* previewHostWindow = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

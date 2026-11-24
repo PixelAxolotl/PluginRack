@@ -4,6 +4,8 @@
 
 #include <cmath>
 
+#include <pluginrack/DspMath.h>
+
 #include "Theme.h"
 
 namespace {
@@ -12,13 +14,6 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kNodeRadius = 6;     // node dot radius, px
 constexpr int kNodeHitRadius = 10; // mouseDown pick tolerance, px
 constexpr int kCurveStepPx = 2;    // magnitude sampling pitch, px
-
-// Clamps mirror core/EqEngine.cpp's computeCoeffs so the drawn response always
-// matches what the engine will actually apply.
-constexpr double kCoreMinFreqHz = 10.0;
-constexpr double kCoreMinQ = 0.1;
-constexpr double kCoreMaxQ = 20.0;
-constexpr double kButterworthQ = 0.7071067811865476; // HP ignores band.q
 
 // Grid vertical lines: 1-2-5(ish) per decade over the 20 Hz - 20 kHz span.
 constexpr double kGridFreqs[] = {
@@ -104,82 +99,33 @@ juce::Point<float> EQCurveComponent::nodePosition(const pluginrack::EqBand& band
 
 double EQCurveComponent::bandShapeDb(const pluginrack::EqBand& band,
                                      double sampleRateHz, double hz) {
-    // Normalised RBJ coefficients, identical maths to core/EqEngine.cpp
-    // computeCoeffs() (clamping included so dragged params can never diverge
-    // from what the engine applies).
-    const double nyquist = sampleRateHz * 0.5;
-    const double maxFreq = (kMaxFreqHz < nyquist) ? kMaxFreqHz : nyquist - 1.0;
-    const double freq = std::fmin(std::fmax(static_cast<double>(band.freqHz), kCoreMinFreqHz), maxFreq);
-    const double q = std::fmin(std::fmax(static_cast<double>(band.q), kCoreMinQ), kCoreMaxQ);
-    const double gainDb = static_cast<double>(band.gainDb);
-
-    const double a = std::pow(10.0, gainDb / 40.0);
-    const double w0 = 2.0 * kPi * freq / sampleRateHz;
-    const double sinW0 = std::sin(w0);
-    const double cosW0 = std::cos(w0);
-
-    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
-    double a0 = 1.0, a1 = 0.0, a2 = 0.0;
-
+    // Same coefficients the engine applies: the RBJ maths now lives once in
+    // core DspMath (the old local copy's shelf alpha went NaN under the sqrt
+    // for Q > 1, so a shelved curve could diverge from what you heard).
+    pluginrack::dsp::Biquad c{};
     switch (band.type) {
-        case pluginrack::EqType::HighPass: {
-            const double alpha = sinW0 / (2.0 * kButterworthQ);
-            b0 = (1.0 + cosW0) * 0.5;
-            b1 = -(1.0 + cosW0);
-            b2 = (1.0 + cosW0) * 0.5;
-            a0 = 1.0 + alpha;
-            a1 = -2.0 * cosW0;
-            a2 = 1.0 - alpha;
+        case pluginrack::EqType::HighPass:
+            c = pluginrack::dsp::highPass(band.freqHz, sampleRateHz,
+                                          pluginrack::dsp::kButterworthQ);
             break;
-        }
-        case pluginrack::EqType::LowPass: {
-            const double alpha = sinW0 / (2.0 * kButterworthQ);
-            b0 = (1.0 - cosW0) * 0.5;
-            b1 = 1.0 - cosW0;
-            b2 = (1.0 - cosW0) * 0.5;
-            a0 = 1.0 + alpha;
-            a1 = -2.0 * cosW0;
-            a2 = 1.0 - alpha;
+        case pluginrack::EqType::LowPass:
+            c = pluginrack::dsp::lowPass(band.freqHz, sampleRateHz,
+                                         pluginrack::dsp::kButterworthQ);
             break;
-        }
-        case pluginrack::EqType::LowShelf: {
-            const double alpha = sinW0 * 0.5 * std::sqrt((a + 1.0 / a) * (1.0 / (q * q) - 1.0) + 2.0);
-            const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;
-            b0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha);
-            b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0);
-            b2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha);
-            a0 = (a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha;
-            a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0);
-            a2 = (a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha;
+        case pluginrack::EqType::LowShelf:
+            c = pluginrack::dsp::lowShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
             break;
-        }
-        case pluginrack::EqType::Peak: {
-            const double alpha = sinW0 / (2.0 * q);
-            // RBJ cookbook bell: centre gain = a^2 = 10^(gainDb/20), which
-            // requires the denominator 1 +/- alpha/a (1 +/- alpha halves it).
-            b0 = 1.0 + alpha * a;
-            b1 = -2.0 * cosW0;
-            b2 = 1.0 - alpha * a;
-            a0 = 1.0 + alpha / a;
-            a1 = -2.0 * cosW0;
-            a2 = 1.0 - alpha / a;
+        case pluginrack::EqType::Peak:
+            c = pluginrack::dsp::bell(band.freqHz, band.q, band.gainDb, sampleRateHz);
             break;
-        }
-        case pluginrack::EqType::HighShelf: {
-            const double alpha = sinW0 * 0.5 * std::sqrt((a + 1.0 / a) * (1.0 / (q * q) - 1.0) + 2.0);
-            const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;
-            b0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha);
-            b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0);
-            b2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha);
-            a0 = (a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha;
-            a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0);
-            a2 = (a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha;
+        case pluginrack::EqType::HighShelf:
+            c = pluginrack::dsp::highShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
             break;
-        }
     }
-
-    const double inv = 1.0 / a0;
-    b0 *= inv; b1 *= inv; b2 *= inv; a1 *= inv; a2 *= inv;
+    // Mirrors EqEngine's non-finite band guard: a poisoned coefficient set
+    // draws as no contribution instead of dragging the curve to NaN.
+    if (!pluginrack::dsp::isFinite(c)) return 0.0;
+    const double b0 = c.b0, b1 = c.b1, b2 = c.b2, a1 = c.a1, a2 = c.a2;
 
     // |H(e^jw)| = |b0 + b1 z^-1 + b2 z^-2| / |1 + a1 z^-1 + a2 z^-2|.
     const double w = 2.0 * kPi * hz / sampleRateHz;

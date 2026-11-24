@@ -4,6 +4,7 @@
 
 #include <JuceHeader.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -65,7 +66,9 @@ public:
         // Peak of the side-chain key the audio thread last fed to this insert,
         // with a light decay so the metering in the racks bar stays readable.
         juce::Atomic<float> sideChainKeyPeak{0.0f};
-        int latencySamples = 0;
+        // Written by the message thread without stateLock (bypass/reload paths)
+        // and read by render and the latency report under it, so it is atomic.
+        std::atomic<int> latencySamples{0};
         // State blob from the scene while the plugin could not be loaded (for
         // example a missing bundle). A save must write it back unchanged
         // instead of recording the empty state of the missing instance.
@@ -93,9 +96,9 @@ public:
     // atomics and the rings are never resized.
     struct AnalyzerTap {
         static constexpr int kSamples = analyzer::kFftSize;
-        static constexpr std::uint32_t kOff = 0;  // mirrors kAnalyzerOff
-        static constexpr std::uint32_t kPre = 1;  // mirrors kAnalyzerPre
-        static constexpr std::uint32_t kPost = 2; // mirrors kAnalyzerPost
+        static constexpr std::uint32_t kOff = 0;  // mirrors EQWindow::kAnalyzerOff
+        static constexpr std::uint32_t kPre = 1;
+        static constexpr std::uint32_t kPost = 2; // mirrors EQWindow::kAnalyzerPost
 
         // JUCE leaves fresh AudioBuffer samples undefined; snapshot() can
         // read the rings before the first writeTap, so start them silent.
@@ -363,7 +366,6 @@ public:
         // What the user asked for (0 = "Auto: whatever the driver defaults
         // to"). Comparing it with the granted size is the only way to tell a
         // big buffer the app requested from one the driver imposed.
-        int requestedInputBufferSize = 0;
         int requestedOutputBufferSize = 0;
         juce::String clockDeviceType;
         int inputReadDelayFrames = 0;
@@ -376,10 +378,8 @@ public:
         juce::String maxInsertName;
         double maxInsertMs = 0.0;
         bool valid = false;
-        bool approximate = true;
         double measuredMs = 0.0;
         bool measuredValid = false;
-        bool measuredAttempted = false;
         bool measureFailed = false;
         // True when capture and playback are different devices. Duplex is then
         // impossible and the read delay is the cost of bridging two clocks.
@@ -394,8 +394,6 @@ public:
         std::uint64_t outputDroppedFrames = 0;
         std::uint64_t outputLowWatermarks = 0;
         std::uint64_t renderMisses = 0;
-        double inputOccupancy = 0.0;
-        double outputOccupancy = 0.0;
     };
 
     AudioEngine();
@@ -441,7 +439,6 @@ public:
         FullDuplexInput     // same-device input: start with one-block delay
     };
     void setLatencyOption(LatencyOption option, bool enabled);
-    bool getLatencyOption(LatencyOption option) const;
 
     // Everything the Settings page can change. Applied as one unit so a
     // device that refuses the new configuration can fall back cleanly. This is
@@ -464,8 +461,6 @@ public:
     // a stream, so it is set straight from Settings instead of being staged.
     void setRackThumbnailFps(int fps);
     int getRackThumbnailFps() const { return rackThumbnailFps_.load(); }
-    void setRackPreviewMode(pluginrack::RackPreviewMode mode);
-    pluginrack::RackPreviewMode getRackPreviewMode() const { return rackPreviewMode_; }
     void setWatchedDevices(const std::vector<pluginrack::WatchedDevice>& devices);
     std::vector<pluginrack::WatchedDevice> getWatchedDevices() const;
 
@@ -515,16 +510,6 @@ public:
     // device that was busy during a reload gets another chance.
     void reloadDevicesAsync(const std::vector<ReloadableDevice>& devices);
     void render(int frames);
-    std::uint64_t getOversizedBlockCount() const { return oversizedBlockCount_.load(); }
-    // Deadline-aware rendering: blocks whose tail had to be silenced, and
-    // non-finite samples quarantined at insert boundaries. Both are lifetime
-    // counters; the rolling telemetry window carries the same events.
-    std::uint64_t getPartialRenderCount() const { return partialRenders_.load(); }
-    std::uint64_t getScrubbedSamples() const { return scrubbedSamples_.load(); }
-    // Advisory per-endpoint capability cache (diagnostics / Settings). The
-    // cache is persisted after every successful open; a stale entry is never
-    // used, the live probe always wins.
-    juce::String getDeviceCacheJson() const;
     void releaseResources();
     // Ensures every channel with an assigned input device shares one capture
     // opened wide enough for the highest physical index it maps. Callers that
@@ -620,7 +605,6 @@ public:
     // Moves an existing send/route to another point on the channel. A tap with
     // no matching strip connection does nothing.
     void setBusSendTap(std::uint32_t channelId, std::uint32_t busId, pluginrack::Tap tap);
-    void setSendTap(std::uint32_t channelId, std::uint32_t outputId, pluginrack::Tap tap);
     pluginrack::Tap getBusSendTap(std::uint32_t channelId, std::uint32_t busId) const;
     pluginrack::Tap getSendTap(std::uint32_t channelId, std::uint32_t outputId) const;
     // End-to-end latency alignment for taps. On by default; turning it off
@@ -761,6 +745,18 @@ public:
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     double getSampleRate() const;
+    // Delay the strip's chain adds at the engine's current rate, from the same
+    // rule table render charges tap compensation with (chainItemLatencySamples:
+    // inserts, chained denoisers, non-bypassed limiters, the EQ delay line,
+    // plus the unchained-fallback effects chainLatencySamples adds). Views that
+    // label latency must ask here instead of counting rows themselves; a
+    // second model goes stale the moment a family joins the table. Bus is an
+    // alias of Output, so these two overloads cover every strip kind.
+    int stripLatencySamples(const Channel& strip) const;
+    int stripLatencySamples(const Output& strip) const;
+    // Delay between the strip input and one of its taps, using the same Item
+    // identity rule as render (Scene.h firstChainItemIndex).
+    int stripTapLatencySamples(const Channel& channel, const pluginrack::Tap& tap) const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
     const std::vector<std::unique_ptr<Bus>>& getBuses() const;
     std::vector<std::unique_ptr<Bus>>& getBuses() { return buses; }
@@ -803,7 +799,6 @@ public:
     bool getSlicedRenderEnabled() const { return slicedRender_.load(); }
     bool getNonFiniteScrubEnabled() const { return nonFiniteScrub_.load(); }
     bool getHealthReloadDevices() const { return healthReload_.load(); }
-    bool getLadderRecoveryEnabled() const { return ladderRecovery_.load(); }
     // Fault containment (beta): run insert DSP in a child process. Default off;
     // persisted scene/schema changes are deferred until Stage 2 passes.
     void setChildProcessDsp(bool enabled) { childProcessDsp_.store(enabled, std::memory_order_release); }
@@ -848,8 +843,6 @@ public:
     // configuration changes, because the old figure no longer describes it.
     void resetLatencyMeasurement();
     bool isLatencyMeasuring() const { return latencyMeasureActive_.load(std::memory_order_relaxed); }
-    bool hasMeasuredLatency() const { return latencyMeasuredValid_.load(std::memory_order_relaxed); }
-    bool didLastMeasurementFail() const { return latencyMeasureFailed_.load(std::memory_order_relaxed); }
     double getMeasuredLatencyMs() const;
 
     // includePluginState=false builds the structural half of the scene only:
@@ -950,29 +943,85 @@ private:
     TapPoint* findTapPoint(Channel& channel, const pluginrack::Tap& tap);
     const TapPoint* findTapPoint(const Channel& channel, const pluginrack::Tap& tap) const;
     // Latency a strip's chain adds, and how much of it sits before a tap.
+    // One rule table, shared with tapLatencySamples and getLatencyReport:
+    // an insert reports its plugin latency; a denoiser named by the chain
+    // always contributes its 512-sample OLA delay, because render calls
+    // process() for chain items even when the effect is bypassed and the
+    // processor delays even a bypassed signal; a limiter's look-ahead counts
+    // only while the effect is not bypassed (its processor skips the delay
+    // line then); the EQ contributes its delay line through eqLatencySamples,
+    // gated by the strip's bypass flag, and only from an Eq chain row, since
+    // that row is the only place render runs the EQ. All at the engine's
+    // current rate. chainLatencySamples then adds the effects that render's
+    // fallback pass runs without a chain row, and tapLatencySamples falls back
+    // to that same total when its item is not in the chain.
     template <typename StripType>
-    static int chainLatencySamples(const StripType& strip) {
-        int total = 0;
-        for (const auto& item : strip.chain) {
-            if (item.type == pluginrack::ChainItemType::Insert) {
-                for (const auto& insert : strip.inserts) {
-                    if (insert->id == item.id) {
-                        total += insert->latencySamples;
-                        break;
-                    }
-                }
-            } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
-                for (const auto& effect : strip.spectralDenoiserEffects) {
-                    if (effect.id == item.id && !effect.bypassed) {
-                        total += pluginrack::kSpectralDenoiserLatencySamples;
-                        break;
-                    }
-                }
+    static int chainItemLatencySamples(const StripType& strip,
+                                       const pluginrack::ChainItem& item,
+                                       double sampleRate) {
+        if (item.type == pluginrack::ChainItemType::Insert) {
+            for (const auto& insert : strip.inserts) {
+                if (insert->id == item.id)
+                    return insert->latencySamples.load();
             }
+            return 0;
+        }
+        if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+            for (const auto& effect : strip.spectralDenoiserEffects) {
+                if (effect.id == item.id)
+                    return pluginrack::kSpectralDenoiserLatencySamples;
+            }
+            return 0;
+        }
+        if (item.type == pluginrack::ChainItemType::Limiter) {
+            for (const auto& effect : strip.limiterEffects) {
+                if (effect.id == item.id)
+                    return effect.bypassed
+                               ? 0
+                               : pluginrack::limiterLatencySamples(effect, sampleRate);
+            }
+            return 0;
+        }
+        if (item.type == pluginrack::ChainItemType::Eq) {
+            return pluginrack::eqLatencySamples(true, strip.eqBypassed.get(),
+                                                strip.eqDelayMs, sampleRate);
+        }
+        return 0;
+    }
+    template <typename StripType>
+    static int chainLatencySamples(const StripType& strip, double sampleRate) {
+        int total = 0;
+        for (const auto& item : strip.chain)
+            total += chainItemLatencySamples(strip, item, sampleRate);
+        // Effects with no chain row still run through render()'s fallback pass
+        // (processNewMissing), so a route delay that ignored them would drift
+        // against the dry path. Only an effect that actually runs counts, and
+        // coverage is per family: ids are unique inside a family but a default
+        // Dynamics and a default Limiter both use id 1, so one id-keyed set
+        // would let a row of one family cover an unchained effect of another.
+        const auto covered = [&strip](pluginrack::ChainItemType type, std::uint32_t id) {
+            return std::any_of(strip.chain.begin(), strip.chain.end(),
+                               [type, id](const pluginrack::ChainItem& item) {
+                                   return item.type == type && item.id == id;
+                               });
+        };
+        for (const auto& effect : strip.limiterEffects) {
+            if (!effect.bypassed && !covered(pluginrack::ChainItemType::Limiter, effect.id))
+                total += pluginrack::limiterLatencySamples(effect, sampleRate);
+        }
+        for (const auto& effect : strip.spectralDenoiserEffects) {
+            if (!effect.bypassed
+                && !covered(pluginrack::ChainItemType::SpectralDenoiser, effect.id))
+                total += pluginrack::kSpectralDenoiserLatencySamples;
         }
         return total;
     }
-    static int tapLatencySamples(const Channel& channel, const pluginrack::Tap& tap);
+    static int tapLatencySamples(const Channel& channel, const pluginrack::Tap& tap,
+                                 double sampleRate);
+    // Inserts on other strips that key off a removed strip fall back to no
+    // side chain instead of pointing at an id that no longer exists.
+    // Requires stateLock; called from removeChannel, removeOutput, removeBus.
+    void clearSideChainRefsLocked(pluginrack::SideChainSource source, std::uint32_t id);
     static float decibelsToGain(float gainDb);
     // Implementation of the public device setters without the "starting up"
     // check: the background opener calls these directly from its worker.
@@ -1049,10 +1098,6 @@ private:
         int renderBlockFrames = 0;
     };
 
-    // Removed plugins stay alive until the audio engine is destroyed. Some
-    // VSTs keep worker callbacks active after removal, so destroying them on
-    // the UI thread during live playback is unsafe.
-    std::vector<std::unique_ptr<InsertSlot>> retiredInserts_;
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
     std::vector<std::unique_ptr<Bus>> buses;
@@ -1069,7 +1114,9 @@ private:
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
-    int requestedInputBufferSize_ = 0;
+    // Read by background device-opener workers while applySettingsValues writes
+    // it on the message thread, so it is atomic.
+    std::atomic<int> requestedInputBufferSize_{0};
     int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
     // Scratch for reading a tap at a compensation delay. 2 x maxBlockFrames,
@@ -1082,10 +1129,7 @@ private:
     // that lands mid-reprepare can never hand a plugin more frames than it
     // allocated for. Guarded by stateLock.
     int renderBlockFrames_ = 256;
-    std::atomic<std::uint64_t> oversizedBlockCount_{0};
     std::atomic<std::uint64_t> renderMisses_{0};
-    std::atomic<std::uint64_t> partialRenders_{0};
-    std::atomic<std::uint64_t> scrubbedSamples_{0};
     // Written by the clock callback only, read by the UI. Mutable so the
     // const report getters can summarise it without a lock.
     mutable pluginrack::AudioTelemetry renderTelemetry_;
@@ -1164,15 +1208,11 @@ private:
     std::atomic<bool> slicedRender_{false};
     std::atomic<bool> nonFiniteScrub_{false};
     std::atomic<bool> healthReload_{false};
-    std::atomic<bool> ladderRecovery_{false};
     std::atomic<bool> childProcessDsp_{false};
     std::atomic<double> healthYellowUnderrunsPerMinute_{1.0};
     std::atomic<double> healthRedUnderrunsPerMinute_{10.0};
     std::atomic<double> healthPinnedToEdgeMs_{5000.0};
     std::atomic<int> rackThumbnailFps_{15};
-    // Plain enum: only ever touched on the message thread (Settings writes,
-    // RackView reads), so no atomic needed.
-    pluginrack::RackPreviewMode rackPreviewMode_ = pluginrack::RackPreviewMode::Selected;
     juce::CriticalSection watchedDevicesLock_;
     std::vector<pluginrack::WatchedDevice> watchedDevices_;
 
