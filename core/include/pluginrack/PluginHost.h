@@ -18,6 +18,9 @@ public:
     virtual void prepare(double sampleRate, int maxBlockFrames) = 0;
     virtual ProcessResult process(AudioBlock& block) noexcept = 0;
     virtual void reset() noexcept = 0;
+    // Processing delay reported by the plugin, in samples. Hosts that cannot
+    // report latency return 0; the mixer uses it to align tap points.
+    virtual int latencySamples() const noexcept { return 0; }
 };
 
 class IPluginFactory {

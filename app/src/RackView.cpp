@@ -279,7 +279,9 @@ AudioEngine::Channel* RackView::currentChannel() {
 
 AudioEngine::Output* RackView::currentOutput() {
     if (!selectedIsOutput || selectedId < 0) return nullptr;
-    return audioEngine.getOutputById(static_cast<std::uint32_t>(selectedId));
+    const auto id = static_cast<std::uint32_t>(selectedId);
+    if (auto* out = audioEngine.getOutputById(id)) return out;
+    return audioEngine.getBusById(id);
 }
 
 const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* RackView::currentInserts() const {
@@ -291,6 +293,8 @@ const std::vector<std::unique_ptr<AudioEngine::InsertSlot>>* RackView::currentIn
     } else {
         for (const auto& out : audioEngine.getOutputs())
             if (out->id == id) return &out->inserts;
+        for (const auto& bus : audioEngine.getBuses())
+            if (bus->id == id) return &bus->inserts;
     }
     return nullptr;
 }
@@ -308,8 +312,10 @@ void RackView::ensureSelection() {
     const auto id = selectedId < 0 ? 0 : static_cast<std::uint32_t>(selectedId);
     bool ok = false;
     if (selectedId >= 0) {
-        ok = selectedIsOutput ? audioEngine.getOutputById(id) != nullptr
-                              : audioEngine.getChannelById(id) != nullptr;
+        ok = selectedIsOutput
+                 ? (audioEngine.getOutputById(id) != nullptr
+                    || audioEngine.getBusById(id) != nullptr)
+                 : audioEngine.getChannelById(id) != nullptr;
     }
     if (!ok) {
         const auto oldId = selectedId;
@@ -342,6 +348,11 @@ void RackView::rebuildChannelCombo() {
     for (const auto& out : audioEngine.getOutputs()) {
         channelCombo.addItem(out->name + " (out)", item++);
         comboIds.push_back((int)out->id);
+        comboIsOutput.push_back(1);
+    }
+    for (const auto& bus : audioEngine.getBuses()) {
+        channelCombo.addItem(bus->name + " (bus)", item++);
+        comboIds.push_back((int)bus->id);
         comboIsOutput.push_back(1);
     }
     // select current without firing onChange
@@ -390,9 +401,13 @@ void RackView::refreshHeader() {
         meter->setStereo(ch->layout != pluginrack::ChannelLayout::Mono);
     } else if (out != nullptr) {
         nameLabel.setText(out->name, juce::dontSendNotification);
-        const auto deviceName = audioEngine.getOutputDeviceState(out->id).deviceName;
-        subLabel.setText(deviceName.isNotEmpty() ? deviceName : juce::String("No device"),
-                         juce::dontSendNotification);
+        if (isSelectedBus()) {
+            subLabel.setText("Bus - summed from its sends", juce::dontSendNotification);
+        } else {
+            const auto deviceName = audioEngine.getOutputDeviceState(out->id).deviceName;
+            subLabel.setText(deviceName.isNotEmpty() ? deviceName : juce::String("No device"),
+                             juce::dontSendNotification);
+        }
         inputEditing = false;
         inputChip.setVisible(false);
         modeCombo.setVisible(false);
@@ -841,15 +856,19 @@ void RackView::releaseMiniTap() {
     // tap lived on, so a stored pointer could outlive it.
     if (tapArmedId == 0) return;
     if (tapArmedIsOutput) {
-        for (const auto& output : audioEngine.getOutputs())
-            if (output->id == tapArmedId) {
-                output->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
-                output->eqTap.setMode(AudioEngine::AnalyzerTap::kOff);
-                output->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
-                output->multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
-                output->deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
-                output->limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
-            }
+        const auto release = [this](auto& strips) {
+            for (const auto& strip : strips)
+                if (strip->id == tapArmedId) {
+                    strip->analyzerTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                    strip->eqTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                    strip->dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                    strip->multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                    strip->deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                    strip->limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
+                }
+        };
+        release(audioEngine.getOutputs());
+        release(audioEngine.getBuses());
     } else {
         for (const auto& channel : audioEngine.getChannels())
             if (channel->id == tapArmedId) {
@@ -2022,7 +2041,10 @@ void RackView::updateSideChainBar() {
     sideChainBarVisible = show;
     sideChainBar.setVisible(show);
     if (!show) return;
-    sideChainBar.setTarget(focus, selectedIsOutput, static_cast<std::uint32_t>(selectedId));
+    const auto ownerKind = !selectedIsOutput ? SideChainBar::OwnerKind::Channel
+                          : isSelectedBus()   ? SideChainBar::OwnerKind::Bus
+                                              : SideChainBar::OwnerKind::Output;
+    sideChainBar.setTarget(focus, ownerKind, static_cast<std::uint32_t>(selectedId));
 }
 
 void RackView::maskIncomingWindow() {
@@ -2332,6 +2354,11 @@ bool RackView::pluginHostAlive(PluginHost* host) const {
     }
     for (const auto& out : audioEngine.getOutputs()) {
         for (const auto& insert : out->inserts) {
+            if (&insert->pluginHost == host) return true;
+        }
+    }
+    for (const auto& bus : audioEngine.getBuses()) {
+        for (const auto& insert : bus->inserts) {
             if (&insert->pluginHost == host) return true;
         }
     }
@@ -2899,11 +2926,15 @@ void RackView::refreshDynamicsButtons() {
 
 void RackView::SourceRowList::setRows(juce::StringArray channelNames,
                                       juce::StringArray deviceNames,
-                                      const std::vector<float>& channelHues) {
-    if (names == channelNames && devices == deviceNames && hues == channelHues) return;
+                                      const std::vector<float>& channelHues,
+                                      juce::StringArray sectionHeaders) {
+    if (names == channelNames && devices == deviceNames && hues == channelHues
+        && headers == sectionHeaders)
+        return;
     names = std::move(channelNames);
     devices = std::move(deviceNames);
     hues = channelHues;
+    headers = std::move(sectionHeaders);
     repaint();
 }
 
@@ -2918,6 +2949,18 @@ void RackView::SourceRowList::paint(juce::Graphics& g) {
 
     auto area = getLocalBounds();
     for (int i = 0; i < names.size() && area.getHeight() > 0; ++i) {
+        if (i < headers.size() && headers[i].isNotEmpty()) {
+            auto headerRow = area.removeFromTop(kHeaderH);
+            if (i > 0) {
+                g.setColour(theme::border());
+                g.fillRect(headerRow.removeFromTop(1));
+                headerRow.removeFromTop(3);
+            }
+            g.setColour(theme::dim());
+            g.setFont(theme::ui::captionFont());
+            g.drawFittedText(headers[i], headerRow, juce::Justification::centredLeft, 1);
+            continue;
+        }
         auto row = area.removeFromTop(kRowH);
         const float hue = (i < (int)hues.size()) ? hues[static_cast<std::size_t>(i)] : 0.0f;
         const auto accent = theme::stripColour(hue);
@@ -2938,18 +2981,62 @@ void RackView::SourceRowList::paint(juce::Graphics& g) {
 void RackView::refreshSourceList() {
     juce::StringArray sourceNames;
     juce::StringArray sourceDevices;
+    juce::StringArray sourceHeaders;
     std::vector<float> sourceHues;
+    const auto addHeader = [&](const juce::String& text) {
+        sourceNames.add(juce::String{});
+        sourceDevices.add(juce::String{});
+        sourceHues.push_back(0.0f);
+        sourceHeaders.add(text);
+    };
+    const auto addRow = [&](const juce::String& name, float hue, const juce::String& device) {
+        sourceNames.add(name);
+        sourceHues.push_back(hue);
+        sourceDevices.add(device);
+        sourceHeaders.add({});
+    };
     if (const auto* out = currentOutput()) {
-        for (const auto& channel : audioEngine.getChannels()) {
-            if (audioEngine.getSendGain(channel->id, out->id) <= -30.0f) continue;
-            sourceNames.add(channel->name);
-            sourceHues.push_back(channel->colourHue);
-            const auto device = audioEngine.getChannelDeviceState(channel->id).deviceName;
-            sourceDevices.add(device.isNotEmpty() ? device : juce::String("No input device"));
+        if (isSelectedBus()) {
+            // A bus is fed by bus sends, not channel->output routes, so list
+            // the channels whose send into this bus is above the floor.
+            addHeader("Inputs");
+            for (const auto& send : audioEngine.getBusSends()) {
+                if (send->busId != out->id) continue;
+                if (send->sendGainDbL.get() <= AudioEngine::kSendOffDb
+                    && send->sendGainDbR.get() <= AudioEngine::kSendOffDb)
+                    continue;
+                for (const auto& channel : audioEngine.getChannels()) {
+                    if (channel->id != send->channelId) continue;
+                    const auto device = audioEngine.getChannelDeviceState(channel->id).deviceName;
+                    addRow(channel->name, channel->colourHue,
+                           device.isNotEmpty() ? device : juce::String("No input device"));
+                }
+            }
+            // The bus's own destinations: outputs it is routed to.
+            addHeader("Outputs");
+            for (const auto& route : audioEngine.getBusRoutes()) {
+                if (route->busId != out->id) continue;
+                if (route->sendGainDbL.get() <= AudioEngine::kSendOffDb
+                    && route->sendGainDbR.get() <= AudioEngine::kSendOffDb)
+                    continue;
+                for (const auto& target : audioEngine.getOutputs()) {
+                    if (target->id != route->outputId) continue;
+                    const auto device = audioEngine.getOutputDeviceState(target->id).deviceName;
+                    addRow(target->name, target->colourHue,
+                           device.isNotEmpty() ? device : juce::String("No output device"));
+                }
+            }
+        } else {
+            for (const auto& channel : audioEngine.getChannels()) {
+                if (audioEngine.getSendGain(channel->id, out->id) <= -30.0f) continue;
+                const auto device = audioEngine.getChannelDeviceState(channel->id).deviceName;
+                addRow(channel->name, channel->colourHue,
+                       device.isNotEmpty() ? device : juce::String("No input device"));
+            }
         }
     }
     sourceList.setRows(std::move(sourceNames), std::move(sourceDevices),
-                       std::move(sourceHues));
+                       std::move(sourceHues), std::move(sourceHeaders));
 }
 
 void RackView::refreshOutputButtons() {
@@ -2962,7 +3049,9 @@ void RackView::refreshOutputButtons() {
     // (an output has no sends of its own): which channels feed it, and the
     // device each of those channels is receiving from.
     refreshSourceList();
-    outputHeader.setText(out != nullptr ? "Inputs" : "Output", juce::dontSendNotification);
+    outputHeader.setText(isSelectedBus() ? "Inputs / Outputs"
+                                         : (out != nullptr ? "Inputs" : "Output"),
+                         juce::dontSendNotification);
 
     for (size_t i = 0; i < outputs.size(); ++i) {
         auto* btn = outputButtons.add(new juce::TextButton(outputs[i]->name));

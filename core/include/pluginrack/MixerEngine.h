@@ -20,6 +20,7 @@
 #include "pluginrack/PluginHost.h"
 #include "pluginrack/Scene.h"
 #include "pluginrack/SceneAvailability.h"
+#include "pluginrack/TapDelay.h"
 
 namespace pluginrack {
 
@@ -75,6 +76,31 @@ private:
         // only stored one level rendered a split send as a matched pair.
         float sendGainL = 0.0f;
         float sendGainR = 0.0f;
+        std::size_t tapIndex = 0;
+        int delaySamples = 0;
+    };
+
+    struct BusCache {
+        float gain = 0.0f;
+        float trim = 1.0f;
+        bool muted = false;
+    };
+
+    struct BusSendCache {
+        std::size_t channelIndex = 0;
+        std::size_t busIndex = 0;
+        float sendGainL = 0.0f;
+        float sendGainR = 0.0f;
+        std::size_t tapIndex = 0;
+        int delaySamples = 0;
+    };
+
+    struct BusRouteCache {
+        std::size_t busIndex = 0;
+        std::size_t outputIndex = 0;
+        float sendGainL = 0.0f;
+        float sendGainR = 0.0f;
+        int delaySamples = 0;
     };
 
     // One strip's built-in processing, in the order the scene asked for.
@@ -83,7 +109,22 @@ private:
     struct Step {
         ChainItemType type = ChainItemType::Insert;
         std::size_t index = 0;
+        std::uint32_t id = 0;
     };
+
+    struct TapState {
+        Tap tap;
+        DelayRing ring;
+        int latencySamples = 0;
+    };
+
+    struct TapPush {
+        std::vector<TapState>* taps = nullptr;
+        float* left = nullptr;
+        float* right = nullptr;
+        int frames = 0;
+    };
+    static void pushItemTap(void* ctx, std::uint32_t itemId);
 
     struct StripDsp {
         EqEngine eq;
@@ -105,26 +146,41 @@ private:
         std::mutex mutex;
         std::vector<StripDsp> channels;
         std::vector<StripDsp> outputs;
+        std::vector<StripDsp> buses;
     };
 
     static StripDsp buildStrip(const Strip& source, double sampleRate, int maxFrames);
-    static void processStrip(StripDsp& strip, float* left, float* right, int frames);
+    static void processStrip(StripDsp& strip, float* left, float* right, int frames,
+                             void (*afterStep)(void*, std::uint32_t) = nullptr,
+                             void* ctx = nullptr);
 
     std::vector<ChannelCache> channels_;
     std::vector<RouteCache> routes_;
+    std::vector<BusCache> buses_;
+    std::vector<BusSendCache> busSends_;
+    std::vector<BusRouteCache> busRoutes_;
     // Output fader/mute, applied after the output inserts like the app.
     std::vector<float> outputGains_;
     std::vector<char> outputMuted_;
     std::vector<float> scratch_;
     std::vector<float> accumulators_;
+    std::vector<float> busBuffers_;
+    std::vector<float> tapScratch_;
+    // One ring per channel tap the scene actually uses, plus one per bus for
+    // the compensation delay applied to bus routes.
+    std::vector<std::vector<TapState>> channelTaps_;
+    std::vector<DelayRing> busCompensation_;
+    std::vector<int> busLatencies_;
     std::vector<std::unique_ptr<InsertChain>> insertChains_;
     std::vector<std::unique_ptr<InsertChain>> outputInsertChains_;
+    std::vector<std::unique_ptr<InsertChain>> busInsertChains_;
     std::unique_ptr<DspState> dsp_;
     IPluginFactory* pluginFactory_ = nullptr;
     std::vector<char> stoppedChannels_;
     std::vector<char> disabledOutputs_;
     std::vector<std::uint32_t> channelIds_;
     std::vector<std::uint32_t> outputIds_;
+    std::vector<std::uint32_t> busIds_;
     MeterBank meters_;
     std::uint64_t scrubbedSamples_ = 0;
     bool scrubEnabled_ = false;

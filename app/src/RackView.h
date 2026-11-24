@@ -70,6 +70,12 @@ public:
     bool hasChainSelected() const { return selectedId >= 0; }
     std::uint32_t selectedChainId() const;
     bool selectedChainIsOutput() const { return selectedIsOutput; }
+    // Buses are Output objects with their own ids, so the rack treats a bus as
+    // an output everywhere except the side-chain owner kind and its subtitle.
+    bool isSelectedBus() const {
+        return selectedIsOutput && selectedId >= 0
+               && audioEngine.getBusById(static_cast<std::uint32_t>(selectedId)) != nullptr;
+    }
 
     std::function<void()> onJumpToMixer;
     std::function<void()> onStructureChanged;
@@ -290,14 +296,17 @@ private:
     class SourceRowList final : public juce::Component {
     public:
         void setRows(juce::StringArray channelNames, juce::StringArray deviceNames,
-                     const std::vector<float>& channelHues);
+                     const std::vector<float>& channelHues,
+                     juce::StringArray sectionHeaders = {});
         void paint(juce::Graphics& g) override;
 
     private:
         static constexpr int kRowH = 34;
+        static constexpr int kHeaderH = 22;
         juce::StringArray names;
         juce::StringArray devices;
         std::vector<float> hues;
+        juce::StringArray headers;
     };
     SourceRowList sourceList;
     // Paces the Inputs refresh: sends and device names only move on user

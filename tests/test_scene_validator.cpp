@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "pluginrack/SceneLimits.h"
 #include "pluginrack/SceneValidator.h"
 
 namespace {
@@ -95,12 +96,12 @@ TEST_CASE("scene with no outputs is rejected") {
 
 TEST_CASE("unsupported schema version is rejected by validation") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 9;
+    scene.schemaVersion = 12;
     const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
     REQUIRE(errors.size() == 1);
     REQUIRE(errors[0].code == pluginrack::SceneErrorCode::UnsupportedSchemaVersion);
     // The message must name the range the validator actually accepts.
-    REQUIRE(errors[0].message.find("expected 1 to 8") != std::string::npos);
+    REQUIRE(errors[0].message.find("expected 1 to 11") != std::string::npos);
 }
 
 TEST_CASE("scene rejects an out-of-range right send level") {
@@ -631,41 +632,52 @@ TEST_CASE("multiband bands need exactly one fewer crossover") {
     REQUIRE(errors.front().code == pluginrack::SceneErrorCode::ValueOutOfRange);
 }
 
-TEST_CASE("duplicate aux bus id is rejected") {
+TEST_CASE("duplicate bus id is rejected") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 8;
-    pluginrack::AuxBus bus;
+    pluginrack::Bus bus;
     bus.id = 4;
     bus.name = "one";
-    bus.sourceChannelIds = {1};
-    scene.auxBuses.push_back(bus);
+    scene.buses.push_back(bus);
     bus.name = "two";
-    scene.auxBuses.push_back(bus);
+    scene.buses.push_back(bus);
     const auto errors = pluginrack::validate(scene);
     REQUIRE_FALSE(errors.empty());
     bool found = false;
     for (const auto& error : errors) {
-        if (error.code == pluginrack::SceneErrorCode::DuplicateAuxBusId) found = true;
+        if (error.code == pluginrack::SceneErrorCode::DuplicateBusId) found = true;
     }
     REQUIRE(found);
 }
 
-TEST_CASE("aux bus source must name a real channel") {
+TEST_CASE("bus send must name a real channel and bus") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 8;
-    pluginrack::AuxBus bus;
+    pluginrack::Bus bus;
     bus.id = 4;
-    bus.name = "one";
-    bus.sourceChannelIds = {99};
-    scene.auxBuses.push_back(bus);
+    scene.buses.push_back(bus);
+    pluginrack::BusSend send;
+    send.channelId = 99;
+    send.busId = 4;
+    scene.busSends.push_back(send);
     const auto errors = pluginrack::validate(scene);
     REQUIRE_FALSE(errors.empty());
-    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownSideChainSourceId);
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownChannelInSend);
+}
+
+TEST_CASE("bus count over the cap is rejected") {
+    pluginrack::Scene scene = makeValidScene();
+    for (std::size_t i = 0; i <= pluginrack::kMaxBuses; ++i) {
+        pluginrack::Bus bus;
+        bus.id = static_cast<std::uint32_t>(100 + i);
+        scene.buses.push_back(bus);
+    }
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::ValueOutOfRange);
 }
 
 TEST_CASE("insert side-chain to a missing strip is rejected") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 8;
+    scene.schemaVersion = 11;
     pluginrack::InsertSlot slot;
     slot.id = 5;
     slot.sideChainSource = pluginrack::SideChainSource::Channel;
@@ -678,7 +690,7 @@ TEST_CASE("insert side-chain to a missing strip is rejected") {
 
 TEST_CASE("insert cannot side-chain from its own channel") {
     pluginrack::Scene scene = makeValidScene();
-    scene.schemaVersion = 8;
+    scene.schemaVersion = 11;
     pluginrack::InsertSlot slot;
     slot.id = 5;
     slot.sideChainSource = pluginrack::SideChainSource::Channel;

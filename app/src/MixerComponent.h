@@ -22,7 +22,7 @@ class MixerComponent final : public juce::Component {
 public:
     // Which strip columns this board shows. The Mixer shows both; the I/O page
     // hosts one board per side so each side gets its own tab.
-    enum class Sections { Both, InputsOnly, OutputsOnly };
+    enum class Sections { Both, InputsOnly, OutputsOnly, BusesOnly };
 
     explicit MixerComponent(AudioEngine& engine);
 
@@ -54,7 +54,7 @@ private:
         // Output EQ is keyed by scene-order position (Task 3 asymmetry), so the
         // strip captures its index at construction; rebuild() recreates strips
         // whenever the structure changes, keeping it fresh.
-        OutputStrip(AudioEngine::Output& output, AudioEngine& engine);
+        OutputStrip(AudioEngine::Output& output, AudioEngine& engine, bool isBus = false);
         ~OutputStrip() override;
         void resized() override;
         void paint(juce::Graphics& g) override;
@@ -117,6 +117,7 @@ private:
 
         AudioEngine::Output& output;
             AudioEngine& audioEngine;
+        const bool bus;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::ComboBox modeCombo;
@@ -126,6 +127,8 @@ private:
         int chainRowCount = 0;
         juce::Label vstHeader{"", "VST RACK"};
         ValueEditSlider gainSlider;
+        ValueEditSlider trimSlider;
+        juce::Label trimLabel{"", "TRIM"};
         LevelMeter meter;
         juce::TextButton muteButton{"Mute"};
         EQWindow* eqWindow = nullptr;
@@ -138,8 +141,10 @@ private:
 
     void rebuildChannelStrips();
     void rebuildOutputStrips();
+    void rebuildBusStrips();
     void layoutChannelStrips(juce::Rectangle<int> viewportBounds);
     void layoutOutputStrips(juce::Rectangle<int> panelBounds);
+    void layoutBusStrips(juce::Rectangle<int> panelBounds);
     void updateChannelDrag(juce::Point<int> screenPosition);
     void finishChannelDrag(std::uint32_t channelId, int sourceIndex);
     void updateOutputDrag(juce::Point<int> screenPosition);
@@ -163,6 +168,7 @@ private:
     AudioEngine& audioEngine;
     Sections sections_ = Sections::Both;
     juce::TextButton addChannelButton{"+ Ch"};
+    juce::TextButton addBusButton{"+ Bus"};
     juce::TextButton addOutputButton{"+ Out"};
     juce::Label inputHeader{"", "INPUTS"};
     juce::Viewport channelViewport;
@@ -176,6 +182,12 @@ private:
     StripLane masterContent;
     int outputInsertIndex = -1;
     juce::OwnedArray<OutputStrip> outputStrips;
+
+    juce::Component busPanel;
+    juce::Label busHeader{"", "BUSES"};
+    juce::Viewport busViewport;
+    StripLane busContent;
+    juce::OwnedArray<OutputStrip> busStrips;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixerComponent)
 };

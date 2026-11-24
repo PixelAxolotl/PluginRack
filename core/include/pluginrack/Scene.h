@@ -19,12 +19,12 @@ namespace pluginrack {
 // Bumped only when an older file must be read differently. The writer stamps
 // this value, the reader compares against it, and the validator rejects
 // anything newer, so the number lives in one place.
-inline constexpr int kSchemaVersion = 8;
+inline constexpr int kSchemaVersion = 11;
 
 // Where an insert's side-chain input is fed from. None keeps the pre-v8
 // behaviour (the plugin's side-chain bus is disabled). Channel and Output
-// reference a live strip by id, Bus references one of the scene's AuxBus
-// entries, which mix a set of channels with their own gain.
+// reference a live strip by id, Bus references one of the scene's buses,
+// which sum their BusSends.
 enum class SideChainSource { None, Channel, Output, Bus };
 
 // Which point of the source strip is tapped. PreInsert is the raw input before
@@ -58,10 +58,8 @@ struct InsertSlot {
     bool operator==(const InsertSlot&) const = default;
 };
 
-// A dedicated side-chain mix bus. Channels listed in sourceChannelIds are
-// summed into this bus, scaled by gainDb, and any insert can select it as its
-// side-chain source. Aux buses are scene state; their audio buffers are
-// runtime-only and live in the engine.
+// A dedicated side-chain mix bus. Superseded by Bus in schema 9; kept only so
+// the codec can read v8 files and migrate them.
 struct AuxBus {
     std::uint32_t id = 0;
     std::string name;
@@ -78,6 +76,20 @@ struct ChainItem {
     std::uint32_t id = 0;
 
     bool operator==(const ChainItem&) const = default;
+};
+
+// A point in a channel's audio path that a send taps. Input is the trimmed
+// signal before the chain, Output is the post-fader signal, and Item is the
+// output of one chain item (identified by ChainItem::id so reordering the
+// chain keeps the tap on the same processor). Output is the default, which
+// reproduces the pre-schema-10 behaviour.
+struct Tap {
+    enum class Kind { Input, Item, Output };
+
+    Kind kind = Kind::Output;
+    std::uint32_t itemId = 0;
+
+    bool operator==(const Tap&) const = default;
 };
 
 // Everything a channel and an output share: identity, level, inserts, the
@@ -146,6 +158,27 @@ struct Output : Strip {
     bool operator==(const Output&) const = default;
 };
 
+// A group / parallel bus (schema 9). It is a full strip, so inserts, the
+// effect chain, EQ, fader and mute all work exactly as they do on a channel or
+// output; only its place in the routing is new.
+struct Bus : Strip {
+    // Input trim applied to the summed sends before the strip chain, like a
+    // channel's trim on its incoming signal.
+    float trimDb = 0.0f;
+
+    bool operator==(const Bus&) const = default;
+};
+
+struct BusSend {
+    std::uint32_t channelId = 0;
+    std::uint32_t busId = 0;
+    float sendGainDb = 0.0f;
+    std::optional<float> sendGainDbR;
+    Tap tap;
+
+    bool operator==(const BusSend&) const = default;
+};
+
 struct Route {
     std::uint32_t channelId = 0;
     std::uint32_t outputId = 0;
@@ -155,8 +188,18 @@ struct Route {
     // pair. Only written to JSON when the two sides actually differ. The live
     // engine and the offline MixerEngine both apply the sides independently.
     std::optional<float> sendGainDbR;
+    Tap tap;
 
     bool operator==(const Route&) const = default;
+};
+
+struct BusRoute {
+    std::uint32_t busId = 0;
+    std::uint32_t outputId = 0;
+    float sendGainDb = 0.0f;
+    std::optional<float> sendGainDbR;
+
+    bool operator==(const BusRoute&) const = default;
 };
 
 // One stream the Settings page watches for auto-reload. Identified by the
@@ -227,10 +270,10 @@ struct Scene {
     int bufferFrames = 256;
     std::vector<Channel> channels;
     std::vector<Output> outputs;
+    std::vector<Bus> buses;
     std::vector<Route> routes;
-    // Dedicated side-chain mix buses (schema 8). Absent in older scenes, which
-    // therefore load with no aux buses.
-    std::vector<AuxBus> auxBuses;
+    std::vector<BusSend> busSends;
+    std::vector<BusRoute> busRoutes;
     // Absent in scenes written before schema 4; loading one then leaves the
     // live tuning alone instead of resetting it to the defaults.
     std::optional<AudioSettings> audio;

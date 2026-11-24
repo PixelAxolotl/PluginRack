@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "pluginrack/SampleScrub.h"
 #include "pluginrack/SceneValidator.h"
@@ -87,6 +88,8 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     channelIndex.reserve(scene.channels.size() * 2 + 1);
     std::unordered_map<std::uint32_t, std::size_t> outputIndex;
     outputIndex.reserve(scene.outputs.size() * 2 + 1);
+    std::unordered_map<std::uint32_t, std::size_t> busIndex;
+    busIndex.reserve(scene.buses.size() * 2 + 1);
 
     channels_.clear();
     channels_.reserve(scene.channels.size());
@@ -127,6 +130,38 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         routes_.push_back(cache);
     }
 
+    buses_.clear();
+    buses_.reserve(scene.buses.size());
+    for (std::size_t i = 0; i < scene.buses.size(); ++i) {
+        const Bus& bus = scene.buses[i];
+        busIndex.emplace(bus.id, i);
+        BusCache cache;
+        cache.gain = dbToLinear(bus.gainDb);
+        cache.trim = dbToLinear(bus.trimDb);
+        cache.muted = bus.muted;
+        buses_.push_back(cache);
+    }
+    busSends_.clear();
+    busSends_.reserve(scene.busSends.size());
+    for (const BusSend& send : scene.busSends) {
+        BusSendCache cache;
+        cache.channelIndex = channelIndex[send.channelId];
+        cache.busIndex = busIndex[send.busId];
+        cache.sendGainL = dbToLinear(send.sendGainDb);
+        cache.sendGainR = dbToLinear(send.sendGainDbR.value_or(send.sendGainDb));
+        busSends_.push_back(cache);
+    }
+    busRoutes_.clear();
+    busRoutes_.reserve(scene.busRoutes.size());
+    for (const BusRoute& route : scene.busRoutes) {
+        BusRouteCache cache;
+        cache.busIndex = busIndex[route.busId];
+        cache.outputIndex = outputIndex[route.outputId];
+        cache.sendGainL = dbToLinear(route.sendGainDb);
+        cache.sendGainR = dbToLinear(route.sendGainDbR.value_or(route.sendGainDb));
+        busRoutes_.push_back(cache);
+    }
+
     const int maxFrames = maxBlockFrames < 0 ? 0 : maxBlockFrames;
     maxBlockFrames_ = maxFrames;
     outputCount_ = scene.outputs.size();
@@ -136,6 +171,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     const std::size_t stereoFrames = static_cast<std::size_t>(maxFrames) * 2;
     scratch_.assign(channels_.size() * stereoFrames, 0.0f);
     accumulators_.assign(outputCount_ * stereoFrames, 0.0f);
+    busBuffers_.assign(buses_.size() * stereoFrames, 0.0f);
 
     insertChains_.clear();
     if (pluginFactory_ != nullptr) {
@@ -155,6 +191,15 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 scrubEnabled_));
         }
     }
+    busInsertChains_.clear();
+    if (pluginFactory_ != nullptr) {
+        busInsertChains_.reserve(scene.buses.size());
+        for (const Bus& bus : scene.buses) {
+            busInsertChains_.push_back(std::make_unique<InsertChain>(
+                bus.inserts, *pluginFactory_, scene.sampleRate, maxFrames,
+                scrubEnabled_));
+        }
+    }
 
     dsp_ = std::make_unique<DspState>();
     dsp_->channels.reserve(scene.channels.size());
@@ -164,6 +209,10 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     dsp_->outputs.reserve(scene.outputs.size());
     for (const Output& output : scene.outputs) {
         dsp_->outputs.push_back(buildStrip(output, scene.sampleRate, maxFrames));
+    }
+    dsp_->buses.reserve(scene.buses.size());
+    for (const Bus& bus : scene.buses) {
+        dsp_->buses.push_back(buildStrip(bus, scene.sampleRate, maxFrames));
     }
 
     stoppedChannels_.assign(channels_.size(), 0);
@@ -179,8 +228,140 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     for (const Output& output : scene.outputs) {
         outputIds_.push_back(output.id);
     }
+    busIds_.clear();
+    busIds_.reserve(scene.buses.size());
+    for (const Bus& bus : scene.buses) {
+        busIds_.push_back(bus.id);
+    }
     meters_.setTargets(channelIds_.data(), channelIds_.size(),
-                       outputIds_.data(), outputIds_.size());
+                       outputIds_.data(), outputIds_.size(),
+                       busIds_.data(), busIds_.size());
+
+    // Taps: capture the signal at the point each route/send asked for and
+    // delay every path to the output by the widest chain latency, so a dry
+    // route and a bus route that started from the same point line up again.
+    const int ringCapacity = kMaxTapDelaySamples + maxFrames + 2;
+    tapScratch_.assign(static_cast<std::size_t>(maxFrames) * 2, 0.0f);
+    auto clampDelay = [](int delay) {
+        return delay < 0 ? 0 : (delay > kMaxTapDelaySamples ? kMaxTapDelaySamples : delay);
+    };
+    auto computeStripLatency = [](const Strip& strip, const InsertChain* chain,
+                                  std::unordered_map<std::uint32_t, int>& itemLatency) {
+        int total = 0;
+        std::unordered_set<std::uint32_t> used;
+        for (const ChainItem& item : strip.chain) {
+            used.insert(item.id);
+            int added = 0;
+            if (item.type == ChainItemType::Insert) {
+                added = chain != nullptr ? chain->latencySamples(item.id) : 0;
+            } else if (item.type == ChainItemType::SpectralDenoiser) {
+                for (const SpectralDenoiserEffect& effect : strip.spectralDenoiserEffects) {
+                    if (effect.id == item.id) {
+                        added = kSpectralDenoiserLatencySamples;
+                        break;
+                    }
+                }
+            }
+            total += added;
+            itemLatency[item.id] = total;
+        }
+        for (const SpectralDenoiserEffect& effect : strip.spectralDenoiserEffects) {
+            if (used.count(effect.id) == 0) {
+                total += kSpectralDenoiserLatencySamples;
+            }
+        }
+        return total;
+    };
+    auto addTap = [](std::vector<TapState>& taps, const Tap& tap) {
+        for (const TapState& existing : taps) {
+            if (existing.tap.kind == tap.kind &&
+                (tap.kind != Tap::Kind::Item || existing.tap.itemId == tap.itemId)) {
+                return;
+            }
+        }
+        TapState state;
+        state.tap = tap;
+        taps.push_back(std::move(state));
+    };
+    auto findTap = [](const std::vector<TapState>& taps, const Tap& tap) -> std::size_t {
+        for (std::size_t i = 0; i < taps.size(); ++i) {
+            if (taps[i].tap.kind == tap.kind &&
+                (tap.kind != Tap::Kind::Item || taps[i].tap.itemId == tap.itemId)) {
+                return i;
+            }
+        }
+        return 0;
+    };
+
+    channelTaps_.assign(scene.channels.size(), {});
+    for (const Route& route : scene.routes) {
+        addTap(channelTaps_[channelIndex[route.channelId]], route.tap);
+    }
+    for (const BusSend& send : scene.busSends) {
+        addTap(channelTaps_[channelIndex[send.channelId]], send.tap);
+    }
+    std::vector<int> channelLatencies(scene.channels.size(), 0);
+    for (std::size_t c = 0; c < scene.channels.size(); ++c) {
+        std::unordered_map<std::uint32_t, int> itemLatency;
+        channelLatencies[c] = computeStripLatency(
+            scene.channels[c],
+            c < insertChains_.size() ? insertChains_[c].get() : nullptr,
+            itemLatency);
+        for (TapState& state : channelTaps_[c]) {
+            if (state.tap.kind == Tap::Kind::Input) {
+                state.latencySamples = 0;
+            } else if (state.tap.kind == Tap::Kind::Output) {
+                state.latencySamples = channelLatencies[c];
+            } else {
+                const auto it = itemLatency.find(state.tap.itemId);
+                state.latencySamples =
+                    it != itemLatency.end() ? it->second : channelLatencies[c];
+            }
+            state.ring.prepare(ringCapacity);
+        }
+    }
+
+    busLatencies_.assign(scene.buses.size(), 0);
+    for (std::size_t b = 0; b < scene.buses.size(); ++b) {
+        std::unordered_map<std::uint32_t, int> itemLatency;
+        busLatencies_[b] = computeStripLatency(
+            scene.buses[b],
+            b < busInsertChains_.size() ? busInsertChains_[b].get() : nullptr,
+            itemLatency);
+    }
+    int maxBusLatency = 0;
+    for (const BusRoute& route : scene.busRoutes) {
+        const int latency = busLatencies_[busIndex[route.busId]];
+        if (latency > maxBusLatency) {
+            maxBusLatency = latency;
+        }
+    }
+    busCompensation_.clear();
+    busCompensation_.resize(scene.buses.size());
+    for (DelayRing& ring : busCompensation_) {
+        ring.prepare(ringCapacity);
+    }
+
+    for (std::size_t i = 0; i < routes_.size() && i < scene.routes.size(); ++i) {
+        RouteCache& cache = routes_[i];
+        const std::vector<TapState>& taps = channelTaps_[cache.channelIndex];
+        cache.tapIndex = findTap(taps, scene.routes[i].tap);
+        const int tapLatency = taps[cache.tapIndex].latencySamples;
+        cache.delaySamples = clampDelay(
+            channelLatencies[cache.channelIndex] - tapLatency + maxBusLatency);
+    }
+    for (std::size_t i = 0; i < busSends_.size() && i < scene.busSends.size(); ++i) {
+        BusSendCache& cache = busSends_[i];
+        const std::vector<TapState>& taps = channelTaps_[cache.channelIndex];
+        cache.tapIndex = findTap(taps, scene.busSends[i].tap);
+        const int tapLatency = taps[cache.tapIndex].latencySamples;
+        cache.delaySamples = clampDelay(
+            channelLatencies[cache.channelIndex] - tapLatency);
+    }
+    for (std::size_t i = 0; i < busRoutes_.size() && i < scene.busRoutes.size(); ++i) {
+        BusRouteCache& cache = busRoutes_[i];
+        cache.delaySamples = clampDelay(maxBusLatency - busLatencies_[cache.busIndex]);
+    }
     return true;
 }
 
@@ -268,37 +449,37 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
         case ChainItemType::Dynamics:
             if (const auto index = findByEffectId(source.effects, item.id)) {
                 usedDynamics[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::Multiband:
             if (const auto index = findByEffectId(source.multibandEffects, item.id)) {
                 usedMultiband[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::DeEsser:
             if (const auto index = findByEffectId(source.deEsserEffects, item.id)) {
                 usedDeEssers[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::Limiter:
             if (const auto index = findByEffectId(source.limiterEffects, item.id)) {
                 usedLimiters[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::FeedbackSuppressor:
             if (const auto index = findByEffectId(source.feedbackSuppressorEffects, item.id)) {
                 usedFeedbackSuppressors[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::SpectralDenoiser:
             if (const auto index = findByEffectId(source.spectralDenoiserEffects, item.id)) {
                 usedSpectralDenoisers[*index] = 1;
-                strip.steps.push_back({item.type, *index});
+                strip.steps.push_back({item.type, *index, item.id});
             }
             break;
         case ChainItemType::Eq:
@@ -307,27 +488,28 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
         }
     }
     for (std::size_t i = 0; i < usedDynamics.size(); ++i) {
-        if (usedDynamics[i] == 0) strip.steps.push_back({ChainItemType::Dynamics, i});
+        if (usedDynamics[i] == 0) strip.steps.push_back({ChainItemType::Dynamics, i, source.effects[i].id});
     }
     for (std::size_t i = 0; i < usedMultiband.size(); ++i) {
-        if (usedMultiband[i] == 0) strip.steps.push_back({ChainItemType::Multiband, i});
+        if (usedMultiband[i] == 0) strip.steps.push_back({ChainItemType::Multiband, i, source.multibandEffects[i].id});
     }
     for (std::size_t i = 0; i < usedDeEssers.size(); ++i) {
-        if (usedDeEssers[i] == 0) strip.steps.push_back({ChainItemType::DeEsser, i});
+        if (usedDeEssers[i] == 0) strip.steps.push_back({ChainItemType::DeEsser, i, source.deEsserEffects[i].id});
     }
     for (std::size_t i = 0; i < usedLimiters.size(); ++i) {
-        if (usedLimiters[i] == 0) strip.steps.push_back({ChainItemType::Limiter, i});
+        if (usedLimiters[i] == 0) strip.steps.push_back({ChainItemType::Limiter, i, source.limiterEffects[i].id});
     }
     for (std::size_t i = 0; i < usedFeedbackSuppressors.size(); ++i) {
-        if (usedFeedbackSuppressors[i] == 0) strip.steps.push_back({ChainItemType::FeedbackSuppressor, i});
+        if (usedFeedbackSuppressors[i] == 0) strip.steps.push_back({ChainItemType::FeedbackSuppressor, i, source.feedbackSuppressorEffects[i].id});
     }
     for (std::size_t i = 0; i < usedSpectralDenoisers.size(); ++i) {
-        if (usedSpectralDenoisers[i] == 0) strip.steps.push_back({ChainItemType::SpectralDenoiser, i});
+        if (usedSpectralDenoisers[i] == 0) strip.steps.push_back({ChainItemType::SpectralDenoiser, i, source.spectralDenoiserEffects[i].id});
     }
     return strip;
 }
 
-void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int frames) {
+void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int frames,
+                               void (*afterStep)(void*, std::uint32_t), void* ctx) {
     if (strip.eqEnabled) {
         flushNonFinite(left, right, frames);
         strip.eq.process(left, right, frames);
@@ -356,11 +538,22 @@ void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int f
         case ChainItemType::Insert:
             break;
         }
+        if (afterStep != nullptr) {
+            afterStep(ctx, step.id);
+        }
     }
 }
 
-void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {
-    if (dsp_ == nullptr) {
+void MixerEngine::pushItemTap(void* ctx, std::uint32_t itemId) {
+    auto* push = static_cast<TapPush*>(ctx);
+    for (TapState& state : *push->taps) {
+        if (state.tap.kind == Tap::Kind::Item && state.tap.itemId == itemId) {
+            state.ring.push(push->left, push->right, push->frames);
+        }
+    }
+}
+
+void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {    if (dsp_ == nullptr) {
         return;
     }
     std::scoped_lock lock(dsp_->mutex);
@@ -445,6 +638,16 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
     }
     meters_.advance(blockFrames, sampleRate_);
 
+    auto pushTapKind = [&](std::vector<TapState>& taps, Tap::Kind kind,
+                           std::uint32_t itemId, float* left, float* right, int frames) {
+        for (TapState& state : taps) {
+            if (state.tap.kind == kind &&
+                (kind != Tap::Kind::Item || state.tap.itemId == itemId)) {
+                state.ring.push(left, right, frames);
+            }
+        }
+    };
+
     for (std::size_t c = 0; c < numChannels; ++c) {
         const AudioBlock& input = channelInputs[c];
         const ChannelCache& cache = channels_[c];
@@ -479,12 +682,20 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchRight[i] = 0.0f;
             }
         }
+        if (c < channelTaps_.size()) {
+            pushTapKind(channelTaps_[c], Tap::Kind::Input, 0,
+                        scratchLeft, scratchRight, frames);
+        }
         // The strip's EQ and built-in chain are pre-fader and run before
         // inserts and gain/pan. The lock only spans the run so bypass and
         // band swaps never race a live filter.
         if (dsp_ != nullptr && c < dsp_->channels.size()) {
+            TapPush push{c < channelTaps_.size() ? &channelTaps_[c] : nullptr,
+                         scratchLeft, scratchRight, frames};
             std::scoped_lock lock(dsp_->mutex);
-            processStrip(dsp_->channels[c], scratchLeft, scratchRight, frames);
+            processStrip(dsp_->channels[c], scratchLeft, scratchRight, frames,
+                         c < channelTaps_.size() ? &MixerEngine::pushItemTap : nullptr,
+                         &push);
         }
         // The built-in chain is an insert too: quarantine anything it emitted
         // before the VST chain and the fader see it.
@@ -495,7 +706,11 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         if (c < insertChains_.size() && insertChains_[c] != nullptr) {
             float* scratchPtrs[2] = {scratchLeft, scratchRight};
             AudioBlock scratchBlock{scratchPtrs, 2, frames};
-            insertChains_[c]->process(scratchBlock);
+            TapPush push{c < channelTaps_.size() ? &channelTaps_[c] : nullptr,
+                         scratchLeft, scratchRight, frames};
+            insertChains_[c]->process(
+                scratchBlock,
+                c < channelTaps_.size() ? &MixerEngine::pushItemTap : nullptr, &push);
             // The chain scrubs after each VST; scrub the strip boundary as
             // well so a plugin that wrote past its block cannot leak.
             if (scrubEnabled_) {
@@ -515,6 +730,10 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchLeft[i] *= leftScale;
                 scratchRight[i] *= rightScale;
             }
+        }
+        if (c < channelTaps_.size()) {
+            pushTapKind(channelTaps_[c], Tap::Kind::Output, 0,
+                        scratchLeft, scratchRight, frames);
         }
         float channelPeak = 0.0f;
         for (int i = 0; i < frames; ++i) {
@@ -547,12 +766,164 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         const float* scratchLeft =
             scratch_.data() + (route.channelIndex * 2) * static_cast<std::size_t>(maxFrames);
         const float* scratchRight = scratchLeft + maxFrames;
+        const bool tapped = route.channelIndex < channelTaps_.size() &&
+                            (route.delaySamples > 0 ||
+                             channelTaps_[route.channelIndex][route.tapIndex].tap.kind !=
+                                 Tap::Kind::Output);
+        if (tapped) {
+            float* tapLeft = tapScratch_.data();
+            float* tapRight = tapLeft + maxFrames;
+            channelTaps_[route.channelIndex][route.tapIndex].ring.read(
+                route.delaySamples, tapLeft, tapRight, frames);
+            scratchLeft = tapLeft;
+            scratchRight = tapRight;
+        }
         float* accLeft =
             accumulators_.data() + (route.outputIndex * 2) * static_cast<std::size_t>(maxFrames);
         float* accRight = accLeft + maxFrames;
         for (int i = 0; i < frames; ++i) {
             accLeft[i] += scratchLeft[i] * route.sendGainL;
             accRight[i] += scratchRight[i] * route.sendGainR;
+        }
+    }
+
+    // Buses: sum their channel sends from the post-fader scratch buffers, run
+    // the bus strip, inserts and fader, then add the result to the outputs.
+    // Side-chain taps are a live-engine feature; this path is audio only.
+    const std::size_t numBuses = buses_.size();
+    for (std::size_t b = 0; b < numBuses; ++b) {
+        float* busLeft =
+            busBuffers_.data() + (b * 2) * static_cast<std::size_t>(maxFrames);
+        float* busRight = busLeft + maxFrames;
+        for (int i = 0; i < blockFrames; ++i) {
+            busLeft[i] = 0.0f;
+            busRight[i] = 0.0f;
+        }
+    }
+    for (const BusSendCache& send : busSends_) {
+        if (send.channelIndex >= numChannels || send.busIndex >= numBuses) {
+            continue;
+        }
+        if (send.sendGainL == 0.0f && send.sendGainR == 0.0f) {
+            continue;
+        }
+        const int channelFrames =
+            clampFrames(channelInputs[send.channelIndex].numFrames, maxFrames);
+        const int frames = channelFrames < blockFrames ? channelFrames : blockFrames;
+        const float* scratchLeft =
+            scratch_.data() + (send.channelIndex * 2) * static_cast<std::size_t>(maxFrames);
+        const float* scratchRight = scratchLeft + maxFrames;
+        const bool tapped = send.channelIndex < channelTaps_.size() &&
+                            (send.delaySamples > 0 ||
+                             channelTaps_[send.channelIndex][send.tapIndex].tap.kind !=
+                                 Tap::Kind::Output);
+        if (tapped) {
+            float* tapLeft = tapScratch_.data();
+            float* tapRight = tapLeft + maxFrames;
+            channelTaps_[send.channelIndex][send.tapIndex].ring.read(
+                send.delaySamples, tapLeft, tapRight, frames);
+            scratchLeft = tapLeft;
+            scratchRight = tapRight;
+        }
+        float* busLeft =
+            busBuffers_.data() + (send.busIndex * 2) * static_cast<std::size_t>(maxFrames);
+        float* busRight = busLeft + maxFrames;
+        for (int i = 0; i < frames; ++i) {
+            busLeft[i] += scratchLeft[i] * send.sendGainL;
+            busRight[i] += scratchRight[i] * send.sendGainR;
+        }
+    }
+    if (dsp_ != nullptr) {
+        std::scoped_lock lock(dsp_->mutex);
+        for (std::size_t b = 0; b < numBuses; ++b) {
+            if (b >= dsp_->buses.size()) {
+                continue;
+            }
+            float* busLeft =
+                busBuffers_.data() + (b * 2) * static_cast<std::size_t>(maxFrames);
+            float* busRight = busLeft + maxFrames;
+            const float trim = b < buses_.size() ? buses_[b].trim : 1.0f;
+            if (trim != 1.0f) {
+                for (int i = 0; i < blockFrames; ++i) {
+                    busLeft[i] *= trim;
+                    busRight[i] *= trim;
+                }
+            }
+            processStrip(dsp_->buses[b], busLeft, busRight, blockFrames);
+            if (scrubEnabled_) {
+                scrubbedSamples_ += static_cast<std::uint64_t>(
+                    scrubNonFinite(busLeft, busRight, blockFrames));
+            }
+        }
+    }
+    for (std::size_t b = 0; b < numBuses; ++b) {
+        if (b >= busInsertChains_.size() || busInsertChains_[b] == nullptr) {
+            continue;
+        }
+        float* busLeft =
+            busBuffers_.data() + (b * 2) * static_cast<std::size_t>(maxFrames);
+        float* busRight = busLeft + maxFrames;
+        float* chainPtrs[2] = {busLeft, busRight};
+        AudioBlock busBlock{chainPtrs, 2, blockFrames};
+        busInsertChains_[b]->process(busBlock);
+        if (scrubEnabled_) {
+            scrubbedSamples_ += static_cast<std::uint64_t>(
+                scrubNonFinite(busLeft, busRight, blockFrames));
+        }
+    }
+    for (std::size_t b = 0; b < numBuses; ++b) {
+        const BusCache& cache = buses_[b];
+        float* busLeft =
+            busBuffers_.data() + (b * 2) * static_cast<std::size_t>(maxFrames);
+        float* busRight = busLeft + maxFrames;
+        const float gain = cache.muted ? 0.0f : cache.gain;
+        float busPeak = 0.0f;
+        for (int i = 0; i < blockFrames; ++i) {
+            busLeft[i] *= gain;
+            busRight[i] *= gain;
+            const float left = std::fabs(busLeft[i]);
+            const float right = std::fabs(busRight[i]);
+            if (left > busPeak) {
+                busPeak = left;
+            }
+            if (right > busPeak) {
+                busPeak = right;
+            }
+        }
+        if (b < busIds_.size()) {
+            meters_.observeBusRealtime(busIds_[b], busPeak);
+        }
+        if (b < busCompensation_.size()) {
+            busCompensation_[b].push(busLeft, busRight, blockFrames);
+        }
+    }
+    for (const BusRouteCache& route : busRoutes_) {
+        if (route.busIndex >= numBuses || route.outputIndex >= numOutputs) {
+            continue;
+        }
+        if (route.sendGainL == 0.0f && route.sendGainR == 0.0f) {
+            continue;
+        }
+        const int outputFrames =
+            clampFrames(outputBlocks[route.outputIndex].numFrames, maxFrames);
+        const int frames = outputFrames < blockFrames ? outputFrames : blockFrames;
+        const float* busLeft =
+            busBuffers_.data() + (route.busIndex * 2) * static_cast<std::size_t>(maxFrames);
+        const float* busRight = busLeft + maxFrames;
+        if (route.delaySamples > 0 && route.busIndex < busCompensation_.size()) {
+            float* tapLeft = tapScratch_.data();
+            float* tapRight = tapLeft + maxFrames;
+            busCompensation_[route.busIndex].read(
+                route.delaySamples, tapLeft, tapRight, frames);
+            busLeft = tapLeft;
+            busRight = tapRight;
+        }
+        float* accLeft = accumulators_.data() +
+                         (route.outputIndex * 2) * static_cast<std::size_t>(maxFrames);
+        float* accRight = accLeft + maxFrames;
+        for (int i = 0; i < frames; ++i) {
+            accLeft[i] += busLeft[i] * route.sendGainL;
+            accRight[i] += busRight[i] * route.sendGainR;
         }
     }
 
@@ -672,6 +1043,12 @@ std::vector<std::uint32_t> MixerEngine::failedPluginSlots() const {
             failed.insert(failed.end(), chainFailures.begin(), chainFailures.end());
         }
     }
+    for (const std::unique_ptr<InsertChain>& chain : busInsertChains_) {
+        if (chain != nullptr) {
+            const std::vector<std::uint32_t> chainFailures = chain->failedSlots();
+            failed.insert(failed.end(), chainFailures.begin(), chainFailures.end());
+        }
+    }
     return failed;
 }
 
@@ -681,6 +1058,9 @@ std::uint64_t MixerEngine::scrubbedSamples() const {
         if (chain != nullptr) total += chain->scrubbedSamples();
     }
     for (const std::unique_ptr<InsertChain>& chain : outputInsertChains_) {
+        if (chain != nullptr) total += chain->scrubbedSamples();
+    }
+    for (const std::unique_ptr<InsertChain>& chain : busInsertChains_) {
         if (chain != nullptr) total += chain->scrubbedSamples();
     }
     return total;

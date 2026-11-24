@@ -28,12 +28,14 @@ void raise(std::atomic<float>& slot, float clamped) noexcept {
 MeterBank::MeterBank(MeterBank&& other) noexcept {
     transfer(channelPeaks_, other.channelPeaks_);
     transfer(outputPeaks_, other.outputPeaks_);
+    transfer(busPeaks_, other.busPeaks_);
 }
 
 MeterBank& MeterBank::operator=(MeterBank&& other) noexcept {
     if (this != &other) {
         transfer(channelPeaks_, other.channelPeaks_);
         transfer(outputPeaks_, other.outputPeaks_);
+        transfer(busPeaks_, other.busPeaks_);
     }
     return *this;
 }
@@ -46,12 +48,20 @@ void MeterBank::observeOutput(std::uint32_t id, float peak) noexcept {
     observe(outputPeaks_, id, peak);
 }
 
+void MeterBank::observeBus(std::uint32_t id, float peak) noexcept {
+    observe(busPeaks_, id, peak);
+}
+
 void MeterBank::observeChannelRealtime(std::uint32_t id, float peak) noexcept {
     observeRealtime(channelPeaks_, id, peak);
 }
 
 void MeterBank::observeOutputRealtime(std::uint32_t id, float peak) noexcept {
     observeRealtime(outputPeaks_, id, peak);
+}
+
+void MeterBank::observeBusRealtime(std::uint32_t id, float peak) noexcept {
+    observeRealtime(busPeaks_, id, peak);
 }
 
 void MeterBank::advance(int numFrames, double sampleRate) noexcept {
@@ -62,6 +72,7 @@ void MeterBank::advance(int numFrames, double sampleRate) noexcept {
         static_cast<float>(std::pow(10.0, -static_cast<double>(numFrames) / sampleRate));
     decay(channelPeaks_, multiplier);
     decay(outputPeaks_, multiplier);
+    decay(busPeaks_, multiplier);
 }
 
 float MeterBank::channelPeak(std::uint32_t id) const noexcept {
@@ -72,21 +83,31 @@ float MeterBank::outputPeak(std::uint32_t id) const noexcept {
     return peakOf(outputPeaks_, id);
 }
 
+float MeterBank::busPeak(std::uint32_t id) const noexcept {
+    return peakOf(busPeaks_, id);
+}
+
 void MeterBank::setTargets(const std::uint32_t* channelIds, std::size_t channelCount,
-                           const std::uint32_t* outputIds, std::size_t outputCount) noexcept {
+                           const std::uint32_t* outputIds, std::size_t outputCount,
+                           const std::uint32_t* busIds, std::size_t busCount) noexcept {
     clear(channelPeaks_);
     clear(outputPeaks_);
+    clear(busPeaks_);
     for (std::size_t i = 0; i < channelCount; ++i) {
         observe(channelPeaks_, channelIds[i], 0.0f);
     }
     for (std::size_t i = 0; i < outputCount; ++i) {
         observe(outputPeaks_, outputIds[i], 0.0f);
     }
+    for (std::size_t i = 0; i < busCount; ++i) {
+        observe(busPeaks_, busIds[i], 0.0f);
+    }
 }
 
 void MeterBank::reset() noexcept {
     clear(channelPeaks_);
     clear(outputPeaks_);
+    clear(busPeaks_);
 }
 
 // Registered slots always occupy a prefix of the table: observe() takes the

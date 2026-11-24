@@ -9,9 +9,9 @@
 #include "PageHeader.h"
 #include "Theme.h"
 
-// The I/O page: the same strips the Mixer shows, split so inputs and outputs
-// each get their own tab. Device assignment stays on the strips, so this page
-// and the Mixer can never disagree. Round-trip measurement lives in Settings.
+// The I/O page: the same strips the Mixer shows, split so inputs, outputs and
+// buses each get their own tab. Device assignment stays on the strips, so this
+// page and the Mixer can never disagree. Round-trip measurement lives in Settings.
 class IoView final : public juce::Component, private juce::Timer {
 public:
     explicit IoView(AudioEngine& engine);
@@ -36,18 +36,22 @@ public:
     std::function<void(int channelId, bool isOutput)> onDoubleClicked;
 
 private:
+    enum class Tab { Inputs, Outputs, Buses };
+
     void timerCallback() override;
-    void selectTab(bool showInputTab);
+    void selectTab(Tab tab);
 
     AudioEngine& audioEngine;
 
     PageHeader header{ "Input & Output" };
     juce::TextButton inputsTab{ "Inputs" };
     juce::TextButton outputsTab{ "Outputs" };
+    juce::TextButton busesTab{ "Buses" };
     MixerComponent inputsBoard;
     MixerComponent outputsBoard;
+    MixerComponent busesBoard;
 
-    bool showInputs = true;
+    Tab currentTab = Tab::Inputs;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IoView)
 };

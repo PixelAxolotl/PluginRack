@@ -28,15 +28,20 @@ public:
 
     void observeChannel(std::uint32_t id, float peak) noexcept;
     void observeOutput(std::uint32_t id, float peak) noexcept;
+    void observeBus(std::uint32_t id, float peak) noexcept;
     void observeChannelRealtime(std::uint32_t id, float peak) noexcept;
     void observeOutputRealtime(std::uint32_t id, float peak) noexcept;
+    void observeBusRealtime(std::uint32_t id, float peak) noexcept;
     void advance(int numFrames, double sampleRate) noexcept; // 20 dB/s release
     float channelPeak(std::uint32_t id) const noexcept;      // 0.0f when unknown
     float outputPeak(std::uint32_t id) const noexcept;       // 0.0f when unknown
+    float busPeak(std::uint32_t id) const noexcept;          // 0.0f when unknown
     // Replaces the metered id set, registering each id at zero. Safe to call
     // while the audio thread reads the bank.
     void setTargets(const std::uint32_t* channelIds, std::size_t channelCount,
-                    const std::uint32_t* outputIds, std::size_t outputCount) noexcept;
+                    const std::uint32_t* outputIds, std::size_t outputCount,
+                    const std::uint32_t* busIds = nullptr,
+                    std::size_t busCount = 0) noexcept;
     void reset() noexcept;
 
 private:
@@ -61,6 +66,7 @@ private:
 
     Table channelPeaks_;
     Table outputPeaks_;
+    Table busPeaks_;
 };
 
 } // namespace pluginrack

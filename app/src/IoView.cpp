@@ -7,7 +7,8 @@ constexpr int kTabWidth = 96;
 IoView::IoView(AudioEngine& engine)
     : audioEngine(engine)
     , inputsBoard(engine)
-    , outputsBoard(engine) {
+    , outputsBoard(engine)
+    , busesBoard(engine) {
     addAndMakeVisible(header);
 
     const auto styleTab = [this](juce::TextButton& tab, const juce::String& tooltip) {
@@ -18,12 +19,15 @@ IoView::IoView(AudioEngine& engine)
     };
     styleTab(inputsTab, "Show the input channel strips");
     styleTab(outputsTab, "Show the output strips");
-    inputsTab.onClick = [this] { selectTab(true); };
-    outputsTab.onClick = [this] { selectTab(false); };
+    styleTab(busesTab, "Show the bus strips");
+    inputsTab.onClick = [this] { selectTab(Tab::Inputs); };
+    outputsTab.onClick = [this] { selectTab(Tab::Outputs); };
+    busesTab.onClick = [this] { selectTab(Tab::Buses); };
 
     inputsBoard.setSections(MixerComponent::Sections::InputsOnly);
     outputsBoard.setSections(MixerComponent::Sections::OutputsOnly);
-    for (auto* board : { &inputsBoard, &outputsBoard }) {
+    busesBoard.setSections(MixerComponent::Sections::BusesOnly);
+    for (auto* board : { &inputsBoard, &outputsBoard, &busesBoard }) {
         board->onStructureChanged = [this] {
             if (onStructureChanged) onStructureChanged();
         };
@@ -36,25 +40,29 @@ IoView::IoView(AudioEngine& engine)
     }
     addAndMakeVisible(inputsBoard);
     addAndMakeVisible(outputsBoard);
-    selectTab(true);
+    addAndMakeVisible(busesBoard);
+    selectTab(Tab::Inputs);
 
     startTimer(250);
 }
 
 IoView::~IoView() { stopTimer(); }
 
-void IoView::selectTab(bool showInputTab) {
-    showInputs = showInputTab;
-    inputsTab.setToggleState(showInputs, juce::dontSendNotification);
-    outputsTab.setToggleState(!showInputs, juce::dontSendNotification);
-    inputsBoard.setVisible(showInputs);
-    outputsBoard.setVisible(!showInputs);
+void IoView::selectTab(Tab tab) {
+    currentTab = tab;
+    inputsTab.setToggleState(tab == Tab::Inputs, juce::dontSendNotification);
+    outputsTab.setToggleState(tab == Tab::Outputs, juce::dontSendNotification);
+    busesTab.setToggleState(tab == Tab::Buses, juce::dontSendNotification);
+    inputsBoard.setVisible(tab == Tab::Inputs);
+    outputsBoard.setVisible(tab == Tab::Outputs);
+    busesBoard.setVisible(tab == Tab::Buses);
     resized();
 }
 
 void IoView::rebuild() {
     inputsBoard.rebuild();
     outputsBoard.rebuild();
+    busesBoard.rebuild();
     resized();
     repaint();
 }
@@ -62,6 +70,7 @@ void IoView::rebuild() {
 void IoView::refreshDeviceStrips() {
     inputsBoard.refreshStrips();
     outputsBoard.refreshStrips();
+    busesBoard.refreshStrips();
 }
 
 void IoView::refresh() {
@@ -85,10 +94,13 @@ void IoView::resized() {
     inputsTab.setBounds(tabs.removeFromLeft(kTabWidth));
     tabs.removeFromLeft(theme::ui::kRowGap);
     outputsTab.setBounds(tabs.removeFromLeft(kTabWidth));
+    tabs.removeFromLeft(theme::ui::kRowGap);
+    busesTab.setBounds(tabs.removeFromLeft(kTabWidth));
     area.removeFromTop(theme::ui::kHeaderGap);
 
     inputsBoard.setBounds(area);
     outputsBoard.setBounds(area);
+    busesBoard.setBounds(area);
 }
 
 void IoView::paint(juce::Graphics& g) {

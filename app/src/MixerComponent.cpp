@@ -9,12 +9,17 @@
 #include "MultibandWindow.h"
 
 MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
-                                                 AudioEngine& engine)
-    : output(outputState), audioEngine(engine),
+                                                 AudioEngine& engine, bool isBus)
+    : output(outputState), audioEngine(engine), bus(isBus),
       meter(gainSlider, outputState.peakL, outputState.peakR, outputState.rmsL,
             outputState.rmsR) {
     deviceControl.setTitle(output.name);
-    {
+    if (bus) {
+        // A bus has no device or clock; the same header shows its name and
+        // what the strip is.
+        deviceControl.setDeviceName("sum of sends");
+        deviceControl.setTooltip("Double-click to rename this bus");
+    } else {
         const auto deviceState = audioEngine.getOutputDeviceState(output.id);
         deviceControl.setDeviceName(deviceState.deviceName);
         deviceControl.setBackendType(deviceState.deviceType);
@@ -32,9 +37,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
             if (callback) callback();
         });
     });
-    removeOutputButton.setTooltip("Remove this output");
+    removeOutputButton.setTooltip(bus ? "Remove this bus" : "Remove this output");
     addAndMakeVisible(removeOutputButton);
 
+    if (!bus) {
     deviceControl.setOnClick([this] {
         DeviceMenu::showDeviceMenu(false, deviceControl,
                                    audioEngine.getOutputDeviceState(output.id).deviceName,
@@ -67,9 +73,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
             });
         });
     });
+    }
     deviceControl.setOnRename([this] {
         juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
-        StripDialog::show("Rename output", output.name, output.colourHue,
+        StripDialog::show(bus ? "Rename bus" : "Rename output", output.name, output.colourHue,
                           [safe](const juce::String& newName, float newHue) {
             if (safe == nullptr) return;
             safe->audioEngine.setOutputName(safe->output.id, newName);
@@ -81,6 +88,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     });
     addAndMakeVisible(deviceControl);
 
+    if (!bus) {
     modeCombo.addItem("Mono", 1);
     modeCombo.addItem("Stereo", 2);
     modeCombo.setSelectedId(output.layout == pluginrack::ChannelLayout::Mono ? 1 : 2, juce::dontSendNotification);
@@ -104,6 +112,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
         audioEngine.setOutputFlipped(output.id, next);
     });
     addAndMakeVisible(flipButton);
+    }
 
     vstHeader.setJustificationType(juce::Justification::centredLeft);
     vstHeader.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
@@ -127,7 +136,34 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     gainSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     gainSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
     addAndMakeVisible(gainSlider);
-    gainSlider.setName("Output");
+    gainSlider.setName(bus ? "Bus" : "Output");
+
+    // Buses trim their summed input before the chain, like a channel trim.
+    trimSlider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    trimSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 18);
+    trimSlider.setRange(-12.0, 12.0, 0.1);
+    trimSlider.setTextValueSuffix(" dB");
+    trimSlider.setDoubleClickReturnValue(true, 0.0);
+    trimSlider.setValue(output.trimDb.get(), juce::dontSendNotification);
+    trimSlider.onValueChange = [this] {
+        audioEngine.setBusTrim(output.id, static_cast<float>(trimSlider.getValue()));
+    };
+    trimSlider.setColour(juce::Slider::rotarySliderFillColourId, theme::green());
+    trimSlider.setColour(juce::Slider::rotarySliderOutlineColourId, theme::deepGreen());
+    trimSlider.setColour(juce::Slider::trackColourId, theme::green());
+    trimSlider.setColour(juce::Slider::backgroundColourId, theme::strip());
+    trimSlider.setColour(juce::Slider::thumbColourId, theme::green());
+    trimSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
+    trimSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
+    trimSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    trimSlider.setName("Trim");
+    addAndMakeVisible(trimSlider);
+    trimSlider.setVisible(bus);
+    trimLabel.setJustificationType(juce::Justification::centred);
+    trimLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    trimLabel.setColour(juce::Label::textColourId, theme::dim());
+    addAndMakeVisible(trimLabel);
+    trimLabel.setVisible(bus);
 
     addAndMakeVisible(meter);
 
@@ -537,13 +573,20 @@ void MixerComponent::OutputStrip::resized() {
                            : juce::Rectangle<int>();
     removeOutputButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
     actionsRow.removeFromRight(2);
-    flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
+    if (!bus) flipButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
     area.removeFromTop(2);
     deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
     area.removeFromTop(4);
 
-    modeCombo.setBounds(area.removeFromTop(theme::metrics::kFieldH));
-    area.removeFromTop(4);
+    if (!bus) {
+        modeCombo.setBounds(area.removeFromTop(theme::metrics::kFieldH));
+        area.removeFromTop(4);
+    } else {
+        auto trimCell = area.removeFromTop(70);
+        trimLabel.setBounds(trimCell.removeFromTop(14));
+        trimSlider.setBounds(trimCell);
+        area.removeFromTop(4);
+    }
 
     // Display block: unified chain (3 built-in + the live inserts).
     // Rows give height back before they squeeze the fader off the strip.
@@ -626,7 +669,10 @@ void MixerComponent::OutputStrip::mouseMove(const juce::MouseEvent& e) {
 
 void MixerComponent::OutputStrip::refresh() {
     gainSlider.setValue(output.gainDb.get(), juce::dontSendNotification);
+    trimSlider.setValue(output.trimDb.get(), juce::dontSendNotification);
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);
+    deviceControl.setTitle(output.name);
+    if (bus) return;
     // Locked snapshot: the device opener writes these strings off-thread.
     const auto deviceState = audioEngine.getOutputDeviceState(output.id);
     deviceControl.setDeviceName(deviceState.deviceName);
@@ -983,6 +1029,15 @@ MixerComponent::MixerComponent(AudioEngine& engine)
     theme::ui::styleButton(addOutputButton);
     addAndMakeVisible(addOutputButton);
 
+    addBusButton.onClick = [this] {
+        if (audioEngine.addBus({}) != 0) {
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        }
+    };
+    theme::ui::styleButton(addBusButton);
+    addAndMakeVisible(addBusButton);
+
     channelViewport.setViewedComponent(&stripContent, false);
     channelViewport.setScrollBarsShown(false, true);
     addAndMakeVisible(channelViewport);
@@ -1003,19 +1058,36 @@ MixerComponent::MixerComponent(AudioEngine& engine)
     masterPanel.addAndMakeVisible(masterViewport);
     addAndMakeVisible(masterPanel);
 
+    busHeader.setJustificationType(juce::Justification::centredLeft);
+    busHeader.setFont(theme::ui::sectionFont());
+    busHeader.setColour(juce::Label::textColourId, theme::dim().withAlpha(0.8f));
+    busPanel.addAndMakeVisible(busHeader);
+    busViewport.setViewedComponent(&busContent, false);
+    busViewport.setScrollBarsShown(false, true);
+    busPanel.addAndMakeVisible(busViewport);
+    addAndMakeVisible(busPanel);
+
     rebuild();
 }
 
 void MixerComponent::resized() {
-    const bool showInputs = sections_ != Sections::OutputsOnly;
-    const bool showOutputs = sections_ != Sections::InputsOnly;
+    const bool showInputs = sections_ != Sections::OutputsOnly && sections_ != Sections::BusesOnly;
+    const bool showOutputs = sections_ != Sections::InputsOnly && sections_ != Sections::BusesOnly;
+    // The dedicated Buses page is where a first bus is created; the mixer's
+    // Both mode only gives the lane room once at least one bus exists.
+    const bool busPage = sections_ == Sections::BusesOnly;
+    const bool showBusButton = sections_ == Sections::Both || busPage;
+    const bool showBuses = busPage || (sections_ == Sections::Both && !audioEngine.getBuses().empty());
 
     addChannelButton.setVisible(showInputs);
     addOutputButton.setVisible(showOutputs);
+    addBusButton.setVisible(showBusButton);
     inputHeader.setVisible(showInputs);
     masterHeader.setVisible(showOutputs);
+    busHeader.setVisible(showBuses);
     channelViewport.setVisible(showInputs);
     masterPanel.setVisible(showOutputs);
+    busPanel.setVisible(showBuses);
 
     auto area = getLocalBounds().reduced(4);
     auto toolbar = area.removeFromTop(28);
@@ -1023,24 +1095,38 @@ void MixerComponent::resized() {
         addChannelButton.setBounds(toolbar.removeFromLeft(60));
         toolbar.removeFromLeft(4);
     }
+    if (showBusButton) {
+        addBusButton.setBounds(toolbar.removeFromLeft(60));
+        toolbar.removeFromLeft(4);
+    }
     if (showOutputs) addOutputButton.setBounds(toolbar.removeFromLeft(60));
     area.removeFromTop(4);
 
     if (showInputs && showOutputs) {
-        const int masterW = juce::jlimit(0, area.getWidth(), 3 * theme::ui::kStripStep + 24);
+        const int panelW = 3 * theme::ui::kStripStep + 24;
+        const int masterW = juce::jlimit(0, area.getWidth(), panelW);
         masterPanel.setBounds(area.removeFromRight(juce::jmax(0, masterW)));
         area.removeFromRight(6);
+        if (showBuses) {
+            const int busW = juce::jlimit(0, area.getWidth(), panelW);
+            busPanel.setBounds(area.removeFromRight(juce::jmax(0, busW)));
+            area.removeFromRight(6);
+        }
         inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
         channelViewport.setBounds(area);
         layoutChannelStrips(area);
         layoutOutputStrips(masterPanel.getLocalBounds());
+        if (showBuses) layoutBusStrips(busPanel.getLocalBounds());
     } else if (showInputs) {
         inputHeader.setBounds(area.removeFromTop(theme::ui::kSectionH));
         channelViewport.setBounds(area);
         layoutChannelStrips(area);
-    } else {
+    } else if (showOutputs) {
         masterPanel.setBounds(area);
         layoutOutputStrips(masterPanel.getLocalBounds());
+    } else {
+        busPanel.setBounds(area);
+        layoutBusStrips(busPanel.getLocalBounds());
     }
 }
 
@@ -1075,11 +1161,30 @@ void MixerComponent::layoutOutputStrips(juce::Rectangle<int> panelBounds) {
     }
 }
 
+void MixerComponent::layoutBusStrips(juce::Rectangle<int> panelBounds) {
+    busHeader.setBounds(panelBounds.removeFromTop(theme::ui::kSectionH));
+    busViewport.setBounds(panelBounds);
+    const int contentW = (int)busStrips.size() * theme::ui::kStripStep + 8;
+    int busH = busViewport.getHeight();
+    if (contentW > busViewport.getWidth()) {
+        busH = juce::jmax(0, busH - busViewport.getScrollBarThickness());
+    }
+    busContent.setSize(juce::jmax(0, juce::jmax(busViewport.getWidth(), contentW)),
+                       juce::jmax(0, busH));
+    for (int i = 0; i < (int)busStrips.size(); ++i) {
+        busStrips[i]->setBounds(i * theme::ui::kStripStep + theme::ui::kStripInset, 0,
+                                theme::ui::kStripW, busH);
+    }
+}
+
 void MixerComponent::closeAllEqWindows() {
     for (auto* s : strips) {
         if (s != nullptr) s->closeAllEffectWindows();
     }
     for (auto* s : outputStrips) {
+        if (s != nullptr) s->closeAllEffectWindows();
+    }
+    for (auto* s : busStrips) {
         if (s != nullptr) s->closeAllEffectWindows();
     }
 }
@@ -1096,10 +1201,13 @@ void MixerComponent::rebuild() {
     stripContent.dropMarkerX = -1.0f;
     masterContent.dropMarkerX = -1.0f;
     strips.clear();
-    if (sections_ != Sections::OutputsOnly) rebuildChannelStrips();
+    if (sections_ == Sections::Both || sections_ == Sections::InputsOnly) rebuildChannelStrips();
 
     outputStrips.clear();
-    if (sections_ != Sections::InputsOnly) rebuildOutputStrips();
+    if (sections_ == Sections::Both || sections_ == Sections::OutputsOnly) rebuildOutputStrips();
+
+    busStrips.clear();
+    if (sections_ == Sections::Both || sections_ == Sections::BusesOnly) rebuildBusStrips();
 
     resized();
 }
@@ -1198,6 +1306,9 @@ void MixerComponent::refreshStrips() {
     for (auto* s : outputStrips) {
         if (s != nullptr) s->refresh();
     }
+    for (auto* s : busStrips) {
+        if (s != nullptr) s->refresh();
+    }
 }
 
 void MixerComponent::rebuildChannelStrips() {
@@ -1285,5 +1396,29 @@ void MixerComponent::rebuildOutputStrips() {
         };
         s->onDragHandleFinished = [this, id, sourceIndex] { finishOutputDrag(id, sourceIndex); };
         masterContent.addAndMakeVisible(*s);
+    }
+}
+
+void MixerComponent::rebuildBusStrips() {
+    for (const auto& bus : audioEngine.getBuses()) {
+        auto* s = busStrips.add(new OutputStrip(*bus, audioEngine, true));
+        const std::uint32_t id = bus->id;
+        s->onRemoveRequested = [this, id] {
+            if (auto release = pluginRemovingHook()) release();
+            audioEngine.removeBus(id);
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
+        s->onRenamed = [this] {
+            rebuild();
+            if (onStructureChanged) onStructureChanged();
+        };
+        s->onSelected = [this, id] {
+            if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), true);
+        };
+        s->onDoubleClicked = [this, id] {
+            if (onDoubleClicked) onDoubleClicked(static_cast<int>(id), true);
+        };
+        busContent.addAndMakeVisible(*s);
     }
 }

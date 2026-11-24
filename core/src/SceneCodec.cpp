@@ -632,6 +632,38 @@ void from_json(const nlohmann::json& j, Output& output) {
     output.flipped = j.value("flipped", false);
 }
 
+void to_json(nlohmann::json& j, const Bus& bus) {
+    to_json(j, static_cast<const Strip&>(bus));
+    j["trimDb"] = bus.trimDb;
+}
+
+void from_json(const nlohmann::json& j, Bus& bus) {
+    bus = Bus{};
+    from_json(j, static_cast<Strip&>(bus));
+    bus.trimDb = j.value("trimDb", 0.0f);
+}
+
+void to_json(nlohmann::json& j, const Tap& tap) {
+    switch (tap.kind) {
+        case Tap::Kind::Input: j = "Input"; break;
+        case Tap::Kind::Item: j = nlohmann::json{{"item", tap.itemId}}; break;
+        case Tap::Kind::Output: j = "Output"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, Tap& tap) {
+    tap = Tap{};
+    if (j.is_string()) {
+        const auto name = j.get<std::string>();
+        if (name == "Input") tap.kind = Tap::Kind::Input;
+        else if (name == "Output") tap.kind = Tap::Kind::Output;
+        else throw nlohmann::json::other_error::create(502, "unknown Tap '" + name + "'", &j);
+    } else if (j.is_object()) {
+        tap.kind = Tap::Kind::Item;
+        tap.itemId = j.value("item", 0u);
+    }
+}
+
 void to_json(nlohmann::json& j, const Route& route) {
     j = nlohmann::json{
         {"channelId", route.channelId},
@@ -643,11 +675,65 @@ void to_json(nlohmann::json& j, const Route& route) {
     if (route.sendGainDbR.has_value()) {
         j["sendGainDbR"] = *route.sendGainDbR;
     }
+    if (route.tap.kind != Tap::Kind::Output) {
+        j["tap"] = route.tap;
+    }
 }
 
 void from_json(const nlohmann::json& j, Route& route) {
     route = Route{};
     j.at("channelId").get_to(route.channelId);
+    j.at("outputId").get_to(route.outputId);
+    route.sendGainDb = j.value("sendGainDb", 0.0f);
+    if (j.contains("sendGainDbR")) {
+        route.sendGainDbR = j.value("sendGainDbR", route.sendGainDb);
+    }
+    if (j.contains("tap")) {
+        j.at("tap").get_to(route.tap);
+    }
+}
+
+void to_json(nlohmann::json& j, const BusSend& send) {
+    j = nlohmann::json{
+        {"channelId", send.channelId},
+        {"busId", send.busId},
+        {"sendGainDb", send.sendGainDb},
+    };
+    if (send.sendGainDbR.has_value()) {
+        j["sendGainDbR"] = *send.sendGainDbR;
+    }
+    if (send.tap.kind != Tap::Kind::Output) {
+        j["tap"] = send.tap;
+    }
+}
+
+void from_json(const nlohmann::json& j, BusSend& send) {
+    send = BusSend{};
+    j.at("channelId").get_to(send.channelId);
+    j.at("busId").get_to(send.busId);
+    send.sendGainDb = j.value("sendGainDb", 0.0f);
+    if (j.contains("sendGainDbR")) {
+        send.sendGainDbR = j.value("sendGainDbR", send.sendGainDb);
+    }
+    if (j.contains("tap")) {
+        j.at("tap").get_to(send.tap);
+    }
+}
+
+void to_json(nlohmann::json& j, const BusRoute& route) {
+    j = nlohmann::json{
+        {"busId", route.busId},
+        {"outputId", route.outputId},
+        {"sendGainDb", route.sendGainDb},
+    };
+    if (route.sendGainDbR.has_value()) {
+        j["sendGainDbR"] = *route.sendGainDbR;
+    }
+}
+
+void from_json(const nlohmann::json& j, BusRoute& route) {
+    route = BusRoute{};
+    j.at("busId").get_to(route.busId);
     j.at("outputId").get_to(route.outputId);
     route.sendGainDb = j.value("sendGainDb", 0.0f);
     if (j.contains("sendGainDbR")) {
@@ -743,9 +829,9 @@ std::string toJson(const Scene& scene) {
         {"outputs", scene.outputs},
         {"routes", scene.routes},
     };
-    // Only written when non-empty so pre-v8 scenes without aux buses keep the
-    // same JSON shape.
-    if (!scene.auxBuses.empty()) j["auxBuses"] = scene.auxBuses;
+    if (!scene.buses.empty()) j["buses"] = scene.buses;
+    if (!scene.busSends.empty()) j["busSends"] = scene.busSends;
+    if (!scene.busRoutes.empty()) j["busRoutes"] = scene.busRoutes;
     if (scene.audio.has_value()) j["audio"] = *scene.audio;
     return j.dump();
 }
@@ -755,9 +841,9 @@ SceneLoadResult fromJson(std::string_view text) {
     try {
         const nlohmann::json j = nlohmann::json::parse(text);
         const int schemaVersion = j.value("schemaVersion", 0);
-        if (schemaVersion < 1 || schemaVersion > 8) {
+        if (schemaVersion < 1 || schemaVersion > 11) {
             result.errors.push_back("unsupported schemaVersion " + std::to_string(schemaVersion) +
-                                    ", expected 1 to 8");
+                                    ", expected 1 to 11");
             return result;
         }
         Scene scene;
@@ -774,13 +860,51 @@ SceneLoadResult fromJson(std::string_view text) {
         if (j.contains("routes")) {
             j.at("routes").get_to(scene.routes);
         }
-        if (j.contains("auxBuses")) {
-            j.at("auxBuses").get_to(scene.auxBuses);
+        if (schemaVersion >= 9) {
+            if (j.contains("buses")) {
+                j.at("buses").get_to(scene.buses);
+            }
+            if (j.contains("busSends")) {
+                j.at("busSends").get_to(scene.busSends);
+            }
+            if (j.contains("busRoutes")) {
+                j.at("busRoutes").get_to(scene.busRoutes);
+            }
+        } else if (schemaVersion == 8 && j.contains("auxBuses")) {
+            std::vector<AuxBus> legacy;
+            j.at("auxBuses").get_to(legacy);
+            for (const AuxBus& old : legacy) {
+                Bus bus;
+                bus.id = old.id;
+                bus.name = old.name;
+                bus.gainDb = old.gainDb;
+                scene.buses.push_back(std::move(bus));
+                for (const std::uint32_t channelId : old.sourceChannelIds) {
+                    BusSend send;
+                    send.channelId = channelId;
+                    send.busId = old.id;
+                    scene.busSends.push_back(send);
+                }
+            }
+            // A v8 bus key always used the post-gain signal, whatever tap the
+            // file named; pinning PostFader keeps the same key level.
+            const auto pinBusTap = [](Strip& strip) {
+                for (InsertSlot& slot : strip.inserts) {
+                    if (slot.sideChainSource == SideChainSource::Bus) {
+                        slot.sideChainTap = SideChainTap::PostFader;
+                    }
+                }
+            };
+            for (Channel& channel : scene.channels) {
+                pinBusTap(channel);
+            }
+            for (Output& output : scene.outputs) {
+                pinBusTap(output);
+            }
         }
-        // v8 fields are opt-in: a pre-v8 save never carries side-chain routing,
-        // even if a hand-edited file contains the keys.
+        // Pre-v8 files never carry side-chain routing, even if a hand-edited
+        // file contains the keys.
         if (schemaVersion < 8) {
-            scene.auxBuses.clear();
             for (auto& channel : scene.channels) {
                 for (auto& slot : channel.inserts) {
                     slot.sideChainSource = SideChainSource::None;

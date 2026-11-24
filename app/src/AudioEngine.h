@@ -21,6 +21,7 @@
 #include <pluginrack/LatencyProfile.h>
 #include <pluginrack/Meters.h>
 #include <pluginrack/Scene.h>
+#include <pluginrack/TapDelay.h>
 #include <pluginrack/MultibandEffect.h>
 #include <pluginrack/DeEsserEffect.h>
 #include <pluginrack/LimiterEffect.h>
@@ -119,6 +120,14 @@ public:
         juce::Atomic<std::uint32_t> postWrite{ 0 };
     };
 
+    // A tap point on a channel. The ring holds the signal at that point so a
+    // send can read it later, aligned with the strip output. Only taps that a
+    // send/route actually uses are allocated (see ensureTapPoint).
+    struct TapPoint {
+        pluginrack::Tap tap;
+        pluginrack::DelayRing ring;
+    };
+
     struct Channel {
         std::uint32_t id = 0;
         juce::String name;
@@ -147,6 +156,13 @@ public:
         // the live strip buffer while it renders.
         juce::AudioBuffer<float> preInsertTap;
         juce::AudioBuffer<float> postFaderTap;
+        // Signal snapshots for sends that tap inside the chain. Guarded by
+        // stateLock; the rings are allocated on the message thread and only
+        // pushed/read by render.
+        std::vector<TapPoint> tapPoints;
+        // The post-fader snapshot, delayed for tap compensation. Always sized;
+        // output taps read it when a shorter path needs padding.
+        pluginrack::DelayRing outputTapRing;
         // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
         // and keep output bit-identical to the pre-EQ engine. eq/eqBands are
@@ -233,6 +249,9 @@ public:
         juce::Atomic<float> rmsL{0.0f};
         juce::Atomic<float> rmsR{0.0f};
         juce::Atomic<float> gainDb{0.0f};
+        // Bus input trim: scales the summed sends before the chain. Outputs
+        // never show or use it.
+        juce::Atomic<float> trimDb{0.0f};
         juce::Atomic<bool> muted{false};
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
         juce::Atomic<bool> flipped{false};
@@ -243,6 +262,9 @@ public:
         // signal entering the output chain, postFaderTap the final output.
         juce::AudioBuffer<float> preInsertTap;
         juce::AudioBuffer<float> postFaderTap;
+        // Holds the finished bus so its route can be delayed against a longer
+        // path (PDC). Always sized; unused until compensation pads it.
+        pluginrack::DelayRing compensation;
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
@@ -292,17 +314,25 @@ public:
         std::unique_ptr<OutputPlayback> output;
     };
 
-    // One dedicated side-chain bus. Channels listed in sourceChannelIds are
-    // summed (post-fader, with their own gain already applied) into `buffer`,
-    // which any insert can then name as its side-chain source. Buffers are
-    // preallocated in prepareToPlayImpl; gain/name/sources are message-thread
-    // state written under stateLock.
-    struct AuxBus {
-        std::uint32_t id = 0;
-        juce::String name;
-        juce::Atomic<float> gainDb{0.0f};
-        std::vector<std::uint32_t> sourceChannelIds;
-        juce::AudioBuffer<float> buffer;
+    // A bus is a full strip fed by channel sends and routed to outputs. It
+    // reuses Output's fields so the strip chain, EQ and effects run unchanged;
+    // the device fields stay unused. scene::Bus is the persisted form.
+    using Bus = Output;
+
+    struct BusSend {
+        std::uint32_t channelId = 0;
+        std::uint32_t busId = 0;
+        juce::Atomic<float> sendGainDbL{0.0f};
+        juce::Atomic<float> sendGainDbR{0.0f};
+        // Where on the channel the send taps. Written under stateLock.
+        pluginrack::Tap tap;
+    };
+
+    struct BusRoute {
+        std::uint32_t busId = 0;
+        std::uint32_t outputId = 0;
+        juce::Atomic<float> sendGainDbL{0.0f};
+        juce::Atomic<float> sendGainDbR{0.0f};
     };
 
     struct Route {
@@ -310,6 +340,8 @@ public:
         std::uint32_t outputId = 0;
         juce::Atomic<float> sendGainDbL{0.0f};
         juce::Atomic<float> sendGainDbR{0.0f};
+        // Where on the channel the route taps. Written under stateLock.
+        pluginrack::Tap tap;
     };
 
     struct LatencyReport {
@@ -573,13 +605,28 @@ public:
     void setPluginSideChain(std::uint32_t channelId, std::uint32_t insertId,
                             pluginrack::SideChainSource source, std::uint32_t sourceId,
                             pluginrack::SideChainTap tap, float gainDb);
-    // Dedicated aux buses: created and edited by the UI, mixed into `buffer` on
-    // the render thread, then readable as any insert's side-chain source.
-    std::uint32_t addAuxBus(const juce::String& name,
-                            const std::vector<std::uint32_t>& sourceChannelIds);
-    void removeAuxBus(std::uint32_t busId);
-    void setAuxBus(std::uint32_t busId, const juce::String& name, float gainDb,
-                   const std::vector<std::uint32_t>& sourceChannelIds);
+    // Buses: full strips between channels and outputs. Channel sends are
+    // post-fader; bus routes into outputs are additive, so a channel can feed
+    // the dry output and one or more buses in parallel. A bus with no routes is
+    // key-only, which is what the old aux bus became in schema 9.
+    std::uint32_t addBus(const juce::String& name);
+    void removeBus(std::uint32_t busId);
+    // Sends and routes are sparse: created by the first non-off edit, erased
+    // when set back to kSendOffDb. Creation past the scene cap is refused.
+    void setBusSend(std::uint32_t channelId, std::uint32_t busId, float gainDbL, float gainDbR);
+    // Input trim on the summed bus signal (-12..+12 dB).
+    void setBusTrim(std::uint32_t busId, float trimDb);
+    void setBusRoute(std::uint32_t busId, std::uint32_t outputId, float gainDbL, float gainDbR);
+    // Moves an existing send/route to another point on the channel. A tap with
+    // no matching strip connection does nothing.
+    void setBusSendTap(std::uint32_t channelId, std::uint32_t busId, pluginrack::Tap tap);
+    void setSendTap(std::uint32_t channelId, std::uint32_t outputId, pluginrack::Tap tap);
+    pluginrack::Tap getBusSendTap(std::uint32_t channelId, std::uint32_t busId) const;
+    pluginrack::Tap getSendTap(std::uint32_t channelId, std::uint32_t outputId) const;
+    // End-to-end latency alignment for taps. On by default; turning it off
+    // makes every send/route read the channel output (the old behaviour).
+    void setLatencyCompensationEnabled(bool enabled);
+    bool isLatencyCompensationEnabled() const;
     // Fault containment: re-spawn the child host for a failed insert (Reload).
     // Clears `failed` only on a successful HOSTREADY. Message thread only.
     bool reloadInsert(std::uint32_t channelId, std::uint32_t insertId);
@@ -622,6 +669,11 @@ public:
     void setSendGain(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     void setSendGainL(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
     void setSendGainR(std::uint32_t channelId, std::uint32_t outputId, float gainDb);
+    // Patches drag-and-drop: create a 0 dB route if absent, then move its tap.
+    // removeSend erases the route so the output stops receiving the channel.
+    void connectSend(std::uint32_t channelId, std::uint32_t outputId,
+                     const pluginrack::Tap& tap);
+    void removeSend(std::uint32_t channelId, std::uint32_t outputId);
     float getSendGain(std::uint32_t channelId, std::uint32_t outputId) const;
     float getSendGainL(std::uint32_t channelId, std::uint32_t outputId) const;
     float getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const;
@@ -708,8 +760,12 @@ public:
     getOutputDenoiserBandReduction(std::uint32_t outputId, std::uint32_t effectId);
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
+    double getSampleRate() const;
     const std::vector<std::unique_ptr<Output>>& getOutputs() const;
-    const std::vector<std::unique_ptr<AuxBus>>& getAuxBuses() const;
+    const std::vector<std::unique_ptr<Bus>>& getBuses() const;
+    std::vector<std::unique_ptr<Bus>>& getBuses() { return buses; }
+    const std::vector<std::unique_ptr<BusSend>>& getBusSends() const;
+    const std::vector<std::unique_ptr<BusRoute>>& getBusRoutes() const;
     // Peak of the key currently reaching the insert's side-chain input. Zero
     // when the insert has no side-chain source. Read by the UI timer.
     float getSideChainKeyPeak(std::uint32_t ownerId, std::uint32_t insertId, bool isOutput) const;
@@ -725,6 +781,13 @@ public:
     Output* getOutputById(std::uint32_t outputId) {
         for (auto& o : outputs) {
             if (o->id == outputId) return o.get();
+        }
+        return nullptr;
+    }
+
+    Bus* getBusById(std::uint32_t busId) {
+        for (auto& b : buses) {
+            if (b->id == busId) return b.get();
         }
         return nullptr;
     }
@@ -844,10 +907,13 @@ private:
     struct SceneRestoreJob {
         std::vector<std::unique_ptr<Channel>> channels;
         std::vector<std::unique_ptr<Output>> outputs;
-        std::vector<std::unique_ptr<AuxBus>> auxBuses;
+        std::vector<std::unique_ptr<Bus>> buses;
         std::vector<std::unique_ptr<Route>> routes;
+        std::vector<std::unique_ptr<BusSend>> busSends;
+        std::vector<std::unique_ptr<BusRoute>> busRoutes;
         std::vector<std::uint32_t> channelIds;
         std::vector<std::uint32_t> outputIds;
+        std::vector<std::uint32_t> busIds;
         std::vector<PendingInsertLoad> pending;
         std::map<std::uint32_t, juce::String> desiredInputDevices;
         std::map<std::uint32_t, juce::String> desiredOutputDevices;
@@ -876,6 +942,37 @@ private:
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
+
+    // Tap plumbing: a channel keeps one ring per tap that a send or route
+    // points at. Rings are allocated on the message thread under stateLock;
+    // render only pushes and reads them.
+    void ensureTapPoint(Channel& channel, const pluginrack::Tap& tap);
+    TapPoint* findTapPoint(Channel& channel, const pluginrack::Tap& tap);
+    const TapPoint* findTapPoint(const Channel& channel, const pluginrack::Tap& tap) const;
+    // Latency a strip's chain adds, and how much of it sits before a tap.
+    template <typename StripType>
+    static int chainLatencySamples(const StripType& strip) {
+        int total = 0;
+        for (const auto& item : strip.chain) {
+            if (item.type == pluginrack::ChainItemType::Insert) {
+                for (const auto& insert : strip.inserts) {
+                    if (insert->id == item.id) {
+                        total += insert->latencySamples;
+                        break;
+                    }
+                }
+            } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
+                for (const auto& effect : strip.spectralDenoiserEffects) {
+                    if (effect.id == item.id && !effect.bypassed) {
+                        total += pluginrack::kSpectralDenoiserLatencySamples;
+                        break;
+                    }
+                }
+            }
+        }
+        return total;
+    }
+    static int tapLatencySamples(const Channel& channel, const pluginrack::Tap& tap);
     static float decibelsToGain(float gainDb);
     // Implementation of the public device setters without the "starting up"
     // check: the background opener calls these directly from its worker.
@@ -958,20 +1055,28 @@ private:
     std::vector<std::unique_ptr<InsertSlot>> retiredInserts_;
     std::vector<std::unique_ptr<Channel>> channels;
     std::vector<std::unique_ptr<Output>> outputs;
-    std::vector<std::unique_ptr<AuxBus>> auxBuses;
+    std::vector<std::unique_ptr<Bus>> buses;
     std::vector<std::unique_ptr<Route>> routes;
+    std::vector<std::unique_ptr<BusSend>> busSends;
+    std::vector<std::unique_ptr<BusRoute>> busRoutes;
     std::map<juce::String, SharedInputCapture> inputCaptures_;
     pluginrack::MeterBank meters;
     mutable juce::CriticalSection stateLock;
     std::uint32_t nextChannelId = 1;
+    // Outputs and buses share this counter so an id names exactly one strip;
+    // findOutput() relies on that when it searches both lists.
     std::uint32_t nextOutputId = 1;
-    std::uint32_t nextAuxBusId = 1;
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
     int currentBufferSize = 256;
     int requestedInputBufferSize_ = 0;
     int requestedOutputBufferSize_ = 0;
     int maxBlockFrames_ = 256;
+    // Scratch for reading a tap at a compensation delay. 2 x maxBlockFrames,
+    // allocated in prepareToPlayImpl.
+    juce::AudioBuffer<float> tapScratch;
+    // Guards the tap compensation maths; toggled from Settings.
+    bool latencyCompensation_ = true;
     // Ceiling the audio thread may render at. Lowered before a device reopen
     // and raised only after every plugin has been re-prepared, so a callback
     // that lands mid-reprepare can never hand a plugin more frames than it

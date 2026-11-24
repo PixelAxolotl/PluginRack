@@ -12,10 +12,12 @@
 // focused insert in place; the engine owns the routing.
 class SideChainBar final : public juce::Component, private juce::Timer {
 public:
+    enum class OwnerKind { Channel, Output, Bus };
+
     explicit SideChainBar(AudioEngine& engine);
 
-    // The focused insert. ownerId is the channel or output that holds it.
-    void setTarget(AudioEngine::InsertSlot* insert, bool isOutput, std::uint32_t ownerId);
+    // The focused insert. ownerId is the channel, output or bus that holds it.
+    void setTarget(AudioEngine::InsertSlot* insert, OwnerKind ownerKind, std::uint32_t ownerId);
     // Re-reads the engine's lists and the insert's values. Call after strips or
     // buses change.
     void refresh();
@@ -36,7 +38,7 @@ private:
 
     AudioEngine& audioEngine;
     AudioEngine::InsertSlot* target = nullptr;
-    bool targetIsOutput = false;
+    OwnerKind ownerKind = OwnerKind::Channel;
     std::uint32_t ownerId = 0;
     // Guards the onChange callbacks while the bar writes values back.
     bool updating = false;

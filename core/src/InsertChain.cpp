@@ -30,6 +30,11 @@ InsertChain::InsertChain(const std::vector<InsertSlot>& slots, IPluginFactory& f
 }
 
 void InsertChain::process(AudioBlock& block) noexcept {
+    process(block, nullptr, nullptr);
+}
+
+void InsertChain::process(AudioBlock& block, void (*afterSlot)(void*, std::uint32_t),
+                          void* ctx) noexcept {
     for (Entry& entry : entries_) {
         if (entry.instance != nullptr && !entry.failed) {
             const bool failed = entry.instance->process(block) == ProcessResult::Failed;
@@ -45,7 +50,21 @@ void InsertChain::process(AudioBlock& block) noexcept {
                 failed_.push_back(entry.id);
             }
         }
+        if (afterSlot != nullptr) {
+            afterSlot(ctx, entry.id);
+        }
     }
+}
+
+int InsertChain::latencySamples(std::uint32_t slotId) const noexcept {
+    for (const Entry& entry : entries_) {
+        if (entry.id == slotId) {
+            return entry.instance != nullptr && !entry.failed
+                       ? entry.instance->latencySamples()
+                       : 0;
+        }
+    }
+    return 0;
 }
 
 std::vector<std::uint32_t> InsertChain::failedSlots() const {

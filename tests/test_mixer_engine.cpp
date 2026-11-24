@@ -52,6 +52,54 @@ void addRoute(pluginrack::Scene& scene, std::uint32_t channelId, std::uint32_t o
     scene.routes.push_back(route);
 }
 
+void addTappedRoute(pluginrack::Scene& scene, std::uint32_t channelId,
+                    std::uint32_t outputId, const pluginrack::Tap& tap,
+                    float sendGainDb = 0.0f) {
+    pluginrack::Route route;
+    route.channelId = channelId;
+    route.outputId = outputId;
+    route.sendGainDb = sendGainDb;
+    route.tap = tap;
+    scene.routes.push_back(route);
+}
+
+void addBus(pluginrack::Scene& scene, std::uint32_t id, float gainDb = 0.0f) {
+    pluginrack::Bus bus;
+    bus.id = id;
+    bus.name = "bus" + std::to_string(id);
+    bus.gainDb = gainDb;
+    scene.buses.push_back(bus);
+}
+
+void addBusSend(pluginrack::Scene& scene, std::uint32_t channelId, std::uint32_t busId,
+                float sendGainDb = 0.0f) {
+    pluginrack::BusSend send;
+    send.channelId = channelId;
+    send.busId = busId;
+    send.sendGainDb = sendGainDb;
+    scene.busSends.push_back(send);
+}
+
+void addTappedBusSend(pluginrack::Scene& scene, std::uint32_t channelId,
+                      std::uint32_t busId, const pluginrack::Tap& tap,
+                      float sendGainDb = 0.0f) {
+    pluginrack::BusSend send;
+    send.channelId = channelId;
+    send.busId = busId;
+    send.sendGainDb = sendGainDb;
+    send.tap = tap;
+    scene.busSends.push_back(send);
+}
+
+void addBusRoute(pluginrack::Scene& scene, std::uint32_t busId, std::uint32_t outputId,
+                 float sendGainDb = 0.0f) {
+    pluginrack::BusRoute route;
+    route.busId = busId;
+    route.outputId = outputId;
+    route.sendGainDb = sendGainDb;
+    scene.busRoutes.push_back(route);
+}
+
 struct StereoBuffer {
     std::vector<float> left;
     std::vector<float> right;
@@ -83,6 +131,75 @@ pluginrack::MixerEngine prepareEngine(const pluginrack::Scene& scene, int maxBlo
 
 } // namespace
 
+TEST_CASE("pre-fader tap passes while the channel is muted") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].muted = true;
+    addOutput(scene, 1);
+    pluginrack::Tap input;
+    input.kind = pluginrack::Tap::Kind::Input;
+    addTappedRoute(scene, 1, 1, input);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    StereoBuffer inputBuffer(256, 0.0f);
+    StereoBuffer outputBuffer(256, 0.0f);
+    for (int i = 0; i < 256; ++i) {
+        inputBuffer.left[static_cast<std::size_t>(i)] = 0.5f;
+        inputBuffer.right[static_cast<std::size_t>(i)] = 0.5f;
+    }
+    const pluginrack::AudioBlock inputs[1] = {inputBuffer.inputBlock()};
+    pluginrack::AudioBlock outputs[1] = {outputBuffer.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.5f;
+    REQUIRE(outputBuffer.left[0] == Catch::Approx(expected));
+    REQUIRE(outputBuffer.right[0] == Catch::Approx(expected));
+}
+
+TEST_CASE("bus send at the input tap ignores the channel fader") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1, -20.0f);
+    addOutput(scene, 1);
+    addBus(scene, 4);
+    pluginrack::Tap input;
+    input.kind = pluginrack::Tap::Kind::Input;
+    addTappedBusSend(scene, 1, 4, input);
+    addBusRoute(scene, 4, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    StereoBuffer inputBuffer(256, 0.0f);
+    StereoBuffer outputBuffer(256, 0.0f);
+    for (int i = 0; i < 256; ++i) {
+        inputBuffer.left[static_cast<std::size_t>(i)] = 0.5f;
+        inputBuffer.right[static_cast<std::size_t>(i)] = 0.5f;
+    }
+    const pluginrack::AudioBlock inputs[1] = {inputBuffer.inputBlock()};
+    pluginrack::AudioBlock outputs[1] = {outputBuffer.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.5f;
+    REQUIRE(outputBuffer.left[0] == Catch::Approx(expected));
+    REQUIRE(outputBuffer.right[0] == Catch::Approx(expected));
+}
+
+TEST_CASE("output tap still follows the channel fader") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1, -20.0f);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    StereoBuffer inputBuffer(256, 0.5f);
+    StereoBuffer outputBuffer(256, 0.0f);
+    const pluginrack::AudioBlock inputs[1] = {inputBuffer.inputBlock()};
+    pluginrack::AudioBlock outputs[1] = {outputBuffer.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.5f * 0.1f * kCenterPanGain;
+    REQUIRE(outputBuffer.left[0] == Catch::Approx(expected));
+    REQUIRE(outputBuffer.right[0] == Catch::Approx(expected));
+}
+
 TEST_CASE("unity route passes signal at center pan") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
@@ -101,6 +218,31 @@ TEST_CASE("unity route passes signal at center pan") {
         REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(0.35355339f));
         REQUIRE(out.right[static_cast<std::size_t>(i)] == Catch::Approx(0.35355339f));
     }
+}
+
+TEST_CASE("bus runs in parallel with the dry route") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    addBus(scene, 4, -6.0f);
+    addBusSend(scene, 1, 4);
+    addBusRoute(scene, 4, 1);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+
+    constexpr int kFrames = 128;
+    StereoBuffer in(kFrames, 0.5f);
+    StereoBuffer out(kFrames, 0.0f);
+    const pluginrack::AudioBlock inputs[] = {in.inputBlock()};
+    pluginrack::AudioBlock outputs[] = {out.outputBlock()};
+    engine.render(inputs, outputs);
+
+    const float expected = 0.5f * kCenterPanGain * (1.0f + 0.5011872f);
+    for (int i = 0; i < kFrames; ++i) {
+        REQUIRE(out.left[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+        REQUIRE(out.right[static_cast<std::size_t>(i)] == Catch::Approx(expected));
+    }
+    REQUIRE(engine.meters().busPeak(4) > 0.0f);
 }
 
 TEST_CASE("send gain of -6 dB scales the route") {

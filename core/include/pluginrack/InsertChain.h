@@ -18,6 +18,11 @@ public:
     InsertChain(const std::vector<InsertSlot>& slots, IPluginFactory& factory,
                 double sampleRate, int maxBlockFrames, bool scrubEnabled = false);
     void process(AudioBlock& block) noexcept; // allocation-free
+    // Same pass, invoking afterSlot(ctx, slotId) once that slot has run, so
+    // per-item tap points can capture the signal between inserts.
+    void process(AudioBlock& block, void (*afterSlot)(void*, std::uint32_t),
+                void* ctx) noexcept;
+    int latencySamples(std::uint32_t slotId) const noexcept;
     std::vector<std::uint32_t> failedSlots() const; // slot ids that failed to load or process
     // Non-finite samples replaced with silence at the insert boundaries.
     // Cumulative for the lifetime of the chain; the delta per block is what

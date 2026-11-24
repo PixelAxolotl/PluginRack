@@ -2,11 +2,13 @@
 #include "pluginrack/MultibandEffect.h"
 #include "pluginrack/DeEsserEffect.h"
 #include "pluginrack/LimiterEffect.h"
+#include "pluginrack/SceneLimits.h"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -37,7 +39,6 @@ constexpr std::size_t kMaxInserts = 64;
 constexpr std::size_t kMaxChainItems = 16;
 constexpr std::size_t kMaxChannels = 64;
 constexpr std::size_t kMaxOutputs = 32;
-constexpr std::size_t kMaxRoutes = 1024;
 constexpr std::size_t kMaxWatchedDevices = 64;
 // Buffer sizes the device layer negotiates; anything outside this is a sign of
 // a hand-edited or foreign file, not a real session. 32 is the lowest block an
@@ -509,6 +510,21 @@ std::vector<SceneError> validate(const Scene& scene) {
                           "scene has " + std::to_string(scene.routes.size()) +
                               " routes, expected at most 1024"});
     }
+    if (scene.buses.size() > kMaxBuses) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
+                          "scene has " + std::to_string(scene.buses.size()) +
+                              " buses, expected at most 16"});
+    }
+    if (scene.busSends.size() > kMaxBusSends) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
+                          "scene has " + std::to_string(scene.busSends.size()) +
+                              " bus sends, expected at most 1024"});
+    }
+    if (scene.busRoutes.size() > kMaxBusRoutes) {
+        errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
+                          "scene has " + std::to_string(scene.busRoutes.size()) +
+                              " bus routes, expected at most 512"});
+    }
     if (scene.bufferFrames < kMinBufferFrames || scene.bufferFrames > kMaxBufferFrames) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
                           "bufferFrames " + std::to_string(scene.bufferFrames) +
@@ -517,7 +533,10 @@ std::vector<SceneError> validate(const Scene& scene) {
 
     std::unordered_set<std::uint32_t> channelIds;
     channelIds.reserve(scene.channels.size() * 2 + 1);
+    std::unordered_map<std::uint32_t, const Channel*> channelById;
+    channelById.reserve(scene.channels.size() * 2 + 1);
     for (const Channel& channel : scene.channels) {
+        channelById.emplace(channel.id, &channel);
         if (channel.id == 0) {
             errors.push_back(
                 {SceneErrorCode::ValueOutOfRange, 0, "channel id must not be zero"});
@@ -569,29 +588,21 @@ std::vector<SceneError> validate(const Scene& scene) {
         validateStrip("output", output, errors);
     }
 
-    // Aux buses (schema 8). Their source channels are checked here because the
-    // channel id set is complete by now; inserts referencing a bus are checked
-    // in the second pass below.
-    std::unordered_set<std::uint32_t> auxIds;
-    auxIds.reserve(scene.auxBuses.size() * 2 + 1);
-    for (const AuxBus& bus : scene.auxBuses) {
+    // Buses (schema 9). The strip body is validated like a channel/output; the
+    // id set is needed by sends and by inserts keyed off a bus.
+    std::unordered_set<std::uint32_t> busIds;
+    busIds.reserve(scene.buses.size() * 2 + 1);
+    for (const Bus& bus : scene.buses) {
         if (bus.id == 0) {
-            errors.push_back({SceneErrorCode::ValueOutOfRange, 0, "aux bus id must not be zero"});
-        } else if (!auxIds.insert(bus.id).second) {
-            errors.push_back({SceneErrorCode::DuplicateAuxBusId, bus.id,
-                              "duplicate aux bus id " + std::to_string(bus.id)});
+            errors.push_back({SceneErrorCode::ValueOutOfRange, 0, "bus id must not be zero"});
+        } else if (!busIds.insert(bus.id).second) {
+            errors.push_back({SceneErrorCode::DuplicateBusId, bus.id,
+                              "duplicate bus id " + std::to_string(bus.id)});
         }
-        if (!std::isfinite(bus.gainDb) || bus.gainDb < kMinGainDb || bus.gainDb > kMaxGainDb) {
+        validateStrip("bus", bus, errors);
+        if (!std::isfinite(bus.trimDb) || bus.trimDb < kMinTrimDb || bus.trimDb > kMaxTrimDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, bus.id,
-                              "aux bus " + std::to_string(bus.id) +
-                                  " gainDb out of range [-60, 12]"});
-        }
-        for (const std::uint32_t sourceId : bus.sourceChannelIds) {
-            if (!channelIds.contains(sourceId)) {
-                errors.push_back({SceneErrorCode::UnknownSideChainSourceId, bus.id,
-                                  "aux bus " + std::to_string(bus.id) +
-                                      " references unknown channel " + std::to_string(sourceId)});
-            }
+                              "bus " + std::to_string(bus.id) + " trim out of range"});
         }
     }
 
@@ -645,11 +656,11 @@ std::vector<SceneError> validate(const Scene& scene) {
                     }
                     break;
                 case SideChainSource::Bus:
-                    if (!auxIds.contains(slot.sideChainSourceId)) {
+                    if (!busIds.contains(slot.sideChainSourceId)) {
                         errors.push_back({SceneErrorCode::UnknownSideChainSourceId, strip.id,
                                           std::string(kind) + " " + std::to_string(strip.id) +
                                               " insert " + std::to_string(slot.id) +
-                                              " side-chain references unknown aux bus " +
+                                              " side-chain references unknown bus " +
                                               std::to_string(slot.sideChainSourceId)});
                     }
                     break;
@@ -667,6 +678,30 @@ std::vector<SceneError> validate(const Scene& scene) {
     };
     for (const Channel& channel : scene.channels) checkInsertSideChains("channel", channel);
     for (const Output& output : scene.outputs) checkInsertSideChains("output", output);
+    for (const Bus& bus : scene.buses) checkInsertSideChains("bus", bus);
+
+    const auto checkTap = [&](std::uint32_t channelId, const Tap& tap, const std::string& what) {
+        if (tap.kind != Tap::Kind::Item) {
+            return;
+        }
+        if (tap.itemId == 0) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, channelId,
+                              what + " tap item id must not be zero"});
+            return;
+        }
+        const auto channel = channelById.find(channelId);
+        if (channel == channelById.end()) {
+            return; // the unknown channel is reported by the caller
+        }
+        for (const ChainItem& item : channel->second->chain) {
+            if (item.id == tap.itemId) {
+                return;
+            }
+        }
+        errors.push_back({SceneErrorCode::UnknownTapItem, channelId,
+                          what + " tap references unknown chain item " +
+                              std::to_string(tap.itemId)});
+    };
 
     std::unordered_set<std::uint64_t> routePairs;
     routePairs.reserve(scene.routes.size() * 2 + 1);
@@ -708,6 +743,100 @@ std::vector<SceneError> validate(const Scene& scene) {
              *route.sendGainDbR > kMaxGainDb)) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, route.channelId,
                               "route (" + std::to_string(route.channelId) + ", " +
+                                  std::to_string(route.outputId) +
+                                  ") sendGainDbR out of range [-60, 12]"});
+        }
+        checkTap(route.channelId, route.tap,
+                 "route (" + std::to_string(route.channelId) + ", " +
+                     std::to_string(route.outputId) + ")");
+    }
+
+    std::unordered_set<std::uint64_t> busSendPairs;
+    busSendPairs.reserve(scene.busSends.size() * 2 + 1);
+    for (const BusSend& send : scene.busSends) {
+        if (send.channelId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "bus send channelId must not be zero"});
+        }
+        if (send.busId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "bus send busId must not be zero"});
+        }
+        const std::uint64_t pair =
+            (static_cast<std::uint64_t>(send.channelId) << 32) | send.busId;
+        if (!busSendPairs.insert(pair).second) {
+            errors.push_back({SceneErrorCode::DuplicateBusSend, send.channelId,
+                              "duplicate bus send (" + std::to_string(send.channelId) + ", " +
+                                  std::to_string(send.busId) + ")"});
+        }
+        if (send.channelId != 0 && !channelIds.contains(send.channelId)) {
+            errors.push_back({SceneErrorCode::UnknownChannelInSend, send.channelId,
+                              "bus send references unknown channel " +
+                                  std::to_string(send.channelId)});
+        }
+        if (send.busId != 0 && !busIds.contains(send.busId)) {
+            errors.push_back({SceneErrorCode::UnknownBusInSend, send.busId,
+                              "bus send references unknown bus " + std::to_string(send.busId)});
+        }
+        if (!std::isfinite(send.sendGainDb) || send.sendGainDb < kMinGainDb ||
+            send.sendGainDb > kMaxGainDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, send.channelId,
+                              "bus send (" + std::to_string(send.channelId) + ", " +
+                                  std::to_string(send.busId) +
+                                  ") sendGainDb out of range [-60, 12]"});
+        }
+        if (send.sendGainDbR.has_value() &&
+            (!std::isfinite(*send.sendGainDbR) || *send.sendGainDbR < kMinGainDb ||
+             *send.sendGainDbR > kMaxGainDb)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, send.channelId,
+                              "bus send (" + std::to_string(send.channelId) + ", " +
+                                  std::to_string(send.busId) +
+                                  ") sendGainDbR out of range [-60, 12]"});
+        }
+        checkTap(send.channelId, send.tap,
+                 "bus send (" + std::to_string(send.channelId) + ", " +
+                     std::to_string(send.busId) + ")");
+    }
+
+    std::unordered_set<std::uint64_t> busRoutePairs;
+    busRoutePairs.reserve(scene.busRoutes.size() * 2 + 1);
+    for (const BusRoute& route : scene.busRoutes) {
+        if (route.busId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "bus route busId must not be zero"});
+        }
+        if (route.outputId == 0) {
+            errors.push_back(
+                {SceneErrorCode::ValueOutOfRange, 0, "bus route outputId must not be zero"});
+        }
+        const std::uint64_t pair =
+            (static_cast<std::uint64_t>(route.busId) << 32) | route.outputId;
+        if (!busRoutePairs.insert(pair).second) {
+            errors.push_back({SceneErrorCode::DuplicateBusRoute, route.busId,
+                              "duplicate bus route (" + std::to_string(route.busId) + ", " +
+                                  std::to_string(route.outputId) + ")"});
+        }
+        if (route.busId != 0 && !busIds.contains(route.busId)) {
+            errors.push_back({SceneErrorCode::UnknownBusInRoute, route.busId,
+                              "bus route references unknown bus " + std::to_string(route.busId)});
+        }
+        if (route.outputId != 0 && !outputIds.contains(route.outputId)) {
+            errors.push_back({SceneErrorCode::UnknownOutputInBusRoute, route.outputId,
+                              "bus route references unknown output " +
+                                  std::to_string(route.outputId)});
+        }
+        if (!std::isfinite(route.sendGainDb) || route.sendGainDb < kMinGainDb ||
+            route.sendGainDb > kMaxGainDb) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, route.busId,
+                              "bus route (" + std::to_string(route.busId) + ", " +
+                                  std::to_string(route.outputId) +
+                                  ") sendGainDb out of range [-60, 12]"});
+        }
+        if (route.sendGainDbR.has_value() &&
+            (!std::isfinite(*route.sendGainDbR) || *route.sendGainDbR < kMinGainDb ||
+             *route.sendGainDbR > kMaxGainDb)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, route.busId,
+                              "bus route (" + std::to_string(route.busId) + ", " +
                                   std::to_string(route.outputId) +
                                   ") sendGainDbR out of range [-60, 12]"});
         }

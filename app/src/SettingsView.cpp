@@ -424,6 +424,17 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     add(closeToTrayToggle);
 
+    theme::ui::styleToggle(latencyCompensationToggle);
+    latencyCompensationToggle.setTooltip(
+        "Waits for the longest tap path at each output, so a mid-chain tap "
+        "lines up with the dry route. Adds the difference as output latency.");
+    latencyCompensationToggle.setToggleState(audioEngine.isLatencyCompensationEnabled(),
+                                             juce::dontSendNotification);
+    latencyCompensationToggle.onClick = [this] {
+        audioEngine.setLatencyCompensationEnabled(latencyCompensationToggle.getToggleState());
+    };
+    add(latencyCompensationToggle);
+
     clearFaultsButton.onClick = [this] {
         const int n = PluginFaultGuard::clear();
         faultsLabel.setText("Cleared " + juce::String(n) + " fault record(s).", juce::dontSendNotification);
@@ -1175,6 +1186,8 @@ int SettingsView::layoutBody(int width) {
         clearFaultsButton.setBounds(row3.removeFromLeft(220));
         row3.removeFromLeft(8);
         faultsLabel.setBounds(row3.removeFromLeft(260));
+        row3.removeFromLeft(24);
+        latencyCompensationToggle.setBounds(row3.removeFromLeft(260));
         endSection(panel);
     }
 

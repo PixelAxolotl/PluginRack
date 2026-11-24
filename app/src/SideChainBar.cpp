@@ -139,7 +139,8 @@ void SideChainBar::timerCallback() {
         keyLevel.setText("Key -inf", juce::dontSendNotification);
         return;
     }
-    const float peak = audioEngine.getSideChainKeyPeak(ownerId, target->id, targetIsOutput);
+    const float peak = audioEngine.getSideChainKeyPeak(ownerId, target->id,
+                                                       ownerKind != OwnerKind::Channel);
     if (peak <= 0.0f) {
         keyLevel.setText("Key -inf", juce::dontSendNotification);
         return;
@@ -148,11 +149,11 @@ void SideChainBar::timerCallback() {
     keyLevel.setText("Key " + juce::String(db, 1) + " dB", juce::dontSendNotification);
 }
 
-void SideChainBar::setTarget(AudioEngine::InsertSlot* insert, bool isOutput,
+void SideChainBar::setTarget(AudioEngine::InsertSlot* insert, OwnerKind kind,
                              std::uint32_t ownerIdIn) {
-    if (target == insert && targetIsOutput == isOutput && ownerId == ownerIdIn) return;
+    if (target == insert && ownerKind == kind && ownerId == ownerIdIn) return;
     target = insert;
-    targetIsOutput = isOutput;
+    ownerKind = kind;
     ownerId = ownerIdIn;
     refreshValues();
 }
@@ -179,9 +180,11 @@ void SideChainBar::rebuildSourceIds() {
             sourceIdCombo.addItem(outputName(*output), static_cast<int>(output->id));
         }
     } else if (source == pluginrack::SideChainSource::Bus) {
-        for (const auto& bus : audioEngine.getAuxBuses()) {
+        for (const auto& bus : audioEngine.getBuses()) {
             if (bus == nullptr || bus->id == 0) continue;
-            sourceIdCombo.addItem(bus->name, static_cast<int>(bus->id));
+            sourceIdCombo.addItem(bus->name.isNotEmpty() ? bus->name
+                                                         : "Bus " + juce::String(bus->id),
+                                  static_cast<int>(bus->id));
         }
     }
     sourceIdCombo.setEnabled(source != pluginrack::SideChainSource::None);
@@ -189,6 +192,15 @@ void SideChainBar::rebuildSourceIds() {
         sourceIdCombo.setSelectedItemIndex(0, juce::dontSendNotification);
     }
     sourcesButton.setVisible(source == pluginrack::SideChainSource::Bus);
+    // A bus key is summed post-gain, so the tap and the input trim do not
+    // apply to it.
+    const bool busSource = source == pluginrack::SideChainSource::Bus;
+    tapCombo.setVisible(!busSource);
+    gainSlider.setVisible(!busSource);
+    if (busSource) {
+        tapCombo.setBounds({});
+        gainSlider.setBounds({});
+    }
     // setVisible() does not run the parent's layout, and resized() only gives
     // the Sources button bounds while it is visible. Re-lay the bar here or a
     // newly shown button keeps its stale zero-size bounds until the next
@@ -221,26 +233,30 @@ void SideChainBar::apply() {
             : static_cast<std::uint32_t>(juce::jmax(0, sourceIdCombo.getSelectedId()));
     const auto tap = itemToTap(tapCombo.getSelectedId());
     const auto gainDb = static_cast<float>(gainSlider.getValue());
-    if (targetIsOutput) {
-        audioEngine.setOutputPluginSideChain(ownerId, target->id, source, sourceId, tap, gainDb);
-    } else {
+    if (ownerKind == OwnerKind::Channel) {
         audioEngine.setPluginSideChain(ownerId, target->id, source, sourceId, tap, gainDb);
+    } else {
+        // Outputs and buses share the strip-side insert API.
+        audioEngine.setOutputPluginSideChain(ownerId, target->id, source, sourceId, tap, gainDb);
     }
 }
 
 void SideChainBar::addBus() {
     std::vector<std::uint32_t> sources;
-    if (!targetIsOutput) {
+    if (ownerKind == OwnerKind::Channel) {
         // The strip the insert lives on is the natural first feed; a snare
         // insert usually side-chains from its own channel.
         sources.push_back(ownerId);
-    } else {
+    } else if (ownerKind == OwnerKind::Output) {
         for (const auto& channel : audioEngine.getChannels()) {
             if (channel != nullptr && channel->id != 0) sources.push_back(channel->id);
         }
     }
-    const auto busId = audioEngine.addAuxBus({}, sources);
+    const auto busId = audioEngine.addBus({});
     if (busId == 0) return;
+    for (const auto channelId : sources) {
+        audioEngine.setBusSend(channelId, busId, 0.0f, 0.0f);
+    }
     updating = true;
     sourceCombo.setSelectedId(kSourceBus, juce::dontSendNotification);
     rebuildSourceIds();
@@ -252,22 +268,23 @@ void SideChainBar::addBus() {
 void SideChainBar::editBusSources() {
     if (sourceIdCombo.getSelectedId() <= 0) return;
     const auto busId = static_cast<std::uint32_t>(sourceIdCombo.getSelectedId());
-    const AudioEngine::AuxBus* bus = nullptr;
-    for (const auto& candidate : audioEngine.getAuxBuses()) {
-        if (candidate != nullptr && candidate->id == busId) {
-            bus = candidate.get();
-            break;
-        }
-    }
+    const auto* bus = audioEngine.getBusById(busId);
     if (bus == nullptr) return;
 
-    const auto hasSource = [bus](std::uint32_t channelId) {
-        return std::find(bus->sourceChannelIds.begin(), bus->sourceChannelIds.end(), channelId)
-               != bus->sourceChannelIds.end();
+    const auto hasSource = [this, busId](std::uint32_t channelId) {
+        for (const auto& send : audioEngine.getBusSends()) {
+            if (send != nullptr && send->channelId == channelId && send->busId == busId
+                && (send->sendGainDbL.get() > AudioEngine::kSendOffDb
+                    || send->sendGainDbR.get() > AudioEngine::kSendOffDb)) {
+                return true;
+            }
+        }
+        return false;
     };
 
     juce::PopupMenu menu;
-    menu.addSectionHeader(bus->name);
+    menu.addSectionHeader(bus->name.isNotEmpty() ? bus->name
+                                                 : "Bus " + juce::String(bus->id));
     for (const auto& channel : audioEngine.getChannels()) {
         if (channel == nullptr || channel->id == 0) continue;
         menu.addItem(static_cast<int>(channel->id), channelName(*channel), true,
@@ -281,28 +298,26 @@ void SideChainBar::editBusSources() {
         juce::PopupMenu::Options().withTargetComponent(&sourcesButton),
         [safe, busId](int result) {
             if (safe == nullptr || result == 0) return;
-            const auto* live = [&]() -> const AudioEngine::AuxBus* {
-                for (const auto& candidate : safe->audioEngine.getAuxBuses()) {
-                    if (candidate != nullptr && candidate->id == busId) return candidate.get();
-                }
-                return nullptr;
-            }();
-            if (live == nullptr) return;
+            if (safe->audioEngine.getBusById(busId) == nullptr) return;
             if (result == 9000) {
-                safe->audioEngine.removeAuxBus(busId);
+                safe->audioEngine.removeBus(busId);
                 safe->sourceCombo.setSelectedId(kSourceNone, juce::dontSendNotification);
                 safe->refreshValues();
                 return;
             }
-            auto sources = live->sourceChannelIds;
-            const auto it = std::find(sources.begin(), sources.end(),
-                                      static_cast<std::uint32_t>(result));
-            if (it != sources.end()) {
-                sources.erase(it);
-            } else {
-                sources.push_back(static_cast<std::uint32_t>(result));
+            const auto channelId = static_cast<std::uint32_t>(result);
+            for (const auto& send : safe->audioEngine.getBusSends()) {
+                if (send != nullptr && send->channelId == channelId && send->busId == busId) {
+                    const bool on = send->sendGainDbL.get() > AudioEngine::kSendOffDb
+                                    || send->sendGainDbR.get() > AudioEngine::kSendOffDb;
+                    safe->audioEngine.setBusSend(
+                        channelId, busId,
+                        on ? AudioEngine::kSendOffDb : 0.0f,
+                        on ? AudioEngine::kSendOffDb : 0.0f);
+                    return;
+                }
             }
-            safe->audioEngine.setAuxBus(busId, live->name, live->gainDb.get(), sources);
+            safe->audioEngine.setBusSend(channelId, busId, 0.0f, 0.0f);
         });
 }
 
@@ -320,10 +335,14 @@ void SideChainBar::resized() {
     area.removeFromLeft(gap);
     sourceCombo.setBounds(area.removeFromLeft(88));
     area.removeFromLeft(gap);
-    tapCombo.setBounds(area.removeFromLeft(96));
-    area.removeFromLeft(gap);
-    gainSlider.setBounds(area.removeFromLeft(150));
-    area.removeFromLeft(gap);
+    if (tapCombo.isVisible()) {
+        tapCombo.setBounds(area.removeFromLeft(96));
+        area.removeFromLeft(gap);
+    }
+    if (gainSlider.isVisible()) {
+        gainSlider.setBounds(area.removeFromLeft(150));
+        area.removeFromLeft(gap);
+    }
     keyLevel.setBounds(area.removeFromRight(96));
     area.removeFromRight(gap);
 

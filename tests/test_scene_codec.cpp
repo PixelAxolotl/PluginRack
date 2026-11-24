@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -89,11 +89,11 @@ TEST_CASE("scene survives a JSON round trip") {
 }
 
 TEST_CASE("unsupported schema version is rejected") {
-    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 9})");
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(R"({"schemaVersion": 12})");
     REQUIRE(!loaded.scene.has_value());
     REQUIRE(loaded.errors.size() == 1);
     REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("schemaVersion"));
-    REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("expected 1 to 8"));
+    REQUIRE_THAT(loaded.errors[0], Catch::Matchers::ContainsSubstring("expected 1 to 11"));
 }
 
 TEST_CASE("v2 scene with output inserts round-trips") {
@@ -142,7 +142,7 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     REQUIRE(loaded.scene.has_value());
     // Old files auto-migrate: loading keeps the file's version, saving writes today's.
     pluginrack::Scene expected = original;
-    expected.schemaVersion = 8;
+    expected.schemaVersion = 11;
     REQUIRE(*loaded.scene == expected);
     REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
@@ -181,7 +181,7 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
 
 TEST_CASE("slot plugin state is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "state";
 
     pluginrack::Channel channel;
@@ -227,7 +227,7 @@ TEST_CASE("slot plugin state is optional and survives a round trip") {
 
 TEST_CASE("slot plugin class id is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "class-id";
 
     pluginrack::Channel channel;
@@ -326,7 +326,7 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
 
 TEST_CASE("inputChannels round-trips with the channel layout") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "mapping";
 
     pluginrack::Channel mono;
@@ -393,12 +393,12 @@ TEST_CASE("a v2 file loads at its own version and saves at today's") {
     REQUIRE(loaded.scene->schemaVersion == 2);
     // Defaults for a file that predates a field are covered by the v1 case; this
     // one pins the version handoff only.
-    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":8") != std::string::npos);
+    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":11") != std::string::npos);
 }
 
 TEST_CASE("scene v3 round-trip preserves eq bands") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "eq";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -436,7 +436,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     original.routes.push_back(route);
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":8") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":11") != std::string::npos);
     REQUIRE(json.find("eqBands") != std::string::npos);
 
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
@@ -458,7 +458,7 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
 
 TEST_CASE("scene audio settings round-trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "tuned";
 
     pluginrack::AudioSettings audio;
@@ -487,7 +487,7 @@ TEST_CASE("scene audio settings round-trip") {
 
 TEST_CASE("scene v6 audio hardening round-trips") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "hardened";
 
     pluginrack::AudioSettings audio;
@@ -510,14 +510,14 @@ TEST_CASE("scene v6 audio hardening round-trips") {
 
 TEST_CASE("scene v7 audio probe cap round-trips") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     pluginrack::AudioSettings audio;
     audio.wasapiProbeCapEnabled = true;
     audio.wasapiProbeCapChannels = 16;
     original.audio = audio;
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":8") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":11") != std::string::npos);
     REQUIRE(json.find("\"wasapiProbeCapChannels\":16") != std::string::npos);
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
@@ -593,7 +593,7 @@ TEST_CASE("a scene without a preview mode keeps selected-only previews") {
 
 TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     pluginrack::AudioSettings audio;
     audio.lowLatencyInput = true;
     audio.lowLatencyOutputs = true;
@@ -623,7 +623,7 @@ TEST_CASE("a scene written with the retired stream class still loads") {
     CHECK(loaded.scene->outputs[0].name == "mains");
 
     pluginrack::Scene fresh;
-    fresh.schemaVersion = 8;
+    fresh.schemaVersion = 11;
     pluginrack::Output output;
     output.id = 1;
     output.name = "mains";
@@ -640,7 +640,7 @@ TEST_CASE("a scene without an audio block leaves the tuning unset") {    const p
 
 TEST_CASE("a split left and right send survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.name = "split-send";
 
     pluginrack::Channel channel;
@@ -672,7 +672,7 @@ TEST_CASE("a split left and right send survives a round trip") {
 
 TEST_CASE("a matched send stores one level and stays compact") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
     original.channels.push_back(pluginrack::Channel{});
     original.outputs.push_back(pluginrack::Output{});
     pluginrack::Route route;
@@ -692,7 +692,7 @@ TEST_CASE("a matched send stores one level and stays compact") {
 
 TEST_CASE("side-chain routing and aux buses round-trip at schema 8") {
     pluginrack::Scene original;
-    original.schemaVersion = 8;
+    original.schemaVersion = 11;
 
     pluginrack::Channel channel;
     channel.id = 1;
@@ -713,12 +713,25 @@ TEST_CASE("side-chain routing and aux buses round-trip at schema 8") {
     output.name = "mains";
     original.outputs.push_back(output);
 
-    pluginrack::AuxBus bus;
+    pluginrack::Bus bus;
     bus.id = 2;
     bus.name = "Drum bus";
     bus.gainDb = -3.0f;
-    bus.sourceChannelIds = {1};
-    original.auxBuses.push_back(bus);
+    bus.trimDb = -2.5f;
+    original.buses.push_back(bus);
+
+    pluginrack::BusSend send;
+    send.channelId = 1;
+    send.busId = 2;
+    send.sendGainDb = -6.0f;
+    send.sendGainDbR = -7.0f;
+    original.busSends.push_back(send);
+
+    pluginrack::BusRoute busRoute;
+    busRoute.busId = 2;
+    busRoute.outputId = 1;
+    busRoute.sendGainDb = -2.0f;
+    original.busRoutes.push_back(busRoute);
 
     const std::string json = pluginrack::toJson(original);
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
@@ -727,29 +740,44 @@ TEST_CASE("side-chain routing and aux buses round-trip at schema 8") {
     REQUIRE(*loaded.scene == original);
 }
 
-TEST_CASE("pre-v8 scenes drop side-chain routing and aux buses") {
-    pluginrack::Scene original;
-    original.schemaVersion = 8;
-    pluginrack::Channel channel;
-    channel.id = 1;
-    channel.name = "kick";
-    pluginrack::InsertSlot slot;
-    slot.id = 5;
-    slot.sideChainSource = pluginrack::SideChainSource::Channel;
-    slot.sideChainSourceId = 1;
-    slot.sideChainTap = pluginrack::SideChainTap::PreInsert;
-    slot.sideChainGainDb = -6.0f;
-    channel.inserts.push_back(slot);
-    original.channels.push_back(channel);
-    pluginrack::AuxBus bus;
-    bus.id = 2;
-    bus.name = "Side";
-    bus.sourceChannelIds = {1};
-    original.auxBuses.push_back(bus);
+TEST_CASE("v8 aux buses migrate to buses and sends") {
+    const std::string json = R"({
+        "schemaVersion": 8,
+        "channels": [{"id": 1, "inserts": [{"id": 5,
+            "sideChainSource": "Bus", "sideChainSourceId": 2, "sideChainTap": "PreInsert"}]}],
+        "outputs": [{"id": 1}],
+        "auxBuses": [{"id": 2, "name": "Drum bus", "gainDb": -3.0,
+                      "sourceChannelIds": [1]}]
+    })";
 
-    std::string json = pluginrack::toJson(original);
-    const std::string eight = "\"schemaVersion\":8";
-    const std::string seven = "\"schemaVersion\":7";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    const pluginrack::Scene& scene = *loaded.scene;
+    REQUIRE(scene.buses.size() == 1);
+    REQUIRE(scene.buses.front().id == 2);
+    REQUIRE(scene.buses.front().name == "Drum bus");
+    REQUIRE(scene.buses.front().gainDb == -3.0f);
+    REQUIRE(scene.busSends.size() == 1);
+    REQUIRE(scene.busSends.front().channelId == 1);
+    REQUIRE(scene.busSends.front().busId == 2);
+    REQUIRE(scene.busSends.front().sendGainDb == 0.0f);
+    REQUIRE(scene.busRoutes.empty());
+    // A v8 bus key always used the post-gain signal.
+    REQUIRE(scene.channels.front().inserts.front().sideChainTap ==
+            pluginrack::SideChainTap::PostFader);
+}
+
+TEST_CASE("pre-v8 scenes drop side-chain routing and buses") {
+    std::string json = R"({
+        "schemaVersion": 8,
+        "channels": [{"id": 1, "inserts": [{"id": 5,
+            "sideChainSource": "Bus", "sideChainSourceId": 2, "sideChainTap": "PreInsert"}]}],
+        "outputs": [{"id": 1}],
+        "auxBuses": [{"id": 2, "name": "Drum bus", "sourceChannelIds": [1]}]
+    })";
+    const std::string eight = "\"schemaVersion\": 8";
+    const std::string seven = "\"schemaVersion\": 7";
     const auto pos = json.find(eight);
     REQUIRE(pos != std::string::npos);
     json.replace(pos, eight.size(), seven);
@@ -757,7 +785,9 @@ TEST_CASE("pre-v8 scenes drop side-chain routing and aux buses") {
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
     REQUIRE(loaded.scene.has_value());
-    REQUIRE(loaded.scene->auxBuses.empty());
+    REQUIRE(loaded.scene->buses.empty());
+    REQUIRE(loaded.scene->busSends.empty());
+    REQUIRE(loaded.scene->busRoutes.empty());
     REQUIRE(loaded.scene->channels.front().inserts.front().sideChainSource ==
             pluginrack::SideChainSource::None);
     REQUIRE(loaded.scene->channels.front().inserts.front().sideChainSourceId == 0);
