@@ -3280,42 +3280,33 @@ void RackView::resized() {
     editorViewport.setBounds(editorArea);
     const int vw = juce::jmax(0, editorViewport.getWidth());
     const int vh = juce::jmax(0, editorViewport.getHeight());
-    // Every built-in window is the same 860x560 panel. The panel is centred
-    // vertically in the bay (its holder is shifted by the spare space above
-    // and below) instead of top-aligned, so the window never sits against the
-    // top edge with a dead strip below it, and switching between windows never
-    // changes the height or leaves a black bar behind. The gate fits in one
-    // 132 px row below the compressor knobs, so all five windows share the
-    // same panel and the holder never jumps.
-    auto centreInBay = [&](int width, int height) {
-        const int holderW = juce::jmax(vw, width);
-        const int holderH = juce::jmax(vh, height);
-        const int panelW = juce::jmin(width, holderW);
-        const int panelH = juce::jmin(height, holderH);
-        editorHolder.setSize(holderW, holderH);
-        const int x = (holderW - panelW) / 2;
-        const int y = (holderH - panelH) / 2;
-        editorHolder.setTopLeftPosition(x, y);
+    // Every built-in window is one panel that fills the bay. Sizing the holder
+    // to the panel's design size and centring it inside the bay put the extra
+    // width and height *outside* the editor viewport, and since the window was
+    // then given the holder bounds, the right and bottom of the panel (the
+    // header's preset/enable controls, the knob row) were clipped away. Fill
+    // the bay instead: the panels lay themselves out from their bounds.
+    auto fillBay = [&] {
+        editorHolder.setSize(juce::jmax(0, vw), juce::jmax(0, vh));
+        editorHolder.setTopLeftPosition(0, 0);
     };
     if (eqFocused && eqWindow != nullptr) {
-        centreInBay(EQWindow::kWidth, EQWindow::kHeight);
+        fillBay();
         eqWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
     if (dynamicsFocused && dynamicsWindow != nullptr) {
-        centreInBay(DynamicsWindow::kMinWidth, DynamicsWindow::kMinHeight);
+        fillBay();
         dynamicsWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
     }
     if (focusedEffectWindow != nullptr) {
-        // Fill the rack editor bay edge to edge, like the EQ/Dynamics
-        // panels: the graph and knobs stretch to the whole width instead
-        // of sitting in a fixed 860px holder with dead space on the right
-        // (was the "Multiband/De-esser/Limiter not full width" report).
-        // Height keeps the windows' compact 560px; only the width stretches.
-        centreInBay(860, 560);
+        // Same bay fill for the Multiband/De-esser/Limiter/Feedback/Denoiser
+        // panels: their graphs and knob rows stretch to the whole bay instead
+        // of a fixed 860px holder with dead space on the right.
+        fillBay();
         focusedEffectWindow->setBounds(editorHolder.getLocalBounds());
         noEditorLabel.setVisible(false);
         noEditorBypass.setVisible(false);
