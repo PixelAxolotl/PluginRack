@@ -250,7 +250,20 @@ private:
     std::atomic<int> playBufferSize_{256};
     std::atomic<int> childBlockDeadlineMs_{10};
     std::atomic<int> childConsecutiveMisses_{0};
+    // Continuous time the slot has been missing blocks, in block durations. A
+    // latch needs the run to span a second: three consecutive misses is 10-30 ms
+    // of wall time and one scheduling hiccup (page fault, autosave, a plugin
+    // state push) would otherwise bury the slot for the session.
+    std::atomic<int> childMissRunMs_{0};
     std::atomic<bool> childFailed_{false};
+    // Blocks to skip before probing a failed child again. A latched slot renders
+    // dry and waits this long between attempts, so a wedge costs one deadline
+    // wait per second instead of one per block - and a hiccup is not terminal.
+    std::atomic<int> childRetryCountdown_{0};
+
+    // Continuous-miss budget before a slot is declared failed, in milliseconds
+    // of block time (see noteChildMiss).
+    static constexpr int kChildMissLatchMs = 1000;
 
     void noteChildMiss();
 

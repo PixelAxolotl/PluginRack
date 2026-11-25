@@ -1810,3 +1810,34 @@ TEST_CASE("a child slot receives editor parameter edits from the message thread"
     CHECK(contains(hostHeader, "#include \"PluginParamMirror.h\""));
 }
 
+TEST_CASE("a short miss run does not bury a child slot as crashed", "[app][ipc][audio]") {
+    const auto hostCpp = readSource("app/src/PluginHost.cpp");
+    const auto hostHeader = readSource("app/src/PluginHost.h");
+
+    // Three consecutive missed blocks is 10-30 ms of wall time. One scheduling
+    // hiccup (a page fault, an autosave, a plugin state push) used to latch
+    // every child insert as "Plugin crashed (0x103)" for the rest of the
+    // session - 0x103 is STILL_ACTIVE, i.e. the process was alive and only the
+    // fetch missed its deadline. The latch needs a run that spans a second.
+    CHECK(contains(hostHeader, "static constexpr int kChildMissLatchMs = 1000;"));
+    CHECK(contains(hostHeader, "std::atomic<int> childMissRunMs_{0};"));
+    CHECK(contains(hostHeader, "std::atomic<int> childRetryCountdown_{0};"));
+
+    const auto miss = functionBody(hostCpp, "void PluginHost::noteChildMiss()");
+    CHECK(contains(miss, "childMissRunMs_.fetch_add(blockMs"));
+    CHECK(contains(miss, "if (runMs >= kChildMissLatchMs)"));
+    CHECK(contains(miss, "childRetryCountdown_.store("));
+
+    // A latched slot keeps rendering dry, but probes again about once a second,
+    // and a healthy block clears the latch so the insert heals on its own.
+    const auto block = functionBody(
+        hostCpp, "void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,");
+    CHECK(contains(block, "const auto countdown = childRetryCountdown_.load("));
+    CHECK(contains(block, "childMissRunMs_.store(0, std::memory_order_relaxed);"));
+    CHECK(contains(block, "childFailed_.store(false, std::memory_order_release);"));
+
+    // Recovery keeps parameter forwarding alive: the timer only stops for a
+    // child that is gone, not for a slot that is merely latched.
+    const auto timer = functionBody(hostCpp, "void PluginHost::timerCallback()");
+    CHECK(contains(timer, "if (childFailed_.load(std::memory_order_acquire)) {"));
+}

@@ -403,6 +403,8 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
 
     childFailed_.store(false, std::memory_order_relaxed);
     childConsecutiveMisses_.store(0, std::memory_order_relaxed);
+    childMissRunMs_.store(0, std::memory_order_relaxed);
+    childRetryCountdown_.store(0, std::memory_order_relaxed);
     playSampleRate_.store(sampleRate, std::memory_order_relaxed);
     playBufferSize_.store(bufferSize, std::memory_order_relaxed);
     cachedLatencySamples_.store(juce::jmax(0, host->latencySamples(kChildQueryTimeoutMs)),
@@ -447,13 +449,18 @@ void PluginHost::stopChildParamForwarding() {
 
 void PluginHost::timerCallback() {
     auto host = childHost_.load(std::memory_order_acquire);
-    if (host == nullptr || !host->isAlive()
-        || childFailed_.load(std::memory_order_acquire)) {
-        // Nothing to push to: a dead or failed child is repaired by the load
-        // path, not by parameter traffic. Message thread, so stopping here is
-        // legal even though the publish-side start had to hop.
+    if (host == nullptr || !host->isAlive()) {
+        // Nothing to push to: a dead child is repaired by the load path, not by
+        // parameter traffic. Message thread, so stopping here is legal even
+        // though the publish-side start had to hop.
         stopTimer();
         paramMirror_.setArmed(false);
+        return;
+    }
+    if (childFailed_.load(std::memory_order_acquire)) {
+        // A latched slot is dry but still probing, and the audio thread may
+        // heal it - keep the forwarding armed so params reach the child again
+        // once blocks land. Edits made meanwhile stay in the mirror.
         return;
     }
     // A gap the child counted while draining means an edit it never applied.
@@ -626,6 +633,8 @@ void PluginHost::stopChildHost() {
     }
     childFailed_.store(false, std::memory_order_relaxed);
     childConsecutiveMisses_.store(0, std::memory_order_relaxed);
+    childMissRunMs_.store(0, std::memory_order_relaxed);
+    childRetryCountdown_.store(0, std::memory_order_relaxed);
 }
 
 PluginHost::ChildHostStatus PluginHost::childHostStatus() const {
@@ -1184,8 +1193,18 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
     // or after teardown) - it plays dry instead. See spec §3.2.
     if (rendererMode_.load(std::memory_order_acquire) == 1) {
         auto host = childHost_.load(std::memory_order_acquire);
-        if (host == nullptr || childFailed_.load(std::memory_order_acquire) || !host->isAlive()) {
+        if (host == nullptr || !host->isAlive()) {
             return; // dry, explained by childHostStatus()
+        }
+        if (childFailed_.load(std::memory_order_acquire)) {
+            // Latched after a sustained miss run: keep rendering dry but probe
+            // again once a second, so a hiccup that outlived the latch heals
+            // instead of silencing the insert until a manual reload.
+            const auto countdown = childRetryCountdown_.load(std::memory_order_relaxed);
+            if (countdown > 0) {
+                childRetryCountdown_.store(countdown - 1, std::memory_order_relaxed);
+                return; // dry
+            }
         }
 
         const int frames = buffer.getNumSamples();
@@ -1212,7 +1231,14 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
             return; // dry
         }
 
+        // Healthy block: forget the miss run. A slot that latched during a
+        // stall and has been probing since heals the moment a probe lands.
         childConsecutiveMisses_.store(0, std::memory_order_relaxed);
+        childMissRunMs_.store(0, std::memory_order_relaxed);
+        if (childFailed_.load(std::memory_order_relaxed)) {
+            childFailed_.store(false, std::memory_order_release);
+            childRetryCountdown_.store(0, std::memory_order_relaxed);
+        }
         for (int channel = 0; channel < channels; ++channel) {
             buffer.copyFrom(channel, 0, childScratch_, juce::jmin(channel, 1), 0, frames);
         }
@@ -1281,11 +1307,24 @@ void PluginHost::processBlock(juce::AudioBuffer<float>& buffer, bool bypassed,
 }
 
 void PluginHost::noteChildMiss() {
-    // Audio thread: no allocation, no locks, no logging. Three consecutive
-    // misses mean the child is wedged; the slot stays dry until a reload.
-    const int misses = childConsecutiveMisses_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (misses >= 3) {
+    // Audio thread: no allocation, no locks, no logging. A miss on its own is
+    // not a fault - the block plays dry and the next one may be fine - so the
+    // failure latch needs a run that spans a second of continuous misses. A
+    // three-block run is 10-30 ms of wall time and one scheduling hiccup
+    // (a page fault, autosave, a plugin state push) used to bury the slot for
+    // the rest of the session.
+    if (childConsecutiveMisses_.fetch_add(1, std::memory_order_relaxed) + 1 < 3) return;
+    const auto rate = playSampleRate_.load(std::memory_order_relaxed);
+    const auto frames = playBufferSize_.load(std::memory_order_relaxed);
+    const int blockMs = rate > 0.0 && frames > 0
+                            ? juce::jlimit(1, 100, static_cast<int>(1000.0 * frames / rate))
+                            : 10;
+    const auto runMs = childMissRunMs_.fetch_add(blockMs, std::memory_order_relaxed) + blockMs;
+    if (runMs >= kChildMissLatchMs) {
         childFailed_.store(true, std::memory_order_release);
+        // Probe again in about a second of blocks instead of on every block.
+        childRetryCountdown_.store(juce::jmax(8, kChildMissLatchMs / blockMs),
+                                   std::memory_order_relaxed);
     }
 }
 
