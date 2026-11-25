@@ -336,8 +336,18 @@ Stage 2 on a **30-run soak with zero crashes**, plus the V9 rate/buffer sweep,
 V10 M-Audio duplex and V7/V8 state round-trip from §11.
 
 **Known dead code, deliberately kept:** `PluginHost::setChildParameter()` has no
-callers — it is the Phase 2 entry point (task 2.1) and is annotated as such. Do
+callers - it is the Phase 2 entry point (task 2.1) and is annotated as such. Do
 not wire it before the four fixes.
+
+> **Update 2026-11-25:** the four §6.0 fixes landed (explicit `rendererMode_`
+> with a dry fallback, atomic `childHost_`, no prepare on an unchanged format,
+> serialised `controlCall` with sequence recovery), and the entry point is now
+> wired: `parameterValueChanged` records into `PluginParamMirror`, a 30 Hz
+> message-thread timer drains it into the head of the parameter ring, and a
+> refused push or a child-reported sequence gap schedules the full-state
+> resync. Proven end to end with
+> `--test-child-null <vst3> --param-edit`. Child DSP stays behind
+> `--child-dsp`; the Stage 2 soak gate below is unchanged.
 
 **Do not** flip any default, persist a flag, or touch the scene schema until
 Stage 2 passes.

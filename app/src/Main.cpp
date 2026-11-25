@@ -575,10 +575,14 @@ public:
         const int nullTestIndex = args.indexOf("--test-child-null");
         if (nullTestIndex >= 0 && nullTestIndex + 1 < args.size()) {
             const juce::File nullTestFile(args[nullTestIndex + 1].unquoted());
+            // With --param-edit the diagnostic also proves parameter transport:
+            // the same normalised edit is made on the in-process reference and
+            // pushed to the child, and both must still render the same audio.
+            const bool paramEdit = args.contains("--param-edit");
             // Message thread: the in-process instance must be created there
             // (JUCE loads the plugin DLL on the creating thread), and so must
             // the comparison, since it renders through that instance.
-            juce::MessageManager::callAsync([nullTestFile] {
+            juce::MessageManager::callAsync([nullTestFile, paramEdit] {
                 constexpr double rate = 48000.0;
                 constexpr int blockSize = 256;
                 constexpr int blocks = 200;
@@ -718,6 +722,61 @@ public:
                                     : withinTolerance
                                         ? juce::String("within tolerance - ") + summary
                                         : juce::String("FAILED - ") + summary;
+
+                // Parameter transport leg: push real edits to the child, make
+                // the same edits on the reference, then require the two to
+                // still agree. This is what proves the ring actually reaches
+                // the child's instance rather than only being written.
+                //
+                // Every parameter is moved to a deterministic pattern: one
+                // hand-picked parameter may be inaudible (a mode selector, a
+                // bypass), which would make an agreement prove nothing. Both
+                // instances get the same values, so the comparison stays valid
+                // whatever the plugin does with them.
+                if (paramEdit) {
+                    const auto tolerance = juce::jmax(1.0e-6f, baselineDiff);
+                    auto& parameters = reference.instance->getParameters();
+                    juce::AudioBuffer<float> preEditReference(referenceOutput);
+                    int pushed = 0;
+                    int refused = 0;
+                    for (int i = 0; i < parameters.size(); ++i) {
+                        if (parameters[i] == nullptr) continue;
+                        const auto value = (i % 2 == 0) ? 0.3f : 0.7f;
+                        parameters[i]->setValueNotifyingHost(value);
+                        if (child.setChildParameter(i, value)) ++pushed;
+                        else ++refused;
+                    }
+                    // The child drains its parameter ring on its own service
+                    // loop; give it a few iterations before rendering.
+                    juce::Thread::sleep(80);
+                    renderThrough(inProcess, referenceOutput);
+                    renderThrough(child, childOutput);
+                    const auto [editedDiff, editedCount] = compare(referenceOutput, childOutput);
+                    const auto [editDelta, editDeltaCount] = compare(referenceOutput, preEditReference);
+
+                    auto paramResult = juce::String("param edit: ")
+                                       + juce::String(pushed) + " pushed, "
+                                       + juce::String(refused) + " refused; reference move "
+                                       + juce::String(editDelta, 8) + " ("
+                                       + juce::String(editDeltaCount) + " samples), "
+                                       + "child-vs-reference max diff "
+                                       + juce::String(editedDiff, 8) + ", "
+                                       + juce::String(editedCount) + " differing samples ("
+                                       + juce::String(tolerance, 8) + " allowed)";
+                    bool paramOk = refused == 0 && editedDiff <= tolerance;
+                    if (editDelta <= tolerance) {
+                        // Nothing to compare against: report it as such rather
+                        // than claiming the transport was proven.
+                        paramResult << " - inconclusive (the edits did not alter output)";
+                        paramOk = true;
+                    }
+                    if (!paramOk) paramResult << " - FAILED";
+                    juce::Logger::writeToLog("test-child-null: " + paramResult);
+                    std::cout << paramResult.toStdString() << "\n";
+                    std::cout.flush();
+                    if (!paramOk) ::exit(1);
+                }
+
                 juce::Logger::writeToLog("test-child-null: " + result);
                 std::cout << result.toStdString() << "\n";
                 std::cout.flush();

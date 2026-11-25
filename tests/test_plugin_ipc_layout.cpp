@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "PluginIpcLayout.h"
+#include "PluginParamMirror.h"
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace pluginHostIpc;
@@ -252,6 +255,93 @@ TEST_CASE("control begin/end write brackets the payload with an even sequence") 
     controlEndWrite(*section);
     CHECK(section->blockSequence.load() % 2 == 0);
     CHECK(section->blockSequence.load() == 2);
+}
+
+TEST_CASE("param mirror coalesces edits and only works while armed") {
+    PluginParamMirror mirror;
+    mirror.resize(3);
+
+    // Disarmed (no child): the listener pays one load and nothing is recorded,
+    // which is what an in-process slot must cost.
+    mirror.markDirty(0, 0.5f);
+    CHECK(mirror.empty());
+    CHECK(mirror.drain([](int, float) { return true; }) == 0);
+
+    mirror.setArmed(true);
+    mirror.markDirty(1, 0.1f);
+    mirror.markDirty(1, 0.7f); // latest wins
+    mirror.markDirty(2, 0.25f);
+    mirror.markDirty(7, 0.9f); // out of range is ignored, not a crash
+    mirror.markDirty(-1, 0.9f);
+
+    std::vector<std::pair<int, float>> seen;
+    const auto drained = mirror.drain([&seen](int index, float value) {
+        seen.emplace_back(index, value);
+        return true;
+    });
+    CHECK(drained == 2);
+    REQUIRE(seen.size() == 2);
+    CHECK(seen[0].first == 1);
+    CHECK(seen[0].second == 0.7f);
+    CHECK(seen[1].first == 2);
+    CHECK(mirror.empty());
+}
+
+TEST_CASE("a refused param push keeps the edit for the next drain") {
+    PluginParamMirror mirror;
+    mirror.resize(2);
+    mirror.setArmed(true);
+    mirror.markDirty(0, 0.4f);
+
+    // Ring full: the sink reports the loss and the entry must survive so the
+    // next tick retries it instead of the edit vanishing.
+    CHECK(mirror.drain([](int, float) { return false; }) == 1);
+    CHECK_FALSE(mirror.empty());
+
+    float retried = -1.0f;
+    CHECK(mirror.drain([&retried](int, float value) {
+        retried = value;
+        return true;
+    }) == 1);
+    CHECK(retried == 0.4f);
+    CHECK(mirror.empty());
+}
+
+TEST_CASE("a newer edit during a refused push is not overwritten by the retry") {
+    PluginParamMirror mirror;
+    mirror.resize(1);
+    mirror.setArmed(true);
+    mirror.markDirty(0, 0.2f);
+
+    // The sink fails *and* the plugin reports a newer value while it runs (the
+    // knob keeps moving): the retry entry must hold the newer value, not the
+    // one that just failed.
+    CHECK(mirror.drain([&mirror](int, float) {
+        mirror.markDirty(0, 0.9f);
+        return false;
+    }) == 1);
+
+    float retried = -1.0f;
+    CHECK(mirror.drain([&retried](int, float value) {
+        retried = value;
+        return true;
+    }) == 1);
+    CHECK(retried == 0.9f);
+    CHECK(mirror.empty());
+}
+
+TEST_CASE("disarming and clearing a param mirror forgets pending edits") {
+    PluginParamMirror mirror;
+    mirror.resize(2);
+    mirror.setArmed(true);
+    mirror.markDirty(0, 0.3f);
+    mirror.clear();
+    CHECK(mirror.empty());
+    mirror.markDirty(1, 0.6f);
+    mirror.setArmed(false);
+    mirror.clear();
+    CHECK(mirror.empty());
+    CHECK(mirror.drain([](int, float) { return true; }) == 0);
 }
 
 TEST_CASE("control op names match the wire vocabulary") {

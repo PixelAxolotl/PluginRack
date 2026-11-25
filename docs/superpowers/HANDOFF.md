@@ -1,24 +1,35 @@
-# PluginRack — Handoff Document for Next Session/Agent
+# PluginRack - Handoff Document for Next Session/Agent
 
-## Fault containment (2026-11-13) — PARKED, diagnostics only
+## Fault containment (2026-11-13) - child DSP opt-in, parameter transport wired
 
 Read first: `docs/superpowers/plans/2026-11-13-plugin-fault-containment.md`
 §6.0 and `docs/superpowers/specs/2026-11-13-fault-containment-ipc.md` §7.1.
 
-- Branch `feat/audio-robustness` holds the whole attempt; `master` has none of
-  it (Fix 1 `5132a41` is already on master and must stay green).
-- Working today: `--test-child-host <vst3> [--kill-after-ms N]` renders one
-  plugin in a child process and proves the insert goes dry when the child is
-  killed; `--test-child-null <vst3>` proves child output is bit-identical to
-  in-process output (with a determinism baseline). Seven plugins identical at
-  48 kHz / 256.
-- Not wired: no insert in the app uses a child. The engine wiring was written,
-  crashed 4 of 8 twenty-second soaks under live device audio, and was reverted.
-- Resume gate: the four fixes in plan §6.0 (explicit renderer mode, safe host
-  lifetime, no prepare/control on the render path, serialised control calls).
-  Do not re-wire before those, and accept the result only on a 30-run soak with
-  zero crashes.
-- `PluginHost::setChildParameter()` is deliberately caller-less (Phase 2 entry).
+- The four §6.0 resume-gate fixes are in the tree: explicit `rendererMode_`
+  with a dry fallback (`PluginHost.cpp:1112-1116`), atomically published
+  `childHost_` (`PluginHost.h:230`), no child prepare/control round trip on an
+  unchanged format (`PluginHost::prepareToPlay`), and a serialised
+  `controlCall` that recovers its sequence after a timeout
+  (`PluginProcessHost.cpp:191-260`).
+- Child DSP is opt-in with `--child-dsp` (`MainComponent.cpp:315-319` →
+  `audioEngine.setChildProcessDsp(true)`); without it every insert loads
+  in-process. The default is unchanged.
+- Diagnostics: `--test-child-host <vst3> [--kill-after-ms N]` proves the insert
+  goes dry when the child is killed; `--test-child-null <vst3>` proves child
+  output is bit-identical to in-process; add `--param-edit` to also prove
+  parameter transport (every parameter is moved on both instances, the child
+  must still match sample for sample - verified on Harrison 3D Delay: 33
+  edits, reference moved 0.9076, 0 samples differing).
+- Parameter edits reach a child slot since 2026-11-25:
+  `PluginHost::parameterValueChanged` records into `PluginParamMirror`
+  (`app/src/PluginParamMirror.h`), a 30 Hz message-thread timer drains it into
+  the single-producer IPC ring, and a refused push or a gap the child counted
+  triggers `scheduleParamResync()` (full state push with a parameter-sequence
+  cutoff, off the message thread).
+- Still outstanding before child DSP becomes a default: the Stage 2 30-run
+  soak with zero crashes, plus the V9 rate/buffer sweep, V10 duplex and V7/V8
+  state round-trip from §11. Do not flip a default, persist a flag, or touch
+  the scene schema before that.
 
 ## Project Overview
 

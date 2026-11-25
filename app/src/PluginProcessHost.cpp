@@ -307,6 +307,12 @@ std::uint64_t PluginProcessHost::paramProducerSeq() const {
     return params->toHost.producerSeq.load(std::memory_order_acquire);
 }
 
+std::uint64_t PluginProcessHost::paramGapCount() const {
+    if (paramSection.data() == nullptr) return 0;
+    const auto* params = static_cast<const pluginHostIpc::ParamSection*>(paramSection.data());
+    return params->toHost.paramGapCount.load(std::memory_order_acquire);
+}
+
 bool PluginProcessHost::prepare(double sampleRate, int blockSize, int timeoutMs,
                                 juce::String& error) {
     auto* object = new juce::DynamicObject();

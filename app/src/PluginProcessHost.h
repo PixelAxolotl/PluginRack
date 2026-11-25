@@ -121,6 +121,11 @@ public:
     // and everything above it stays queued at the child.
     std::uint64_t paramProducerSeq() const;
 
+    // How many sequence gaps the child has counted while draining parameters.
+    // The parent polls it so a loss the child noticed while no new edit was
+    // being pushed still triggers a full state resync. Message thread.
+    std::uint64_t paramGapCount() const;
+
     // Whatever the child wrote to stdout, for the failure path. Only call this
     // after the child has exited: the output pipe blocks while it is open and
     // empty (see ControlSection::hostReady).

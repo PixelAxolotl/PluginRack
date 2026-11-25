@@ -1757,3 +1757,56 @@ TEST_CASE("a reload detaches the child host before it reaps it", "[app][ipc][aud
                                    "std::shared_ptr<PluginProcessHost> PluginHost::detachChildHost");
     CHECK(contains(host, "childHost_.exchange(nullptr"));
 }
+
+TEST_CASE("a child slot receives editor parameter edits from the message thread", "[app][ipc][audio]") {
+    const auto hostCpp = readSource("app/src/PluginHost.cpp");
+    const auto hostHeader = readSource("app/src/PluginHost.h");
+
+    // The listener can run on the plugin's audio thread and the parameter ring
+    // is single-producer, so it may only record the edit. Draining it into the
+    // ring belongs to the message-thread timer.
+    const auto changed = functionBody(hostCpp, "void PluginHost::parameterValueChanged");
+    CHECK(contains(changed, "paramMirror_.markDirty(parameterIndex, newValue);"));
+    CHECK_FALSE(contains(changed, "setParameter("));
+    CHECK_FALSE(contains(changed, "setChildParameter("));
+
+    const auto timer = functionBody(hostCpp, "void PluginHost::timerCallback()");
+    CHECK(contains(timer, "pushPendingChildParameters();"));
+    CHECK(contains(timer, "paramGapCount()"));
+    CHECK(contains(timer, "scheduleParamResync();"));
+
+    const auto push = functionBody(hostCpp, "void PluginHost::pushPendingChildParameters()");
+    CHECK(contains(push, "paramMirror_.drain("));
+    CHECK(contains(push, "setChildParameter(index, value)"));
+
+    // Publishing a child arms forwarding, and the state push that runs first
+    // already contains every edit made so far.
+    const auto adopt = functionBody(hostCpp, "bool PluginHost::adoptChildHost");
+    const auto publishIdx = adopt.find("childHost_.store(");
+    const auto armIdx = adopt.find("startChildParamForwarding();");
+    REQUIRE(publishIdx != std::string::npos);
+    REQUIRE(armIdx != std::string::npos);
+    CHECK(publishIdx < armIdx);
+
+    // Arming happens on the worker that finished the handshake; a JUCE timer
+    // must be started on the message thread.
+    const auto start = functionBody(hostCpp, "void PluginHost::startChildParamForwarding()");
+    CHECK(contains(start, "juce::MessageManager::callAsync"));
+    CHECK(contains(start, "paramMirror_.setArmed(true);"));
+
+    // Teardown paths stop feeding the ring.
+    CHECK(contains(functionBody(hostCpp, "void PluginHost::stopChildHost"),
+                   "stopChildParamForwarding();"));
+    CHECK(contains(functionBody(hostCpp, "std::shared_ptr<PluginProcessHost> PluginHost::detachChildHost"),
+                   "stopChildParamForwarding();"));
+
+    // A gap the child counted is polled, not only noticed on the next push.
+    CHECK(contains(readSource("app/src/PluginProcessHost.h"), "std::uint64_t paramGapCount() const;"));
+    CHECK(contains(readSource("app/src/PluginProcessHost.cpp"), "paramGapCount.load("));
+
+    const auto mirror = readSource("app/src/PluginParamMirror.h");
+    CHECK(contains(mirror, "void markDirty(int index, float value) noexcept"));
+    CHECK(contains(mirror, "std::size_t drain(Sink&& sink)"));
+    CHECK(contains(hostHeader, "#include \"PluginParamMirror.h\""));
+}
+

@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "PluginProcessHost.h"
+#include "PluginParamMirror.h"
 
 // Tracks the plugin file currently inside plugin code so a crash can be blamed
 // on it, and remembers plugins that crashed the app while loading. A plugin
@@ -31,7 +32,7 @@ bool record(const juce::String& path, int exitCode, std::uint32_t insertId);
 int clear(); // returns how many entries dropped
 } // namespace PluginFaultGuard
 
-class PluginHost : private juce::AudioProcessorParameter::Listener {
+class PluginHost : private juce::AudioProcessorParameter::Listener, private juce::Timer {
 public:
     // Result of instantiating a VST3 file. The instance is shared so it can be
     // built on a worker thread (instantiation blocks for as long as the plugin
@@ -139,14 +140,12 @@ public:
     // Mirrors an editor-side parameter change into the child. The value is
     // normalised (0..1), the same domain the plugin reports.
     //
-    // PARKED: no caller yet (13 Nov 2026). This is the Phase 2 entry point
-    // (plan task 2.1). Do not wire it before the four fixes in plan §6.0 -
-    // forwarding edits into the child while the renderer can still fall through
-    // to the in-process instance was part of the configuration that crashed.
-    // scheduleParamResync() (the ring-overflow and sequence-gap recovery) is
-    // only reachable through this call, so it stays dormant with it; a
-    // child-mode slot therefore renders its launch-time parameters until that
-    // gate opens.
+    // Wired since 25 Nov 2026: while a child is published, the message-thread
+    // timer drains the edits parameterValueChanged recorded into paramMirror_
+    // and pushes them here; a full ring or a gap the child counted is repaired
+    // with a full state push (scheduleParamResync). The listener itself never
+    // pushes - it may run on the plugin's audio thread and the ring is
+    // single-producer - so the audio thread only pays one atomic store per edit.
     bool setChildParameter(int parameterIndex, float normalisedValue);
     // Unpublishes the child and kills it. Only safe once the audio thread can no
     // longer reach this host: killAndReap() closes the Win32 events and unmaps
@@ -204,6 +203,18 @@ private:
     void parameterGestureChanged(int parameterIndex, bool gestureIsStarting) override;
     void attachParameterListeners();
     void detachParameterListeners();
+
+    // Child parameter forwarding (see setChildParameter). The listener records
+    // into paramMirror_; this timer is the only producer into the IPC ring, so
+    // both are message thread and the ring's single-producer contract holds.
+    void timerCallback() override;
+    void pushPendingChildParameters();
+    void startChildParamForwarding();
+    void stopChildParamForwarding();
+    PluginParamMirror paramMirror_;
+    // Baseline for the gap counter the child maintains: a new value means it
+    // dropped an edit while draining, which only a full state push repairs.
+    std::uint64_t observedParamGapCount_ = 0;
 
     std::shared_ptr<juce::AudioPluginInstance> plugin;
     mutable juce::CriticalSection pluginLock;

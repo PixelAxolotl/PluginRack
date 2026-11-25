@@ -250,6 +250,8 @@ PluginHost::~PluginHost() {
     // but a shared_ptr to the child host. Flip the token first so a queued
     // callback drops instead of touching a half-destroyed host.
     paramResyncAlive_->store(false, std::memory_order_release);
+    stopTimer();
+    stopChildParamForwarding();
     stopChildHost();
     delete editorWindow;
     editorWindow = nullptr;
@@ -262,10 +264,15 @@ PluginHost::~PluginHost() {
     }
 }
 
-void PluginHost::parameterValueChanged(int, float) {
+void PluginHost::parameterValueChanged(int parameterIndex, float newValue) {
     // Called from the plugin's UI or audio thread. The counter is only read by
     // the message-thread autosave, so a relaxed increment is enough.
     parameterRevision_.fetch_add(1, std::memory_order_relaxed);
+    // Child forwarding: one atomic store when armed (child published), nothing
+    // otherwise. The timer is the only producer into the parameter ring, so
+    // this stays realtime-safe even when the plugin reports from its audio
+    // thread.
+    paramMirror_.markDirty(parameterIndex, newValue);
 }
 
 void PluginHost::parameterGestureChanged(int, bool) {
@@ -277,6 +284,10 @@ void PluginHost::parameterGestureChanged(int, bool) {
 void PluginHost::attachParameterListeners() {
     // Requires pluginLock (the instance must not be replaced mid-iteration).
     if (plugin == nullptr) return;
+    // Size the child-forwarding mirror to this instance's parameter list while
+    // no callback can be in flight (detach happens first, and the listener lock
+    // serialises the two).
+    paramMirror_.resize(static_cast<std::size_t>(plugin->getParameters().size()));
     for (auto* parameter : plugin->getParameters())
         if (parameter != nullptr) parameter->addListener(this);
 }
@@ -400,9 +411,69 @@ bool PluginHost::adoptChildHost(std::unique_ptr<PluginProcessHost> host,
                      std::memory_order_release);
     auto published = childHost_.load(std::memory_order_acquire);
     rendererMode_.store(1, std::memory_order_release);
+    // The state push above already carries every edit made so far, so nothing
+    // is pending; arming after it keeps a stale entry from replaying over the
+    // restored state.
+    startChildParamForwarding();
     juce::Logger::writeToLog("plugin: child host ready (" + juce::String(published->childProcessId())
                              + ")");
     return true;
+}
+
+void PluginHost::startChildParamForwarding() {
+    // Arming is a single atomic store, so this is safe on the worker that
+    // finished the child handshake. Starting the timer is not: JUCE timers
+    // belong to the message thread, so the start hops there under the lifetime
+    // token (a slot torn down before the callback runs drops it).
+    paramMirror_.clear();
+    observedParamGapCount_ = 0;
+    if (auto host = childHost_.load(std::memory_order_acquire))
+        observedParamGapCount_ = host->paramGapCount();
+    paramMirror_.setArmed(true);
+    const auto alive = paramResyncAlive_;
+    juce::MessageManager::callAsync([this, alive] {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (!childHostEnabled()) return;
+        startTimerHz(30);
+    });
+}
+
+void PluginHost::stopChildParamForwarding() {
+    // Disarm only: the timer stops itself on its next tick once the child is
+    // gone, which keeps this callable from the worker that detaches a child.
+    paramMirror_.setArmed(false);
+    paramMirror_.clear();
+}
+
+void PluginHost::timerCallback() {
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host == nullptr || !host->isAlive()
+        || childFailed_.load(std::memory_order_acquire)) {
+        // Nothing to push to: a dead or failed child is repaired by the load
+        // path, not by parameter traffic. Message thread, so stopping here is
+        // legal even though the publish-side start had to hop.
+        stopTimer();
+        paramMirror_.setArmed(false);
+        return;
+    }
+    // A gap the child counted while draining means an edit it never applied.
+    // Edits are coalesced, so nothing else would notice it until the next knob
+    // move - and a plugin can sit untouched for hours.
+    const auto gaps = host->paramGapCount();
+    if (gaps != observedParamGapCount_) {
+        observedParamGapCount_ = gaps;
+        scheduleParamResync();
+    }
+    pushPendingChildParameters();
+}
+
+void PluginHost::pushPendingChildParameters() {
+    if (paramMirror_.empty()) return;
+    // A refused push (ring full) leaves the entry dirty, so the next tick
+    // retries the latest value; the same refusal also booked a state resync.
+    paramMirror_.drain([this](int index, float value) {
+        return setChildParameter(index, value);
+    });
 }
 
 bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
@@ -543,10 +614,12 @@ std::shared_ptr<PluginProcessHost> PluginHost::detachChildHost() {
     // the audio thread, and reaping closes the events and unmaps the views it
     // renders through. The caller reaps once it knows the audio thread is out
     // (AudioEngine::reloadInsert does it after leaving stateLock).
+    stopChildParamForwarding();
     return childHost_.exchange(nullptr, std::memory_order_acq_rel);
 }
 
 void PluginHost::stopChildHost() {
+    stopChildParamForwarding();
     auto host = childHost_.exchange(nullptr, std::memory_order_acq_rel);
     if (host != nullptr) {
         host->killAndReap();
