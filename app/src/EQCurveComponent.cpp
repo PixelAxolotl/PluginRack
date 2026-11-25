@@ -33,6 +33,55 @@ bool bandActive(const pluginrack::EqBand& band, bool anySolo) noexcept {
     return band.enabled && paramsFinite(band) && (!anySolo || band.solo);
 }
 
+// The coefficient set paint() and magnitudeDbAt() both use, built once per
+// band per curve rebuild instead of once per x-pixel.
+pluginrack::dsp::Biquad coefficientSet(const pluginrack::EqBand& band, double sampleRateHz) {
+    pluginrack::dsp::Biquad c{};
+    switch (band.type) {
+        case pluginrack::EqType::HighPass:
+            c = pluginrack::dsp::highPass(band.freqHz, sampleRateHz,
+                                          pluginrack::dsp::kButterworthQ);
+            break;
+        case pluginrack::EqType::LowPass:
+            c = pluginrack::dsp::lowPass(band.freqHz, sampleRateHz,
+                                         pluginrack::dsp::kButterworthQ);
+            break;
+        case pluginrack::EqType::LowShelf:
+            c = pluginrack::dsp::lowShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
+            break;
+        case pluginrack::EqType::Peak:
+            c = pluginrack::dsp::bell(band.freqHz, band.q, band.gainDb, sampleRateHz);
+            break;
+        case pluginrack::EqType::HighShelf:
+            c = pluginrack::dsp::highShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
+            break;
+    }
+    return c;
+}
+
+// |H(e^jw)| in dB for one coefficient set. Callers feed it a set they already
+// validated with pluginrack::dsp::isFinite; a degenerate denominator still
+// draws as no contribution, exactly as the old per-pixel path did.
+double magnitudeDbFromCoeffs(const pluginrack::dsp::Biquad& c, double hz, double sampleRateHz) {
+    const double b0 = c.b0, b1 = c.b1, b2 = c.b2, a1 = c.a1, a2 = c.a2;
+
+    // |H(e^jw)| = |b0 + b1 z^-1 + b2 z^-2| / |1 + a1 z^-1 + a2 z^-2|.
+    const double w = 2.0 * kPi * hz / sampleRateHz;
+    const double cw = std::cos(w);
+    const double sw = std::sin(w);
+    const double c2w = std::cos(2.0 * w);
+    const double s2w = std::sin(2.0 * w);
+    const double numRe = b0 + b1 * cw + b2 * c2w;
+    const double numIm = -(b1 * sw + b2 * s2w);
+    const double denRe = 1.0 + a1 * cw + a2 * c2w;
+    const double denIm = -(a1 * sw + a2 * s2w);
+
+    const double numMag = std::sqrt(numRe * numRe + numIm * numIm);
+    const double denMag = std::sqrt(denRe * denRe + denIm * denIm);
+    if (!(denMag > 0.0)) return 0.0; // guarded against a degenerate denominator
+    return 20.0 * std::log10(juce::jmax(1e-12, numMag / denMag));
+}
+
 juce::String freqLabel(int hz) {
     if (hz < 1000) return juce::String(hz);
     return juce::String(hz / 1000) + "k"; // label list only contains whole kHz
@@ -46,6 +95,7 @@ EQCurveComponent::EQCurveComponent() {
 
 void EQCurveComponent::setBands(const std::vector<pluginrack::EqBand>& newBands) {
     bands = newBands;
+    invalidateCurvePaths(); // enables/solos/freqs/gains/Q all ride in here
     repaint();
 }
 
@@ -53,6 +103,7 @@ void EQCurveComponent::setSampleRateHz(double rateHz) {
     if (!(rateHz > 0.0)) return; // non-positive ignored: keep the fallback
     if (sampleRateHz == rateHz) return;
     sampleRateHz = rateHz;
+    invalidateCurvePaths(); // every coefficient set depends on the rate
     repaint();
 }
 
@@ -60,7 +111,13 @@ void EQCurveComponent::setSelectedBand(int index) {
     if (index < 0 || index >= static_cast<int>(bands.size())) return;
     if (index == selectedBand) return;
     selectedBand = index;
+    invalidateCurvePaths(); // the dashed band path follows the selection
     repaint();
+}
+
+void EQCurveComponent::resized() {
+    // Paths are in pixel coordinates: a new size invalidates all three.
+    invalidateCurvePaths();
 }
 
 juce::Colour EQCurveComponent::bandColour(const pluginrack::EqBand& band) {
@@ -102,46 +159,11 @@ double EQCurveComponent::bandShapeDb(const pluginrack::EqBand& band,
     // Same coefficients the engine applies: the RBJ maths now lives once in
     // core DspMath (the old local copy's shelf alpha went NaN under the sqrt
     // for Q > 1, so a shelved curve could diverge from what you heard).
-    pluginrack::dsp::Biquad c{};
-    switch (band.type) {
-        case pluginrack::EqType::HighPass:
-            c = pluginrack::dsp::highPass(band.freqHz, sampleRateHz,
-                                          pluginrack::dsp::kButterworthQ);
-            break;
-        case pluginrack::EqType::LowPass:
-            c = pluginrack::dsp::lowPass(band.freqHz, sampleRateHz,
-                                         pluginrack::dsp::kButterworthQ);
-            break;
-        case pluginrack::EqType::LowShelf:
-            c = pluginrack::dsp::lowShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
-            break;
-        case pluginrack::EqType::Peak:
-            c = pluginrack::dsp::bell(band.freqHz, band.q, band.gainDb, sampleRateHz);
-            break;
-        case pluginrack::EqType::HighShelf:
-            c = pluginrack::dsp::highShelf(band.freqHz, band.q, band.gainDb, sampleRateHz);
-            break;
-    }
+    const auto c = coefficientSet(band, sampleRateHz);
     // Mirrors EqEngine's non-finite band guard: a poisoned coefficient set
     // draws as no contribution instead of dragging the curve to NaN.
     if (!pluginrack::dsp::isFinite(c)) return 0.0;
-    const double b0 = c.b0, b1 = c.b1, b2 = c.b2, a1 = c.a1, a2 = c.a2;
-
-    // |H(e^jw)| = |b0 + b1 z^-1 + b2 z^-2| / |1 + a1 z^-1 + a2 z^-2|.
-    const double w = 2.0 * kPi * hz / sampleRateHz;
-    const double cw = std::cos(w);
-    const double sw = std::sin(w);
-    const double c2w = std::cos(2.0 * w);
-    const double s2w = std::sin(2.0 * w);
-    const double numRe = b0 + b1 * cw + b2 * c2w;
-    const double numIm = -(b1 * sw + b2 * s2w);
-    const double denRe = 1.0 + a1 * cw + a2 * c2w;
-    const double denIm = -(a1 * sw + a2 * s2w);
-
-    const double numMag = std::sqrt(numRe * numRe + numIm * numIm);
-    const double denMag = std::sqrt(denRe * denRe + denIm * denIm);
-    if (!(denMag > 0.0)) return 0.0; // guarded against a degenerate denominator
-    return 20.0 * std::log10(juce::jmax(1e-12, numMag / denMag));
+    return magnitudeDbFromCoeffs(c, hz, sampleRateHz);
 }
 
 double EQCurveComponent::magnitudeDbAt(double hz) const {
@@ -212,12 +234,89 @@ float EQCurveComponent::spectrumY(double hz) const {
         spectrumOffsetDb, weighting, hz));
 }
 
+void EQCurveComponent::rebuildCurvePaths() {
+    curvePathsDirty = false;
+    cachedCombinedPath.clear();
+    cachedCombinedFill.clear();
+    cachedSelectedPath.clear();
+    cachedBandShapes.clear();
+
+    const int w = getWidth();
+    const int h = getHeight();
+    if (w < 40 || h < 40 || bands.empty()) return; // nothing drawable yet
+
+    // --- the active-band rule EqEngine::rebuild applies, evaluated once.
+    bool anySolo = false;
+    for (const auto& band : bands) {
+        if (band.solo) { anySolo = true; break; }
+    }
+
+    cachedBandShapes.resize(bands.size());
+    bool anyContribution = false;
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+        if (!bandActive(bands[i], anySolo)) continue;
+        const auto coeffs = coefficientSet(bands[i], sampleRateHz);
+        if (!pluginrack::dsp::isFinite(coeffs)) continue; // draws no contribution
+        cachedBandShapes[i].coeffs = coeffs;
+        cachedBandShapes[i].contributes = true;
+        anyContribution = true;
+    }
+
+    // The selected band is drawn on its own even when bypassed or outside the
+    // solo set (it has always been: only a non-finite set flattens it to 0 dB).
+    const bool hasSelected = selectedBand >= 0 && selectedBand < static_cast<int>(bands.size());
+    pluginrack::dsp::Biquad selectedCoeffs{};
+    bool selectedFinite = false;
+    if (hasSelected) {
+        selectedCoeffs = coefficientSet(bands[static_cast<std::size_t>(selectedBand)], sampleRateHz);
+        selectedFinite = pluginrack::dsp::isFinite(selectedCoeffs);
+    }
+
+    // --- sample the magnitude at the same pixel pitch paint() used to take.
+    for (int x = 0; x <= w; x += kCurveStepPx) {
+        const float px = static_cast<float>(x);
+        const double freqHz = xToFreq(px);
+
+        double totalDb = 0.0;
+        if (anyContribution) {
+            for (const auto& shape : cachedBandShapes) {
+                if (shape.contributes)
+                    totalDb += magnitudeDbFromCoeffs(shape.coeffs, freqHz, sampleRateHz);
+            }
+        }
+        const float y = gainToY(totalDb);
+        if (x == 0) cachedCombinedPath.startNewSubPath(px, y);
+        else cachedCombinedPath.lineTo(px, y);
+
+        if (hasSelected) {
+            const double bandDb = selectedFinite
+                ? magnitudeDbFromCoeffs(selectedCoeffs, freqHz, sampleRateHz)
+                : 0.0;
+            const float bandY = gainToY(bandDb);
+            if (x == 0) cachedSelectedPath.startNewSubPath(px, bandY);
+            else cachedSelectedPath.lineTo(px, bandY);
+        }
+    }
+
+    // Fill under the combined curve: the closed copy paint() used to build.
+    cachedCombinedFill = cachedCombinedPath;
+    cachedCombinedFill.lineTo(static_cast<float>(w), gainToY(0.0));
+    cachedCombinedFill.lineTo(0.0f, gainToY(0.0));
+    cachedCombinedFill.closeSubPath();
+}
+
 void EQCurveComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::strip());
 
     const int w = getWidth();
     const int h = getHeight();
     if (w < 40 || h < 40 || bands.empty()) return;
+
+    // Fonts and strokes never change between frames: build them once.
+    static const juce::Font labelFont{juce::FontOptions(9.0f)};
+    static const juce::Font dbFont{juce::FontOptions(8.0f)};
+    static const juce::PathStrokeType combinedStroke{2.0f};
+    static const juce::PathStrokeType selectedStroke{1.0f};
 
     // --- grid: 20 Hz - 20 kHz log X, +/-15 dB linear Y (0 dB line heavier).
     for (const double f : kGridFreqs) {
@@ -226,7 +325,7 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         g.setColour(edge ? theme::border() : theme::border().withAlpha(0.35f));
         g.drawLine(x, 0.0f, x, static_cast<float>(h), edge ? 1.0f : 0.5f);
     }
-    g.setFont(juce::Font(juce::FontOptions(9.0f)));
+    g.setFont(labelFont);
     for (const int f : kLabelFreqs) {
         const float x = freqToX(static_cast<double>(f));
         g.setColour(theme::dim().withAlpha(0.8f));
@@ -243,7 +342,7 @@ void EQCurveComponent::paint(juce::Graphics& g) {
         g.drawLine(0.0f, y, static_cast<float>(w), y, db == 0 ? 1.0f : 0.5f);
         g.setColour(theme::dim().withAlpha(0.9f));
         g.fillRect(0.0f, y - 0.5f, 6.0f, 1.0f);
-        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        g.setFont(dbFont);
         // Clamped inside the component: the top and bottom marks used to be
         // half-drawn outside the curve's bounds.
         const int labelY = juce::jlimit(0, juce::jmax(0, h - 12), static_cast<int>(y) - 6);
@@ -263,37 +362,27 @@ void EQCurveComponent::paint(juce::Graphics& g) {
                                           spectrumOffsetDb, weighting);
     }
 
-    // --- combined magnitude (yellow): dB sum of the active bands' responses,
-    // via the same magnitudeDbAt the sine-vs-curve verification checks.
-    auto paintCurve = [&](int index, juce::Colour colour, float thickness, bool fill) {
-        juce::Path curve;
-        for (int x = 0; x <= w; x += kCurveStepPx) {
-            const double f = xToFreq(static_cast<float>(x));
-            const double totalDb = (index >= 0)
-                ? bandShapeDb(bands[static_cast<std::size_t>(index)], sampleRateHz, f)
-                : magnitudeDbAt(f);
-            const float y = gainToY(totalDb);
-            if (x == 0) curve.startNewSubPath(static_cast<float>(x), y);
-            else curve.lineTo(static_cast<float>(x), y);
-        }
-        if (fill) {
-            juce::Path filled = curve;
-            filled.lineTo(static_cast<float>(w), gainToY(0.0));
-            filled.lineTo(0.0f, gainToY(0.0));
-            filled.closeSubPath();
-            g.setColour(colour.withAlpha(0.14f));
-            g.fillPath(filled);
-        }
-        g.setColour(colour);
-        g.strokePath(curve, juce::PathStrokeType(thickness));
-    };
+    // --- combined magnitude (yellow): dB sum of the active bands' responses.
+    // The geometry (one biquad coefficient set per band, sampled at the same
+    // pixel pitch) is rebuilt only when curvePathsDirty is set; magnitudeDbAt
+    // answers the same maths for verification.
+    if (curvePathsDirty) rebuildCurvePaths();
 
-    paintCurve(-1, theme::amber(), 2.0f, true); // combined
+    if (!cachedCombinedPath.isEmpty()) {
+        if (!cachedCombinedFill.isEmpty()) {
+            g.setColour(theme::amber().withAlpha(0.14f));
+            g.fillPath(cachedCombinedFill);
+        }
+        g.setColour(theme::amber()); // combined
+        g.strokePath(cachedCombinedPath, combinedStroke);
+    }
 
-    // Selected band alone, dashed in its band colour (drawn under the nodes).
-    if (selectedBand >= 0 && selectedBand < static_cast<int>(bands.size()))
-        paintCurve(selectedBand, bandColour(bands[static_cast<std::size_t>(selectedBand)]).withAlpha(0.55f),
-                   1.0f, false);
+    // Selected band alone in its band colour, drawn under the nodes.
+    if (selectedBand >= 0 && selectedBand < static_cast<int>(bands.size())
+        && !cachedSelectedPath.isEmpty()) {
+        g.setColour(bandColour(bands[static_cast<std::size_t>(selectedBand)]).withAlpha(0.55f));
+        g.strokePath(cachedSelectedPath, selectedStroke);
+    }
 
     // --- nodes (band colours; dimmed when bypassed, ringed when selected).
     for (int i = 0; i < static_cast<int>(bands.size()); ++i) {
@@ -357,6 +446,7 @@ void EQCurveComponent::mouseDoubleClick(const juce::MouseEvent& e) {
     band = factory; // original type, frequency, gain, Q, enabled and solo
     dragBand = -1;
     setSelectedBand(index);
+    invalidateCurvePaths(); // the band change landed directly in the vector
     repaint();
     if (onBandsChanged) onBandsChanged();
 }
@@ -370,6 +460,7 @@ void EQCurveComponent::mouseDrag(const juce::MouseEvent& e) {
         band.gainDb = static_cast<float>(std::round(yToGain(e.position.getY()) * 10.0) / 10.0);
     }
 
+    invalidateCurvePaths(); // band moved under paint's feet
     repaint();
     if (onBandsChanged) onBandsChanged();
 }

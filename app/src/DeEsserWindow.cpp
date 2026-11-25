@@ -3,6 +3,21 @@
 #include "AnalyzerConfig.h"
 #include <algorithm>
 #include <cmath>
+
+namespace {
+// Analyzer idle gate shared by the FFT panels: a block whose loudest sample
+// is below this reads as digital silence for display purposes.
+constexpr float kSilentTapPeak = 1.0e-7f;
+
+// True once every smoothed bin has settled at the -100 dBFS display floor, so
+// a silent tap cannot move the trace (and the FFT would redraw nothing).
+bool spectrumSettledAtFloor(const std::vector<float>& bins) {
+    for (const float db : bins)
+        if (db > -99.9f) return false;
+    return true;
+}
+} // namespace
+
 using namespace pluginrack;
 
 DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& initialEffect,
@@ -173,6 +188,9 @@ void DeEsserWindow::setBypassed(bool b) { effect.bypassed = b; enableButton.setT
 void DeEsserWindow::setAnalyzerMode(int m) { if (m == 0) stopTimer(); else startTimer(33); }
 
 void DeEsserWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the taps, the FFT and the paint
+    // until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     // Two pulls of the same buffers: the gain-reduction trace models the
     // sibilance detector's input, so it reads the pre-effect ring; the RTA
     // shows what the de-esser actually passed, so it reads the post ring.
@@ -185,10 +203,17 @@ void DeEsserWindow::timerCallback() {
     gainReductionDb = std::abs(deEsserStaticGainDb(levelDb, effect));
 
     if (pullAnalyzerTap) pullAnalyzerTap(true, tapL.data(), tapR.data(), kAnalyzerFftSize);
+    float tapPeak = 0.0f;
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const std::size_t idx = static_cast<std::size_t>(i);
         fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
+        tapPeak = std::max(tapPeak, std::max(std::abs(tapL[idx]), std::abs(tapR[idx])));
     }
+    // Digital silence and a smoothed trace already resting on the floor: the
+    // FFT could only redraw the same flat line, so skip it (and the repaint)
+    // until audio returns. Both tap pulls above still run.
+    if (tapPeak < kSilentTapPeak && spectrumSettledAtFloor(spectrumAvg)) return;
+
     analyzerFft->performFrequencyOnlyForwardTransform(fftScratch.data(), true);
     constexpr float normalisation = 4.0f / static_cast<float>(kAnalyzerFftSize);
     for (std::size_t i = 0; i < spectrumDb.size(); ++i) {
@@ -200,11 +225,16 @@ void DeEsserWindow::timerCallback() {
         float& held = spectrumAvg[bin];
         held += (fresh - held) * (fresh > held ? 0.6f : 0.15f);
     }
-    graph.setFrequencyData(FrequencyTraceData{
-        {}, spectrumAvg,
-        makeDeEsserGainReductionTrace(effect, gainReductionDb, spectrumAvg.size()),
-        sampleRateHz, spectrumOffsetDb, weighting});
-    graph.repaint();
+    // Fill the member trace in place: its vectors keep their capacity, so a
+    // tick no longer builds a fresh FrequencyTraceData with three copies.
+    // targetDb stays empty (no target curve on this panel).
+    frequencyTrace.activityDb.assign(spectrumAvg.begin(), spectrumAvg.end());
+    frequencyTrace.reductionDb =
+        makeDeEsserGainReductionTrace(effect, gainReductionDb, spectrumAvg.size());
+    frequencyTrace.spectrumSampleRateHz = sampleRateHz;
+    frequencyTrace.spectrumDisplayOffsetDb = spectrumOffsetDb;
+    frequencyTrace.spectrumWeighting = weighting;
+    graph.setFrequencyData(frequencyTrace);
 }
 
 void DeEsserWindow::paint(juce::Graphics& g) {

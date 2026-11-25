@@ -428,6 +428,7 @@ public:
                 else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
                 else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
+                else if (tok == "patches" || tok == "patch") shotView = AppView::Patches;
                 else if (tok == "multiband" || tok == "deesser" || tok == "limiter"
                          || tok == "spectral" || tok == "feedback") shotEffect = tok;
                 else if (tok.containsOnly("0123456789")) {

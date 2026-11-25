@@ -327,16 +327,40 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     const std::uint64_t frameStart = inputSamples_ - fftSize;
     const std::size_t oldest = inputWrite_;
 
+    // Stereo-packed frame: one complex FFT carries both channels. The real
+    // part holds the windowed left input, the imaginary part the windowed
+    // right input, so X[k] = L[k] + j R[k] for the two real spectra. This
+    // halves the transforms per hop and leaves every later stage unchanged.
     for (std::size_t n = 0; n < fftSize; ++n) {
         const std::size_t source = (oldest + n) & (fftSize - 1);
         const float w = window_[n];
         reLeft_[n] = inputLeft_[source] * w;
-        imLeft_[n] = 0.0f;
-        reRight_[n] = inputRight_[source] * w;
-        imRight_[n] = 0.0f;
+        imLeft_[n] = inputRight_[source] * w;
     }
     fft(reLeft_, imLeft_, false);
-    fft(reRight_, imRight_, false);
+
+    // Split X back into the two Hermitian spectra. For real L and R,
+    // conj(X[N-k]) = L[k] - j R[k], hence
+    //   L[k] = (X[k] + conj(X[N-k])) / 2
+    //   R[k] = (X[k] - conj(X[N-k])) / (2j),
+    // which expands to the assignments below. The DC bin (k = 0) and Nyquist
+    // bin (k = N/2) pair with themselves -- their mirror index is the bin
+    // itself -- and the formula collapses to L = (Re X, 0), R = (Im X, 0).
+    // Both are real there, as a real signal's DC and Nyquist bins must be.
+    const std::size_t fftMask = fftSize - 1;
+    const auto unpackBin = [this, fftSize, fftMask](std::size_t k, float& leftRe,
+                                                    float& leftIm, float& rightRe,
+                                                    float& rightIm) noexcept {
+        const std::size_t mirror = (fftSize - k) & fftMask;
+        const float xr = reLeft_[k];
+        const float xi = imLeft_[k];
+        const float yr = reLeft_[mirror];
+        const float yi = imLeft_[mirror];
+        leftRe = 0.5f * (xr + yr);
+        leftIm = 0.5f * (xi - yi);
+        rightRe = 0.5f * (xi + yi);
+        rightIm = 0.5f * (yr - xr);
+    };
 
     if (learnRequest_.exchange(false, std::memory_order_acq_rel)) {
         std::fill(learnSum_.begin(), learnSum_.end(), 0.0);
@@ -359,8 +383,13 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
         * 0.01f;
 
     for (std::size_t k = 0; k < bins; ++k) {
-        const float powerLeft = reLeft_[k] * reLeft_[k] + imLeft_[k] * imLeft_[k];
-        const float powerRight = reRight_[k] * reRight_[k] + imRight_[k] * imRight_[k];
+        float leftRe = 0.0f;
+        float leftIm = 0.0f;
+        float rightRe = 0.0f;
+        float rightIm = 0.0f;
+        unpackBin(k, leftRe, leftIm, rightRe, rightIm);
+        const float powerLeft = leftRe * leftRe + leftIm * leftIm;
+        const float powerRight = rightRe * rightRe + rightIm * rightIm;
         const float power = std::max(0.5f * (powerLeft + powerRight), 0.0f);
 
         if (learning) {
@@ -493,32 +522,39 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
         bandReductionDb_[band].store(reduction, std::memory_order_relaxed);
     }
 
+    // Apply the masks in the split domain, then pack Z[k] = L'[k] + j R'[k]
+    // for one inverse FFT. The negative bins follow from Hermitian symmetry:
+    // Z[N-k] = conj(L'[k] - j R'[k]). Writing Z into reRight_/imRight_ keeps
+    // the packed forward spectrum in reLeft_/imLeft_ readable for the unpack.
     for (std::size_t k = 0; k < bins; ++k) {
+        float leftRe = 0.0f;
+        float leftIm = 0.0f;
+        float rightRe = 0.0f;
+        float rightIm = 0.0f;
+        unpackBin(k, leftRe, leftIm, rightRe, rightIm);
         const float maskLeft = useSideMasks ? smoothGainLeft_[k] : smoothGain_[k];
         const float maskRight = useSideMasks ? smoothGainRight_[k] : smoothGain_[k];
-        reLeft_[k] *= maskLeft;
-        imLeft_[k] *= maskLeft;
-        reRight_[k] *= maskRight;
-        imRight_[k] *= maskRight;
-        if (k == 0 || k + 1 == bins) {
-            continue;
+        leftRe *= maskLeft;
+        leftIm *= maskLeft;
+        rightRe *= maskRight;
+        rightIm *= maskRight;
+        reRight_[k] = leftRe - rightIm;
+        imRight_[k] = leftIm + rightRe;
+        const std::size_t mirror = (fftSize - k) & fftMask;
+        if (mirror != k) {
+            reRight_[mirror] = leftRe + rightIm;
+            imRight_[mirror] = rightRe - leftIm;
         }
-        // Mirror the mask onto the negative frequencies so the inverse
-        // transform stays real.
-        const std::size_t mirror = static_cast<std::size_t>(kSpectralDenoiserFftSize) - k;
-        reLeft_[mirror] *= maskLeft;
-        imLeft_[mirror] *= maskLeft;
-        reRight_[mirror] *= maskRight;
-        imRight_[mirror] *= maskRight;
     }
-    fft(reLeft_, imLeft_, true);
     fft(reRight_, imRight_, true);
 
+    // The inverse transform is Z[n] = L_out[n] + j R_out[n]; its real and
+    // imaginary parts are the reconstructed frames fed to the same OLA path.
     for (std::size_t n = 0; n < fftSize; ++n) {
         const float w = window_[n] * overlapNorm_;
         const auto slot = static_cast<std::size_t>((frameStart + n) & kOverlapMask);
-        overlapLeft_[slot] += reLeft_[n] * w;
-        overlapRight_[slot] += reRight_[n] * w;
+        overlapLeft_[slot] += reRight_[n] * w;
+        overlapRight_[slot] += imRight_[n] * w;
     }
 }
 

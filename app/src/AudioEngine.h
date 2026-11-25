@@ -66,6 +66,14 @@ public:
         // Peak of the side-chain key the audio thread last fed to this insert,
         // with a light decay so the metering in the racks bar stays readable.
         juce::Atomic<float> sideChainKeyPeak{0.0f};
+        // The resolved side-chain source, cached on the message thread whenever
+        // the routing or the strip vectors change
+        // (refreshAllSideChainCachesLocked). render() then skips the per-insert
+        // find_if over channels/outputs/buses; a null pointer means nothing was
+        // resolved (no source, or an id that no longer exists) and render falls
+        // back to the keyed lookup, writing the answer back into the cache.
+        const juce::AudioBuffer<float>* sideChainSourceBuffer = nullptr;
+        bool sideChainSourceMono = false;
         // Written by the message thread without stateLock (bypass/reload paths)
         // and read by render and the latency report under it, so it is atomic.
         std::atomic<int> latencySamples{0};
@@ -84,6 +92,38 @@ public:
         juce::Atomic<int> failExitCode{0};
         // Records to faults.json exactly once per failure transition.
         juce::Atomic<bool> faultRecorded{false};
+    };
+
+    // One pre-resolved step of a strip's render pass. render() used to walk
+    // `chain` and search the effect/insert vectors for every row and every
+    // slice; buildRenderPlan does that once on the message thread so the audio
+    // thread only switches on `type` and indexes a vector. The two step lists
+    // reproduce the old passes exactly: renderSteps is the chain in order,
+    // fallbackSteps is the unchained-family pass (and the unchained EQ) that
+    // runs after it.
+    struct RenderStep {
+        pluginrack::ChainItemType type = pluginrack::ChainItemType::Insert;
+        // Index into the matching effect vector (and its parallel processor
+        // vector); size_t(-1) when the row names nothing the strip still owns.
+        std::size_t index = std::size_t(-1);
+        std::uint32_t itemId = 0;
+        // True for the one chain row that owns this item's Item tap - the row
+        // pluginrack::firstChainItemIndex resolves. Later rows that share the
+        // id must not push, so the ring and the billed latency stay on the
+        // first row.
+        bool tapOwned = false;
+        // Resolved VST slot for an Insert row; nullptr when the id is gone.
+        InsertSlot* insert = nullptr;
+    };
+
+    // One pass over a stereo block for the meter: peak and RMS per side, read
+    // once per channel. render() used to make four separate AudioBuffer passes
+    // (two getMagnitude, two getRMSLevel) over the same samples.
+    struct StereoMeterSample {
+        float peakL = 0.0f;
+        float peakR = 0.0f;
+        float rmsL = 0.0f;
+        float rmsR = 0.0f;
     };
 
     // Task 6 analyzer tap: when an EQ window turns the spectrum on, render()
@@ -129,6 +169,9 @@ public:
     struct TapPoint {
         pluginrack::Tap tap;
         pluginrack::DelayRing ring;
+        // tapLatencySamples() for this point, refreshed with the render plan so
+        // a send or route never re-walks the chain to bill its delay.
+        int cachedLatencySamples = 0;
     };
 
     struct Channel {
@@ -166,6 +209,18 @@ public:
         // The post-fader snapshot, delayed for tap compensation. Always sized;
         // output taps read it when a shorter path needs padding.
         pluginrack::DelayRing outputTapRing;
+        // Pre-resolved render plan (see RenderStep). rebuildRenderPlan fills
+        // both lists on the message thread under stateLock; render() only walks
+        // them, so a slice never scans the chain or the effect/insert vectors.
+        std::vector<RenderStep> renderSteps;
+        // The unchained families in fallback-pass order, ending with the EQ
+        // when the chain has no Eq row.
+        std::vector<RenderStep> fallbackSteps;
+        bool hasEqInChain = false;
+        // chainLatencySamples() for this strip, kept in step with the plan and
+        // refreshed whenever it or an insert's latency changes. The audio
+        // thread reads it once per block instead of re-walking the chain.
+        int cachedChainLatencySamples = 0;
         // Six-band channel EQ, tapped before the inserts (pre-fader), mirroring
         // core MixerEngine. Bypassed by default to match scene v3 eqEnabled=false
         // and keep output bit-identical to the pre-EQ engine. eq/eqBands are
@@ -268,6 +323,11 @@ public:
         // Holds the finished bus so its route can be delayed against a longer
         // path (PDC). Always sized; unused until compensation pads it.
         pluginrack::DelayRing compensation;
+        // Pre-resolved render plan; same rules as Channel's pair.
+        std::vector<RenderStep> renderSteps;
+        std::vector<RenderStep> fallbackSteps;
+        bool hasEqInChain = false;
+        int cachedChainLatencySamples = 0;
         // Output EQ, tapped before the output inserts, mirroring core's
         // pre-master-write output tap. Same locking rules as Channel.
         pluginrack::EqEngine eq;
@@ -532,7 +592,8 @@ public:
     // so a move only reshuffles the scene order.
     void moveOutput(std::uint32_t outputId, int targetIndex);
     void addOutput();
-    juce::String removeOutput(std::uint32_t outputId);    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
+    juce::String removeOutput(std::uint32_t outputId);
+    juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String setDeviceBufferSize(int size);
     juce::String setInputBufferSize(int size);
@@ -745,6 +806,20 @@ public:
 
     const std::vector<std::unique_ptr<Channel>>& getChannels() const;
     double getSampleRate() const;
+    // Lock-free mirror of getSampleRate for the UI timers. The engine rate is
+    // published to atomicSampleRate_ wherever currentSampleRate is written
+    // (the clock output's open path), so a view can follow it without taking
+    // stateLock; getLatencyReport() is a try-lock and can fail.
+    double getCurrentSampleRate() const noexcept {
+        return atomicSampleRate_.load(std::memory_order_relaxed);
+    }
+    // Monotonic counter bumped once by every public mutator that changes state
+    // a scene save would write. The autosave poll compares it with the plugin
+    // parameter revision and only serialises the scene when one moved. It is a
+    // plain atomic load: callable from the message thread without stateLock.
+    std::uint64_t getStructureRevision() const noexcept {
+        return structureRevision_.load(std::memory_order_relaxed);
+    }
     // Delay the strip's chain adds at the engine's current rate, from the same
     // rule table render charges tap compensation with (chainItemLatencySamples:
     // inserts, chained denoisers, non-bypassed limiters, the EQ delay line,
@@ -935,6 +1010,18 @@ private:
     InsertSlot* findInsert(std::uint32_t channelId, std::uint32_t insertId);
     Output* findOutput(std::uint32_t outputId);
     InsertSlot* findOutputInsert(std::uint32_t outputId, std::uint32_t insertId);
+    // Publishes a scene-persisted edit to the autosave poll (see
+    // getStructureRevision). Each public mutator whose change a save would
+    // write calls this exactly once, however many render plans it rebuilds.
+    // The audio thread never calls it.
+    void bumpStructureRevision() noexcept {
+        structureRevision_.fetch_add(1, std::memory_order_relaxed);
+    }
+    // Device assignment with the startup guard and the stale-measurement reset
+    // but no revision bump: the layout/mapping setters call it and bump once
+    // for the whole logical edit, so it is not counted twice.
+    juce::String reassignChannelInputDevice(std::uint32_t channelId,
+                                            const juce::String& deviceName);
 
     // Tap plumbing: a channel keeps one ring per tap that a send or route
     // points at. Rings are allocated on the message thread under stateLock;
@@ -942,6 +1029,24 @@ private:
     void ensureTapPoint(Channel& channel, const pluginrack::Tap& tap);
     TapPoint* findTapPoint(Channel& channel, const pluginrack::Tap& tap);
     const TapPoint* findTapPoint(const Channel& channel, const pluginrack::Tap& tap) const;
+    // Resolve a strip's chain and its unchained-fallback pass into
+    // renderSteps/fallbackSteps, then refresh cachedChainLatencySamples and
+    // every TapPoint's cached latency. Requires stateLock; called from every
+    // setter that changes the chain, an effect vector, the inserts, the EQ
+    // state or the sample rate (see the report for the full list).
+    void rebuildRenderPlan(Channel& channel, double sampleRate);
+    void rebuildRenderPlan(Output& output, double sampleRate);
+    // Resolve the side-chain source of one insert from its current settings.
+    // Requires stateLock; returns nullptr when no strip carries the id.
+    const juce::AudioBuffer<float>* resolveSideChainSource(const InsertSlot& insert,
+                                                           bool& mono) const;
+    // Re-resolve every insert's cached side-chain source. Requires stateLock;
+    // called after any change that can invalidate a cached strip pointer.
+    void refreshAllSideChainCachesLocked();
+    // Peak and RMS for both sides in one read pass. Same numbers as two
+    // getMagnitude() plus two getRMSLevel() calls over the same range.
+    static StereoMeterSample measureStereoBlock(const juce::AudioBuffer<float>& buffer,
+                                                int frames) noexcept;
     // Latency a strip's chain adds, and how much of it sits before a tap.
     // One rule table, shared with tapLatencySamples and getLatencyReport:
     // an insert reports its plugin latency; a denoiser named by the chain
@@ -994,7 +1099,7 @@ private:
         for (const auto& item : strip.chain)
             total += chainItemLatencySamples(strip, item, sampleRate);
         // Effects with no chain row still run through render()'s fallback pass
-        // (processNewMissing), so a route delay that ignored them would drift
+        // (runFallbackSteps), so a route delay that ignored them would drift
         // against the dry path. Only an effect that actually runs counts, and
         // coverage is per family: ids are unique inside a family but a default
         // Dynamics and a default Limiter both use id 1, so one id-keyed set
@@ -1125,6 +1230,13 @@ private:
     std::uint32_t nextOutputId = 1;
     std::uint32_t nextInsertId = 1;
     double currentSampleRate = 48000.0;
+    // Published with currentSampleRate so getCurrentSampleRate() can be read
+    // from a UI timer without contending for stateLock.
+    std::atomic<double> atomicSampleRate_{48000.0};
+    // Bumped by bumpStructureRevision() on every scene-persisted edit; read
+    // lock-free by MainComponent::pollSceneChanges to skip the scene
+    // serialisation when nothing changed.
+    std::atomic<std::uint64_t> structureRevision_{0};
     int currentBufferSize = 256;
     // Read by background device-opener workers while applySettingsValues writes
     // it on the message thread, so it is atomic.

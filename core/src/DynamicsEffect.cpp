@@ -43,6 +43,18 @@ void DynamicsProcessor::process(float* left, float* right, int frames) noexcept 
     const float release = dsp::smoothingCoeff(sampleRate_, std::max(effect_.releaseMs, 10.0f));
     const float inputGain = dsp::dbToGain(effect_.inputGainDb);
     const float makeup = dsp::dbToGain(effect_.makeupDb);
+    // Gain-domain knee edges, hoisted out of the sample loop so the branches
+    // can compare envelopes directly. Only the soft-knee blend still needs
+    // dB; below/above the knee the same curve is a plain gain or one pow.
+    const float gateRange = std::max(effect_.ratio, 0.0f);
+    const float knee = std::max(effect_.kneeDb, 0.0f);
+    const float halfKnee = knee * 0.5f;
+    const float thresholdDb = effect_.thresholdDb;
+    const float thresholdGain = dsp::dbToGain(thresholdDb);
+    const float lowKneeGain = dsp::dbToGain(thresholdDb - halfKnee);
+    const float highKneeGain = dsp::dbToGain(thresholdDb + halfKnee);
+    const float rangeGain = dsp::dbToGain(-gateRange);
+    const float compSlope = 1.0f / ratio - 1.0f;
 
     for (int i = 0; i < frames; ++i) {
         // A single non-finite sample (or non-finite trim) must not poison the
@@ -56,30 +68,28 @@ void DynamicsProcessor::process(float* left, float* right, int frames) noexcept 
         const float level = std::max(std::fabs(sL), std::fabs(sR));
         envelope_ += (level - envelope_) * (level > envelope_ ? attack : release);
         dsp::flushState(envelope_);
-        const float levelDb = dsp::gainToDb(envelope_);
-        float targetDb = 0.0f;
+        // staticGain is the curve's gain without makeup; the dB form below is
+        // the only path that still converts, and only inside the knee.
+        float staticGain = 1.0f;
         if (gate) {
             // Downward expander: below the threshold the output drops by Range
             // dB (stored in ratio), and the knee spreads that corner.
-            const float range = std::max(effect_.ratio, 0.0f);
-            const float knee = std::max(effect_.kneeDb, 0.0f);
-            const float distance = levelDb - effect_.thresholdDb;
-            if (knee > 0.0f && distance < knee * 0.5f && distance > -knee * 0.5f) {
-                targetDb = -range * (knee * 0.5f - distance) / knee;
-            } else if (distance <= -knee * 0.5f) {
-                targetDb = -range;
+            if (knee > 0.0f && envelope_ > lowKneeGain && envelope_ < highKneeGain) {
+                const float distance = dsp::gainToDb(envelope_) - thresholdDb;
+                staticGain = dsp::dbToGain(-gateRange * (halfKnee - distance) / knee);
+            } else if (envelope_ <= lowKneeGain) {
+                staticGain = rangeGain;
             }
-        } else {
-            const float knee = std::max(effect_.kneeDb, 0.0f);
-            const float distance = levelDb - effect_.thresholdDb;
-            if (knee > 0.0f && distance > -knee * 0.5f && distance < knee * 0.5f) {
-                const float compressed = distance + knee * 0.5f;
-                targetDb = (1.0f / ratio - 1.0f) * compressed * compressed / (2.0f * knee);
-            } else if (distance > 0.0f) {
-                targetDb = effect_.thresholdDb + distance / ratio - levelDb;
-            }
+        } else if (knee > 0.0f && envelope_ > lowKneeGain && envelope_ < highKneeGain) {
+            const float distance = dsp::gainToDb(envelope_) - thresholdDb;
+            const float compressed = distance + halfKnee;
+            staticGain = dsp::dbToGain(compSlope * compressed * compressed / (2.0f * knee));
+        } else if (envelope_ > thresholdGain) {
+            // Above the knee: dB gain is compSlope * distance, i.e.
+            // 10^(compSlope*distance/20) = (envelope/threshold)^compSlope.
+            staticGain = std::pow(envelope_ / thresholdGain, compSlope);
         }
-        const float targetGain = dsp::dbToGain(targetDb) * makeup;
+        const float targetGain = staticGain * makeup;
         const float gainRate = targetGain < gain_ ? attack : release;
         gain_ += (targetGain - gain_) * gainRate;
         dsp::flushState(gain_);

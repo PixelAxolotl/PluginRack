@@ -25,6 +25,37 @@ juce::String intervalText(int ms) {
     return ms >= 1000 ? juce::String(ms / 1000) + " s" : juce::String(ms) + " ms";
 }
 
+// Below this the meter is silent: a decayed bar approaches zero but never
+// reaches it, and a value this small is far under one pixel and under the
+// 0.1 dB step of the readouts. Snapping it to 0 lets a quiet meter stop
+// repainting, and the same number is the "did anything move" threshold.
+constexpr float kRepaintEpsilon = 1.0e-5f;
+
+// A laid-out label plus the natural bounds it was measured at.
+struct TextArrangement {
+    juce::GlyphArrangement glyphs;
+    juce::Rectangle<float> bounds;
+};
+
+TextArrangement makeLabel(const juce::String& text) {
+    TextArrangement made;
+    made.glyphs.addLineOfText(juce::Font(juce::FontOptions(7.0f)), text, 0.0f, 0.0f);
+    made.bounds = made.glyphs.getBoundingBox(0, -1, true);
+    return made;
+}
+
+// "Peak" and "RMS" are constant text in one constant font, so their glyph runs
+// are laid out once for the process rather than on every frame of every meter.
+const TextArrangement& peakNameLabel() {
+    static const TextArrangement label = makeLabel("Peak");
+    return label;
+}
+
+const TextArrangement& rmsNameLabel() {
+    static const TextArrangement label = makeLabel("RMS");
+    return label;
+}
+
 int yForLevel(juce::Rectangle<int> bar, float proportion) {
     return juce::jlimit(bar.getY(), bar.getBottom(),
                         juce::roundToInt(static_cast<float>(bar.getBottom())
@@ -78,7 +109,19 @@ juce::String LevelMeter::peakHoldLabel(int ms) {
 void LevelMeter::setStereo(bool shouldBeStereo) {
     if (stereo == shouldBeStereo) return;
     stereo = shouldBeStereo;
+    // Which reading the row shows changed (max of both sides vs left), so the
+    // cached numeric glyph runs are no longer valid.
+    peakGlyphs.text.clear();
+    rmsGlyphs.text.clear();
     repaint();
+}
+
+void LevelMeter::refreshValueGlyphs(ValueGlyphs& cache, const juce::String& text) {
+    if (cache.text == text) return;
+    cache.text = text;
+    cache.glyphs.clear();
+    cache.glyphs.addLineOfText(juce::Font(juce::FontOptions(9.0f)), text, 0.0f, 0.0f);
+    cache.bounds = cache.glyphs.getBoundingBox(0, -1, true);
 }
 
 void LevelMeter::paint(juce::Graphics& g) {
@@ -115,24 +158,14 @@ void LevelMeter::paint(juce::Graphics& g) {
         auto readouts = juce::Rectangle<int>(well.getX() + 2, barTop - readoutHeight - 1,
                                              well.getWidth() - 4, readoutHeight);
         auto peakRow = readouts.removeFromTop(readoutHeight / 2);
-        const auto drawReadout = [&g](juce::Rectangle<int> row, const juce::String& value,
-                                      const juce::String& name) {
-            const auto valueFont = juce::Font(juce::FontOptions(9.0f));
-            const auto nameFont = juce::Font(juce::FontOptions(7.0f));
-
-            // Draw the glyphs at their natural size and place them by their
-            // own bounds: a fixed rect either squeezes a wide value or clips
-            // its last digit on this narrow meter.
-            juce::GlyphArrangement nameGlyphs;
-            nameGlyphs.addLineOfText(nameFont, name, 0.0f, 0.0f);
-            const auto nameBounds = nameGlyphs.getBoundingBox(0, -1, true);
-
-            juce::GlyphArrangement valueGlyphs;
-            valueGlyphs.addLineOfText(valueFont, value, 0.0f, 0.0f);
-            const auto valueBounds = valueGlyphs.getBoundingBox(0, -1, true);
-
+        // Glyphs are drawn at their natural size and placed by their own
+        // bounds: a fixed rect either squeezes a wide value or clips its last
+        // digit on this narrow meter. Both arrangements are cached — the label
+        // is constant, the value only changes with its 0.1 dB text.
+        const auto drawReadout = [&g](juce::Rectangle<int> row, const ValueGlyphs& value,
+                                      const TextArrangement& name) {
             const int nameRight = row.getRight();
-            const int valueRight = nameRight - juce::roundToInt(nameBounds.getWidth()) - 3;
+            const int valueRight = nameRight - juce::roundToInt(name.bounds.getWidth()) - 3;
             const auto place = [&row](const juce::Rectangle<float>& bounds, int right) {
                 return juce::AffineTransform::translation(
                     (float)right - bounds.getRight(),
@@ -141,14 +174,16 @@ void LevelMeter::paint(juce::Graphics& g) {
             };
 
             g.setColour(theme::text());
-            valueGlyphs.draw(g, place(valueBounds, valueRight));
+            value.glyphs.draw(g, place(value.bounds, valueRight));
             g.setColour(theme::dim());
-            nameGlyphs.draw(g, place(nameBounds, nameRight));
+            name.glyphs.draw(g, place(name.bounds, nameRight));
         };
         const float loudestPeak = stereo ? juce::jmax(displayedPeakL, displayedPeakR) : displayedPeakL;
         const float loudestRms = stereo ? juce::jmax(displayedRmsL, displayedRmsR) : displayedRmsL;
-        drawReadout(peakRow, dbText(loudestPeak), "Peak");
-        drawReadout(readouts, dbText(loudestRms), "RMS");
+        refreshValueGlyphs(peakGlyphs, dbText(loudestPeak));
+        refreshValueGlyphs(rmsGlyphs, dbText(loudestRms));
+        drawReadout(peakRow, peakGlyphs, peakNameLabel());
+        drawReadout(readouts, rmsGlyphs, rmsNameLabel());
     }
 
     constexpr int gap = 2;
@@ -233,15 +268,28 @@ void LevelMeter::timerCallback() {
     const auto now = juce::Time::getMillisecondCounter();
     const int holdMs = peakHoldMs();
 
+    const float previousPeakL = displayedPeakL;
+    const float previousPeakR = displayedPeakR;
+    const float previousRmsL = displayedRmsL;
+    const float previousRmsR = displayedRmsR;
+    const float previousHeldL = heldPeakL;
+    const float previousHeldR = heldPeakR;
+
+    // A decayed bar approaches zero asymptotically; snap it to true silence so
+    // a meter with no signal stops repainting instead of redrawing forever.
+    const auto snapSilent = [](float value) {
+        return value < kRepaintEpsilon ? 0.0f : value;
+    };
+
     // Keep the full amplitude range (up to kMaxDb) so hot signals are not
     // clamped to 0 dB; proportionOf()/dbText() handle the display range.
     const float peakL = juce::jmax(0.0f, leftPeakSource.get());
     const float peakR = juce::jmax(0.0f, rightPeakSource.get());
-    displayedPeakL = juce::jmax(peakL, displayedPeakL * 0.85f);
-    displayedPeakR = juce::jmax(peakR, displayedPeakR * 0.85f);
+    displayedPeakL = snapSilent(juce::jmax(peakL, displayedPeakL * 0.85f));
+    displayedPeakR = snapSilent(juce::jmax(peakR, displayedPeakR * 0.85f));
 
-    displayedRmsL = smoothedRms(displayedRmsL, juce::jmax(0.0f, leftRmsSource.get()));
-    displayedRmsR = smoothedRms(displayedRmsR, juce::jmax(0.0f, rightRmsSource.get()));
+    displayedRmsL = snapSilent(smoothedRms(displayedRmsL, juce::jmax(0.0f, leftRmsSource.get())));
+    displayedRmsR = snapSilent(smoothedRms(displayedRmsR, juce::jmax(0.0f, rightRmsSource.get())));
 
     // The held peak tracks the loudest value and, once its interval is up,
     // drops back to whatever the live peak is now and holds that for the next
@@ -255,5 +303,15 @@ void LevelMeter::timerCallback() {
     updateHold(heldPeakL, holdStartL, displayedPeakL);
     updateHold(heldPeakR, holdStartR, displayedPeakR);
 
-    repaint();
+    // A hidden meter needs no redraw, and a still one neither: compare in
+    // linear amplitude, where kRepaintEpsilon is far below one drawn pixel and
+    // below the 0.1 dB step of the readouts.
+    if (!isShowing()) return;
+    const auto moved = [](float after, float before) {
+        return !(std::abs(after - before) < kRepaintEpsilon);
+    };
+    if (moved(displayedPeakL, previousPeakL) || moved(displayedPeakR, previousPeakR)
+        || moved(displayedRmsL, previousRmsL) || moved(displayedRmsR, previousRmsR)
+        || moved(heldPeakL, previousHeldL) || moved(heldPeakR, previousHeldR))
+        repaint();
 }

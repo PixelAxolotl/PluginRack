@@ -60,7 +60,15 @@ public:
 
 public:
     std::function<void()> onRemoveRequested;
+    // Structural edits only (the split creates new channels, so the whole
+    // board has to be rebuilt).
     std::function<void()> rebuildCallback;
+    // Narrow notifications for edits this strip has already applied to itself
+    // (a chain/insert change, a rename). They let the host refresh the views
+    // that mirror engine state without rebuilding the mixer board, which would
+    // close every strip's floating effect window and drop unrelated focus.
+    std::function<void()> onInsertsChanged;
+    std::function<void()> onRenamed;
     std::function<void()> onSelected;
     std::function<void()> onDoubleClicked;
 

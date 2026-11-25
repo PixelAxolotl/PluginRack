@@ -43,7 +43,14 @@ public:
     // the teardown reading freed channels/outputs.
     void closeAllEqWindows();
 
+    // Full structural change: a channel/output/bus was added, removed or
+    // reordered, so the board rebuilt itself. Hosts refresh everything.
     std::function<void()> onStructureChanged;
+    // Strip-local change (a chain edit or a rename) that the strip already
+    // applied to itself. Hosts must refresh the views that mirror engine state
+    // (rack, routing, saves) but must NOT rebuild the mixer board: that would
+    // close every strip's floating effect window and drop unrelated focus.
+    std::function<void()> onInsertsChanged;
     std::function<void(int channelId, bool isOutput)> onSelectionChanged;
     std::function<void(int channelId, bool isOutput)> onDoubleClicked;
 
@@ -85,6 +92,10 @@ private:
         void eraseBuiltIn(pluginrack::ChainItem item) override;
 
         std::function<void()> onRemoveRequested;
+        // Narrow notifications: the strip has already refreshed its own chain,
+        // so the board only refreshes the mirrored views (a rename also
+        // updates the channel strips' routing chips in place).
+        std::function<void()> onInsertsChanged;
         std::function<void()> onRenamed;
         std::function<void()> onDeviceChanged;
         std::function<void()> onSelected;
@@ -140,6 +151,9 @@ private:
     void rebuildChannelStrips();
     void rebuildOutputStrips();
     void rebuildBusStrips();
+    // Routes a strip-local edit to the narrow host notification. Hosts that
+    // have not wired it yet keep the previous full-structure notification.
+    void notifyInsertsChanged();
     void layoutChannelStrips(juce::Rectangle<int> viewportBounds);
     void layoutOutputStrips(juce::Rectangle<int> panelBounds);
     void layoutBusStrips(juce::Rectangle<int> panelBounds);

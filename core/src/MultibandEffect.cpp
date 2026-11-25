@@ -15,6 +15,9 @@ MultibandEffect makeDefaultMultibandEffect(std::uint32_t id) {
 
 std::vector<MultibandEffect> defaultMultibandEffects() { return {makeDefaultMultibandEffect(1)}; }
 
+// Reference curve (UI, tests, and the editor's graph). The render path in
+// MultibandProcessor::process() evaluates the same law in the gain domain so a
+// sample needs at most one pow; any change here must be mirrored there.
 float multibandStaticGainDb(float levelDb, const MultibandBand& band) {
     if (band.bypassed || !band.enabled) return 0.0f;
     if (band.mode == MultibandMode::Expand) {
@@ -172,6 +175,18 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
         const float makeup = dsp::dbToGain(band.makeupDb);
         const float attack = dsp::smoothingCoeff(sampleRate_, band.attackMs);
         const float release = dsp::smoothingCoeff(sampleRate_, std::max(band.releaseMs, 10.0f));
+        // Gain-domain knee edges, hoisted like the single-band processor's:
+        // the same curve as multibandStaticGainDb, with the soft knee left in
+        // dB and every other branch a plain gain or one pow.
+        const bool expand = band.mode == MultibandMode::Expand;
+        const float knee = std::max(band.kneeDb, 0.0f);
+        const float halfKnee = knee * 0.5f;
+        const float thresholdDb = band.thresholdDb;
+        const float thresholdGain = dsp::dbToGain(thresholdDb);
+        const float lowKneeGain = dsp::dbToGain(thresholdDb - halfKnee);
+        const float highKneeGain = dsp::dbToGain(thresholdDb + halfKnee);
+        const float compSlope = 1.0f / std::max(band.ratio, 1.0f) - 1.0f;
+        const float expandSlope = band.ratio - 1.0f;
         auto& env = envelopes_[static_cast<std::size_t>(b)];
         float grSum = 0.0f;
         for (int i = 0; i < frames; ++i) {
@@ -179,15 +194,31 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
             bufR_[static_cast<std::size_t>(i)] *= inputGain;
             const float level = std::max(std::fabs(bufL_[static_cast<std::size_t>(i)]), std::fabs(bufR_[static_cast<std::size_t>(i)]));
             env.env += (level - env.env) * (level > env.env ? attack : release);
-            const float targetDb = multibandStaticGainDb(dsp::gainToDb(env.env), band);
-            const float targetGain = dsp::dbToGain(targetDb) * makeup;
+            float staticGain = 1.0f;
+            if (expand) {
+                // Below the threshold the expander drops by
+                // (ratio - 1) * (thresholdDb - levelDb) dB, which in the gain
+                // domain is (envelope/threshold)^(ratio - 1).
+                if (env.env < thresholdGain) {
+                    staticGain = std::pow(env.env / thresholdGain, expandSlope);
+                }
+            } else if (knee > 0.0f && env.env > lowKneeGain && env.env < highKneeGain) {
+                const float distance = dsp::gainToDb(env.env) - thresholdDb;
+                const float compressed = distance + halfKnee;
+                staticGain = dsp::dbToGain(compSlope * compressed * compressed / (2.0f * knee));
+            } else if (env.env > thresholdGain) {
+                staticGain = std::pow(env.env / thresholdGain, compSlope);
+            }
+            const float targetGain = staticGain * makeup;
             const float gainRate = targetGain < env.gain ? attack : release;
             env.gain += (targetGain - env.gain) * gainRate;
             // Flush so a NaN parameter or a stray non-finite value cannot keep
             // the envelope poisoned after the input is clean again.
             dsp::flushState(env.env);
             dsp::flushState(env.gain);
-            grSum += -targetDb;
+            // A sample the curve left alone contributes exactly 0 dB, so the
+            // meter only pays for the conversion on samples that moved.
+            grSum += staticGain == 1.0f ? 0.0f : -dsp::gainToDb(staticGain);
             bufL_[static_cast<std::size_t>(i)] *= env.gain;
             bufR_[static_cast<std::size_t>(i)] *= env.gain;
             outL_[static_cast<std::size_t>(i)] += bufL_[static_cast<std::size_t>(i)];

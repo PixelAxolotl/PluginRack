@@ -128,8 +128,10 @@ struct SpectralDenoiserEffect {
 SpectralDenoiserEffect makeDefaultSpectralDenoiserEffect(std::uint32_t id = 1);
 
 // Streaming STFT denoiser. All buffers are allocated in prepare(); process()
-// never allocates. One gain mask is shared by default; the stereo link control
-// blends toward per-side masks that use the same noise estimate.
+// never allocates. The two channels share one complex FFT per hop (left in the
+// real part, right in the imaginary part) and are split back before the masks.
+// One gain mask is shared by default; the stereo link control blends toward
+// per-side masks that use the same noise estimate.
 class SpectralDenoiserProcessor {
 public:
     SpectralDenoiserProcessor() = default;

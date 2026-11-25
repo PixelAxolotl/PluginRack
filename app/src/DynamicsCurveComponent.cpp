@@ -34,6 +34,7 @@ float DynamicsCurveComponent::staticGainDb(float inputDb,
 
 void DynamicsCurveComponent::setEffect(const pluginrack::DynamicsEffect& newEffect) {
     effect = newEffect;
+    curvesDirty = true;
     repaint();
 }
 
@@ -41,7 +42,13 @@ void DynamicsCurveComponent::setGate(const pluginrack::DynamicsEffect& newGate, 
     gate = newGate;
     gatePresent = true;
     gateActive = active;
+    curvesDirty = true;
     repaint();
+}
+
+void DynamicsCurveComponent::resized() {
+    // The cached paths live in pixel coordinates.
+    curvesDirty = true;
 }
 
 // Mirrors the processor's expander law: Range dB of attenuation below the
@@ -58,9 +65,61 @@ float DynamicsCurveComponent::gateGainDb(float inputDb,
 }
 
 void DynamicsCurveComponent::setLivePoint(float inputDb, float outputDb) {
-    liveInputDb = inputDb;
-    liveOutputDb = outputDb;
+    // Out-of-view levels are pinned to the graph's own range: the meters and
+    // the dot are drawn inside it, so there is nothing to gain from keeping a
+    // value the paint code has to clamp anyway.
+    const float input = juce::jlimit(kMinDb, kMaxDb, std::isfinite(inputDb) ? inputDb : kMinDb);
+    const float output = juce::jlimit(kMinDb, kMaxDb, std::isfinite(outputDb) ? outputDb : kMinDb);
+    // Below a tenth of a pixel of motion at this graph size nothing can change
+    // on screen (the meter bars are 6 px over 60 dB, the dot is 9 px wide), so
+    // skip the repaint the live meter would otherwise queue 30-60 times a s.
+    constexpr float kLiveMoveEpsilonDb = 0.05f;
+    if (std::abs(input - liveInputDb) < kLiveMoveEpsilonDb
+        && std::abs(output - liveOutputDb) < kLiveMoveEpsilonDb) {
+        return;
+    }
+    liveInputDb = input;
+    liveOutputDb = output;
     repaint();
+}
+
+void DynamicsCurveComponent::rebuildCurves(juce::Rectangle<float> graph) {
+    curvesDirty = false;
+    identityPath.clear();
+    transferPath.clear();
+    gatePath.clear();
+
+    const auto toPoint = [&graph](float inputDb, float outputDbValue) {
+        return juce::Point<float>(
+            graph.getX() + graph.getWidth() * (inputDb - kMinDb) / (kMaxDb - kMinDb),
+            graph.getBottom() - graph.getHeight() *
+                (juce::jlimit(kMinDb, kMaxDb, outputDbValue) - kMinDb) / (kMaxDb - kMinDb));
+    };
+
+    identityPath.startNewSubPath(toPoint(kMinDb, kMinDb));
+    transferPath.startNewSubPath(toPoint(kMinDb, kMinDb + staticGainDb(kMinDb, effect)));
+    for (int i = 1; i <= 120; ++i) {
+        const float input = kMinDb + (kMaxDb - kMinDb) * static_cast<float>(i) / 120.0f;
+        identityPath.lineTo(toPoint(input, input));
+        transferPath.lineTo(toPoint(input, input + staticGainDb(input, effect)));
+    }
+
+    if (gatePresent) {
+        // Only the part that deviates from unity: past the threshold the gate
+        // is the identity line the compressor curve is already drawn over.
+        // A bypassed gate still draws, dimmed, so the shape stays readable
+        // while its switch is off.
+        const float gateEndDb = juce::jlimit(
+            kMinDb, kMaxDb, gate.thresholdDb + std::max(gate.kneeDb, 0.0f) * 0.5f);
+        gatePath.startNewSubPath(toPoint(kMinDb, kMinDb + gateGainDb(kMinDb, gate)));
+        for (int i = 1; i <= 120; ++i) {
+            const float input = kMinDb + (gateEndDb - kMinDb) * static_cast<float>(i) / 120.0f;
+            gatePath.lineTo(toPoint(input, input + gateGainDb(input, gate)));
+        }
+        // Close the step back onto unity: without this the vertical edge that
+        // lifts the muted level to the threshold is missing.
+        gatePath.lineTo(toPoint(gateEndDb, gateEndDb));
+    }
 }
 
 void DynamicsCurveComponent::paint(juce::Graphics& g) {
@@ -94,7 +153,8 @@ void DynamicsCurveComponent::paint(juce::Graphics& g) {
                              graph.getX(), graph.getRight());
     }
 
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
+    static const juce::Font tickFont{juce::FontOptions(8.0f)};
+    g.setFont(tickFont);
     for (int i = 0; i <= kGridSteps; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(kGridSteps);
         const int db = juce::roundToInt(kMinDb + (kMaxDb - kMinDb) * t);
@@ -107,40 +167,18 @@ void DynamicsCurveComponent::paint(juce::Graphics& g) {
                    juce::Justification::right);
     }
 
-    juce::Path identity;
-    juce::Path transfer;
-    identity.startNewSubPath(toPoint(kMinDb, kMinDb));
-    transfer.startNewSubPath(toPoint(kMinDb, kMinDb + staticGainDb(kMinDb, effect)));
-    for (int i = 1; i <= 120; ++i) {
-        const float input = kMinDb + (kMaxDb - kMinDb) * static_cast<float>(i) / 120.0f;
-        identity.lineTo(toPoint(input, input));
-        transfer.lineTo(toPoint(input, input + staticGainDb(input, effect)));
-    }
+    if (curvesDirty) rebuildCurves(graph);
+
     g.setColour(theme::dim().withAlpha(0.45f));
-    g.strokePath(identity, juce::PathStrokeType(1.0f));
+    g.strokePath(identityPath, juce::PathStrokeType(1.0f));
 
     if (gatePresent) {
-        // Only the part that deviates from unity: past the threshold the gate
-        // is the identity line the compressor curve is already drawn over.
-        // A bypassed gate still draws, dimmed, so the shape stays readable
-        // while its switch is off.
-        const float gateEndDb = juce::jlimit(
-            kMinDb, kMaxDb, gate.thresholdDb + std::max(gate.kneeDb, 0.0f) * 0.5f);
-        juce::Path gatePath;
-        gatePath.startNewSubPath(toPoint(kMinDb, kMinDb + gateGainDb(kMinDb, gate)));
-        for (int i = 1; i <= 120; ++i) {
-            const float input = kMinDb + (gateEndDb - kMinDb) * static_cast<float>(i) / 120.0f;
-            gatePath.lineTo(toPoint(input, input + gateGainDb(input, gate)));
-        }
-        // Close the step back onto unity: without this the vertical edge that
-        // lifts the muted level to the threshold is missing.
-        gatePath.lineTo(toPoint(gateEndDb, gateEndDb));
         g.setColour(theme::green().withAlpha(gateActive ? 1.0f : 0.4f));
         g.strokePath(gatePath, juce::PathStrokeType(2.0f));
     }
 
     g.setColour(theme::cyan());
-    g.strokePath(transfer, juce::PathStrokeType(2.0f));
+    g.strokePath(transferPath, juce::PathStrokeType(2.0f));
 
     const auto dot = toPoint(liveInputDb, liveOutputDb);
     g.setColour(theme::blue().withAlpha(0.22f));
@@ -172,7 +210,8 @@ void DynamicsCurveComponent::paint(juce::Graphics& g) {
     meter({ graph.getRight() + 3.0f, graph.getY(), 6.0f, graph.getHeight() }, liveOutputDb, false);
 
     g.setColour(theme::dim());
-    g.setFont(juce::Font(juce::FontOptions(10.0f)));
+    static const juce::Font captionFont{juce::FontOptions(10.0f)};
+    g.setFont(captionFont);
     g.drawText("out dB",
                juce::Rectangle<int>(juce::roundToInt(graph.getX()), juce::roundToInt(caption.getY()),
                                     60, 12),

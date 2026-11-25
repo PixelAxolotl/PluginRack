@@ -29,6 +29,9 @@ DeEsserEffect makeDefaultDeEsserEffect(std::uint32_t id) {
 
 std::vector<DeEsserEffect> defaultDeEsserEffects() { return {makeDefaultDeEsserEffect(1)}; }
 
+// Reference curve (UI, tests, and the editor's graph). DeEsserProcessor::
+// process() evaluates the same law in the gain domain so a sample needs no
+// transcendental; any change here must be mirrored there.
 float deEsserStaticGainDb(float levelDb, const DeEsserEffect& effect) {
     if (effect.bypassed) return 0.0f;
     const float over = levelDb - effect.thresholdDb;
@@ -90,6 +93,16 @@ void DeEsserProcessor::process(float* left, float* right, int frames) noexcept {
     const float attack = dsp::smoothingCoeff(sampleRate_, effect_.attackMs);
     const float release = dsp::smoothingCoeff(sampleRate_, effect_.releaseMs);
     const bool split = effect_.mode == DeEsserMode::Split;
+    // Same curve as deEsserStaticGainDb, evaluated in the gain domain:
+    // that helper returns -min(rangeDb, levelDb - thresholdDb) above the
+    // threshold, and dbToGain(-x) is 10^(-x/20), so the reduction is
+    //   max(10^(-rangeDb/20), 10^((thresholdDb - levelDb)/20))
+    // = max(minGain, thresholdGain / envelope) with levelDb from gainToDb.
+    // No log10/pow per sample; rangeDb is used unclamped exactly like the
+    // helper (the validator allows up to 36 dB, and negative values must
+    // still boost the way the old formula did).
+    const float thresholdGain = dsp::dbToGain(effect_.thresholdDb);
+    const float minGain = dsp::dbToGain(-effect_.rangeDb);
     for (int i = 0; i < frames; ++i) {
         // Sanitize at the door: one non-finite sample used to poison the
         // envelope and gain forever (and stay in the split forever).
@@ -102,16 +115,19 @@ void DeEsserProcessor::process(float* left, float* right, int frames) noexcept {
         const float detLevel = std::max(std::fabs(bandL), std::fabs(bandR));
         envelope_ += (detLevel - envelope_) * (detLevel > envelope_ ? attack : release);
         dsp::flushState(envelope_);
-        const float targetDb = deEsserStaticGainDb(dsp::gainToDb(envelope_), effect_);
-        const float targetGain = dsp::dbToGain(targetDb);
+        const float targetGain = envelope_ <= thresholdGain
+                                     ? 1.0f
+                                     : std::max(minGain, thresholdGain / envelope_);
         const float gainRate = targetGain < gain_ ? attack : release;
         gain_ += (targetGain - gain_) * gainRate;
         dsp::flushState(gain_);
-        reductionDb_ = -targetDb;
-        if (!std::isfinite(reductionDb_)) reductionDb_ = 0.0f;
         left[i] = split ? (inL - bandL) + bandL * gain_ : inL * gain_;
         right[i] = split ? (inR - bandR) + bandR * gain_ : inR * gain_;
     }
+    // Meter only: the per-sample write could only ever leave the value of the
+    // last frame, so evaluate it once here with the original dB-domain helper.
+    reductionDb_ = -deEsserStaticGainDb(dsp::gainToDb(envelope_), effect_);
+    if (!std::isfinite(reductionDb_)) reductionDb_ = 0.0f;
 }
 
 } // namespace pluginrack

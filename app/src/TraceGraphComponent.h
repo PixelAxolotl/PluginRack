@@ -53,8 +53,11 @@ class TraceGraphComponent final : public juce::Component {
 public:
     TraceGraphComponent();
 
-    void setFrequencyData(FrequencyTraceData data);
-    void setTimeData(TimeTraceData data);
+    // Const-reference: callers keep preallocated trace members and hand them
+    // over as lvalues, so a by-value parameter would copy every vector before
+    // the (unavoidable) copy into this component's storage.
+    void setFrequencyData(const FrequencyTraceData& data);
+    void setTimeData(const TimeTraceData& data);
     void setMode(TraceGraphMode newMode);
     void setOverlayPainter(std::function<void(juce::Graphics&, juce::Rectangle<float>)> painter);
 

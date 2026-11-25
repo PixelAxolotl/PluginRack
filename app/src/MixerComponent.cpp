@@ -849,8 +849,9 @@ void MixerComponent::OutputStrip::reorderChainItem(pluginrack::ChainItem item, i
     juce::Component::SafePointer<OutputStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        // Copy the callback: the rebuild destroys this strip.
-        auto callback = safe->onRenamed;
+        // Copy the callback: a host that only wires the structural rebuild
+        // destroys this strip from inside it.
+        auto callback = safe->onInsertsChanged;
         safe->chainDropTarget = -1;
         safe->refreshInserts();
         if (callback) callback();
@@ -1001,12 +1002,28 @@ void MixerComponent::OutputStrip::eraseBuiltIn(pluginrack::ChainItem item) {
     }
     for (const auto& entry : cardItems)
         audioEngine.removeOutputChainItem(output.id, entry);
-    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
-        && feedbackSuppressorWindow != nullptr) {
+    // The removed card takes its own panel with it; the board no longer
+    // rebuilds the strip (which used to close every panel as a side effect),
+    // so close the one that just lost its effect and leave the rest open.
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        closeEqWindow();
+    } else if (item.type == pluginrack::ChainItemType::Dynamics
+               && dynamicsWindow != nullptr) {
+        dynamicsWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::Multiband
+               && multibandWindow != nullptr) {
+        multibandWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::DeEsser
+               && deEsserWindow != nullptr) {
+        deEsserWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::Limiter
+               && limiterWindow != nullptr) {
+        limiterWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
+               && feedbackSuppressorWindow != nullptr) {
         feedbackSuppressorWindow->onClose();
-    }
-    if (item.type == pluginrack::ChainItemType::SpectralDenoiser
-        && spectralDenoiserWindow != nullptr) {
+    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser
+               && spectralDenoiserWindow != nullptr) {
         spectralDenoiserWindow->onClose();
     }
     refreshAfterInsertChange();
@@ -1014,10 +1031,15 @@ void MixerComponent::OutputStrip::eraseBuiltIn(pluginrack::ChainItem item) {
 
 void MixerComponent::OutputStrip::refreshAfterInsertChange() {
     refreshInserts();
+    // The board no longer recreates the strip after a chain edit, so lay the
+    // new/removed slot rows out here instead of relying on the rebuild.
+    resized();
     juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        auto callback = safe->onRenamed;
+        // This strip is up to date; the host refreshes the mirrored views
+        // without rebuilding the board, so open effect windows survive.
+        auto callback = safe->onInsertsChanged;
         if (callback) callback();
     });
 }
@@ -1314,6 +1336,20 @@ void MixerComponent::finishOutputDrag(std::uint32_t outputId, int sourceIndex) {
     });
 }
 
+void MixerComponent::notifyInsertsChanged() {
+    // The strip has refreshed itself, so the board stays put: only the views
+    // that mirror engine state need rebuilding. Rebuilding the board here
+    // would destroy every strip, closing their floating effect windows and
+    // dropping scroll/focus for the ones the user did not touch.
+    if (onInsertsChanged) {
+        onInsertsChanged();
+        return;
+    }
+    // Hosts that have not split the notifications yet (the I/O page boards)
+    // keep the old full-structure path until they wire onInsertsChanged.
+    if (onStructureChanged) onStructureChanged();
+}
+
 void MixerComponent::refreshStrips() {
     for (auto* s : strips) {
         if (s != nullptr) s->refreshInput();
@@ -1346,10 +1382,14 @@ void MixerComponent::rebuildChannelStrips() {
             if (onStructureChanged) onStructureChanged();
         };
         s->rebuildCallback = [this] {
-            // Strips call this after engine-side structure edits (e.g. split).
+            // Structural only (split adds channels): the board has to rebuild.
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
+        s->onInsertsChanged = [this] { notifyInsertsChanged(); };
+        // A rename is applied to this strip already; the routing chips list
+        // output names, not channel names, so nothing else on the board moves.
+        s->onRenamed = [this] { notifyInsertsChanged(); };
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), false);
         };
@@ -1386,9 +1426,14 @@ void MixerComponent::rebuildOutputStrips() {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
+        s->onInsertsChanged = [this] { notifyInsertsChanged(); };
         s->onRenamed = [this] {
-            rebuild();
-            if (onStructureChanged) onStructureChanged();
+            // Every channel strip's routing chips are labelled with the output
+            // names, so an output rename refreshes those chips in place. The
+            // strips themselves stay alive, keeping their effect windows open.
+            for (auto* strip : strips)
+                if (strip != nullptr) strip->rebuildRoutingButtons();
+            notifyInsertsChanged();
         };
         s->onDeviceChanged = [this] {
             // Only output strips carry the clock dot; refreshing inputs here
@@ -1424,10 +1469,10 @@ void MixerComponent::rebuildBusStrips() {
             rebuild();
             if (onStructureChanged) onStructureChanged();
         };
-        s->onRenamed = [this] {
-            rebuild();
-            if (onStructureChanged) onStructureChanged();
-        };
+        // Buses are not send targets (the routing chips list outputs), so a bus
+        // rename only has to refresh the mirrored views.
+        s->onInsertsChanged = [this] { notifyInsertsChanged(); };
+        s->onRenamed = [this] { notifyInsertsChanged(); };
         s->onSelected = [this, id] {
             if (onSelectionChanged) onSelectionChanged(static_cast<int>(id), true);
         };

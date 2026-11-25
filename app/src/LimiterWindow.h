@@ -42,6 +42,9 @@ private:
     std::vector<float> historyInput;
     std::vector<float> historyReduction;
     std::vector<float> historyOutput;
+    // Reused by timerCallback: the three trace vectors keep their capacity, so
+    // a 30 Hz tick no longer builds a temporary TimeTraceData (three vectors).
+    TimeTraceData timeTrace;
     void syncControls();
     void applyPreset(int id);
     float grDb = 0.0f, peakDb = -60.0f;

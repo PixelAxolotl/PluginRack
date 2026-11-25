@@ -42,6 +42,17 @@ public:
 private:
     void timerCallback() override;
 
+    // Readouts print one decimal place, so a meter bounces through a handful
+    // of strings: keep the last glyph run and its natural bounds, keyed by the
+    // formatted text, instead of laying the text out on every frame.
+    struct ValueGlyphs {
+        juce::String text;
+        juce::GlyphArrangement glyphs;
+        juce::Rectangle<float> bounds;
+    };
+
+    static void refreshValueGlyphs(ValueGlyphs& cache, const juce::String& text);
+
     // The vertical extent a fader's value travels through, in the fader's
     // parent coordinates. A slider maps its value across this whole region;
     // the track it paints is inset from it, so the meter has to use the
@@ -63,6 +74,10 @@ private:
     juce::uint32 holdStartL = 0;
     juce::uint32 holdStartR = 0;
     bool stereo = true;
+
+    // Paint cache for the two numeric readouts (see ValueGlyphs above).
+    ValueGlyphs peakGlyphs;
+    ValueGlyphs rmsGlyphs;
 
     inline static std::atomic<int> peakHoldMsValue{500};
 

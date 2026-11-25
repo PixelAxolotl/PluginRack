@@ -447,6 +447,9 @@ void DynamicsWindow::syncGateControls() {
 }
 
 void DynamicsWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the tap and the curve/gauge
+    // update until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     if (!pullAnalyzerTap) return;
     // Pre-effect tap: the dot and the gauge model the compressor's own input,
     // so they must read the ring the engine writes before the processor runs.

@@ -202,6 +202,7 @@ private:
     bool sceneChangedSinceSave_ = false;
     bool haveChangeBaseline_ = false;
     juce::uint64 lastStructureHash_ = 0;
+    juce::uint64 lastStructureRevision_ = 0;
     juce::uint64 lastPluginRevision_ = 0;
     juce::uint64 lastSavedHash_ = 0;
     juce::uint64 lastSavedSize_ = 0;

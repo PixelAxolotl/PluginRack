@@ -1,6 +1,21 @@
 #include "EQWindow.h"
 
+#include <algorithm>
 #include <cmath>
+
+namespace {
+// Analyzer idle gate shared by the FFT panels: a block whose loudest sample
+// is below this reads as digital silence for display purposes.
+constexpr float kSilentTapPeak = 1.0e-7f;
+
+// True once every smoothed bin has settled at the -100 dBFS display floor, so
+// a silent tap cannot move the trace (and the FFT would redraw nothing).
+bool spectrumSettledAtFloor(const std::vector<float>& bins) {
+    for (const float db : bins)
+        if (db > -99.9f) return false;
+    return true;
+}
+} // namespace
 
 EQWindow::EQWindow(const juce::String& title,
                    const std::vector<pluginrack::EqBand>& initialBands,
@@ -337,6 +352,9 @@ void EQWindow::setRtaOffsetDb(float offsetDb) {
 }
 
 void EQWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the tap, the FFT and the paint
+    // until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     const auto startTicks = juce::Time::getHighResolutionTicks();
 
     // Pull the ring copy (a plain memcpy out of preallocated engine memory)
@@ -349,6 +367,17 @@ void EQWindow::timerCallback() {
         pullAnalyzerTap(analyzerMode == kAnalyzerPost,
                         tapL.data(), tapR.data());
     }
+    // Digital silence and a smoothed trace already resting on the floor: the
+    // next FFT can only redraw the same flat line, so skip the FFT work and
+    // the repaint until audio returns. The tap pull above still runs, so the
+    // ring keeps draining and the first non-zero block is seen immediately.
+    float tapPeak = 0.0f;
+    for (int i = 0; i < kAnalyzerFftSize; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i);
+        tapPeak = std::max(tapPeak, std::max(std::abs(tapL[idx]), std::abs(tapR[idx])));
+    }
+    if (tapPeak < kSilentTapPeak && spectrumSettledAtFloor(spectrumAvg)) return;
+
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const std::size_t idx = static_cast<std::size_t>(i);
         fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];

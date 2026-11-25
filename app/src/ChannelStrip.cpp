@@ -82,7 +82,9 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
             safe->audioEngine.setChannelColourHue(safe->channel.id, newHue);
             safe->deviceControl.setTitle(newName);
             safe->repaint();
-            if (safe->rebuildCallback) safe->rebuildCallback();
+            // The strip shows the new name already; only the mirrored views
+            // (rack, routing, saves) need a refresh, so no board rebuild.
+            if (safe->onRenamed) safe->onRenamed();
         });
     });
     addAndMakeVisible(deviceControl);
@@ -957,8 +959,9 @@ void ChannelStrip::reorderChainItem(pluginrack::ChainItem item, int targetIndex)
     juce::Component::SafePointer<ChannelStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        // Copy the callback: the rebuild destroys this strip.
-        auto callback = safe->rebuildCallback;
+        // Copy the callback before touching anything: a host that still wires
+        // only the structural rebuild destroys this strip from inside it.
+        auto callback = safe->onInsertsChanged;
         safe->chainDropTarget = -1;
         safe->refreshInserts();
         if (callback) callback();
@@ -1127,12 +1130,28 @@ void ChannelStrip::eraseBuiltIn(pluginrack::ChainItem item) {
     }
     for (const auto& entry : cardItems)
         audioEngine.removeChannelChainItem(channel.id, entry);
-    if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
-        && feedbackSuppressorWindow != nullptr) {
+    // The removed card takes its own panel with it; the board no longer
+    // rebuilds the strip (which used to close every panel as a side effect),
+    // so close the one that just lost its effect and leave the rest open.
+    if (item.type == pluginrack::ChainItemType::Eq) {
+        closeEqWindow();
+    } else if (item.type == pluginrack::ChainItemType::Dynamics
+               && dynamicsWindow != nullptr) {
+        dynamicsWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::Multiband
+               && multibandWindow != nullptr) {
+        multibandWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::DeEsser
+               && deEsserWindow != nullptr) {
+        deEsserWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::Limiter
+               && limiterWindow != nullptr) {
+        limiterWindow->onClose();
+    } else if (item.type == pluginrack::ChainItemType::FeedbackSuppressor
+               && feedbackSuppressorWindow != nullptr) {
         feedbackSuppressorWindow->onClose();
-    }
-    if (item.type == pluginrack::ChainItemType::SpectralDenoiser
-        && spectralDenoiserWindow != nullptr) {
+    } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser
+               && spectralDenoiserWindow != nullptr) {
         spectralDenoiserWindow->onClose();
     }
     refreshAfterInsertChange();
@@ -1140,10 +1159,16 @@ void ChannelStrip::eraseBuiltIn(pluginrack::ChainItem item) {
 
 void ChannelStrip::refreshAfterInsertChange() {
     refreshInserts();
+    // The board no longer recreates the strip after a chain edit, so lay the
+    // new/removed slot rows out here instead of relying on the rebuild.
+    resized();
     juce::Component::SafePointer<ChannelStrip> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        auto callback = safe->rebuildCallback;
+        // This strip is up to date; tell the host so it can refresh the other
+        // views without rebuilding the board (which would close this strip's
+        // and its neighbours' floating effect windows).
+        auto callback = safe->onInsertsChanged;
         if (callback) callback();
     });
 }

@@ -41,19 +41,75 @@ double weightingDbAt(SpectrumWeighting weighting, double hz) {
     return 20.0 * std::log10(response) + 0.06;
 }
 
-} // namespace
+// --- RTA pixel table ---------------------------------------------------------
+// drawSpectrum repaints at 30-60 Hz and used to evaluate pow() for the
+// log-frequency mapping plus the weighting sqrt/log10 for every x-pixel, every
+// frame. Both depend only on (widthPx, sampleRateHz, weighting), so they are
+// tabulated once per key and looked up afterwards.
+//
+// Threading: every drawSpectrum caller paints on the JUCE message thread (the
+// TraceGraphComponent / EQCurveComponent / Multiband / De-esser graphs), so a
+// thread_local table needs no lock. The sample rate stays in the key by spec
+// even though frequency and weight do not depend on it: a rate change is rare
+// and re-tabulating then keeps the key honest for future per-rate terms.
+constexpr int kSpectrumTableEntries = 4; // small LRU-ish window, round-robin
 
-float weightingDb(SpectrumWeighting weighting, double hz) {
-    return static_cast<float>(weightingDbAt(weighting, hz));
+struct SpectrumPixel {
+    float freqHz = 0.0f;  // log-mapped centre frequency of this x-pixel
+    float weightDb = 0.0f; // IEC weighting at that frequency
+};
+
+struct SpectrumTable {
+    float widthPx = 0.0f;
+    double sampleRateHz = 0.0;
+    SpectrumWeighting weighting = SpectrumWeighting::Z;
+    std::vector<SpectrumPixel> pixels;
+};
+
+thread_local std::array<SpectrumTable, kSpectrumTableEntries> spectrumTables{};
+// Clock hand: the next entry to overwrite when the key misses, so the four
+// slots cycle instead of one entry evicting the rest on alternating widths.
+thread_local int spectrumVictim = 0;
+
+const std::vector<SpectrumPixel>& spectrumPixelTable(float widthPx,
+                                                     double sampleRateHz,
+                                                     SpectrumWeighting weighting) {
+    for (const auto& table : spectrumTables) {
+        if (table.widthPx == widthPx && table.sampleRateHz == sampleRateHz
+            && table.weighting == weighting && !table.pixels.empty()) {
+            return table.pixels;
+        }
+    }
+
+    SpectrumTable& table = spectrumTables[static_cast<std::size_t>(spectrumVictim)];
+    spectrumVictim = (spectrumVictim + 1) % kSpectrumTableEntries;
+    table.widthPx = widthPx;
+    table.sampleRateHz = sampleRateHz;
+    table.weighting = weighting;
+
+    // Same pixel walk drawSpectrum used: x = 0 .. floor(width), each pixel at
+    // position x / width.
+    const int points = static_cast<int>(widthPx) + 1;
+    table.pixels.resize(static_cast<std::size_t>(points));
+    for (int x = 0; x < points; ++x) {
+        const double position = static_cast<double>(x) / static_cast<double>(widthPx);
+        const double frequency = kMinFrequency
+            * std::pow(kMaxFrequency / kMinFrequency, position);
+        table.pixels[static_cast<std::size_t>(x)] = {static_cast<float>(frequency),
+                                                     weightingDb(weighting, frequency)};
+    }
+    return table.pixels;
 }
 
-float displayRtaLevelDb(float measuredDb, float displayOffsetDb, SpectrumWeighting weighting, double hz) {
+// displayRtaLevelDb with the weighting term supplied from the table instead of
+// evaluated here: identical maths, one log10 per pixel saved.
+float displayRtaLevelDbAtWeight(float measuredDb, float displayOffsetDb, float weightDb) {
     if (!std::isfinite(measuredDb)) return kMinDb;
     constexpr double kRtaKneeDb = -12.0;
     constexpr double kRtaCompSlope = 0.6;
     double db = static_cast<double>(measuredDb)
         + static_cast<double>(displayOffsetDb)
-        + weightingDbAt(weighting, hz);
+        + static_cast<double>(weightDb);
     if (db < kRtaKneeDb) db = kRtaKneeDb + (db - kRtaKneeDb) * kRtaCompSlope;
     // True digital silence (-inf / -100 dBFS FFT floor) eases to the bottom
     // instead of snapping to it, so quiet-but-real signal between -36 and
@@ -66,6 +122,17 @@ float displayRtaLevelDb(float measuredDb, float displayOffsetDb, SpectrumWeighti
         db = kMinDb + (db - kMinDb) * t;
     }
     return static_cast<float>(db);
+}
+
+} // namespace
+
+float weightingDb(SpectrumWeighting weighting, double hz) {
+    return static_cast<float>(weightingDbAt(weighting, hz));
+}
+
+float displayRtaLevelDb(float measuredDb, float displayOffsetDb, SpectrumWeighting weighting, double hz) {
+    return displayRtaLevelDbAtWeight(measuredDb, displayOffsetDb,
+                                     static_cast<float>(weightingDbAt(weighting, hz)));
 }
 
 float clampDb(float db) {
@@ -89,7 +156,8 @@ void drawFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Rectangle
     g.setColour(theme::border());
     g.drawRoundedRectangle(bounds.reduced(1.0f), 4.0f, 1.0f);
 
-    g.setFont(juce::Font(juce::FontOptions(9.0f)));
+    static const juce::Font gridFont{juce::FontOptions(9.0f)};
+    g.setFont(gridFont);
     if (frequencyScale) {
         for (const auto frequency : kGridFrequencies) {
             const auto x = frequencyToX(frequency, graph);
@@ -154,15 +222,19 @@ void TraceGraphComponent::drawSpectrum(juce::Graphics& g,
                                        float displayOffsetDb,
                                        SpectrumWeighting weighting) {
     if (values.empty()) return;
+    const float widthPx = graph.getWidth();
+    if (!(widthPx > 0.0f)) return; // no pixels to map
+    const auto& pixels = spectrumPixelTable(widthPx, sampleRateHz, weighting);
     juce::Path path;
-    for (int x = 0; x <= graph.getWidth(); ++x) {
-        const auto position = static_cast<float>(x) / graph.getWidth();
-        const double frequency = kMinFrequency
-            * std::pow(kMaxFrequency / kMinFrequency, static_cast<double>(position));
-        const auto level = TraceGraphComponent::spectrumLevelAtDb(values, frequency, sampleRateHz);
-        const auto y = dbToY(displayRtaLevelDb(level, displayOffsetDb, weighting, frequency), graph);
-        const auto px = graph.getX() + static_cast<float>(x);
-        if (x == 0) path.startNewSubPath(px, y);
+    for (std::size_t i = 0; i < pixels.size(); ++i) {
+        const auto& pixel = pixels[i];
+        // Table hit: frequency and IEC weight are precomputed, only the bin
+        // interpolation and the display knee remain per pixel.
+        const auto level = TraceGraphComponent::spectrumLevelAtDb(
+            values, static_cast<double>(pixel.freqHz), sampleRateHz);
+        const auto y = dbToY(displayRtaLevelDbAtWeight(level, displayOffsetDb, pixel.weightDb), graph);
+        const auto px = graph.getX() + static_cast<float>(i);
+        if (i == 0) path.startNewSubPath(px, y);
         else path.lineTo(px, y);
     }
     path.lineTo(graph.getRight(), graph.getBottom());
@@ -201,7 +273,8 @@ void drawLegend(juce::Graphics& g,
                 juce::Rectangle<float> bounds,
                 const std::vector<std::pair<const char*, juce::Colour>>& entries) {
     float x = bounds.getX() + 8.0f;
-    g.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    static const juce::Font legendFont{juce::FontOptions(10.0f, juce::Font::bold)};
+    g.setFont(legendFont);
     for (const auto& [label, colour] : entries) {
         g.setColour(colour);
         g.drawText(label, juce::roundToInt(x), juce::roundToInt(bounds.getY() + 4.0f),
@@ -235,13 +308,13 @@ TraceGraphComponent::TraceGraphComponent() {
     setOpaque(true);
 }
 
-void TraceGraphComponent::setFrequencyData(FrequencyTraceData data) {
-    frequencyData_ = std::move(data);
+void TraceGraphComponent::setFrequencyData(const FrequencyTraceData& data) {
+    frequencyData_ = data;
     repaint();
 }
 
-void TraceGraphComponent::setTimeData(TimeTraceData data) {
-    timeData_ = std::move(data);
+void TraceGraphComponent::setTimeData(const TimeTraceData& data) {
+    timeData_ = data;
     repaint();
 }
 

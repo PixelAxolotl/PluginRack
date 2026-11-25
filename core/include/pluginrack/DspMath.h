@@ -61,9 +61,27 @@ inline float applyBiquadSample(float x, const Biquad& c, float& s1, float& s2) n
     return y;
 }
 
+// Block form: the same recurrence and the same flushing contract, with the
+// state kept in registers and no isfinite/denormal branch per sample. On a
+// long block two predictable branches per state cost more than the filter
+// itself, so the state is checked once after the loop. If the state went
+// non-finite during the block, everything it produced from then on is
+// unusable: scrub the non-finite samples instead of letting them spread.
 inline void applyBiquad(float* buf, int frames, const Biquad& c, float& s1, float& s2) noexcept {
     for (int i = 0; i < frames; ++i) {
-        buf[i] = applyBiquadSample(buf[i], c, s1, s2);
+        const float x = buf[i];
+        const float y = c.b0 * x + s1;
+        s1 = c.b1 * x - c.a1 * y + s2;
+        s2 = c.b2 * x - c.a2 * y;
+        buf[i] = y;
+    }
+    const bool poisoned = !std::isfinite(s1) || !std::isfinite(s2);
+    flushState(s1);
+    flushState(s2);
+    if (poisoned) {
+        for (int i = 0; i < frames; ++i) {
+            if (!std::isfinite(buf[i])) buf[i] = 0.0f;
+        }
     }
 }
 

@@ -74,6 +74,11 @@ public:
 
     std::function<void()> onJumpToMixer;
     std::function<void()> onStructureChanged;
+    // Chain and insert edits the rack has already applied to its own rows. The
+    // host refreshes the views that mirror engine state without rebuilding the
+    // mixer board, which would close every strip's floating effect window.
+    // Unwired hosts keep the old full-structure notification.
+    std::function<void()> onInsertsChanged;
 
     // IInsertHost
     juce::String insertPlugin(const juce::File& file, int pluginUniqueId = 0) override;
@@ -111,6 +116,9 @@ private:
     void ensureSelection();
     void refreshHeader();
     void refreshSlots();
+    // Chain/insert edits go through here: the narrow host notification when it
+    // is wired, the full-structure one otherwise.
+    void notifyInsertsChanged();
     void layoutSlots();
     int chainBoundaryY(int targetIndex) const;
     void refreshEditor();
@@ -241,6 +249,9 @@ private:
     MiniSpectrum multibandSpectrum;
     MiniSpectrum deEsserSpectrum;
     float multibandMeterLevelDb = -60.0f;
+    // Reused every tick for the Multiband card's per-band reductions: the
+    // thumbnail timer runs at up to 60 Hz, so the vector keeps its capacity.
+    std::vector<float> multibandReductionScratch_;
     float deEsserReductionDb = 0.0f;
     float deEsserDetS1L = 0.0f, deEsserDetS2L = 0.0f, deEsserDetS1R = 0.0f, deEsserDetS2R = 0.0f;
     // Compressor card: the merged Dynamics card when the gate is there too.

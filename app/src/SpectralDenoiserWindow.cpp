@@ -550,6 +550,10 @@ void SpectralDenoiserWindow::closeButtonPressed() {
 }
 
 void SpectralDenoiserWindow::timerCallback() {
+    // A hidden panel has nothing to draw, so the reduction bars stop being
+    // polled. A running profile learn is a persisted change (it rewrites the
+    // effect's noise profile), so it keeps ticking while the panel is hidden.
+    if (!isShowing() && !learning) return;
     std::array<float, pluginrack::kSpectralDenoiserTrimBandCount> bands{};
     if (!effect.bypassed) {
         bands = outputStrip

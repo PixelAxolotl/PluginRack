@@ -139,6 +139,22 @@ struct FeedbackSuppressorEffect {
 FeedbackSuppressorEffect makeDefaultFeedbackSuppressorEffect(std::uint32_t id = 1);
 std::vector<FeedbackSuppressorEffect> defaultFeedbackSuppressorEffects();
 
+// Precomputed butterflies for the detector's in-place radix-2 FFT. Both
+// analysis sizes are fixed, so the bit-reversal permutation and the twiddles
+// at every stage are built once in prepare() and only read afterwards; the
+// render path must never call std::cos/std::sin per sample or per butterfly.
+struct FeedbackSuppressorFftTables {
+    int size = 0;
+    // Size entries: bitReverse[i] is the index i moves to during the
+    // reordering pass.
+    std::vector<int> bitReverse;
+    // Size/2 entries: exp(-2*pi*I*k/size). Stage len uses every size/len-th
+    // entry, which is exp(-2*pi*I*j/len) for butterfly j.
+    std::vector<float> twiddleRe;
+    std::vector<float> twiddleIm;
+    bool operator==(const FeedbackSuppressorFftTables&) const = default;
+};
+
 class FeedbackSuppressorProcessor {
 public:
     FeedbackSuppressorProcessor() = default;
@@ -251,6 +267,13 @@ private:
     std::vector<float> fftLowReal_;
     std::vector<float> fftLowImag_;
     std::vector<float> magsLow_;
+    // Analysis windows and FFT butterflies, built in prepare(). They depend
+    // only on the two fixed analysis sizes, not on the sample rate or the
+    // effect settings, so nothing here is rebuilt when a knob moves.
+    std::vector<float> highWindow_;
+    std::vector<float> lowWindow_;
+    FeedbackSuppressorFftTables highFft_;
+    FeedbackSuppressorFftTables lowFft_;
     std::vector<Peak> peaks_;
     std::vector<Detection> detections_;
     int analysisPass_ = 0;

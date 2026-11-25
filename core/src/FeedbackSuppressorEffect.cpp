@@ -13,38 +13,85 @@ namespace pluginrack {
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
+constexpr double kTwoPi = 6.283185307179586476925286766559;
 
-void fft(std::vector<float>& re, std::vector<float>& im) {
-    const int n = static_cast<int>(re.size());
-    // bit reversal
-    for (int i = 1, j = 0; i < n; ++i) {
+static_assert((kFeedbackSuppressorAnalysisSize & (kFeedbackSuppressorAnalysisSize - 1)) == 0,
+              "high-band analysis size must be a power of two");
+static_assert((kFeedbackSuppressorLowAnalysisSize & (kFeedbackSuppressorLowAnalysisSize - 1)) == 0,
+              "low-band analysis size must be a power of two");
+
+// Symmetric Hann, identical to the formula the per-pass code used:
+// w[i] = 0.5 - 0.5*cos(2*pi*i/(n-1)). Computed in double and stored as float,
+// which is well below the float resolution of the old inline expression.
+void buildHannWindow(std::vector<float>& window, int n) {
+    window.resize(static_cast<std::size_t>(n));
+    const double denominator = static_cast<double>(n - 1);
+    for (int i = 0; i < n; ++i) {
+        const double angle = kTwoPi * static_cast<double>(i) / denominator;
+        window[static_cast<std::size_t>(i)] =
+            static_cast<float>(0.5 - 0.5 * std::cos(angle));
+    }
+}
+
+// Bit reversal and twiddles for one transform size. The angles are computed
+// directly in double per entry (no incremental rotation), so the tables carry
+// no accumulated phase drift.
+void buildFftTables(FeedbackSuppressorFftTables& tables, int n) {
+    tables.size = n;
+    tables.bitReverse.assign(static_cast<std::size_t>(n), 0);
+    int j = 0;
+    for (int i = 1; i < n; ++i) {
         int bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
+        for (; (j & bit) != 0; bit >>= 1) j ^= bit;
         j ^= bit;
+        tables.bitReverse[static_cast<std::size_t>(i)] = j;
+    }
+    tables.twiddleRe.assign(static_cast<std::size_t>(n / 2), 1.0f);
+    tables.twiddleIm.assign(static_cast<std::size_t>(n / 2), 0.0f);
+    for (int k = 0; k < n / 2; ++k) {
+        const double angle = -kTwoPi * static_cast<double>(k) / static_cast<double>(n);
+        tables.twiddleRe[static_cast<std::size_t>(k)] =
+            static_cast<float>(std::cos(angle));
+        tables.twiddleIm[static_cast<std::size_t>(k)] =
+            static_cast<float>(std::sin(angle));
+    }
+}
+
+// In-place radix-2 FFT, unscaled exactly as before (no 1/n factor).
+void fft(std::vector<float>& re, std::vector<float>& im,
+         const FeedbackSuppressorFftTables& tables) {
+    const int n = static_cast<int>(re.size());
+    if (n <= 1 || tables.size != n) return;
+    const int* bitReverse = tables.bitReverse.data();
+    for (int i = 1; i < n; ++i) {
+        const int j = bitReverse[static_cast<std::size_t>(i)];
         if (i < j) {
-            std::swap(re[i], re[j]);
-            std::swap(im[i], im[j]);
+            const auto a = static_cast<std::size_t>(i);
+            const auto b = static_cast<std::size_t>(j);
+            std::swap(re[a], re[b]);
+            std::swap(im[a], im[b]);
         }
     }
+    const float* twiddleRe = tables.twiddleRe.data();
+    const float* twiddleIm = tables.twiddleIm.data();
     for (int len = 2; len <= n; len <<= 1) {
-        const float ang = -2.0f * kPi / static_cast<float>(len);
-        const float wlenRe = std::cos(ang);
-        const float wlenIm = std::sin(ang);
+        const int half = len / 2;
+        const int stride = n / len;
         for (int i = 0; i < n; i += len) {
-            float wRe = 1.0f, wIm = 0.0f;
-            for (int j = 0; j < len / 2; ++j) {
-                const float uRe = re[i + j];
-                const float uIm = im[i + j];
-                const float vRe = re[i + j + len / 2] * wRe - im[i + j + len / 2] * wIm;
-                const float vIm = re[i + j + len / 2] * wIm + im[i + j + len / 2] * wRe;
-                re[i + j] = uRe + vRe;
-                im[i + j] = uIm + vIm;
-                re[i + j + len / 2] = uRe - vRe;
-                im[i + j + len / 2] = uIm - vIm;
-                const float nwRe = wRe * wlenRe - wIm * wlenIm;
-                const float nwIm = wRe * wlenIm + wIm * wlenRe;
-                wRe = nwRe;
-                wIm = nwIm;
+            for (int j = 0; j < half; ++j) {
+                const auto t = static_cast<std::size_t>(j * stride);
+                const float wRe = twiddleRe[t];
+                const float wIm = twiddleIm[t];
+                const auto lo = static_cast<std::size_t>(i + j);
+                const auto hi = static_cast<std::size_t>(i + j + half);
+                const float uRe = re[lo];
+                const float uIm = im[lo];
+                const float vRe = re[hi] * wRe - im[hi] * wIm;
+                const float vIm = re[hi] * wIm + im[hi] * wRe;
+                re[lo] = uRe + vRe;
+                im[lo] = uIm + vIm;
+                re[hi] = uRe - vRe;
+                im[hi] = uIm - vIm;
             }
         }
     }
@@ -114,6 +161,10 @@ FeedbackSuppressorProcessor& FeedbackSuppressorProcessor::operator=(
     fftLowReal_ = other.fftLowReal_;
     fftLowImag_ = other.fftLowImag_;
     magsLow_ = other.magsLow_;
+    highWindow_ = other.highWindow_;
+    lowWindow_ = other.lowWindow_;
+    highFft_ = other.highFft_;
+    lowFft_ = other.lowFft_;
     peaks_ = other.peaks_;
     detections_ = other.detections_;
     analysisPass_ = other.analysisPass_;
@@ -167,6 +218,11 @@ void FeedbackSuppressorProcessor::prepare(double sampleRate) {
     fftLowReal_.assign(kLowAnalysisSize, 0.0f);
     fftLowImag_.assign(kLowAnalysisSize, 0.0f);
     magsLow_.assign(kLowAnalysisSize / 2, 0.0f);
+    // Fixed-size analysis tables: built here, read-only on the render path.
+    buildHannWindow(highWindow_, kHighAnalysisSize);
+    buildHannWindow(lowWindow_, kLowAnalysisSize);
+    buildFftTables(highFft_, kHighAnalysisSize);
+    buildFftTables(lowFft_, kLowAnalysisSize);
     peaks_.clear();
     peaks_.reserve(kLowAnalysisSize / 2);
     detections_.clear();
@@ -469,6 +525,13 @@ void FeedbackSuppressorProcessor::closeGate() noexcept {
 
 void FeedbackSuppressorProcessor::analyze() {
     if (sampleRate_ <= 0.0) return;
+    // Windows and butterflies exist only after prepare(); without them there is
+    // no detector to run (a default-constructed processor is never rendered).
+    if (highWindow_.size() != static_cast<std::size_t>(kHighAnalysisSize)
+        || lowWindow_.size() != static_cast<std::size_t>(kLowAnalysisSize)
+        || highFft_.size != kHighAnalysisSize || lowFft_.size != kLowAnalysisSize) {
+        return;
+    }
     detections_.clear();
     const int maxCuts = std::min(kMaxNotches,
                                  feedbackSuppressorCutCount(effect_.strength));
@@ -479,16 +542,18 @@ void FeedbackSuppressorProcessor::analyze() {
     // the single view is less noisy.
     if (analysisCount_ >= kHighAnalysisSize) {
         const int n = kHighAnalysisSize;
+        const int ringMask = kLowAnalysisSize - 1;
+        const float* window = highWindow_.data();
         for (int i = 0; i < n; ++i) {
-            const int src = (analysisWrite_ - n + i + kLowAnalysisSize) % kLowAnalysisSize;
+            // kLowAnalysisSize is a power of two, so the ring wrap is a mask.
+            const int src = (analysisWrite_ - n + i + kLowAnalysisSize) & ringMask;
             const auto index = static_cast<std::size_t>(src);
             const float sample = 0.5f * (analysisBuffer_[0][index] + analysisBuffer_[1][index]);
-            const float w = 0.5f - 0.5f * std::cos(
-                2.0f * kPi * static_cast<float>(i) / static_cast<float>(n - 1));
-            fftReal_[static_cast<std::size_t>(i)] = sample * w;
+            fftReal_[static_cast<std::size_t>(i)] =
+                sample * window[static_cast<std::size_t>(i)];
             fftImag_[static_cast<std::size_t>(i)] = 0.0f;
         }
-        fft(fftReal_, fftImag_);
+        fft(fftReal_, fftImag_, highFft_);
         for (int i = 1; i < n / 2; ++i) {
             mags_[static_cast<std::size_t>(i)] =
                 std::sqrt(fftReal_[static_cast<std::size_t>(i)] * fftReal_[static_cast<std::size_t>(i)]
@@ -504,21 +569,29 @@ void FeedbackSuppressorProcessor::analyze() {
     // 20+ Hz away. It needs 170 ms of history, so it starts later than the
     // high band and does not slow the high-band response.
     //
+    // This transform stays on every analysis hop rather than every second one.
+    // Candidate confirmation counts passes, not time: a skipped low-band pass
+    // would register as a miss, and updateNotches() rejects a candidate whose
+    // hitRatio drops below 0.8 (allowedMisses is 2 only for confirmPasses >= 4),
+    // so a low peak reported on alternate hops could never reach a cut. The
+    // 240 ms first-cut probes in the detector tests also assume ~10.7 ms hops.
+    //
     // Both channels go through one complex transform: left in the real part,
     // right in the imaginary part, then split with the Hermitian pair. Taking
     // the larger per-channel magnitude means feedback that arrives in opposite
     // polarity on L and R cannot cancel out of the detector.
     if (analysisCount_ >= kLowAnalysisSize) {
         const int n = kLowAnalysisSize;
+        const int ringMask = n - 1;
+        const float* window = lowWindow_.data();
         for (int i = 0; i < n; ++i) {
-            const int src = (analysisWrite_ - n + i + kLowAnalysisSize) % kLowAnalysisSize;
+            const int src = (analysisWrite_ - n + i + kLowAnalysisSize) & ringMask;
             const auto index = static_cast<std::size_t>(src);
-            const float w = 0.5f - 0.5f * std::cos(
-                2.0f * kPi * static_cast<float>(i) / static_cast<float>(n - 1));
+            const float w = window[static_cast<std::size_t>(i)];
             fftLowReal_[static_cast<std::size_t>(i)] = analysisBuffer_[0][index] * w;
             fftLowImag_[static_cast<std::size_t>(i)] = analysisBuffer_[1][index] * w;
         }
-        fft(fftLowReal_, fftLowImag_);
+        fft(fftLowReal_, fftLowImag_, lowFft_);
         for (int i = 1; i < n / 2; ++i) {
             const int mirror = n - i;
             const float xr = fftLowReal_[static_cast<std::size_t>(i)];
@@ -1151,7 +1224,7 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
             gateEnergySum_ -= static_cast<double>(gateEnergy_[static_cast<std::size_t>(gateWrite_)]);
             gateEnergy_[static_cast<std::size_t>(gateWrite_)] = static_cast<float>(instantEnergy);
             gateEnergySum_ += instantEnergy;
-            gateWrite_ = (gateWrite_ + 1) % gateWindow_;
+            if (++gateWrite_ >= gateWindow_) gateWrite_ = 0;
             if (gateFilled_ < gateWindow_) {
                 ++gateFilled_;
             }
@@ -1241,7 +1314,8 @@ void FeedbackSuppressorProcessor::process(float* left, float* right, int frames)
                     }
                     analysisBuffer_[c][static_cast<std::size_t>(analysisWrite_)] = std::isfinite(lp) ? lp : 0.0f;
                 }
-                analysisWrite_ = (analysisWrite_ + 1) % n;
+                // n is kLowAnalysisSize, a power of two: mask instead of modulo.
+                analysisWrite_ = (analysisWrite_ + 1) & (n - 1);
                 if (analysisCount_ < n) ++analysisCount_;
             }
 

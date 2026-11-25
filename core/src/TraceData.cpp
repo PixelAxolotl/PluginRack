@@ -57,13 +57,14 @@ std::vector<float> makeMultibandTargetTrace(const MultibandEffect& effect,
     return trace;
 }
 
-std::vector<float> makeMultibandGainChangeTrace(const MultibandEffect& effect,
-                                                const std::vector<float>& reductionsDb,
-                                                std::size_t binCount,
-                                                float minHz,
-                                                float maxHz) {
-    std::vector<float> trace(binCount, 0.0f);
-    if (binCount == 0 || effect.bands.empty()) return trace;
+void fillMultibandGainChangeTrace(const MultibandEffect& effect,
+                                  const std::vector<float>& reductionsDb,
+                                  std::size_t binCount,
+                                  std::vector<float>& out,
+                                  float minHz,
+                                  float maxHz) {
+    out.assign(binCount, 0.0f);
+    if (binCount == 0 || effect.bands.empty()) return;
 
     for (std::size_t bin = 0; bin < binCount; ++bin) {
         const float position = binCount > 1
@@ -74,17 +75,27 @@ std::vector<float> makeMultibandGainChangeTrace(const MultibandEffect& effect,
         const float reduction = bandIndex < reductionsDb.size()
             ? std::abs(finiteOr(reductionsDb[bandIndex], 0.0f))
             : 0.0f;
-        trace[bin] = clampGraphDb(-reduction);
+        out[bin] = clampGraphDb(-reduction);
     }
+}
+
+std::vector<float> makeMultibandGainChangeTrace(const MultibandEffect& effect,
+                                                const std::vector<float>& reductionsDb,
+                                                std::size_t binCount,
+                                                float minHz,
+                                                float maxHz) {
+    std::vector<float> trace;
+    fillMultibandGainChangeTrace(effect, reductionsDb, binCount, trace, minHz, maxHz);
     return trace;
 }
 
-std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
-                                                 float reductionDb,
-                                                 std::size_t binCount,
-                                                 float minHz,
-                                                 float maxHz) {
-    std::vector<float> trace(binCount, 0.0f);
+void fillDeEsserGainReductionTrace(const DeEsserEffect& effect,
+                                   float reductionDb,
+                                   std::size_t binCount,
+                                   std::vector<float>& out,
+                                   float minHz,
+                                   float maxHz) {
+    out.assign(binCount, 0.0f);
     const float reduction = std::abs(finiteOr(reductionDb, 0.0f));
     const float center = std::clamp(finiteOr(effect.freqHz, 6000.0f), minHz, maxHz);
     const float q = std::max(0.1f, finiteOr(effect.q, 2.0f));
@@ -95,8 +106,17 @@ std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
         const float frequency = logFrequency(position, minHz, maxHz);
         const float distance = std::log2(std::max(1.0f, frequency) / center);
         const float width = 0.85f / q;
-        trace[bin] = clampGraphDb(-reduction * std::exp(-0.5f * (distance / width) * (distance / width)));
+        out[bin] = clampGraphDb(-reduction * std::exp(-0.5f * (distance / width) * (distance / width)));
     }
+}
+
+std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
+                                                 float reductionDb,
+                                                 std::size_t binCount,
+                                                 float minHz,
+                                                 float maxHz) {
+    std::vector<float> trace;
+    fillDeEsserGainReductionTrace(effect, reductionDb, binCount, trace, minHz, maxHz);
     return trace;
 }
 

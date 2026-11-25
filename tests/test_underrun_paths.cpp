@@ -343,10 +343,19 @@ TEST_CASE("taps and latency rules cover the paths render actually runs",
     CHECK(stripPre < stripRun);
 
     // Effects with no chain row still run through the fallback pass, so their
-    // windows must stay fed and their latency must reach the route delays.
-    CHECK(contains(cpp, "processNewMissing(channel->chain, channel->limiterEffects"));
-    CHECK(contains(cpp, "&channel->limiterTap);"));
-    CHECK(contains(cpp, "&strip->limiterTap);"));
+    // windows must stay fed and their latency must reach the route delays. The
+    // plan records the unchained families; render walks that list and the
+    // fallback keeps the chain loop's pre/process/post tap order.
+    CHECK(contains(cpp, "void buildRenderPlan(StripType& strip)"));
+    CHECK(contains(cpp,
+                    "appendUnchained(pluginrack::ChainItemType::Limiter, strip.limiterEffects)"));
+    const auto fallback = functionBody(cpp, "void runFallbackSteps");
+    CHECK(contains(fallback, "case pluginrack::ChainItemType::Limiter:"));
+    CHECK(contains(fallback, "strip.limiterTap.writeTap(false"));
+    CHECK(contains(fallback, "strip.limiterProcessors[step.index].process"));
+    CHECK(contains(fallback, "strip.limiterTap.writeTap(true"));
+    CHECK(contains(cpp, "runFallbackSteps(*channel, channel->fallbackSteps"));
+    CHECK(contains(cpp, "runFallbackSteps(*strip, strip->fallbackSteps"));
     const auto chainLatency = functionBody(header, "static int chainLatencySamples");
     CHECK(contains(chainLatency, "pluginrack::limiterLatencySamples(effect, sampleRate)"));
     CHECK(contains(chainLatency, "pluginrack::kSpectralDenoiserLatencySamples"));
@@ -358,18 +367,23 @@ TEST_CASE("taps and latency rules cover the paths render actually runs",
     const auto eqHelper = functionBody(cpp, "int stripEqLatencySamples");
     CHECK(contains(eqHelper, "pluginrack::eqLatencySamples(true, strip.eqBypassed.get()"));
     CHECK(!contains(eqHelper, "if (!inChain) return 0;"));
-    CHECK(contains(cpp, "if (!hasEqRow(*channel) && !channel->eqBypassed.get())"));
-    CHECK(contains(cpp, "if (!hasEqRow(*strip) && !strip->eqBypassed.get())"));
-    // ...and the fallback keeps the row path's tap order: pre, process, post.
-    const auto channelFallback = cpp.find("if (!hasEqRow(*channel)");
+    // The plan appends the EQ only when the chain has no Eq row, and the
+    // fallback keeps the row path's tap order: pre, process, post.
+    CHECK(contains(cpp, "if (!strip.hasEqInChain) {"));
+    CHECK(contains(fallback, "case pluginrack::ChainItemType::Eq:"));
+    const auto channelFallback = fallback.find("case pluginrack::ChainItemType::Eq:");
     REQUIRE(channelFallback != std::string::npos);
-    const auto channelFallbackPre = cpp.find("channel->eqTap.writeTap(false", channelFallback);
-    const auto channelFallbackRun = cpp.find("channel->eq.process(", channelFallback);
-    const auto channelFallbackPost = cpp.find("channel->eqTap.writeTap(true", channelFallback);
+    const auto channelFallbackPre = fallback.find("strip.eqTap.writeTap(false", channelFallback);
+    const auto channelFallbackRun = fallback.find("strip.eq.process(", channelFallback);
+    const auto channelFallbackPost = fallback.find("strip.eqTap.writeTap(true", channelFallback);
+    REQUIRE(channelFallbackPre != std::string::npos);
     REQUIRE(channelFallbackRun != std::string::npos);
     REQUIRE(channelFallbackPost != std::string::npos);
     CHECK(channelFallbackPre < channelFallbackRun);
     CHECK(channelFallbackRun < channelFallbackPost);
+    // The unchained EQ stays gated by the strip bypass flag, as the row path
+    // used to gate it through hasEqRow.
+    CHECK(contains(fallback, "if (!strip.eqBypassed.get()) {"));
 
     // A staged restore can land on a new clock; the six built-in families
     // must be re-prepared there exactly as in prepareToPlayImpl.
@@ -395,13 +409,16 @@ TEST_CASE("an item tap pushes and bills the same chain row", "[underrun][latency
     CHECK(contains(latency, "pluginrack::firstChainItemIndex(channel.chain, tap.itemId)"));
     CHECK(contains(latency, "for (int i = 0; i <= index; ++i)"));
 
-    // ...and render only writes the ring at that same row, instead of at
-    // every row sharing the id (the later family's signal used to stay in the
-    // ring while the latency came from the first).
+    // ...and the plan marks the row that owns the tap; render pushes only when
+    // that step owns it, instead of at every row sharing the id (the later
+    // family's signal used to stay in the ring while the latency came from the
+    // first row).
+    const auto plan = functionBody(cpp, "void buildRenderPlan");
+    CHECK(contains(plan, "pluginrack::firstChainItemIndex(strip.chain, item.id)"));
+    CHECK(contains(plan, "step.tapOwned ="));
     const auto render = functionBody(cpp, "void AudioEngine::render");
-    const auto guard =
-        render.find("pluginrack::firstChainItemIndex(channel->chain, item.id)");
-    const auto push = render.find("pluginrack::Tap{pluginrack::Tap::Kind::Item, item.id}");
+    const auto guard = render.find("if (step.tapOwned) {");
+    const auto push = render.find("pluginrack::Tap{pluginrack::Tap::Kind::Item");
     REQUIRE(guard != std::string::npos);
     REQUIRE(push != std::string::npos);
     CHECK(guard < push);
@@ -476,6 +493,21 @@ TEST_CASE("a built-in panel owns the editor bay until its card goes",
     CHECK(contains(selection, "closeEffectWindows();"));
     CHECK(contains(selection, "closeEqWindow();"));
     CHECK(contains(selection, "closeDynamicsWindow();"));
+
+    // Those closes mute taps on currentChannel()/currentOutput(), so they must
+    // run while the old strip is still selected: the selectedId assignment
+    // comes after them, never before.
+    const auto closeIdx = selection.find("closeEffectWindows();");
+    const auto assignIdx = selection.find("selectedId = ");
+    REQUIRE(closeIdx != std::string::npos);
+    REQUIRE(assignIdx != std::string::npos);
+    CHECK(closeIdx < assignIdx);
+
+    // The Dynamics panel takes the bay from a plugin-backed panel too: the
+    // close sits before the reuse check so the reuse and the fresh-open paths
+    // both clear the other panel, its FFT timer and its armed analyzer tap.
+    const auto dynamics = functionBody(rack, "void RackView::focusDynamics");
+    CHECK(contains(dynamics, "closeEffectWindows();"));
 }
 
 TEST_CASE("latency tuning options reach the device opens",
@@ -1699,4 +1731,29 @@ TEST_CASE("scene swaps release plugin editors before their processors", "[app][u
     REQUIRE(releaseIdx != std::string::npos);
     REQUIRE(restoreIdx != std::string::npos);
     CHECK(releaseIdx < restoreIdx);
+}
+TEST_CASE("a reload detaches the child host before it reaps it", "[app][ipc][audio]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+    const auto reload = functionBody(cpp, "bool AudioEngine::reloadInsert");
+
+    // render() holds stateLock across processBlock - the submitBlock/fetchBlock
+    // pair - so detaching the child while holding it proves the audio thread is
+    // out of that host. Reaping there instead would close the events and unmap
+    // the views the block renders through.
+    const auto lockIdx = reload.find("const juce::ScopedLock lock(stateLock);");
+    const auto detachIdx = reload.find("detachChildHost()");
+    const auto reapIdx = reload.find("oldHost->killAndReap();");
+    REQUIRE(lockIdx != std::string::npos);
+    REQUIRE(detachIdx != std::string::npos);
+    REQUIRE(reapIdx != std::string::npos);
+    CHECK(lockIdx < detachIdx);
+    CHECK(detachIdx < reapIdx);
+    // The detach must be the exchange, not a call that kills in place.
+    CHECK_FALSE(contains(reload, "pluginHost.stopChildHost();"));
+
+    const auto header = readSource("app/src/PluginHost.h");
+    CHECK(contains(header, "std::shared_ptr<PluginProcessHost> detachChildHost();"));
+    const auto host = functionBody(readSource("app/src/PluginHost.cpp"),
+                                   "std::shared_ptr<PluginProcessHost> PluginHost::detachChildHost");
+    CHECK(contains(host, "childHost_.exchange(nullptr"));
 }

@@ -26,6 +26,23 @@ std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
                                                  float minHz = 20.0f,
                                                  float maxHz = 20000.0f);
 
+// In-place forms, for callers that rebuild a trace every UI tick: they resize
+// `out` to binCount and reuse its existing capacity, so a steady-size trace
+// stops allocating. The returning make* helpers are thin wrappers over these.
+void fillMultibandGainChangeTrace(const MultibandEffect& effect,
+                                  const std::vector<float>& reductionsDb,
+                                  std::size_t binCount,
+                                  std::vector<float>& out,
+                                  float minHz = 20.0f,
+                                  float maxHz = 20000.0f);
+
+void fillDeEsserGainReductionTrace(const DeEsserEffect& effect,
+                                   float reductionDb,
+                                   std::size_t binCount,
+                                   std::vector<float>& out,
+                                   float minHz = 20.0f,
+                                   float maxHz = 20000.0f);
+
 class LevelHistory final {
 public:
     explicit LevelHistory(std::size_t capacity);

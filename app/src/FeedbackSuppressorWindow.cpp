@@ -8,6 +8,20 @@
 using namespace pluginrack;
 
 namespace {
+// Analyzer idle gate shared by the FFT panels: a block whose loudest sample
+// is below this reads as digital silence for display purposes.
+constexpr float kSilentTapPeak = 1.0e-7f;
+
+// True once every smoothed bin has settled at the -100 dBFS display floor, so
+// a silent tap cannot move the trace (and the FFT would redraw nothing).
+bool spectrumSettledAtFloor(const std::vector<float>& bins) {
+    for (const float db : bins)
+        if (db > -99.9f) return false;
+    return true;
+}
+} // namespace
+
+namespace {
 constexpr int kPeakHoldMs = 500;
 
 float proportionOf(float linear) {
@@ -682,6 +696,9 @@ void FeedbackSuppressorWindow::setWeightingIndex(int index) {
 }
 
 void FeedbackSuppressorWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the taps, the FFT and the paint
+    // until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     if (pullNotches) {
         lastNotchCount = pullNotches(lastNotches.data(), lastDepths.data(),
                                      static_cast<int>(lastNotches.size()));
@@ -707,6 +724,12 @@ void FeedbackSuppressorWindow::timerCallback() {
     measure(outL, outR, outPeak, outRms);
     inputMeter.setLevels(inPeak, inRms);
     outputMeter.setLevels(outPeak, outRms);
+
+    // Digital silence on the analysed (post) ring with the smoothed trace
+    // already resting on the floor: the FFT could only redraw the same flat
+    // line, so skip it and the graph repaint until audio returns. Both tap
+    // pulls and the notches above still run.
+    if (outPeak < kSilentTapPeak && spectrumSettledAtFloor(spectrumAvg)) return;
 
     std::fill(fftScratch.begin(), fftScratch.end(), 0.0f);
     for (int i = 0; i < kAnalyzerFftSize; ++i) {

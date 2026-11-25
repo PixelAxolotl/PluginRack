@@ -1153,6 +1153,47 @@ TEST_CASE("mixer runs an unchained eq as the last fallback step") {
             Catch::Approx(2.0f).margin(0.08f));
 }
 
+TEST_CASE("mixer unchained eq enabled after prepare runs its delay") {
+    // buildStrip() used to append the unchained Eq fallback step only when the
+    // strip was prepared with eqEnabled already set. A strip prepared while
+    // bypassed and then enabled through setChannelEqBypassed() flipped
+    // strip.eqEnabled but had no Eq step at all, so neither the EQ nor its
+    // delay ever ran. The live engine re-checks the bypass flag every block,
+    // so the step has to be there unconditionally.
+    auto sceneFor = [] {
+        pluginrack::Scene scene = makeScene();
+        addChannel(scene, 1);
+        scene.channels[0].eqEnabled = false; // stays off at prepare
+        scene.channels[0].eqBands = pluginrack::defaultEqBands();
+        for (auto& band : scene.channels[0].eqBands) {
+            band.enabled = false; // isolate the delay ring
+        }
+        scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz
+        addOutput(scene, 1);
+        addRoute(scene, 1, 1);
+        return scene;
+    };
+
+    // Bypassed at prepare: the delay stays out of the path.
+    pluginrack::MixerEngine bypassed = prepareEngine(sceneFor());
+    REQUIRE(firstNonZero(renderImpulse(bypassed, 1)[0]) == 0);
+
+    // Enabled after prepare: the fallback step the fix appends runs the delay.
+    pluginrack::MixerEngine enabled = prepareEngine(sceneFor());
+    enabled.setChannelEqBypassed(0, false);
+    const auto delayed = renderImpulse(enabled, 1);
+    REQUIRE(firstNonZero(delayed[0]) == 48);
+    REQUIRE(delayed[0][48] == Catch::Approx(0.5f * kCenterPanGain));
+
+    // Bypassed again: the delayed position is silent and the dry path returns.
+    pluginrack::MixerEngine toggled = prepareEngine(sceneFor());
+    toggled.setChannelEqBypassed(0, false);
+    toggled.setChannelEqBypassed(0, true);
+    const auto dry = renderImpulse(toggled, 1);
+    REQUIRE(firstNonZero(dry[0]) == 0);
+    REQUIRE(dry[0][48] == 0.0f);
+}
+
 TEST_CASE("mixer runs the eq at its row and in chain order") {
     // With an Eq row the EQ runs there, and the direct route is billed for
     // the delay so both paths still leave together.

@@ -319,17 +319,20 @@ void RackView::ensureSelection() {
                  : audioEngine.getChannelById(id) != nullptr;
     }
     if (!ok) {
-        const auto oldId = selectedId;
-        const auto oldOut = selectedIsOutput;
-        selectedId = -1;
+        // Resolve the replacement first but keep it in locals: the closes below
+        // mute taps on currentChannel()/currentOutput(), so they must run while
+        // the *old* strip is still selected. Assigning selectedId/selectedIsOutput
+        // earlier would leave the old strip's taps armed and mute the new one's.
+        auto fallbackId = -1;
+        auto fallbackIsOutput = selectedIsOutput;
         if (!audioEngine.getChannels().empty()) {
-            selectedId = static_cast<int>(audioEngine.getChannels().front()->id);
-            selectedIsOutput = false;
+            fallbackId = static_cast<int>(audioEngine.getChannels().front()->id);
+            fallbackIsOutput = false;
         } else if (!audioEngine.getOutputs().empty()) {
-            selectedId = static_cast<int>(audioEngine.getOutputs().front()->id);
-            selectedIsOutput = true;
+            fallbackId = static_cast<int>(audioEngine.getOutputs().front()->id);
+            fallbackIsOutput = true;
         }
-        if (selectedId != oldId || selectedIsOutput != oldOut) {
+        if (fallbackId != selectedId || fallbackIsOutput != selectedIsOutput) {
             // Every panel is bound to the strip it was opened on, so a
             // selection that moves takes all of them down, not just the EQ.
             closeEffectWindows();
@@ -337,6 +340,8 @@ void RackView::ensureSelection() {
             closeDynamicsWindow();
             focusedInsertId = 0;
         }
+        selectedId = fallbackId;
+        selectedIsOutput = fallbackIsOutput;
     }
 }
 
@@ -541,6 +546,14 @@ const pluginrack::DynamicsEffect* RackView::effectOfType(pluginrack::DynamicsEff
     const auto found = std::find_if(effects->begin(), effects->end(),
                                     [type](const auto& effect) { return effect.type == type; });
     return found != effects->end() ? &*found : nullptr;
+}
+
+void RackView::notifyInsertsChanged() {
+    if (onInsertsChanged) {
+        onInsertsChanged();
+        return;
+    }
+    if (onStructureChanged) onStructureChanged();
 }
 
 void RackView::refreshSlots() {
@@ -972,8 +985,10 @@ void RackView::timerCallback() {
     }
 
     // The cards follow the engine, not just the layout: the EQ panel and the
-    // dynamics knobs edit these values while the list stays on screen.
-    const double liveRateHz = audioEngine.getLatencyReport().sampleRate;
+    // dynamics knobs edit these values while the list stays on screen. The
+    // rate is an atomic read: taking the latency report's try-lock here would
+    // silently fall back whenever the audio thread was mid-callback.
+    const double liveRateHz = audioEngine.getCurrentSampleRate();
     const bool eqBypassed = selectedIsOutput
                                 ? (currentOutput() != nullptr && currentOutput()->eqBypassed.get())
                                 : (currentChannel() != nullptr && currentChannel()->eqBypassed.get());
@@ -1027,8 +1042,10 @@ void RackView::timerCallback() {
                 mini->setSpectrum(multibandSpectrum.magnitudes(), multibandSpectrum.numBins());
                 if (effect != nullptr) {
                     mini->setMultiband(*effect, liveRateHz);
-                    std::vector<float> reductions;
-                    reductions.reserve(effect->bands.size());
+                    // clear() keeps the capacity, so the card's reductions do
+                    // not allocate on every thumbnail tick.
+                    auto& reductions = multibandReductionScratch_;
+                    reductions.clear();
                     for (const auto& band : effect->bands)
                         reductions.push_back(std::max(0.0f, -MultibandCurveComponent::compressionGainDb(
                             levelDb, band)));
@@ -2798,11 +2815,17 @@ void RackView::focusDiagnosticsWindow(pluginrack::ChainItemType type) {
 }
 
 void RackView::focusDynamics(pluginrack::DynamicsEffectType type) {
+    // The bay holds one panel at a time: a plugin-backed panel would otherwise
+    // stay docked beside the Dynamics panel, keep its FFT timer alive and leave
+    // its analyzer tap armed. Both the reuse and the fresh-open paths land here
+    // first, so the other panels come down before the Dynamics window is made.
+    closeEffectWindows();
     if (dynamicsWindow != nullptr) {
         if (dynamicsWindow->getType() != type) {
             closeDynamicsWindow();
         } else {
             dynamicsFocused = true;
+            hideDockedEditor();
             closeEqWindow();
             if (dynamicsWindow->getParentComponent() != &editorHolder)
                 editorHolder.addAndMakeVisible(dynamicsWindow);
@@ -3557,11 +3580,10 @@ void RackView::reorderChainItem(pluginrack::ChainItem item, int targetIndex) {
     juce::Component::SafePointer<RackView> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        auto callback = safe->onStructureChanged;
         safe->chainDropTarget = -1;
         safe->chainMarker.setVisible(false);
         safe->refreshSlots();
-        if (callback) callback();
+        safe->notifyInsertsChanged();
     });
 }
 
@@ -3806,8 +3828,7 @@ void RackView::refreshAfterInsertChange() {
     juce::Component::SafePointer<RackView> safe(this);
     juce::MessageManager::callAsync([safe] {
         if (safe == nullptr) return;
-        auto callback = safe->onStructureChanged;
-        if (callback) callback();
+        safe->notifyInsertsChanged();
     });
 }
 

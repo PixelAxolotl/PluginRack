@@ -3,6 +3,20 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+// Analyzer idle gate shared by the FFT panels: a block whose loudest sample
+// is below this reads as digital silence for display purposes.
+constexpr float kSilentTapPeak = 1.0e-7f;
+
+// True once every smoothed bin has settled at the -100 dBFS display floor, so
+// a silent tap cannot move the trace (and the FFT would redraw nothing).
+bool spectrumSettledAtFloor(const std::vector<float>& bins) {
+    for (const float db : bins)
+        if (db > -99.9f) return false;
+    return true;
+}
+} // namespace
+
 using namespace pluginrack;
 
 MultibandWindow::MultibandWindow(const juce::String& title,
@@ -353,6 +367,9 @@ void MultibandWindow::setAnalyzerMode(int mode) {
 }
 
 void MultibandWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the taps, the FFT and the paint
+    // until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     // Two pulls of the same buffers: the per-band gain-reduction bars model
     // each band's compressor input, so they read the pre-effect ring; the RTA
     // shows the multiband's output, so it reads the post ring.
@@ -360,7 +377,8 @@ void MultibandWindow::timerCallback() {
 
     float sum = 0.0f;
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
-        const float sample = (tapL[static_cast<std::size_t>(i)] + tapR[static_cast<std::size_t>(i)]) * 0.5f;
+        const std::size_t idx = static_cast<std::size_t>(i);
+        const float sample = (tapL[idx] + tapR[idx]) * 0.5f;
         sum += sample * sample;
     }
     const float levelDb = 20.0f * std::log10(std::max(1.0e-5f, std::sqrt(sum / kAnalyzerFftSize)));
@@ -372,10 +390,16 @@ void MultibandWindow::timerCallback() {
     curve.setGainReduction(gainReductionDb);
 
     if (pullAnalyzerTap) pullAnalyzerTap(true, tapL.data(), tapR.data(), kAnalyzerFftSize);
+    float tapPeak = 0.0f;
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
         const std::size_t idx = static_cast<std::size_t>(i);
         fftScratch[idx] = (tapL[idx] + tapR[idx]) * 0.5f * hannCoeffs[idx];
+        tapPeak = std::max(tapPeak, std::max(std::abs(tapL[idx]), std::abs(tapR[idx])));
     }
+    // Digital silence and a smoothed trace already resting on the floor: the
+    // FFT could only redraw the same flat line, so skip it (and the repaint)
+    // until audio returns. Both tap pulls above still run.
+    if (tapPeak < kSilentTapPeak && spectrumSettledAtFloor(spectrumAvg)) return;
     analyzerFft->performFrequencyOnlyForwardTransform(fftScratch.data(), true);
     constexpr float normalisation = 4.0f / static_cast<float>(kAnalyzerFftSize);
     for (std::size_t i = 0; i < spectrumDb.size(); ++i) {

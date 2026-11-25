@@ -57,6 +57,9 @@ private:
     std::vector<float> fftScratch;
     std::vector<float> spectrumDb;
     std::vector<float> spectrumAvg;
+    // Reused by timerCallback: the trace vectors keep their capacity, so the
+    // 30 Hz tick does not rebuild a FrequencyTraceData (three vectors) at all.
+    FrequencyTraceData frequencyTrace;
     juce::Label analyzerLabel{"", "Analyzer"};
     juce::Label rtaOffsetLabel{"", "0"};
     MiniButton rtaMinusButton{"-"};

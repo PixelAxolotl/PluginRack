@@ -84,6 +84,9 @@ void LimiterWindow::setBypassed(bool b) { effect.bypassed = b; enableButton.setT
 void LimiterWindow::setAnalyzerMode(int m) { if (m == 0) stopTimer(); else startTimer(33); }
 
 void LimiterWindow::timerCallback() {
+    // A hidden panel has nothing to draw: skip the taps, the trace update and
+    // the paint until the owner shows the window again (same guard as RackView).
+    if (!isShowing()) return;
     if (!pullAnalyzerTap) return;
     pullAnalyzerTap(false, preTapL.data(), preTapR.data(), static_cast<int>(preTapL.size()));
     pullAnalyzerTap(true, postTapL.data(), postTapR.data(), static_cast<int>(postTapL.size()));
@@ -101,14 +104,19 @@ void LimiterWindow::timerCallback() {
     levelHistory.copyOrderedTo(std::span<float>(historyInput),
                                std::span<float>(historyReduction),
                                std::span<float>(historyOutput));
+    // Fill the member trace in place (assign keeps the member's capacity for
+    // every tick) instead of building three temporary vectors per tick.
     const auto count = levelHistory.size();
-    graph.setTimeData(TimeTraceData{
-        {historyInput.begin(), historyInput.begin() + static_cast<std::ptrdiff_t>(count)},
-        {historyReduction.begin(), historyReduction.begin() + static_cast<std::ptrdiff_t>(count)},
-        {historyOutput.begin(), historyOutput.begin() + static_cast<std::ptrdiff_t>(count)}});
+    const auto end = historyInput.begin() + static_cast<std::ptrdiff_t>(count);
+    timeTrace.inputDb.assign(historyInput.begin(), end);
+    timeTrace.reductionDb.assign(historyReduction.begin(),
+                                 historyReduction.begin() + static_cast<std::ptrdiff_t>(count));
+    timeTrace.outputDb.assign(historyOutput.begin(),
+                              historyOutput.begin() + static_cast<std::ptrdiff_t>(count));
+    // The graph repaints itself when its data changed, so no explicit repaint.
+    graph.setTimeData(timeTrace);
     peakDb = outputDb;
     grDb = reductionDb;
-    graph.repaint();
 }
 
 void LimiterWindow::paint(juce::Graphics& g) {

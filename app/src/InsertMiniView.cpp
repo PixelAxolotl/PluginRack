@@ -10,6 +10,19 @@ namespace {
 constexpr int kGaugeWidth = 10;
 constexpr int kGaugeCaptionHeight = 10;
 constexpr float kMaxReductionDb = 24.0f;
+// A live tick can move a band's reduction by a rounding error; rebuild the
+// thumbnail trace (and repaint the card) only when a band actually moved. The
+// trace is a piecewise-constant map of these per-band values, so unchanged
+// inputs mean unchanged pixels. Same rule as MultibandCurveComponent.
+constexpr float kTraceEpsilonDb = 0.05f;
+
+bool reductionsMoved(const std::vector<float>& previous, const std::vector<float>& current) {
+    if (previous.size() != current.size()) return true;
+    for (std::size_t i = 0; i < current.size(); ++i)
+        // Written so a NaN counts as moved instead of comparing false.
+        if (!(std::abs(current[i] - previous[i]) < kTraceEpsilonDb)) return true;
+    return false;
+}
 
 // Live gain-reduction column shared by the de-esser, limiter and dynamics
 // cards: an empty track with a fill rising from the bottom, captioned "GR".
@@ -149,6 +162,10 @@ void InsertMiniView::setDeEsser(const pluginrack::DeEsserEffect& effect, double 
 
 void InsertMiniView::setGainReduction(const std::vector<float>& newReductionsDb) {
     if (kind != Kind::Multiband) return;
+    // Same trace size and no band moved by a visible step: nothing to redraw.
+    if (multibandGainChange.size() == multibandTarget.size() && !multibandGainChange.empty()
+        && !reductionsMoved(reductionsDb, newReductionsDb))
+        return;
     reductionsDb = newReductionsDb;
     updateTraceVectors();
     repaint();
@@ -167,11 +184,13 @@ void InsertMiniView::updateTraceVectors() {
     if (kind == Kind::Multiband) {
         MultibandCurveComponent::normaliseEffect(multiband);
         multibandTarget = pluginrack::makeMultibandTargetTrace(multiband, 128);
-        multibandGainChange = pluginrack::makeMultibandGainChangeTrace(
-            multiband, reductionsDb, multibandTarget.size());
+        // In-place: the card is redrawn every tick, so the trace vector keeps
+        // its capacity instead of being reallocated per repaint.
+        pluginrack::fillMultibandGainChangeTrace(multiband, reductionsDb,
+                                                 multibandTarget.size(), multibandGainChange);
     } else if (kind == Kind::DeEsser) {
-        deEsserGainChange = pluginrack::makeDeEsserGainReductionTrace(
-            deEsser, deEsserGainReductionDb, 128);
+        pluginrack::fillDeEsserGainReductionTrace(deEsser, deEsserGainReductionDb, 128,
+                                                  deEsserGainChange);
     }
 }
 

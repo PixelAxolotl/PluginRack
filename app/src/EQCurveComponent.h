@@ -5,6 +5,7 @@
 #include <functional>
 #include <vector>
 
+#include <pluginrack/DspMath.h>
 #include <pluginrack/EqEngine.h>
 
 #include "TraceGraphComponent.h"
@@ -81,6 +82,7 @@ public:
     std::function<void()> onBandSelected;
 
     void paint(juce::Graphics& g) override;
+    void resized() override;
     void mouseDown(const juce::MouseEvent& e) override;
     // Double-clicking a node restores that point to its factory setting (type,
     // frequency, gain, Q and enabled/solo state) and pushes it to the engine.
@@ -100,6 +102,17 @@ private:
     // maths. sampleRateHz is the UI's reference rate (device rate at build).
     static double bandShapeDb(const pluginrack::EqBand& band,
                               double sampleRateHz, double hz);
+
+    // Cached curve geometry (Task: 30-60 Hz repaints must not re-run the biquad
+    // maths per x-pixel). The paths are rebuilt only when a setter that can
+    // move them ran: setBands, setSelectedBand, setSampleRateHz, resized, and
+    // any direct band edit in mouseDrag/mouseDoubleClick.
+    struct CachedBandShape {
+        pluginrack::dsp::Biquad coeffs{};
+        bool contributes = false; // active band with finite coefficients
+    };
+    void invalidateCurvePaths() noexcept { curvePathsDirty = true; }
+    void rebuildCurvePaths();
 
     double xToFreq(float x) const;
     float freqToX(double hz) const;
@@ -126,6 +139,17 @@ private:
     // that strip draws the same analyzer height.
     float spectrumOffsetDb = 0.0f;
     Weighting weighting = Weighting::Z;
+
+    // Prebuilt curve geometry (see rebuildCurvePaths). Rebuilt lazily in
+    // paint() while curvePathsDirty is set, and never touched by the RTA
+    // setters (spectrum/offset/weighting), so a 30-60 Hz analyzer repaint
+    // costs no biquad maths.
+    juce::Path cachedCombinedPath;
+    juce::Path cachedCombinedFill;
+    juce::Path cachedSelectedPath;
+    // One coefficient set per band, refreshed with the paths (not per x-pixel).
+    std::vector<CachedBandShape> cachedBandShapes;
+    bool curvePathsDirty = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EQCurveComponent)
 };

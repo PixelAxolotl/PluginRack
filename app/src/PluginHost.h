@@ -148,7 +148,20 @@ public:
     // child-mode slot therefore renders its launch-time parameters until that
     // gate opens.
     bool setChildParameter(int parameterIndex, float normalisedValue);
+    // Unpublishes the child and kills it. Only safe once the audio thread can no
+    // longer reach this host: killAndReap() closes the Win32 events and unmaps
+    // the shared views submitBlock/fetchBlock use. A caller that has not
+    // unlinked the slot first must use detachChildHost().
     void stopChildHost();
+    // Unpublishes the child without reaping it and returns the old pointer, so
+    // the caller decides *when* the killAndReap() is safe. The audio thread
+    // reads childHost_ with acquire and only dereferences the pointer it got,
+    // so after this exchange it either holds nothing from this host or holds a
+    // shared_ptr the caller owns too; a caller that detaches while holding the
+    // engine stateLock (render() holds it across processBlock) knows the audio
+    // thread is out of submitBlock/fetchBlock before it reaps. Null when the
+    // slot had no child.
+    std::shared_ptr<PluginProcessHost> detachChildHost();
     bool childHostEnabled() const {
         return childHost_.load(std::memory_order_acquire) != nullptr;
     }
@@ -207,6 +220,13 @@ private:
     // Published atomically so the audio thread can never observe a
     // half-torn pointer (fix 2 of the resume gate). A slot whose renderer
     // mode is "child" keeps reading dry when this is null.
+    //
+    // Two ways out, and the difference is the caller's lock discipline:
+    // stopChildHost() unpublishes *and* reaps in one call, so it requires that
+    // the audio thread can no longer reach this slot (the insert is unlinked,
+    // or the audio device is stopped); detachChildHost() only unpublishes and
+    // hands the caller the pointer, which is what a reload needs because the
+    // slot stays live while its child is replaced.
     std::atomic<std::shared_ptr<PluginProcessHost>> childHost_{};
     std::atomic<int> rendererMode_{0}; // 0 = in-process, 1 = child (fix 1)
     juce::AudioBuffer<float> childScratch_;
@@ -229,17 +249,28 @@ private:
     // host pointer), so it is taken on the message thread; only the blocking
     // control request runs on a detached worker, which is handed the child host
     // by shared_ptr and value copies of the snapshot and never touches `this`.
-    // paramResyncAlive_ keeps a queued callback off a destroyed host;
-    // paramResyncPending_ and paramResyncAgain_ are shared so the worker can
-    // re-open the gate and report a request that arrived mid-push (a plain
-    // member would be written from the worker).
+    // paramResyncAlive_ keeps a queued callback off a destroyed host.
+    //
+    // Ticket protocol (no second flag, so no lost wakeup): a request is one
+    // bump of neededGen; `active` says who owes the round. A requester that
+    // finds a round in flight never has to signal it directly - the round
+    // compares neededGen against the generation it snapshotted when it ends and
+    // books one more round when they differ. Leaving active set while that
+    // rearm is queued, and clearing it before the closing recheck, is what
+    // makes a preemption between the two impossible to lose a request to.
+    struct ResyncState {
+        std::atomic<std::uint64_t> neededGen{0};
+        std::atomic<bool> active{false};
+    };
     void scheduleParamResync();
+    // The round body, message thread only: snapshot and hand the blocking push
+    // to the worker. Called by scheduleParamResync and by the rearm, which is
+    // why it re-reads the generation instead of taking one from its caller.
+    void startParamResyncRound();
     juce::String editorStateAsBase64() const;
-    std::shared_ptr<std::atomic<bool>> paramResyncPending_{
-        std::make_shared<std::atomic<bool>>(false)};
-    std::shared_ptr<std::atomic<bool>> paramResyncAgain_{
-        std::make_shared<std::atomic<bool>>(false)};
-    std::shared_ptr<std::atomic<bool>> paramResyncAlive_{std::make_shared<std::atomic<bool>>(true)};
+    std::shared_ptr<ResyncState> paramResyncState_{std::make_shared<ResyncState>()};
+    std::shared_ptr<std::atomic<bool>> paramResyncAlive_{
+        std::make_shared<std::atomic<bool>>(true)};
 
     juce::DocumentWindow* editorWindow = nullptr;
 

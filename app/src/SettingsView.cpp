@@ -644,7 +644,9 @@ void SettingsView::refresh() {
     refreshReloadDevices();
     refreshListenChoices();
     updateMeasurement(report);
-    pollAutoReload();
+    // pollAutoReload() is not called here: timerCallback() drives it on every
+    // tick whether or not this page is on screen, so a refresh would only run
+    // it a second time on the same tick.
 
     // Wrapped lines decide the section heights, so only a change in one of them
     // is worth re-running the layout.
@@ -889,7 +891,21 @@ void SettingsView::pollAutoReload() {
 }
 
 void SettingsView::timerCallback() {
+    // Background duties stay on while the page is hidden: the latency profile
+    // has to finish measuring and a broken watched device has to be reopened
+    // whether or not Settings is on screen.
     if (audioEngine.isLatencyProfileActive()) (void) audioEngine.tickLatencyProfile();
+    pollAutoReload();
+    // The full readout/layout refresh only matters on screen; becoming visible
+    // runs it once (see visibilityChanged), so a hidden page costs one tick.
+    if (!isShowing()) return;
+    refresh();
+}
+
+void SettingsView::visibilityChanged() {
+    // refresh() is skipped while hidden, so the page must catch up the moment
+    // it returns to screen instead of waiting for the next timer tick.
+    if (!isShowing()) return;
     refresh();
 }
 

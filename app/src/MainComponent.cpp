@@ -350,6 +350,15 @@ MainComponent::MainComponent()
     toolbar.onErrorClicked = [this] { showAudioErrors(); };
 
     mixer.onStructureChanged = [this] { refreshViews(); };
+    // A strip-local chain edit or rename: the strip has already refreshed
+    // itself, so refresh the views that mirror engine state without rebuilding
+    // the mixer board. Rebuilding it would close every strip's floating effect
+    // window and drop scroll/focus for the strips the user did not touch.
+    mixer.onInsertsChanged = [this] { router.refreshViews(); };
+    // The rack applies chain/insert edits to its own rows, so a card add,
+    // remove or drag must not rebuild the mixer board and close the other
+    // strips' floating windows. Route those through the narrow notification.
+    router.getRackView().onInsertsChanged = [this] { router.refreshViews(); };
 
     // All device/plugin work is deferred to the first paint (see paint()):
     // starting it from the constructor ran it before the window had drawn,
@@ -967,22 +976,37 @@ void MainComponent::pollSceneChanges() {
     if (audioEngine.isOpeningDevices()) return;
     if (audioEngine.getChannels().empty() || audioEngine.getOutputs().empty()) return;
 
-    // Structural half of the scene only: no plugin state capture, so this is
-    // safe to run once a second while audio plays.
-    const auto structureHash =
-        sceneFingerprint(pluginrack::toJson(audioEngine.makeScene(false)));
+    // Both counters are lock-free reads published by the engine: an idle poll
+    // costs two atomic loads and nothing else. A setter that changes saved
+    // state bumps the structure revision; a plugin editor knob bumps its
+    // parameter revision.
+    const auto structureRevision = audioEngine.getStructureRevision();
     const auto pluginRevision = audioEngine.getPluginEditRevision();
     if (!haveChangeBaseline_) {
-        lastStructureHash_ = structureHash;
+        lastStructureHash_ =
+            sceneFingerprint(pluginrack::toJson(audioEngine.makeScene(false)));
+        lastStructureRevision_ = structureRevision;
         lastPluginRevision_ = pluginRevision;
         haveChangeBaseline_ = true;
         return;
     }
-    if (structureHash == lastStructureHash_ && pluginRevision == lastPluginRevision_)
+    // Early return: the scene can only have changed if one of the two
+    // revisions moved, so no makeScene, no toJson, no fingerprint.
+    if (structureRevision == lastStructureRevision_ && pluginRevision == lastPluginRevision_)
         return;
 
+    // A revision moved, but the edit may serialise exactly like the last
+    // polled scene (an undo, or a setter that reapplied the same value). Only
+    // this exact-fingerprint comparison decides the save, as before.
+    const auto structureHash =
+        sceneFingerprint(pluginrack::toJson(audioEngine.makeScene(false)));
+    const bool unchanged = structureHash == lastStructureHash_
+                           && pluginRevision == lastPluginRevision_;
     lastStructureHash_ = structureHash;
+    lastStructureRevision_ = structureRevision;
     lastPluginRevision_ = pluginRevision;
+    if (unchanged) return;
+
     lastSceneChangeMs_ = nowMs;
     if (!sceneChangedSinceSave_) {
         sceneChangedSinceSave_ = true;

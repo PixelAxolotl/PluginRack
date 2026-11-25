@@ -30,6 +30,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace pluginHostIpc {
 
@@ -198,11 +199,18 @@ inline void controlEndWrite(ControlSection& section) {
 
 // Copies `text` into the section payload. Returns false (and leaves the payload
 // untouched) when it would not fit, so an oversized state is a refused request
-// rather than a truncated one.
+// rather than a truncated one: the length check runs before the copy, so no
+// prefix of an oversized string is ever written.
 inline bool controlSetPayload(ControlSection& section, const char* text, std::size_t length) {
     if (text == nullptr) return false;
-    if (length + 1 > kControlPayloadBytes) return false;
-    for (std::size_t i = 0; i < length; ++i) section.payload[i] = text[i];
+    // Same accept/reject rule as before (reject when length + 1 > cap), written
+    // without the addition so a SIZE_MAX length cannot wrap into a pass.
+    if (length > kControlPayloadBytes - 1) return false;
+    // `length` bytes plus the terminator are known to fit: the check above
+    // guarantees length + 1 <= kControlPayloadBytes, so the byte after the
+    // copied range is in bounds. memcpy is safe here because the source and the
+    // section payload never overlap (the payload is the shared mapping).
+    if (length > 0) std::memcpy(section.payload, text, length);
     section.payload[length] = '\0';
     section.payloadBytes.store(length, std::memory_order_release);
     return true;

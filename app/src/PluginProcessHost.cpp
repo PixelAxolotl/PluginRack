@@ -64,6 +64,11 @@ bool PluginProcessHost::start(const juce::File& file, int pluginUniqueId, double
     launched = true;
     hostDead.store(false, std::memory_order_relaxed);
     stopWatcher.store(false, std::memory_order_relaxed);
+    // Clear the stop signal left over from a previous killAndReap(); otherwise
+    // the new watcher's first wait(100) returns at once and the loop spins
+    // until the flag is seen. No watcher thread is running here: start() only
+    // spawns one after the previous one was joined.
+    stopWatcherEvent.reset();
     startWatcher();
     juce::Logger::writeToLog("plugin: child host started for " + file.getFileName());
     return true;
@@ -442,13 +447,19 @@ void PluginProcessHost::startWatcher() {
                 hostDead.store(true, std::memory_order_release);
                 return;
             }
-            juce::Thread::sleep(100);
+            // Bounded wait rather than a sleep: signal() from
+            // stopWatcherThread() wakes it immediately, so a plugin removal or
+            // reload does not sit out the rest of a tick on the message thread.
+            stopWatcherEvent.wait(100);
         }
     });
 }
 
 void PluginProcessHost::stopWatcherThread() {
     stopWatcher.store(true, std::memory_order_relaxed);
+    // Signal before joining: the watcher may be inside the 100 ms wait, and
+    // without the signal join() would block this thread for that long.
+    stopWatcherEvent.signal();
     if (watcher.joinable()) watcher.join();
 }
 

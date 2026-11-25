@@ -606,7 +606,13 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     // single step closing the appended order, matching the live engine's
     // processNewMissing() pass. The sentinel index and the cleared tap flag
     // keep it from owning an item tap: with no row there is no id to name it.
-    if (!usedEq && source.eqEnabled) {
+    // The step is appended even while the strip is bypassed: the EQ can be
+    // enabled after prepare (setChannelEqBypassed), and the live engine picks
+    // that up because it re-reads eqBypassed every block. processStrip gates
+    // the step on strip.eqEnabled and computeStripLatency bills
+    // eqLatencySamples(strip.eqEnabled, ...), which is 0 while disabled, so a
+    // dormant step neither processes nor delays anything.
+    if (!usedEq) {
         strip.steps.push_back({ChainItemType::Eq, static_cast<std::size_t>(-1), 0, false});
     }
     return strip;
@@ -776,6 +782,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
         float* scratchRight = scratchLeft + maxFrames;
         const bool silenced = cache.muted || (anySolo_ && !cache.soloed) ||
                                 (c < stoppedChannels_.size() && stoppedChannels_[c] != 0);
+        const bool stopped = c < stoppedChannels_.size() && stoppedChannels_[c] != 0;
         const bool isMono = input.numChannels == 1;
         const bool isStereo = input.numChannels == 2;
         const bool hasMono =
@@ -801,6 +808,32 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                 scratchLeft[i] = 0.0f;
                 scratchRight[i] = 0.0f;
             }
+        }
+        // A stopped channel that already has silence at its input has nothing
+        // to compute. Skip the strip and the VST run, but still advance every
+        // tap the channel owns so the pre-fader timelines of routes and sends
+        // stay aligned; scratch is all zeros here, so these are the same
+        // values the per-step taps would have seen. Muted-but-not-stopped
+        // channels keep running: their pre-fader taps must still pass audio.
+        bool idleStopped = stopped;
+        if (idleStopped) {
+            for (int i = 0; i < frames; ++i) {
+                if (scratchLeft[i] != 0.0f || scratchRight[i] != 0.0f) {
+                    idleStopped = false;
+                    break;
+                }
+            }
+        }
+        if (idleStopped) {
+            if (c < channelTaps_.size()) {
+                for (TapState& state : channelTaps_[c]) {
+                    state.ring.push(scratchLeft, scratchRight, frames);
+                }
+            }
+            if (c < channelIds_.size()) {
+                meters_.observeChannelRealtime(channelIds_[c], 0.0f);
+            }
+            continue;
         }
         if (c < channelTaps_.size()) {
             pushTapKind(channelTaps_[c], Tap::Kind::Input, 0,

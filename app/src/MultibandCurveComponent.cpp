@@ -12,6 +12,21 @@ constexpr float kMinDb = -48.0f;
 constexpr float kMaxDb = 12.0f;
 constexpr int kCrossoverHitRadius = 14;
 constexpr float kCrossoverHandleRadius = 7.0f;
+constexpr std::size_t kTraceBins = 256;
+// A live tick can move a band's reduction by a rounding error; rebuilding the
+// trace and repainting for that only churns the graph at the timer rate. The
+// trace is a piecewise-constant map of the per-band values, so unchanged inputs
+// mean an unchanged trace. (At the trace's -60 dB floor a larger input move can
+// still map to the same pixels: that case rebuilds harmlessly.)
+constexpr float kTraceEpsilonDb = 0.05f;
+
+bool reductionsMoved(const std::vector<float>& previous, const std::vector<float>& current) {
+    if (previous.size() != current.size()) return true;
+    for (std::size_t i = 0; i < current.size(); ++i)
+        // Written so a NaN counts as moved instead of comparing false.
+        if (!(std::abs(current[i] - previous[i]) < kTraceEpsilonDb)) return true;
+    return false;
+}
 
 juce::String frequencyText(double hz) {
     if (hz >= 1000.0) return juce::String(hz / 1000.0, hz >= 10000.0 ? 0 : 1) + "k";
@@ -64,7 +79,7 @@ void MultibandCurveComponent::setEffect(const pluginrack::MultibandEffect& newEf
     normaliseEffect(effect);
     selectedBand = juce::jlimit(0, static_cast<int>(effect.bands.size()) - 1, selectedBand);
     targetTraceDb = pluginrack::makeMultibandTargetTrace(effect, 256);
-    gainChangeTraceDb = pluginrack::makeMultibandGainChangeTrace(effect, reductionsDb, 256);
+    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb);
     repaint();
 }
 
@@ -91,8 +106,11 @@ void MultibandCurveComponent::setSpectrumWeighting(SpectrumWeighting newWeightin
 }
 
 void MultibandCurveComponent::setGainReduction(const std::vector<float>& reductions) {
+    // Nothing on screen would change: keep the trace (and the paint) untouched.
+    if (gainChangeTraceDb.size() == kTraceBins && !reductionsMoved(reductionsDb, reductions))
+        return;
     reductionsDb = reductions;
-    gainChangeTraceDb = pluginrack::makeMultibandGainChangeTrace(effect, reductionsDb, 256);
+    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb);
     repaint();
 }
 

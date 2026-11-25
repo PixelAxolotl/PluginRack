@@ -35,6 +35,13 @@
 //       -> the parameter producer thread (the message thread), like
 //          setParameter: it reads the producer side of the param mapping, which
 //          is only closed from that same thread.
+//   watcher thread (private)
+//       -> spawned by start(); every 100 ms it checks the child and marks the
+//          host dead when it is gone. Stopped by stopWatcherThread(), which
+//          sets stopWatcher and then signals stopWatcherEvent so the join()
+//          returns immediately instead of waiting out the current tick.
+//          killAndReap() (and therefore the destructor) goes through it, so a
+//          host destroyed while the watcher runs never blocks for a tick.
 //
 // The failure rule lives in PluginHost, not here: on a miss the caller leaves
 // the block dry. There is deliberately no "fall back to the in-process
@@ -158,6 +165,12 @@ private:
 
     std::atomic<bool> hostDead{false};
     std::atomic<bool> stopWatcher{false};
+    // Wakes the watcher out of its 100 ms wait (auto-reset: one signal releases
+    // one wait; a signal that arrives first stays pending, so it cannot be
+    // missed between the stopWatcher store and the wait). start() resets it
+    // before spawning the next watcher, because a previous killAndReap() leaves
+    // it signalled and the new loop would spin on immediate returns.
+    juce::WaitableEvent stopWatcherEvent;
     std::thread watcher;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessHost)

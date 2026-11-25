@@ -80,7 +80,7 @@ void LimiterProcessor::process(float* left, float* right, int frames) noexcept {
         delayR_[static_cast<std::size_t>(delayWrite_)] = inR;
         int read = delayWrite_ - la;
         if (read < 0) read += cap;
-        delayWrite_ = (delayWrite_ + 1) % cap;
+        if (++delayWrite_ >= cap) delayWrite_ = 0;
         const float delayedL = la > 0 ? delayL_[static_cast<std::size_t>(read)] : inL;
         const float delayedR = la > 0 ? delayR_[static_cast<std::size_t>(read)] : inR;
         const float level = std::max(std::fabs(inL), std::fabs(inR));
@@ -93,8 +93,11 @@ void LimiterProcessor::process(float* left, float* right, int frames) noexcept {
         const float finalL = delayedL * gain_;
         const float finalR = delayedR * gain_;
         left[i] = finalL; right[i] = finalR;
-        reductionDb_ = -dsp::gainToDb(gain_);
     }
+    // The reduction meter is UI only: one log10 per block, not per sample.
+    // gain_ after the loop is the gain the last emitted frame used, which is
+    // exactly what the old per-sample write left in the meter.
+    reductionDb_ = -dsp::gainToDb(gain_);
 }
 
 } // namespace pluginrack

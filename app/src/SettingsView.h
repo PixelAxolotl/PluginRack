@@ -18,6 +18,7 @@ public:
     explicit SettingsView(AudioEngine& engine);
 
     void resized() override;
+    void visibilityChanged() override;
     void refresh();
 
     std::function<void(bool)> onCloseToTrayChanged;

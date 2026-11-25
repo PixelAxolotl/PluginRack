@@ -418,7 +418,7 @@ bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
 }
 
 void PluginHost::scheduleParamResync() {
-    // One push at a time, and never on the audio thread: the ring overflow or
+    // One round at a time, and never on the audio thread: the ring overflow or
     // the child-reported gap is noticed by a message-thread setChildParameter
     // call. PluginHost is message-thread owned, so the snapshot (the editor
     // instance's state, the child host pointer) is taken there; the blocking
@@ -426,70 +426,103 @@ void PluginHost::scheduleParamResync() {
     // `this`. setChildParameter has no production caller while the
     // fault-containment plan is parked (§6.0), so this path is exercised only
     // by tests until that gate opens.
-    const auto pendingFlag = paramResyncPending_;
-    const auto againFlag = paramResyncAgain_;
-    if (pendingFlag->exchange(true, std::memory_order_acq_rel)) {
-        // A push is already queued or running. Its snapshot may predate this
-        // edit, so record the request for it to serve with one more round.
-        againFlag->store(true, std::memory_order_release);
+    const auto state = paramResyncState_;
+    // The request is recorded before the gate is tested: a round that is already
+    // in flight sees the bumped generation when it ends and books one more
+    // round, so there is no window between "notice a round" and "tell it".
+    state->neededGen.fetch_add(1, std::memory_order_acq_rel);
+    if (state->active.exchange(true, std::memory_order_acq_rel)) {
+        // A round is queued or running. Its snapshot may predate this edit, but
+        // its end-of-round recheck will not.
         return;
     }
     const auto alive = paramResyncAlive_;
-    juce::MessageManager::callAsync([this, alive, pendingFlag, againFlag] {
+    juce::MessageManager::callAsync([this, alive] {
         // The lifetime token is the first read: once the destructor flipped
-        // it, even paramResyncPending_ on this may already be gone.
+        // it, even paramResyncState_ on this may already be gone.
         if (!alive->load(std::memory_order_acquire)) return;
-        auto host = childHost_.load(std::memory_order_acquire);
-        const auto giveUp = [pendingFlag, againFlag] {
-            // No child to push to: a resync would be a no-op, so the queued
-            // requests are dropped rather than retried against a dead host.
-            pendingFlag->store(false, std::memory_order_release);
-            againFlag->store(false, std::memory_order_release);
-        };
-        if (host == nullptr || host->isDead()) {
-            giveUp();
+        startParamResyncRound();
+    });
+}
+
+void PluginHost::startParamResyncRound() {
+    // Message thread, and `active` is held by this round (scheduleParamResync
+    // set it, or the previous round's rearm ran with it still set). Both entry
+    // points reach this same body, so a booked round always takes a fresh
+    // snapshot - reusing the worker's would miss the edit that booked it.
+    const auto state = paramResyncState_;
+    const auto alive = paramResyncAlive_;
+    // Read the generation before anything else the round covers: every request
+    // counted so far is included in this snapshot, and a later one differs
+    // here and is caught when the round ends.
+    const auto targetGen = state->neededGen.load(std::memory_order_acquire);
+
+    const std::function<void()> rearm = [this, alive] {
+        // Hops to the message thread first, so the worker never touches
+        // PluginHost: a rearm queued behind the destructor drops on the token.
+        if (!alive->load(std::memory_order_acquire)) return;
+        startParamResyncRound();
+    };
+
+    // Ends the round: either hand `active` back so the next request can post a
+    // round, or book the next round when one already arrived. Clearing active
+    // *then* rechecking is what closes the race: a requester that bumped a
+    // generation either saw active == true (this recheck then sees its bump) or
+    // exchanged it from false and posted a round of its own. Both orders end
+    // with exactly one round owed, so a request cannot be dropped between the
+    // two reads the old pending/again flag pair needed.
+    const auto endRound = [state, targetGen, rearm] {
+        if (state->neededGen.load(std::memory_order_acquire) != targetGen) {
+            // A request arrived while this round was in flight: its snapshot
+            // predates it, so one more round is owed. active stays set, which
+            // is what keeps a third requester from posting a duplicate.
+            juce::MessageManager::callAsync(rearm);
             return;
         }
-        // Sequence before state: an edit published between the two reads is
-        // then still queued at the child (and applied after the push), never
-        // silently dropped, because the blob cannot be newer than the cutoff
-        // it travels with.
-        const auto snapshotSeq = host->paramProducerSeq();
-        // Read the state now, at push time, so every edit that arrived while
-        // the resync was coalescing is covered by this single snapshot.
-        const auto state = editorStateAsBase64();
-        if (state.isEmpty()) { // no instance to take state from
-            giveUp();
-            return;
+        state->active.store(false, std::memory_order_release);
+        if (state->neededGen.load(std::memory_order_acquire) != targetGen
+            && !state->active.exchange(true, std::memory_order_acq_rel)) {
+            juce::MessageManager::callAsync(rearm);
         }
-        // From here the worker owns the request flag: an edit that needs a
-        // re-push while this one runs sets it again and gets one more round.
-        // It asks for that round through this callable, which hops to the
-        // message thread first, so the worker itself never holds a PluginHost
-        // pointer or touches a member.
-        againFlag->store(false, std::memory_order_release);
-        const std::function<void()> rearm = [this, alive] {
-            if (!alive->load(std::memory_order_acquire)) return;
-            scheduleParamResync();
-        };
-        // The push waits up to 5 s on a wedged child, which is exactly the
-        // wait the message thread must not take. Everything the worker needs is
-        // captured by value; its own shared_ptr keeps the child's channels
-        // alive if the slot is torn down first, and killAndReap makes the call
-        // return promptly instead of sitting out the timeout.
-        juce::Thread::launch([host, pendingFlag, againFlag, state, snapshotSeq, rearm] {
-            juce::String error;
-            if (!host->setState(state, 5000, error, snapshotSeq)) {
-                juce::Logger::writeToLog("plugin: child param resync failed (" + error + ")");
-            }
-            pendingFlag->store(false, std::memory_order_release);
-            if (againFlag->load(std::memory_order_acquire)) {
-                // An edit was lost while this push was in flight: the snapshot
-                // above cannot contain it, so book one more round on the
-                // message thread, where the next snapshot has to be taken.
-                juce::MessageManager::callAsync(rearm);
-            }
-        });
+    };
+
+    auto host = childHost_.load(std::memory_order_acquire);
+    if (host == nullptr || host->isDead()) {
+        // No child to push to: a resync would be a no-op, so the request is
+        // dropped rather than retried against a dead host. endRound still keeps
+        // the generation handshake intact for a request that raced this round.
+        endRound();
+        return;
+    }
+    // Sequence before state: an edit published between the two reads is
+    // then still queued at the child (and applied after the push), never
+    // silently dropped, because the blob cannot be newer than the cutoff
+    // it travels with.
+    const auto snapshotSeq = host->paramProducerSeq();
+    // Read the state now, at push time, so every edit that arrived while
+    // the resync was coalescing is covered by this single snapshot.
+    const auto stateBase64 = editorStateAsBase64();
+    if (stateBase64.isEmpty()) { // no instance to take state from
+        endRound();
+        return;
+    }
+    // From here the worker owns the round: an edit that needs a re-push while
+    // this one runs bumps the generation and endRound books one more round.
+    // The booking asks for that round through the rearm callable, which hops to
+    // the message thread first, so the worker itself never holds a PluginHost
+    // pointer or touches a member.
+    //
+    // The push waits up to 5 s on a wedged child, which is exactly the
+    // wait the message thread must not take. Everything the worker needs is
+    // captured by value; its own shared_ptr keeps the child's channels
+    // alive if the slot is torn down first, and killAndReap makes the call
+    // return promptly instead of sitting out the timeout.
+    juce::Thread::launch([host, stateBase64, snapshotSeq, endRound] {
+        juce::String error;
+        if (!host->setState(stateBase64, 5000, error, snapshotSeq)) {
+            juce::Logger::writeToLog("plugin: child param resync failed (" + error + ")");
+        }
+        endRound();
     });
 }
 
@@ -503,6 +536,14 @@ juce::String PluginHost::editorStateAsBase64() const {
     juce::MemoryBlock state;
     plugin->getStateInformation(state);
     return state.getSize() > 0 ? state.toBase64Encoding() : juce::String{};
+}
+
+std::shared_ptr<PluginProcessHost> PluginHost::detachChildHost() {
+    // Deliberately no killAndReap(): the returned pointer may still be in use by
+    // the audio thread, and reaping closes the events and unmaps the views it
+    // renders through. The caller reaps once it knows the audio thread is out
+    // (AudioEngine::reloadInsert does it after leaving stateLock).
+    return childHost_.exchange(nullptr, std::memory_order_acq_rel);
 }
 
 void PluginHost::stopChildHost() {
