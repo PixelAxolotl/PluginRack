@@ -82,6 +82,7 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
             safe->audioEngine.setOutputName(safe->output.id, newName);
             safe->audioEngine.setOutputColourHue(safe->output.id, newHue);
             safe->deviceControl.setTitle(newName);
+            safe->refreshColour();
             safe->repaint();
             if (safe->onRenamed) safe->onRenamed();
         });
@@ -128,13 +129,11 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     gainSlider.onValueChange = [this] {
         audioEngine.setOutputGain(output.id, static_cast<float>(gainSlider.getValue()));
     };
-    const auto outputAccent = theme::stripColour(output.colourHue);
-    gainSlider.setColour(juce::Slider::trackColourId, outputAccent);
     gainSlider.setColour(juce::Slider::backgroundColourId, theme::strip());
-    gainSlider.setColour(juce::Slider::thumbColourId, outputAccent);
     gainSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     gainSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     gainSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    refreshColour();
     addAndMakeVisible(gainSlider);
     gainSlider.setName(bus ? "Bus" : "Output");
 
@@ -680,7 +679,18 @@ void MixerComponent::OutputStrip::mouseMove(const juce::MouseEvent& e) {
                        : juce::MouseCursor::NormalCursor);
 }
 
+void MixerComponent::OutputStrip::refreshColour() {
+    if (output.colourHue == appliedHue) return;
+    appliedHue = output.colourHue;
+    const auto accent = theme::stripColour(appliedHue);
+    gainSlider.setColour(juce::Slider::trackColourId, accent);
+    gainSlider.setColour(juce::Slider::thumbColourId, accent);
+    // The bottom accent bar paints from the live hue, so it needs the repaint.
+    repaint();
+}
+
 void MixerComponent::OutputStrip::refresh() {
+    refreshColour();
     gainSlider.setValue(output.gainDb.get(), juce::dontSendNotification);
     trimSlider.setValue(output.trimDb.get(), juce::dontSendNotification);
     muteButton.setToggleState(output.muted.get(), juce::dontSendNotification);

@@ -65,6 +65,11 @@ private:
         void resized() override;
         void paint(juce::Graphics& g) override;
         void refresh();
+        // The gain slider takes the strip's identity colour, derived from the
+        // output hue; a hue change after construction (a rename dialog, a
+        // rack-side rename, a scene load) has to re-derive it, because the
+        // accent bar paints from the live hue.
+        void refreshColour();
         void openEqWindow();
         void closeEqWindow();
         void closeAllEffectWindows();
@@ -127,6 +132,7 @@ private:
         AudioEngine::Output& output;
             AudioEngine& audioEngine;
         const bool bus;
+        float appliedHue = -1.0f;
         DeviceControl deviceControl;
         MiniButton removeOutputButton{juce::String::fromUTF8("\xc3\x97")};
         juce::ComboBox modeCombo;

@@ -81,6 +81,7 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
             safe->audioEngine.setChannelName(safe->channel.id, newName);
             safe->audioEngine.setChannelColourHue(safe->channel.id, newHue);
             safe->deviceControl.setTitle(newName);
+            safe->refreshColour();
             safe->repaint();
             // The strip shows the new name already; only the mirrored views
             // (rack, routing, saves) need a refresh, so no board rebuild.
@@ -166,15 +167,13 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     faderSlider.onValueChange = [this] {
         audioEngine.setChannelGain(channel.id, static_cast<float>(faderSlider.getValue()));
     };
-    // Fader in the channel's own identity colour; the bottom accent bar is
-    // painted separately in ChannelStrip::paint() and stays as is.
-    const auto channelAccent = theme::stripColour(channel.colourHue);
-    faderSlider.setColour(juce::Slider::trackColourId, channelAccent);
+    // Fader in the channel's own identity colour; refreshColour() keeps it in
+    // step with the live hue when the strip is renamed.
     faderSlider.setColour(juce::Slider::backgroundColourId, theme::strip());
-    faderSlider.setColour(juce::Slider::thumbColourId, channelAccent);
     faderSlider.setColour(juce::Slider::textBoxTextColourId, theme::text());
     faderSlider.setColour(juce::Slider::textBoxBackgroundColourId, theme::control());
     faderSlider.setColour(juce::Slider::textBoxOutlineColourId, theme::line());
+    refreshColour();
     addAndMakeVisible(faderSlider);
     faderSlider.setName("Gain");
 
@@ -798,7 +797,20 @@ void ChannelStrip::rebuildInputCombos(int count) {
     }
 }
 
+void ChannelStrip::refreshColour() {
+    if (channel.colourHue == appliedHue) return;
+    appliedHue = channel.colourHue;
+    const auto accent = theme::stripColour(appliedHue);
+    faderSlider.setColour(juce::Slider::trackColourId, accent);
+    faderSlider.setColour(juce::Slider::thumbColourId, accent);
+    // The bottom accent bar paints from the live hue, so it needs the repaint.
+    repaint();
+}
+
 void ChannelStrip::refreshInput() {
+    // A rack-side rename or a scene load reaches the strip through the board's
+    // refresh, so the identity colour is re-derived here too.
+    refreshColour();
     // Device name/error are written by the device-opener worker: take a locked
     // snapshot instead of reading the strip fields directly.
     const auto deviceState = audioEngine.getChannelDeviceState(channel.id);

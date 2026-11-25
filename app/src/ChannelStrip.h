@@ -93,9 +93,16 @@ private:
     void splitIntoMonoChannels();
     void rebuildInputCombos(int count);
     void paintDragHandle(juce::Graphics& g) const;
+    // The fader's track and thumb take the strip's identity colour, which is
+    // derived from the channel hue. A hue change after the strip was built (a
+    // rename dialog, a rack-side rename, a scene load) has to re-derive them -
+    // the accent bar already paints from the live hue, so without this the
+    // fader keeps its construction-time colour.
+    void refreshColour();
 
     AudioEngine::Channel& channel;
     AudioEngine& audioEngine;
+    float appliedHue = -1.0f;
     DeviceControl deviceControl;
     MiniButton removeChannelButton{juce::String::fromUTF8("\xc3\x97")};
     MiniButton splitButton{"Split"};

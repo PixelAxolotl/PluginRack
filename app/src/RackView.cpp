@@ -3439,6 +3439,9 @@ void RackView::renameSelectedChain() {
             safe->audioEngine.setOutputColourHue(static_cast<std::uint32_t>(selected), newHue);
         }
         safe->rebuild();
+        // The rename can change the identity colour too, which the mixer
+        // strips derive from the engine; tell the mirrored views.
+        safe->notifyInsertsChanged();
     });
 }
 

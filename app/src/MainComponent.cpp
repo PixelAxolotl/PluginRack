@@ -288,6 +288,10 @@ void ViewRouter::refreshViews() {
     // and re-creating a plugin UI (some plugins hang on that teardown).
     releaseOrphanedEditor();
     rackView.rebuild();
+    // Strips re-derive their identity colour and device state without being
+    // rebuilt, so a rename made anywhere (rack, mixer, scene load) reaches the
+    // fader instead of leaving it in its construction-time colour.
+    mixerView.refreshStrips();
     routingView.rebuild();
     patchesView.rebuild();
     ioView.rebuild();

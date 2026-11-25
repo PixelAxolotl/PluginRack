@@ -1841,3 +1841,42 @@ TEST_CASE("a short miss run does not bury a child slot as crashed", "[app][ipc][
     const auto timer = functionBody(hostCpp, "void PluginHost::timerCallback()");
     CHECK(contains(timer, "if (childFailed_.load(std::memory_order_acquire)) {"));
 }
+
+TEST_CASE("a strip fader follows a colour change made after it was built", "[app][ui]") {
+    const auto channelCpp = readSource("app/src/ChannelStrip.cpp");
+    const auto mixerCpp = readSource("app/src/MixerComponent.cpp");
+
+    // The accent bar paints from the live hue, so deriving the fader colour once
+    // in the constructor left it in the old colour after a rename that changed
+    // the hue - an orange strip with a blue fader. Both strips now re-derive it
+    // through refreshColour(), which is a no-op until the hue actually moves.
+    const auto channelColour = functionBody(channelCpp, "void ChannelStrip::refreshColour()");
+    CHECK(contains(channelColour, "if (channel.colourHue == appliedHue) return;"));
+    CHECK(contains(channelColour, "theme::stripColour(appliedHue)"));
+    CHECK(contains(channelColour, "juce::Slider::thumbColourId, accent"));
+    CHECK(contains(channelColour, "juce::Slider::trackColourId, accent"));
+
+    const auto outputColour = functionBody(mixerCpp, "void MixerComponent::OutputStrip::refreshColour()");
+    CHECK(contains(outputColour, "if (output.colourHue == appliedHue) return;"));
+    CHECK(contains(outputColour, "theme::stripColour(appliedHue)"));
+    CHECK(contains(outputColour, "juce::Slider::thumbColourId, accent"));
+
+    // Every path that can change the hue re-derives: the strip's own rename
+    // dialog, the board's refresh of device state, and a rack-side rename,
+    // which reaches the mixer through the router's view refresh.
+    CHECK(contains(channelCpp, "safe->refreshColour();"));
+    CHECK(contains(mixerCpp, "safe->refreshColour();"));
+    CHECK(contains(functionBody(channelCpp, "void ChannelStrip::refreshInput()"), "refreshColour();"));
+    CHECK(contains(functionBody(mixerCpp, "void MixerComponent::OutputStrip::refresh()"),
+                   "refreshColour();"));
+    CHECK(contains(readSource("app/src/MainComponent.cpp"),
+                   "mixerView.refreshStrips();"));
+
+    // Constructors must not capture the hue directly any more.
+    const auto channelCtor = functionBody(channelCpp, "ChannelStrip::ChannelStrip(");
+    CHECK(contains(channelCtor, "refreshColour();"));
+    CHECK_FALSE(contains(channelCtor, "setColour(juce::Slider::thumbColourId, channelAccent)"));
+    const auto outputCtor = functionBody(mixerCpp, "MixerComponent::OutputStrip::OutputStrip(");
+    CHECK(contains(outputCtor, "refreshColour();"));
+    CHECK_FALSE(contains(outputCtor, "setColour(juce::Slider::thumbColourId, outputAccent)"));
+}
