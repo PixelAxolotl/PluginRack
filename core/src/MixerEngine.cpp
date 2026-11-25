@@ -246,9 +246,10 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     };
     auto computeStripLatency = [](const Strip& strip, const InsertChain* chain, double sampleRate,
                                   std::unordered_map<std::uint32_t, int>& itemLatency) {
-        // The EQ delay ring runs ahead of every chain item, so it seeds the
-        // running total; the Eq row itself then adds nothing at its position.
-        int total = eqLatencySamples(strip.eqEnabled, false, strip.eqDelayMs, sampleRate);
+        // The EQ delay ring runs only from an Eq chain row, at that row's
+        // position, so a strip without the row bills no EQ latency at all -
+        // the same rule as the live engine's stripEqLatencySamples.
+        int total = 0;
         // Usage is tracked per family and per position, mirroring buildStrip():
         // the built-in families share small ids (a default Dynamics and a
         // default Limiter are both id 1), so one id-keyed set would read a
@@ -271,6 +272,10 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                     usedSpectralDenoisers[*index] = 1;
                     added = kSpectralDenoiserLatencySamples;
                 }
+            } else if (item.type == ChainItemType::Eq) {
+                // Offline keeps only the bypass flag, so it stands in for the
+                // live engine's separate eqBypassed argument.
+                added = eqLatencySamples(strip.eqEnabled, false, strip.eqDelayMs, sampleRate);
             }
             total += added;
             // A tap names an id, and ids repeat across families: it resolves to
@@ -463,8 +468,9 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     // Resolve the running order once. The scene's chain names effects by id;
     // anything the chain leaves out still runs, appended in the historical
     // Dynamics -> Multiband -> DeEsser -> Limiter order so old scenes render
-    // exactly as before. EQ runs before the chain and inserts render through
-    // their own InsertChain, so both are skipped here.
+    // exactly as before. Inserts render through their own InsertChain and are
+    // skipped here; the EQ keeps a row like live render, because that row is
+    // the only place it runs.
     std::vector<char> usedDynamics(source.effects.size(), 0);
     std::vector<char> usedMultiband(source.multibandEffects.size(), 0);
     std::vector<char> usedDeEssers(source.deEsserEffects.size(), 0);
@@ -533,8 +539,9 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             }
             break;
         case ChainItemType::Eq:
-            // EQ runs ahead of the step loop; this row only anchors taps that
-            // sit directly after the EQ.
+            // Like live render, the EQ runs at this row and nowhere else. The
+            // sentinel index marks a row that owns no processor; the step loop
+            // probes the strip's single EqEngine instead.
             addStep(static_cast<std::size_t>(-1));
             break;
         case ChainItemType::Insert:
@@ -588,10 +595,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
 
 void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int frames,
                                void (*afterStep)(void*, std::uint32_t), void* ctx) {
-    if (strip.eqEnabled) {
-        flushNonFinite(left, right, frames);
-        strip.eq.process(left, right, frames);
-    }
     for (const Step& step : strip.steps) {
         switch (step.type) {
         case ChainItemType::Dynamics:
@@ -613,6 +616,13 @@ void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int f
             if (step.index < strip.spectralDenoisers.size()) strip.spectralDenoisers[step.index].process(left, right, frames);
             break;
         case ChainItemType::Eq:
+            // Same order as live render: the EQ runs at the row, and its tap
+            // below sees the post-EQ signal. No row means no EQ at all.
+            if (strip.eqEnabled) {
+                flushNonFinite(left, right, frames);
+                strip.eq.process(left, right, frames);
+            }
+            break;
         case ChainItemType::Insert:
             break;
         }

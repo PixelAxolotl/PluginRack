@@ -641,6 +641,7 @@ TEST_CASE("mixer +6dB peak at 1k boosts 1k sine approx 2x") {
     REQUIRE(referencePeak > 0.1f);
 
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f; // the 1 kHz peak band
     pluginrack::MixerEngine boosted = prepareEngine(scene);
@@ -652,6 +653,7 @@ TEST_CASE("mixer +6dB peak at 1k boosts 1k sine approx 2x") {
 TEST_CASE("mixer setChannelEq applies bands live and ignores bad indexes") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
     auto bands = pluginrack::defaultEqBands();
@@ -668,6 +670,7 @@ TEST_CASE("mixer setChannelEq applies bands live and ignores bad indexes") {
 TEST_CASE("mixer setOutputEq boosts the summed bus") {
     pluginrack::Scene scene = eqTestScene();
     scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     pluginrack::MixerEngine reference = prepareEngine(scene);
 
     auto bands = pluginrack::defaultEqBands();
@@ -684,9 +687,11 @@ TEST_CASE("mixer setOutputEq boosts the summed bus") {
 TEST_CASE("mixer render with active eq allocates nothing") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f;
     scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
 
     AllocCounter::reset();
     pluginrack::MixerEngine engine = prepareEngine(scene);
@@ -705,6 +710,7 @@ TEST_CASE("mixer render with active eq allocates nothing") {
 TEST_CASE("mixer scene eq delay shifts the channel output") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     for (auto& band : scene.channels[0].eqBands) {
         band.enabled = false; // isolate the delay
     }
@@ -734,8 +740,10 @@ TEST_CASE("mixer scene eq delay shifts the channel output") {
 TEST_CASE("mixer render with active eq delay allocates nothing") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.channels[0].eqDelayMs = 500.0f;
     scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.outputs[0].eqDelayMs = 100.0f;
 
     AllocCounter::reset();
@@ -755,6 +763,7 @@ TEST_CASE("mixer render with active eq delay allocates nothing") {
 TEST_CASE("mixer non-finite input frames are flushed at the eq tap") {
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     pluginrack::MixerEngine engine = prepareEngine(scene);
 
     constexpr int kFrames = 128;
@@ -781,6 +790,7 @@ TEST_CASE("mixer setChannelEqBypassed gates the eq live without re-prepare") {
 
     pluginrack::Scene scene = eqTestScene();
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.channels[0].eqBands = pluginrack::defaultEqBands();
     scene.channels[0].eqBands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
@@ -802,6 +812,7 @@ TEST_CASE("mixer setOutputEqBypassed gates the output eq") {
 
     pluginrack::Scene scene = eqTestScene();
     scene.outputs[0].eqEnabled = true;
+    scene.outputs[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.outputs[0].eqBands = pluginrack::defaultEqBands();
     scene.outputs[0].eqBands[3].gainDb = 6.0f;
     pluginrack::MixerEngine engine = prepareEngine(scene);
@@ -1012,6 +1023,7 @@ TEST_CASE("mixer compensates eq delay across tap points") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
     scene.channels[0].eqBands = pluginrack::defaultEqBands();
     for (auto& band : scene.channels[0].eqBands) {
         band.enabled = false; // delay only: no band may colour the impulse
@@ -1030,6 +1042,72 @@ TEST_CASE("mixer compensates eq delay across tap points") {
     const auto rendered = renderImpulse(engine, 2);
     REQUIRE(firstNonZero(rendered[0]) == 48);
     REQUIRE(firstNonZero(rendered[1]) == 48);
+}
+
+TEST_CASE("mixer runs the eq only at an Eq row, in chain order") {
+    // A strip may carry eqEnabled, bands and a delay without an Eq row. Live
+    // render has no place to run the EQ then, so the offline mixer must not
+    // run it either - not the colour, not the delay, not the route billing.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
+    for (auto& band : scene.channels[0].eqBands) {
+        band.enabled = false;
+    }
+    scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz, if it ran
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    addBus(scene, 4);
+    pluginrack::Tap input;
+    input.kind = pluginrack::Tap::Kind::Input;
+    addTappedBusSend(scene, 1, 4, input);
+    addRoute(scene, 1, 1);
+    addBusRoute(scene, 4, 2);
+
+    pluginrack::MixerEngine noRow = prepareEngine(scene);
+    const auto noRowRendered = renderImpulse(noRow, 2);
+    REQUIRE(firstNonZero(noRowRendered[0]) == 0);
+    REQUIRE(firstNonZero(noRowRendered[1]) == 0);
+
+    // With the row the delay runs, and the direct route is billed for it so
+    // both paths still leave together.
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
+    pluginrack::MixerEngine withRow = prepareEngine(scene);
+    const auto withRowRendered = renderImpulse(withRow, 2);
+    REQUIRE(firstNonZero(withRowRendered[0]) == 48);
+    REQUIRE(firstNonZero(withRowRendered[1]) == 48);
+
+    // Ordering: the EQ acts on the signal at its row, not on the strip input.
+    // A limiter fed the unboosted sine clamps a small peak; the boost placed
+    // after it survives, while the reverse order drives the limiter with the
+    // boost and clamps it back down.
+    auto limiter = pluginrack::makeDefaultLimiterEffect(7);
+    limiter.ceilingDb = -6.0f;
+    limiter.inputGainDb = 12.0f;
+
+    pluginrack::Scene after = eqTestScene();
+    after.channels[0].eqEnabled = true;
+    after.channels[0].eqBands = pluginrack::defaultEqBands();
+    after.channels[0].eqBands[3].gainDb = 12.0f; // the 1 kHz peak band
+    after.channels[0].limiterEffects = {limiter};
+    after.channels[0].chain = {{pluginrack::ChainItemType::Limiter, 7},
+                               {pluginrack::ChainItemType::Eq, 0}};
+    pluginrack::MixerEngine afterEngine = prepareEngine(after);
+
+    pluginrack::Scene before = eqTestScene();
+    before.channels[0].eqEnabled = true;
+    before.channels[0].eqBands = pluginrack::defaultEqBands();
+    before.channels[0].eqBands[3].gainDb = 12.0f;
+    before.channels[0].limiterEffects = {limiter};
+    before.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0},
+                                {pluginrack::ChainItemType::Limiter, 7}};
+    pluginrack::MixerEngine beforeEngine = prepareEngine(before);
+
+    const float afterPeak = sineOutputPeak(afterEngine);
+    const float beforePeak = sineOutputPeak(beforeEngine);
+    REQUIRE(beforePeak > 0.1f);
+    REQUIRE(afterPeak / beforePeak > 1.8f);
 }
 
 TEST_CASE("mixer aligns a bypassed denoiser against the compensated send") {

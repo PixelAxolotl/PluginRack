@@ -143,6 +143,10 @@ public:
     // (plan task 2.1). Do not wire it before the four fixes in plan §6.0 -
     // forwarding edits into the child while the renderer can still fall through
     // to the in-process instance was part of the configuration that crashed.
+    // scheduleParamResync() (the ring-overflow and sequence-gap recovery) is
+    // only reachable through this call, so it stays dormant with it; a
+    // child-mode slot therefore renders its launch-time parameters until that
+    // gate opens.
     bool setChildParameter(int parameterIndex, float normalisedValue);
     void stopChildHost();
     bool childHostEnabled() const {

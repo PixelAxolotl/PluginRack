@@ -41,6 +41,20 @@
 namespace {
 constexpr std::uint32_t kLatencyMeasureTimeoutMs = 3000;
 
+// A removed insert or strip is stopped after stateLock is released:
+// closeFloatingEditor must run on the message thread and stopChildHost joins
+// the sandbox process, so neither may happen while render() holds the lock.
+void retireInsert(AudioEngine::InsertSlot& slot) {
+    slot.pluginHost.closeFloatingEditor();
+    slot.pluginHost.stopChildHost();
+    slot.pluginHost.releaseResources();
+}
+
+template <typename Strip>
+void retireStripInserts(Strip& strip) {
+    for (auto& insert : strip.inserts) retireInsert(*insert);
+}
+
 // Text the audio thread publishes while it renders an insert, so a crash inside
 // the plugin names the insert instead of just naming a module offset
 // (CrashContext.h). Built once, on the message thread, when the insert is
@@ -1375,25 +1389,33 @@ juce::String AudioEngine::removeChannel(std::uint32_t channelId) {
     // The startup opener holds Channel* across a device probe; refuse the
     // structural change until it is done instead of invalidating it.
     if (isOpeningDevices()) return "Audio devices are still starting up. Try again in a moment.";
-    const juce::ScopedLock lock(stateLock);
-    const auto it = std::find_if(channels.begin(), channels.end(),
-                                 [channelId](const auto& channel) {
-                                     return channel->id == channelId;
-                                 });
-    if (it == channels.end()) return "The channel no longer exists.";
-    // validate() rejects a scene with no channels, so the exit autosave would
-    // silently keep the previous session. Mirror removeOutput's floor.
-    if (channels.size() <= 1) return "At least one channel is required.";
-    (*it)->input.reset();
-    channels.erase(it);
-    routes.erase(std::remove_if(routes.begin(), routes.end(),
-                               [channelId](const auto& route) { return route->channelId == channelId; }),
-                  routes.end());
-    busSends.erase(std::remove_if(busSends.begin(), busSends.end(),
-                                  [channelId](const auto& send) { return send->channelId == channelId; }),
-                   busSends.end());
-    clearSideChainRefsLocked(pluginrack::SideChainSource::Channel, channelId);
-    pruneUnusedCaptures();
+    std::unique_ptr<Channel> removed;
+    {
+        const juce::ScopedLock lock(stateLock);
+        const auto it = std::find_if(channels.begin(), channels.end(),
+                                     [channelId](const auto& channel) {
+                                         return channel->id == channelId;
+                                     });
+        if (it == channels.end()) return "The channel no longer exists.";
+        // validate() rejects a scene with no channels, so the exit autosave would
+        // silently keep the previous session. Mirror removeOutput's floor.
+        if (channels.size() <= 1) return "At least one channel is required.";
+        (*it)->input.reset();
+        removed = std::move(*it);
+        channels.erase(it);
+        routes.erase(std::remove_if(routes.begin(), routes.end(),
+                                   [channelId](const auto& route) { return route->channelId == channelId; }),
+                      routes.end());
+        busSends.erase(std::remove_if(busSends.begin(), busSends.end(),
+                                      [channelId](const auto& send) { return send->channelId == channelId; }),
+                       busSends.end());
+        clearSideChainRefsLocked(pluginrack::SideChainSource::Channel, channelId);
+        pruneUnusedCaptures();
+    }
+    // Released the lock first: render() can no longer reach the strip, and
+    // stopping its plugins joins sandbox processes and closes editors on this
+    // message thread.
+    retireStripInserts(*removed);
     return {};
 }
 
@@ -1547,6 +1569,7 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
 
     const bool wasClock = (clockOutputId == outputId);
     OutputPlayback* retiredPlayback = nullptr;
+    std::unique_ptr<Output> removed;
     {
         const juce::ScopedLock sl(stateLock);
         if (wasClock && out->output != nullptr) {
@@ -1564,7 +1587,8 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
                         busRoutes.end());
         for (auto it = outputs.begin(); it != outputs.end(); ++it) {
             if ((*it)->id == outputId) {
-                it = outputs.erase(it);
+                removed = std::move(*it);
+                outputs.erase(it);
                 break;
             }
         }
@@ -1594,6 +1618,11 @@ juce::String AudioEngine::removeOutput(std::uint32_t outputId) {
             }
         }
         publishRenderOutputsLocked();
+    }
+    if (removed != nullptr) {
+        // Same rule as removeChannel: the strip is unlinked from the render
+        // set, so its plugins can be stopped without the lock.
+        retireStripInserts(*removed);
     }
     if (retiredPlayback != nullptr) {
         retiredPlayback->close();
@@ -1734,11 +1763,8 @@ void AudioEngine::removePlugin(std::uint32_t channelId, std::uint32_t insertId) 
     }
     // stateLock is released and render() can no longer reach this insert.
     // Stopping it here reaps the VST3 instance and its child process instead of
-    // keeping both alive until shutdown. closeEditor runs on
-    // this (message) thread, then the unique_ptr destroys the slot.
-    removed->pluginHost.closeFloatingEditor();
-    removed->pluginHost.stopChildHost();
-    removed->pluginHost.releaseResources();
+    // keeping both alive until shutdown.
+    retireInsert(*removed);
 }
 
 void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::ChainItem item) {
@@ -1988,17 +2014,26 @@ void AudioEngine::clearSideChainRefsLocked(pluginrack::SideChainSource source,
 }
 
 void AudioEngine::removeBus(std::uint32_t busId) {
-    const juce::ScopedLock lock(stateLock);
-    buses.erase(std::remove_if(buses.begin(), buses.end(),
-                               [busId](const auto& bus) { return bus->id == busId; }),
-                buses.end());
-    busSends.erase(std::remove_if(busSends.begin(), busSends.end(),
-                                  [busId](const auto& send) { return send->busId == busId; }),
-                   busSends.end());
-    busRoutes.erase(std::remove_if(busRoutes.begin(), busRoutes.end(),
-                                   [busId](const auto& route) { return route->busId == busId; }),
-                    busRoutes.end());
-    clearSideChainRefsLocked(pluginrack::SideChainSource::Bus, busId);
+    std::vector<std::unique_ptr<Bus>> removed;
+    {
+        const juce::ScopedLock lock(stateLock);
+        for (auto it = buses.begin(); it != buses.end();) {
+            if ((*it)->id == busId) {
+                removed.push_back(std::move(*it));
+                it = buses.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        busSends.erase(std::remove_if(busSends.begin(), busSends.end(),
+                                      [busId](const auto& send) { return send->busId == busId; }),
+                       busSends.end());
+        busRoutes.erase(std::remove_if(busRoutes.begin(), busRoutes.end(),
+                                       [busId](const auto& route) { return route->busId == busId; }),
+                        busRoutes.end());
+        clearSideChainRefsLocked(pluginrack::SideChainSource::Bus, busId);
+    }
+    for (auto& bus : removed) retireStripInserts(*bus);
 }
 
 void AudioEngine::setBusSend(std::uint32_t channelId, std::uint32_t busId,

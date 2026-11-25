@@ -400,6 +400,16 @@ TEST_CASE("an item tap pushes and bills the same chain row", "[underrun][latency
     CHECK(contains(mixer, "pluginrack::firstChainItemIndex(source.chain, item.id)"));
     CHECK(contains(mixer, "pluginrack::firstChainItemIndex(strip.chain, item.id)"));
     CHECK(contains(mixer, "step.tapOwned"));
+
+    // ...and it runs the EQ the way live render does: inside the step loop, so
+    // the Eq row is the only trigger and the tap after it sees post-EQ audio.
+    const auto processStrip = functionBody(mixer, "void MixerEngine::processStrip");
+    const auto stepLoop = processStrip.find("for (const Step& step : strip.steps)");
+    const auto eqRun = processStrip.find("strip.eq.process(left, right, frames);");
+    REQUIRE(stepLoop != std::string::npos);
+    REQUIRE(eqRun != std::string::npos);
+    CHECK(stepLoop < eqRun);
+    CHECK(contains(processStrip, "case ChainItemType::Eq:"));
 }
 
 TEST_CASE("patches latency labels come from the engine's one rule table",

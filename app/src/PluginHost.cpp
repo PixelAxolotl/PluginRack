@@ -417,7 +417,9 @@ void PluginHost::scheduleParamResync() {
     // overflow or the child-reported gap is noticed by a message-thread
     // setChildParameter call, and the state push itself is a blocking control
     // request. The shared flag lets the queued callback notice a host that
-    // died before it ran.
+    // died before it ran. setChildParameter has no production caller while the
+    // fault-containment plan is parked (§6.0), so this path is exercised only
+    // by tests until that gate opens.
     if (paramResyncPending_.exchange(true, std::memory_order_acq_rel)) return;
     const auto alive = paramResyncAlive_;
     juce::MessageManager::callAsync([this, alive] {

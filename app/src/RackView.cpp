@@ -1470,8 +1470,12 @@ void RackView::refreshEditor() {
             }
         }
     }
+    // Every dock path starts its own clock. A first show has no freeze phase,
+    // so leaving the old value in place made the later logs print either the
+    // raw high-res counter (when it was still 0) or the previous swap's start,
+    // which read as a many-minute editor creation.
+    swapStartedAt = swapPhaseStart;
     if (previousEditor != nullptr) {
-        swapStartedAt = swapPhaseStart;
         juce::Logger::writeToLog(
             "rack: swap freeze "
             + juce::String(juce::Time::getMillisecondCounterHiRes() - swapPhaseStart, 1)
