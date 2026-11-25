@@ -189,21 +189,25 @@ void MixerComponent::OutputStrip::closeAllEffectWindows() {
     if (dynamicsWindow != nullptr) {
         auto* doomed = dynamicsWindow;
         dynamicsWindow = nullptr;
+        output.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (multibandWindow != nullptr) {
         auto* doomed = multibandWindow;
         multibandWindow = nullptr;
+        output.multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (deEsserWindow != nullptr) {
         auto* doomed = deEsserWindow;
         deEsserWindow = nullptr;
+        output.deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (limiterWindow != nullptr) {
         auto* doomed = limiterWindow;
         limiterWindow = nullptr;
+        output.limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (feedbackSuppressorWindow != nullptr) {
@@ -880,24 +884,29 @@ void MixerComponent::OutputStrip::clearChainPreview() {
 void MixerComponent::OutputStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     if (item.type == pluginrack::ChainItemType::Eq) {
         audioEngine.setOutputEqBypassed(output.id, bypassed);
+        // The card is the panel's other bypass switch, so the panel follows it.
+        if (eqWindow != nullptr) eqWindow->setEqEnabled(!bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Multiband) {
         auto effects = output.multibandEffects;
         effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputMultiband(output.id, effects);
+        if (multibandWindow != nullptr) multibandWindow->setBypassed(bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::DeEsser) {
         auto effects = output.deEsserEffects;
         effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputDeEssers(output.id, effects);
+        if (deEsserWindow != nullptr) deEsserWindow->setBypassed(bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Limiter) {
         auto effects = output.limiterEffects;
         effectedit::setBypass(effects, item.id, bypassed);
         audioEngine.setOutputLimiters(output.id, effects);
+        if (limiterWindow != nullptr) limiterWindow->setBypassed(bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::FeedbackSuppressor) {

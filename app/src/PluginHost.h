@@ -224,13 +224,21 @@ private:
     void noteChildMiss();
 
     // Full-state recovery for parameter traffic the child could not receive.
-    // Coalesced: one pending flag, one async message-thread push. The state
-    // comes from the in-process editor instance (the child holds the stale
-    // one) and is pushed via setState, never from the audio thread - the
-    // shared alive flag keeps a queued callback off a destroyed host.
+    // Coalesced: one pending push, one snapshot, one push per round. The
+    // snapshot has to read this object (the editor instance's state, the child
+    // host pointer), so it is taken on the message thread; only the blocking
+    // control request runs on a detached worker, which is handed the child host
+    // by shared_ptr and value copies of the snapshot and never touches `this`.
+    // paramResyncAlive_ keeps a queued callback off a destroyed host;
+    // paramResyncPending_ and paramResyncAgain_ are shared so the worker can
+    // re-open the gate and report a request that arrived mid-push (a plain
+    // member would be written from the worker).
     void scheduleParamResync();
     juce::String editorStateAsBase64() const;
-    std::atomic<bool> paramResyncPending_{false};
+    std::shared_ptr<std::atomic<bool>> paramResyncPending_{
+        std::make_shared<std::atomic<bool>>(false)};
+    std::shared_ptr<std::atomic<bool>> paramResyncAgain_{
+        std::make_shared<std::atomic<bool>>(false)};
     std::shared_ptr<std::atomic<bool>> paramResyncAlive_{std::make_shared<std::atomic<bool>>(true)};
 
     juce::DocumentWindow* editorWindow = nullptr;

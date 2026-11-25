@@ -534,21 +534,25 @@ void ChannelStrip::closeAllEffectWindows() {
     if (dynamicsWindow != nullptr) {
         auto* doomed = dynamicsWindow;
         dynamicsWindow = nullptr;
+        channel.dynamicsTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (multibandWindow != nullptr) {
         auto* doomed = multibandWindow;
         multibandWindow = nullptr;
+        channel.multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (deEsserWindow != nullptr) {
         auto* doomed = deEsserWindow;
         deEsserWindow = nullptr;
+        channel.deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (limiterWindow != nullptr) {
         auto* doomed = limiterWindow;
         limiterWindow = nullptr;
+        channel.limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
         delete doomed;
     }
     if (feedbackSuppressorWindow != nullptr) {
@@ -988,6 +992,8 @@ void ChannelStrip::clearChainPreview() {
 void ChannelStrip::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
     if (item.type == pluginrack::ChainItemType::Eq) {
         audioEngine.setChannelEqBypassed(channel.id, bypassed);
+        // The card is the panel's other bypass switch, so the panel follows it.
+        if (eqWindow != nullptr) eqWindow->setEqEnabled(!bypassed);
         return;
     }
     if (item.type == pluginrack::ChainItemType::Multiband) {

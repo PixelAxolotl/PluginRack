@@ -273,17 +273,32 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
                         reply = errorReply("state could not be decoded");
                         break;
                     }
+                    // Snapshot the cutoff before the restore: the sender took
+                    // its state after producing this sequence, so queued edits
+                    // up to it are stale relative to the blob.
+                    const auto snapshotSeq = static_cast<std::uint64_t>(
+                        static_cast<juce::int64>(body.getProperty("paramSeq", 0)));
                     plugin->setStateInformation(decoded.getData(),
                                                 static_cast<int>(decoded.getSize()));
                     block->latencySamples = plugin->getLatencySamples();
-                    // A full state supersedes every parameter edit queued
-                    // before it: drain the stale entries, then take the
-                    // producer's current sequence as applied so the next
-                    // delivered message is not read as a new gap.
-                    pluginHostIpc::ParamMsg stale;
-                    while (pluginHostIpc::paramRingPop(params->toHost, stale)) {}
-                    lastAppliedParamSeq =
-                        params->toHost.producerSeq.load(std::memory_order_acquire);
+                    // A full state supersedes every parameter edit the sender
+                    // had already made when it took the snapshot: drop exactly
+                    // those entries and take the snapshot's sequence as
+                    // applied, so the next delivered message is not read as a
+                    // new gap - while an edit published after the snapshot
+                    // stays queued and is applied on top.
+                    if (snapshotSeq > 0) {
+                        pluginHostIpc::paramRingDrainUpTo(params->toHost, snapshotSeq);
+                        lastAppliedParamSeq = snapshotSeq;
+                    } else {
+                        // No snapshot information (scene load, adoption): the
+                        // state is the whole truth, so everything queued so far
+                        // is stale.
+                        pluginHostIpc::ParamMsg stale;
+                        while (pluginHostIpc::paramRingPop(params->toHost, stale)) {}
+                        lastAppliedParamSeq =
+                            params->toHost.producerSeq.load(std::memory_order_acquire);
+                    }
                     reply = okReply();
                     break;
                 }

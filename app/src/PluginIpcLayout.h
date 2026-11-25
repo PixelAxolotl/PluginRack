@@ -98,6 +98,31 @@ inline bool paramRingPop(ParamRing& ring, ParamMsg& msg) {
     return true;
 }
 
+// Single-consumer drain with a sequence cutoff: discards every queued message
+// whose sequence number is <= maxSeq, leaving anything the producer published
+// after that cutoff queued for the caller. Used when a full state blob is
+// applied at the child: the blob was snapshotted at producer sequence maxSeq,
+// so entries up to that number are already inside it and applying them again
+// would replay stale values over the restored state. Same release/acquire
+// discipline as paramRingPop (slot read after the acquire head load, consumer
+// index published with release), and it advances consumerSeq per message so
+// paramRingLostMessages keeps reading correctly after the cutoff.
+inline std::uint64_t paramRingDrainUpTo(ParamRing& ring, std::uint64_t maxSeq) {
+    std::uint64_t drained = 0;
+    for (;;) {
+        const auto tail = ring.tail.load(std::memory_order_relaxed);
+        if (tail == ring.head.load(std::memory_order_acquire)) break;
+        const auto& slot = ring.slots[tail % static_cast<std::uint64_t>(kParamRingSlots)];
+        // Sequences are published in ring order, so the first entry past the
+        // cutoff means every later one is past it too.
+        if (slot.seq > maxSeq) break;
+        ring.consumerSeq.store(slot.seq, std::memory_order_release);
+        ring.tail.store(tail + 1, std::memory_order_release);
+        ++drained;
+    }
+    return drained;
+}
+
 // True when the producer published sequence numbers the consumer never saw.
 // Call this after draining the ring: a message dropped because the ring was
 // full still consumed a sequence number, so the receiver can detect the loss

@@ -352,11 +352,24 @@ TEST_CASE("taps and latency rules cover the paths render actually runs",
     CHECK(contains(chainLatency, "pluginrack::kSpectralDenoiserLatencySamples"));
     CHECK(contains(chainLatency, "!effect.bypassed"));
 
-    // The EQ delay line only runs from an Eq chain row, so the report must not
-    // bill a delay that render never applies.
+    // The EQ delay line runs from an Eq chain row or, without a row, from the
+    // fallback pass that closes render's effect loop, so the report bills it
+    // either way and leaves the bypass test to eqLatencySamples.
     const auto eqHelper = functionBody(cpp, "int stripEqLatencySamples");
-    CHECK(contains(eqHelper, "pluginrack::ChainItemType::Eq"));
-    CHECK(contains(eqHelper, "if (!inChain) return 0;"));
+    CHECK(contains(eqHelper, "pluginrack::eqLatencySamples(true, strip.eqBypassed.get()"));
+    CHECK(!contains(eqHelper, "if (!inChain) return 0;"));
+    CHECK(contains(cpp, "if (!hasEqRow(*channel) && !channel->eqBypassed.get())"));
+    CHECK(contains(cpp, "if (!hasEqRow(*strip) && !strip->eqBypassed.get())"));
+    // ...and the fallback keeps the row path's tap order: pre, process, post.
+    const auto channelFallback = cpp.find("if (!hasEqRow(*channel)");
+    REQUIRE(channelFallback != std::string::npos);
+    const auto channelFallbackPre = cpp.find("channel->eqTap.writeTap(false", channelFallback);
+    const auto channelFallbackRun = cpp.find("channel->eq.process(", channelFallback);
+    const auto channelFallbackPost = cpp.find("channel->eqTap.writeTap(true", channelFallback);
+    REQUIRE(channelFallbackRun != std::string::npos);
+    REQUIRE(channelFallbackPost != std::string::npos);
+    CHECK(channelFallbackPre < channelFallbackRun);
+    CHECK(channelFallbackRun < channelFallbackPost);
 
     // A staged restore can land on a new clock; the six built-in families
     // must be re-prepared there exactly as in prepareToPlayImpl.
@@ -456,6 +469,13 @@ TEST_CASE("a built-in panel owns the editor bay until its card goes",
     // Selection changes close the panel first, so it cannot follow the user
     // onto another strip.
     CHECK(contains(rack, "closeEffectWindows();"));
+
+    // A selection the engine re-made closes every panel, not just the EQ:
+    // they all edit the strip that was on screen.
+    const auto selection = functionBody(rack, "void RackView::ensureSelection");
+    CHECK(contains(selection, "closeEffectWindows();"));
+    CHECK(contains(selection, "closeEqWindow();"));
+    CHECK(contains(selection, "closeDynamicsWindow();"));
 }
 
 TEST_CASE("latency tuning options reach the device opens",

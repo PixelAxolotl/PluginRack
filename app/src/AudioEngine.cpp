@@ -147,6 +147,18 @@ void processNewMissing(const std::vector<pluginrack::ChainItem>& chain,
     }
 }
 
+// An Eq chain row is the one place the chain loop runs the strip's EQ. A
+// strip without one still runs it at the end of the fallback pass, in the same
+// last position the offline mixer appends it, so both engines apply and bill
+// the same delay line.
+template <typename StripType>
+bool hasEqRow(const StripType& strip) noexcept {
+    return std::any_of(strip.chain.begin(), strip.chain.end(),
+                       [](const pluginrack::ChainItem& item) {
+                           return item.type == pluginrack::ChainItemType::Eq;
+                       });
+}
+
 // One built-in family re-prepared for the current clock. A size change
 // rebuilds the vector so processors keep index alignment with effects (the
 // chain looks processors up by effect index); a matched vector is prepared
@@ -793,6 +805,15 @@ void AudioEngine::render(int frames) {
                 processNewMissing(channel->chain, channel->limiterEffects, channel->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count, &channel->limiterTap);
                 processNewMissing(channel->chain, channel->feedbackSuppressorEffects, channel->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count, &channel->feedbackTap);
                 processNewMissing(channel->chain, channel->spectralDenoiserEffects, channel->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count, nullptr);
+                // No Eq row means the chain loop never ran the EQ. Close the
+                // fallback pass with it, in the same last position the offline
+                // mixer appends it, and keep the row path's tap order so the
+                // EQ window's pre ring sees the input side.
+                if (!hasEqRow(*channel) && !channel->eqBypassed.get()) {
+                    channel->eqTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
+                    channel->eq.process(block.getWritePointer(0), block.getWritePointer(1), count);
+                    channel->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+                }
                 channel->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
                 scrubRange(channel->buffer, start, count);
             }
@@ -984,6 +1005,13 @@ void AudioEngine::render(int frames) {
         processNewMissing(strip->chain, strip->limiterEffects, strip->limiterProcessors, pluginrack::ChainItemType::Limiter, block.getWritePointer(0), block.getWritePointer(1), count, &strip->limiterTap);
         processNewMissing(strip->chain, strip->feedbackSuppressorEffects, strip->feedbackSuppressorProcessors, pluginrack::ChainItemType::FeedbackSuppressor, block.getWritePointer(0), block.getWritePointer(1), count, &strip->feedbackTap);
         processNewMissing(strip->chain, strip->spectralDenoiserEffects, strip->spectralDenoiserProcessors, pluginrack::ChainItemType::SpectralDenoiser, block.getWritePointer(0), block.getWritePointer(1), count, nullptr);
+        // Same unchained-EQ fallback as the channel pass: no Eq row means the
+        // chain loop skipped it, so it runs last with the row path's tap order.
+        if (!hasEqRow(*strip) && !strip->eqBypassed.get()) {
+            strip->eqTap.writeTap(false, block.getReadPointer(0), block.getReadPointer(1), count);
+            strip->eq.process(block.getWritePointer(0), block.getWritePointer(1), count);
+            strip->eqTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
+        }
         strip->analyzerTap.writeTap(true, block.getReadPointer(0), block.getReadPointer(1), count);
         scrubRange(strip->buffer, start, count);
     };
@@ -5296,13 +5324,9 @@ int stripLimiterLatencySamples(const Strip& strip, double sampleRate) {
 }
 template <typename Strip>
 int stripEqLatencySamples(const Strip& strip, double sampleRate) {
-    // The EQ delay line only runs from the Eq chain row (render's Eq branch),
-    // so a strip whose Eq has no row adds no delay even with eqDelayMs set.
-    const bool inChain = std::any_of(strip.chain.begin(), strip.chain.end(),
-                                     [](const pluginrack::ChainItem& item) {
-                                         return item.type == pluginrack::ChainItemType::Eq;
-                                     });
-    if (!inChain) return 0;
+    // The EQ delay line runs from the Eq chain row, or - without one - from
+    // render's fallback pass, so it always bills. eqLatencySamples already
+    // reports 0 while the strip's EQ is bypassed or has no delay.
     return pluginrack::eqLatencySamples(true, strip.eqBypassed.get(), strip.eqDelayMs,
                                         sampleRate);
 }

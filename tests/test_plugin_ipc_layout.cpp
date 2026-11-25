@@ -165,6 +165,61 @@ TEST_CASE("consecutive param messages are not reported as a gap") {
     CHECK_FALSE(paramSeqGapped(first.seq, second.seq));
 }
 
+TEST_CASE("param ring drain up to a sequence stops at the cutoff") {
+    ParamRing ring;
+    for (std::uint32_t i = 1; i <= 5; ++i) {
+        ParamMsg msg;
+        msg.id = i;
+        REQUIRE(paramRingPush(ring, msg));
+    }
+
+    // The cutoff is inclusive, and a cutoff below every queued sequence drains
+    // nothing.
+    CHECK(paramRingDrainUpTo(ring, 0) == 0);
+    CHECK(paramRingDrainUpTo(ring, 3) == 3);
+    CHECK(ring.consumerSeq.load() == 3);
+
+    // The entries published after the cutoff stay queued, in order and with no
+    // gap: the state that carried sequence 3 does not cover them.
+    ParamMsg next;
+    REQUIRE(paramRingPop(ring, next));
+    CHECK(next.id == 4);
+    CHECK(next.seq == 4);
+    CHECK_FALSE(paramSeqGapped(3, next.seq));
+    REQUIRE(paramRingPop(ring, next));
+    CHECK(next.id == 5);
+    CHECK(next.seq == 5);
+    CHECK_FALSE(paramRingPop(ring, next));
+}
+
+TEST_CASE("param ring drain up to a sequence keeps a dropped edit detectable") {
+    ParamRing ring;
+    for (std::uint32_t i = 1; i <= 3; ++i) {
+        ParamMsg msg;
+        msg.id = i;
+        REQUIRE(paramRingPush(ring, msg));
+    }
+    // Emulate the full-ring drop at sequence 4: a real gap that early needs 512
+    // messages already queued, but the effect on the counters is this one
+    // store - the producer advances without anything entering the ring.
+    ring.producerSeq.store(ring.producerSeq.load(std::memory_order_acquire) + 1,
+                           std::memory_order_release);
+    ParamMsg later;
+    later.id = 5;
+    REQUIRE(paramRingPush(ring, later));
+    REQUIRE(ring.producerSeq.load() == 5);
+
+    CHECK(paramRingDrainUpTo(ring, 3) == 3);
+
+    // The delivered message skipped the dropped one, so the child still sees
+    // the gap even though the state push swallowed sequences 1..3.
+    ParamMsg next;
+    REQUIRE(paramRingPop(ring, next));
+    CHECK(next.id == 5);
+    CHECK(next.seq == 5);
+    CHECK(paramSeqGapped(3, next.seq));
+}
+
 TEST_CASE("control payload copies text and stays terminated") {
     // The control section is ~1 MiB; a stack instance overflows the default
     // 1 MB thread stack, so tests own it on the heap like the shared mapping.

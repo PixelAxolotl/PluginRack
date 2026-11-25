@@ -244,6 +244,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engi
 }
 
 RackView::~RackView() {
+    nameLabel.removeMouseListener(this);
     stopTimer();
     releaseMiniTap();
     closeEffectWindows();
@@ -329,7 +330,11 @@ void RackView::ensureSelection() {
             selectedIsOutput = true;
         }
         if (selectedId != oldId || selectedIsOutput != oldOut) {
+            // Every panel is bound to the strip it was opened on, so a
+            // selection that moves takes all of them down, not just the EQ.
+            closeEffectWindows();
             closeEqWindow();
+            closeDynamicsWindow();
             focusedInsertId = 0;
         }
     }
@@ -1270,22 +1275,25 @@ void RackView::destroyEditorWhenIdle(juce::AudioProcessorEditor* editor, PluginH
 }
 
 void RackView::refreshEditor() {
+    // A panel's backing is its chain row, not the effect object: removing the
+    // card only erases the row and marks the effect bypassed, so the effect
+    // vector cannot tell whether the panel still has a card to edit.
+    auto* panelChannel = selectedIsOutput ? nullptr : currentChannel();
+    auto* panelOutput = selectedIsOutput ? currentOutput() : nullptr;
+    const auto hasRow = [panelChannel, panelOutput](pluginrack::ChainItemType type) {
+        const auto matches = [type](const auto& item) { return item.type == type; };
+        if (panelChannel != nullptr)
+            return std::any_of(panelChannel->chain.begin(), panelChannel->chain.end(), matches);
+        if (panelOutput != nullptr)
+            return std::any_of(panelOutput->chain.begin(), panelOutput->chain.end(), matches);
+        return false;
+    };
+
     // A built-in panel owns the bay until it is closed: the card list rebuilds
     // that follow opening one must not tear the panel down again. Selection
     // changes close it first (setSelectedChannel / the strip combo), so the
     // panel here always belongs to the strip on screen.
     if (focusedEffectWindow != nullptr) {
-        auto* ch = selectedIsOutput ? nullptr : currentChannel();
-        auto* out = selectedIsOutput ? currentOutput() : nullptr;
-        // Removing the card leaves the effect object in the strip (only its
-        // chain row goes and it is marked bypassed), so the panel's backing is
-        // its chain row, not the effect vector.
-        const auto hasRow = [ch, out](pluginrack::ChainItemType type) {
-            const auto matches = [type](const auto& item) { return item.type == type; };
-            if (ch != nullptr) return std::any_of(ch->chain.begin(), ch->chain.end(), matches);
-            if (out != nullptr) return std::any_of(out->chain.begin(), out->chain.end(), matches);
-            return false;
-        };
         const bool backed =
             multibandWindow != nullptr
                 ? hasRow(pluginrack::ChainItemType::Multiband)
@@ -1312,24 +1320,35 @@ void RackView::refreshEditor() {
     }
 
     if (eqFocused && eqWindow != nullptr) {
-        hideDockedEditor();
-        if (eqWindow->getParentComponent() != &editorHolder)
-            editorHolder.addAndMakeVisible(eqWindow);
-        noEditorLabel.setVisible(false);
-        noEditorBypass.setVisible(false);
-        resized();
-        return;
+        // Losing the EQ row leaves the panel nothing to edit, so it follows
+        // its card out instead of re-docking against a strip without one.
+        if (!hasRow(pluginrack::ChainItemType::Eq)) {
+            closeEqWindow();
+        } else {
+            hideDockedEditor();
+            if (eqWindow->getParentComponent() != &editorHolder)
+                editorHolder.addAndMakeVisible(eqWindow);
+            noEditorLabel.setVisible(false);
+            noEditorBypass.setVisible(false);
+            resized();
+            return;
+        }
     }
     // The dynamics panel owns the bay while it is open; docking an insert
-    // editor here would paint it on top of the panel.
+    // editor here would paint it on top of the panel. Same row test as the
+    // other panels: the card is the panel's backing.
     if (dynamicsFocused && dynamicsWindow != nullptr) {
-        hideDockedEditor();
-        if (dynamicsWindow->getParentComponent() != &editorHolder)
-            editorHolder.addAndMakeVisible(dynamicsWindow);
-        noEditorLabel.setVisible(false);
-        noEditorBypass.setVisible(false);
-        resized();
-        return;
+        if (!hasRow(pluginrack::ChainItemType::Dynamics)) {
+            closeDynamicsWindow();
+        } else {
+            hideDockedEditor();
+            if (dynamicsWindow->getParentComponent() != &editorHolder)
+                editorHolder.addAndMakeVisible(dynamicsWindow);
+            noEditorLabel.setVisible(false);
+            noEditorBypass.setVisible(false);
+            resized();
+            return;
+        }
     }
     if (eqFocused) {
         eqFocused = false;
@@ -2328,16 +2347,29 @@ void RackView::closeEqWindow() {
 
 void RackView::closeEffectWindows() {
     if (focusedEffectWindow == nullptr) return;
-    if (feedbackSuppressorWindow != nullptr) {
-        if (auto* c = currentChannel()) c->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
-        if (auto* o = currentOutput()) o->feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
-    }
+    // Each panel's RTA reads its own plugin's tap; switching that tap off with
+    // the panel keeps the next surface opened on this strip from reading a
+    // ring nobody writes any more.
+    const bool hadMultiband = multibandWindow != nullptr;
+    const bool hadDeEsser = deEsserWindow != nullptr;
+    const bool hadLimiter = limiterWindow != nullptr;
+    const bool hadFeedback = feedbackSuppressorWindow != nullptr;
+    const auto muteTaps = [hadMultiband, hadDeEsser, hadLimiter, hadFeedback](auto& strip) {
+        if (hadMultiband) strip.multibandTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (hadDeEsser) strip.deEsserTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (hadLimiter) strip.limiterTap.setMode(AudioEngine::AnalyzerTap::kOff);
+        if (hadFeedback) strip.feedbackTap.setMode(AudioEngine::AnalyzerTap::kOff);
+    };
+    if (auto* c = currentChannel()) muteTaps(*c);
+    if (auto* o = currentOutput()) muteTaps(*o);
     auto* doomed = focusedEffectWindow;
     focusedEffectWindow = nullptr;
     multibandWindow = nullptr;
     deEsserWindow = nullptr;
     limiterWindow = nullptr;
-    feedbackSuppressorWindow = nullptr;    spectralDenoiserWindow = nullptr;    eqFocused = false;
+    feedbackSuppressorWindow = nullptr;
+    spectralDenoiserWindow = nullptr;
+    eqFocused = false;
     dynamicsFocused = false;
     editorHolder.removeChildComponent(doomed);
     delete doomed;
@@ -3540,6 +3572,8 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
         } else {
             audioEngine.setChannelEqBypassed(static_cast<std::uint32_t>(selectedId), bypassed);
         }
+        // The card is the panel's other bypass switch, so the panel follows it.
+        if (eqWindow != nullptr) eqWindow->setEqEnabled(!bypassed);
     } else if (item.type == pluginrack::ChainItemType::Multiband) {
         if (selectedIsOutput) {
             if (auto* output = currentOutput()) {
@@ -3591,6 +3625,7 @@ void RackView::setBuiltInBypass(pluginrack::ChainItem item, bool bypassed) {
             effectedit::setBypass(effects, item.id, bypassed);
             audioEngine.setChannelFeedbackSuppressors(channel->id, effects);
         }
+        if (feedbackSuppressorWindow != nullptr) feedbackSuppressorWindow->setBypassed(bypassed);
     } else if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
         if (selectedIsOutput) {
             if (auto* output = currentOutput()) {

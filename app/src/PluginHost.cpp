@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <functional>
 
 namespace {
 class PluginWindow final : public juce::DocumentWindow {
@@ -242,8 +243,12 @@ PluginHost::PluginHost() {
 }
 
 PluginHost::~PluginHost() {
-    // A queued param resync callback must see this and drop instead of
-    // touching a half-destroyed host.
+    // PluginHost is message-thread owned: every member below, the editor
+    // window and the parameter bindings assume that. The only off-thread code
+    // is the parameter resync, which reads this object on the message thread
+    // and then runs its blocking push on a detached worker that holds nothing
+    // but a shared_ptr to the child host. Flip the token first so a queued
+    // callback drops instead of touching a half-destroyed host.
     paramResyncAlive_->store(false, std::memory_order_release);
     stopChildHost();
     delete editorWindow;
@@ -413,30 +418,78 @@ bool PluginHost::setChildParameter(int parameterIndex, float normalisedValue) {
 }
 
 void PluginHost::scheduleParamResync() {
-    // One pending resync at a time, and never on the audio thread: the ring
-    // overflow or the child-reported gap is noticed by a message-thread
-    // setChildParameter call, and the state push itself is a blocking control
-    // request. The shared flag lets the queued callback notice a host that
-    // died before it ran. setChildParameter has no production caller while the
+    // One push at a time, and never on the audio thread: the ring overflow or
+    // the child-reported gap is noticed by a message-thread setChildParameter
+    // call. PluginHost is message-thread owned, so the snapshot (the editor
+    // instance's state, the child host pointer) is taken there; the blocking
+    // control request is then handed to a detached worker that never sees
+    // `this`. setChildParameter has no production caller while the
     // fault-containment plan is parked (§6.0), so this path is exercised only
     // by tests until that gate opens.
-    if (paramResyncPending_.exchange(true, std::memory_order_acq_rel)) return;
+    const auto pendingFlag = paramResyncPending_;
+    const auto againFlag = paramResyncAgain_;
+    if (pendingFlag->exchange(true, std::memory_order_acq_rel)) {
+        // A push is already queued or running. Its snapshot may predate this
+        // edit, so record the request for it to serve with one more round.
+        againFlag->store(true, std::memory_order_release);
+        return;
+    }
     const auto alive = paramResyncAlive_;
-    juce::MessageManager::callAsync([this, alive] {
+    juce::MessageManager::callAsync([this, alive, pendingFlag, againFlag] {
         // The lifetime token is the first read: once the destructor flipped
         // it, even paramResyncPending_ on this may already be gone.
         if (!alive->load(std::memory_order_acquire)) return;
-        paramResyncPending_.store(false, std::memory_order_release);
         auto host = childHost_.load(std::memory_order_acquire);
-        if (host == nullptr || host->isDead()) return;
+        const auto giveUp = [pendingFlag, againFlag] {
+            // No child to push to: a resync would be a no-op, so the queued
+            // requests are dropped rather than retried against a dead host.
+            pendingFlag->store(false, std::memory_order_release);
+            againFlag->store(false, std::memory_order_release);
+        };
+        if (host == nullptr || host->isDead()) {
+            giveUp();
+            return;
+        }
+        // Sequence before state: an edit published between the two reads is
+        // then still queued at the child (and applied after the push), never
+        // silently dropped, because the blob cannot be newer than the cutoff
+        // it travels with.
+        const auto snapshotSeq = host->paramProducerSeq();
         // Read the state now, at push time, so every edit that arrived while
         // the resync was coalescing is covered by this single snapshot.
         const auto state = editorStateAsBase64();
-        if (state.isEmpty()) return; // no instance to take state from
-        juce::String error;
-        if (!host->setState(state, 5000, error)) {
-            juce::Logger::writeToLog("plugin: child param resync failed (" + error + ")");
+        if (state.isEmpty()) { // no instance to take state from
+            giveUp();
+            return;
         }
+        // From here the worker owns the request flag: an edit that needs a
+        // re-push while this one runs sets it again and gets one more round.
+        // It asks for that round through this callable, which hops to the
+        // message thread first, so the worker itself never holds a PluginHost
+        // pointer or touches a member.
+        againFlag->store(false, std::memory_order_release);
+        const std::function<void()> rearm = [this, alive] {
+            if (!alive->load(std::memory_order_acquire)) return;
+            scheduleParamResync();
+        };
+        // The push waits up to 5 s on a wedged child, which is exactly the
+        // wait the message thread must not take. Everything the worker needs is
+        // captured by value; its own shared_ptr keeps the child's channels
+        // alive if the slot is torn down first, and killAndReap makes the call
+        // return promptly instead of sitting out the timeout.
+        juce::Thread::launch([host, pendingFlag, againFlag, state, snapshotSeq, rearm] {
+            juce::String error;
+            if (!host->setState(state, 5000, error, snapshotSeq)) {
+                juce::Logger::writeToLog("plugin: child param resync failed (" + error + ")");
+            }
+            pendingFlag->store(false, std::memory_order_release);
+            if (againFlag->load(std::memory_order_acquire)) {
+                // An edit was lost while this push was in flight: the snapshot
+                // above cannot contain it, so book one more round on the
+                // message thread, where the next snapshot has to be taken.
+                juce::MessageManager::callAsync(rearm);
+            }
+        });
     });
 }
 

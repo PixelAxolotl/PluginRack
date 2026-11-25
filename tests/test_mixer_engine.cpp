@@ -1044,16 +1044,87 @@ TEST_CASE("mixer compensates eq delay across tap points") {
     REQUIRE(firstNonZero(rendered[1]) == 48);
 }
 
-TEST_CASE("mixer runs the eq only at an Eq row, in chain order") {
-    // A strip may carry eqEnabled, bands and a delay without an Eq row. Live
-    // render has no place to run the EQ then, so the offline mixer must not
-    // run it either - not the colour, not the delay, not the route billing.
+TEST_CASE("mixer item tap on an Eq row carries the eq-delayed signal") {
+    // An Item tap names a chain row and bills the latency up to and including
+    // it. On an Eq row that total already contains the delay line, so the
+    // tapped copy needs no padding and still leaves with the direct route.
+    // A ring written before the EQ instead of after it would arrive early.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
+    for (auto& band : scene.channels[0].eqBands) {
+        band.enabled = false; // delay only: no band may colour the impulse
+    }
+    scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    pluginrack::Tap item;
+    item.kind = pluginrack::Tap::Kind::Item;
+    item.itemId = 0;
+    addTappedRoute(scene, 1, 2, item);
+    addRoute(scene, 1, 1);
+
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+    const auto rendered = renderImpulse(engine, 2);
+    REQUIRE(firstNonZero(rendered[0]) == 48);
+    REQUIRE(firstNonZero(rendered[1]) == 48);
+    REQUIRE(std::fabs(rendered[1][48]) > 1.0e-3f);
+}
+
+TEST_CASE("mixer item tap before the Eq row is compensated to the direct output") {
+    // The Dynamics row sits ahead of the Eq row. Its tap must be padded by the
+    // EQ delay so it still lands with the direct output; billing the EQ delay
+    // before the Dynamics row instead would leave the tapped copy early.
+    // The Eq tap sits after the delay line, so it carries the delay already
+    // and must not be padded a second time (that would land it 48 late).
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].effects = {pluginrack::defaultDynamicsEffects().front()}; // id 1
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
+    for (auto& band : scene.channels[0].eqBands) {
+        band.enabled = false; // delay only, so both tapped copies match
+    }
+    scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Dynamics, 1},
+                               {pluginrack::ChainItemType::Eq, 0}};
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    addOutput(scene, 3);
+    pluginrack::Tap dynamicsTap;
+    dynamicsTap.kind = pluginrack::Tap::Kind::Item;
+    dynamicsTap.itemId = 1;
+    addTappedRoute(scene, 1, 2, dynamicsTap);
+    pluginrack::Tap eqTap;
+    eqTap.kind = pluginrack::Tap::Kind::Item;
+    eqTap.itemId = 0;
+    addTappedRoute(scene, 1, 3, eqTap);
+    addRoute(scene, 1, 1);
+
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+    const auto rendered = renderImpulse(engine, 3);
+    REQUIRE(firstNonZero(rendered[0]) == 48);
+    REQUIRE(firstNonZero(rendered[1]) == 48);
+    REQUIRE(firstNonZero(rendered[2]) == 48);
+    // Both taps are pre-fader, so their samples are directly comparable: the
+    // padded pre-EQ copy must equal the post-EQ one.
+    REQUIRE(rendered[1][48] == Catch::Approx(rendered[2][48]).margin(1.0e-6f));
+}
+
+TEST_CASE("mixer runs an unchained eq as the last fallback step") {
+    // A strip can carry eqEnabled, bands and a delay with no Eq row (a scene
+    // saved before per-strip ordering). The EQ then has no place in the chain,
+    // so it closes the fallback pass - the same last position live render
+    // gives it. The delay applies and the direct route is billed for it, so
+    // the dry and tapped paths stay aligned.
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     scene.channels[0].eqEnabled = true;
     scene.channels[0].eqBands = pluginrack::defaultEqBands();
     for (auto& band : scene.channels[0].eqBands) {
-        band.enabled = false;
+        band.enabled = false; // delay only: no band may colour the impulse
     }
     scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz, if it ran
     addOutput(scene, 1);
@@ -1065,14 +1136,44 @@ TEST_CASE("mixer runs the eq only at an Eq row, in chain order") {
     addRoute(scene, 1, 1);
     addBusRoute(scene, 4, 2);
 
-    pluginrack::MixerEngine noRow = prepareEngine(scene);
-    const auto noRowRendered = renderImpulse(noRow, 2);
-    REQUIRE(firstNonZero(noRowRendered[0]) == 0);
-    REQUIRE(firstNonZero(noRowRendered[1]) == 0);
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+    const auto rendered = renderImpulse(engine, 2);
+    REQUIRE(firstNonZero(rendered[0]) == 48);
+    REQUIRE(firstNonZero(rendered[1]) == 48);
 
-    // With the row the delay runs, and the direct route is billed for it so
-    // both paths still leave together.
+    // It renders the bands too, not only the delay line: +6 dB at 1 kHz
+    // doubles a 1 kHz sine exactly like the row path does.
+    pluginrack::Scene coloured = eqTestScene();
+    coloured.channels[0].eqEnabled = true; // still no Eq row
+    coloured.channels[0].eqBands = pluginrack::defaultEqBands();
+    coloured.channels[0].eqBands[3].gainDb = 6.0f;
+    pluginrack::MixerEngine reference = prepareEngine(eqTestScene());
+    pluginrack::MixerEngine boosted = prepareEngine(coloured);
+    REQUIRE(sineOutputPeak(boosted) / sineOutputPeak(reference) ==
+            Catch::Approx(2.0f).margin(0.08f));
+}
+
+TEST_CASE("mixer runs the eq at its row and in chain order") {
+    // With an Eq row the EQ runs there, and the direct route is billed for
+    // the delay so both paths still leave together.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].eqEnabled = true;
+    scene.channels[0].eqBands = pluginrack::defaultEqBands();
+    for (auto& band : scene.channels[0].eqBands) {
+        band.enabled = false;
+    }
+    scene.channels[0].eqDelayMs = 1.0f; // 48 samples at 48 kHz
     scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    addBus(scene, 4);
+    pluginrack::Tap input;
+    input.kind = pluginrack::Tap::Kind::Input;
+    addTappedBusSend(scene, 1, 4, input);
+    addRoute(scene, 1, 1);
+    addBusRoute(scene, 4, 2);
+
     pluginrack::MixerEngine withRow = prepareEngine(scene);
     const auto withRowRendered = renderImpulse(withRow, 2);
     REQUIRE(firstNonZero(withRowRendered[0]) == 48);
@@ -1239,5 +1340,39 @@ TEST_CASE("mixer skips a bypassed denoiser that has no chain row") {
     const auto rendered = renderImpulse(engine, 2, 5, 128);
     REQUIRE(firstNonZero(rendered[0]) == 128);
     REQUIRE(firstNonZero(rendered[1]) == 128);
+}
+
+TEST_CASE("mixer a duplicate-id row that owns no tap does not republish it") {
+    // chain = [Dynamics 1, Limiter 1]: the Item tap on id 1 belongs to the
+    // first row, the Dynamics. The Limiter row repeats the id but owns no tap,
+    // so the ring must keep the post-Dynamics signal. Its look-ahead still
+    // bills, padding that copy to land with the post-Limiter direct output.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].effects = {pluginrack::defaultDynamicsEffects().front()};
+    scene.channels[0].limiterEffects = {pluginrack::makeDefaultLimiterEffect(1)};
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Dynamics, 1},
+                               {pluginrack::ChainItemType::Limiter, 1}};
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    pluginrack::Tap item;
+    item.kind = pluginrack::Tap::Kind::Item;
+    item.itemId = 1;
+    addTappedRoute(scene, 1, 2, item);
+    addRoute(scene, 1, 1);
+
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+    const auto rendered = renderImpulse(engine, 2);
+    // Limiter look-ahead is 72 samples at 48 kHz.
+    REQUIRE(firstNonZero(rendered[0]) == 72);
+    REQUIRE(firstNonZero(rendered[1]) == 72);
+    REQUIRE(std::fabs(rendered[1][72]) > 1.0e-3f);
+    // One cluster only: a ring republished at the Limiter row would carry the
+    // post-limiter impulse and land a second copy 72 samples later.
+    bool oneCluster = true;
+    for (std::size_t i = 73; i < rendered[1].size(); ++i) {
+        if (std::fabs(rendered[1][i]) > 1.0e-5f) oneCluster = false;
+    }
+    REQUIRE(oneCluster);
 }
 

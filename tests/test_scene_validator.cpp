@@ -664,6 +664,25 @@ TEST_CASE("bus send must name a real channel and bus") {
     REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownChannelInSend);
 }
 
+TEST_CASE("a tap may name the eq row, which is id zero") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = pluginrack::kSchemaVersion;
+    scene.channels.front().eqEnabled = true;
+    scene.channels.front().chain = {{pluginrack::ChainItemType::Eq, 0}};
+    pluginrack::Tap tap;
+    tap.kind = pluginrack::Tap::Kind::Item;
+    tap.itemId = 0; // the eq row, and the patch view offers it as a source
+    scene.routes.front().tap = tap;
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    // Zero is only legal because a row carries it: without the eq row the tap
+    // names nothing, and the scene must be rejected rather than open silent.
+    scene.channels.front().chain.clear();
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownTapItem);
+}
+
 TEST_CASE("bus count over the cap is rejected") {
     pluginrack::Scene scene = makeValidScene();
     for (std::size_t i = 0; i <= pluginrack::kMaxBuses; ++i) {

@@ -950,11 +950,11 @@ private:
     // processor delays even a bypassed signal; a limiter's look-ahead counts
     // only while the effect is not bypassed (its processor skips the delay
     // line then); the EQ contributes its delay line through eqLatencySamples,
-    // gated by the strip's bypass flag, and only from an Eq chain row, since
-    // that row is the only place render runs the EQ. All at the engine's
-    // current rate. chainLatencySamples then adds the effects that render's
-    // fallback pass runs without a chain row, and tapLatencySamples falls back
-    // to that same total when its item is not in the chain.
+    // gated by the strip's bypass flag, at its Eq chain row or - without one -
+    // at the end of render's fallback pass. All at the engine's current rate.
+    // chainLatencySamples then adds the effects that render's fallback pass
+    // runs without a chain row, and tapLatencySamples falls back to that same
+    // total when its item is not in the chain.
     template <typename StripType>
     static int chainItemLatencySamples(const StripType& strip,
                                        const pluginrack::ChainItem& item,
@@ -1013,6 +1013,18 @@ private:
             if (!effect.bypassed
                 && !covered(pluginrack::ChainItemType::SpectralDenoiser, effect.id))
                 total += pluginrack::kSpectralDenoiserLatencySamples;
+        }
+        // The EQ is one engine, not an effect vector: a row runs it in place,
+        // and without a row render's fallback pass runs it last. Either path
+        // bills the same expression, so the total never depends on which one
+        // the strip is on and stripEqLatencySamples can report it directly.
+        const bool eqChained = std::any_of(
+            strip.chain.begin(), strip.chain.end(), [](const pluginrack::ChainItem& item) {
+                return item.type == pluginrack::ChainItemType::Eq;
+            });
+        if (!eqChained) {
+            total += pluginrack::eqLatencySamples(true, strip.eqBypassed.get(),
+                                                  strip.eqDelayMs, sampleRate);
         }
         return total;
     }

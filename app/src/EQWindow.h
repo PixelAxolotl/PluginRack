@@ -86,7 +86,7 @@ public:
     static constexpr int kHeight = theme::ui::kEffectWindowH;
 
     // Analyzer mode codes: the setAnalyzerTapMode callback forwards these to
-    // AudioEngine::AnalyzerTap::setMode (kOff/kPre/kPost mirror).
+    // AudioEngine::AnalyzerTap::setMode (kOff/kPost mirror).
     static constexpr int kAnalyzerOff = 0;
     static constexpr int kAnalyzerPost = 2;
     static constexpr int kAnalyzerFftSize = analyzer::kFftSize;
@@ -133,7 +133,7 @@ public:
     // is the saved scene value.
     std::function<void(int weighting)> applyWeighting;
 
-    // Switches between kAnalyzerOff/Pre/Post; button clicks route through it.
+    // Switches between kAnalyzerOff and kAnalyzerPost; button clicks route through it.
     void setAnalyzerMode(int mode);
 
     void closeButtonPressed() override;

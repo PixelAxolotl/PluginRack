@@ -413,6 +413,45 @@ TEST_CASE("eq prepare resets biquad states") {
     }
 }
 
+TEST_CASE("eq prepare at a new rate drops delay samples from the old one") {
+    // A rate change re-prepares every strip. The delay line must be rebuilt for
+    // the new rate, not kept: stale samples from the 48 kHz line used to leak
+    // into the first 96 kHz block. The 1 ms request survives prepare() and is
+    // now 96 samples, so an impulse must arrive there with silence before it.
+    EqEngine e;
+    e.prepare(48000.0);
+    auto bands = defaultEqBands();
+    for (auto& band : bands) {
+        band.enabled = false; // delay only
+    }
+    e.setBands(bands);
+    e.setDelayMs(1.0f); // 48 samples at 48 kHz
+
+    // Fill the 48 kHz line with a constant burst: any retained history would
+    // appear at the tap immediately at the new rate.
+    std::vector<float> warmL(1024, 0.5f);
+    std::vector<float> warmR(1024, 0.5f);
+    for (int off = 0; off < 1024; off += 256) {
+        e.process(warmL.data() + off, warmR.data() + off, 256);
+    }
+
+    e.prepare(96000.0);
+
+    constexpr int kFrames = 512;
+    std::vector<float> L(static_cast<std::size_t>(kFrames), 0.0f);
+    std::vector<float> R(static_cast<std::size_t>(kFrames), 0.0f);
+    L[0] = 1.0f;
+    R[0] = -0.5f;
+    e.process(L.data(), R.data(), kFrames);
+
+    for (int i = 0; i < 96; ++i) {
+        REQUIRE(L[static_cast<std::size_t>(i)] == 0.0f);
+        REQUIRE(R[static_cast<std::size_t>(i)] == 0.0f);
+    }
+    REQUIRE(L[96] == Catch::Approx(1.0f));
+    REQUIRE(R[96] == Catch::Approx(-0.5f));
+}
+
 TEST_CASE("eq latency helper reports the delay line") {
     // Freezing the compensation contract: only an enabled, un-bypassed delay
     // counts, and the report never exceeds the delay-line cap.

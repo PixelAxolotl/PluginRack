@@ -76,9 +76,10 @@ void DeEsserProcessor::reset() noexcept {
 void DeEsserProcessor::rebuild() {
     // True band-pass, NOT a bell boost: the band contains only the sibilance
     // region, so (in - band) + band*gain leaves out-of-band bit-identical.
-    band_ = paramsFinite(effect_)
-                ? dsp::bandPass(effect_.freqHz, sampleRate_, effect_.q, kMinBandHz, kMaxBandHz)
-                : dsp::bandPass(6000.0f, sampleRate_, 2.0f, kMinBandHz, kMaxBandHz);
+    // Non-finite settings never reach here in process() either, so leave the
+    // previous coefficients in place instead of inventing a 6 kHz band.
+    if (!paramsFinite(effect_)) return;
+    band_ = dsp::bandPass(effect_.freqHz, sampleRate_, effect_.q, kMinBandHz, kMaxBandHz);
 }
 
 void DeEsserProcessor::process(float* left, float* right, int frames) noexcept {

@@ -21,10 +21,20 @@
 // Threading contract:
 //   start/waitReady/setState/getState/prepare/requestLatency/killAndReap
 //       -> any non-audio thread. Bounded waits, never used from processBlock.
+//          The control round trips are serialised by controlLock_, so the
+//          message thread and the param-resync worker can both issue them: a
+//          caller that finds the lock held waits for the other round trip to
+//          finish before its own timeout starts.
 //   submitBlock/fetchBlock
 //       -> the audio thread only. No allocation, no locks, bounded waits.
 //   setParameter
 //       -> one producer thread at a time (the message thread today).
+//   lastKnownState
+//       -> any thread (read under controlLock_).
+//   paramProducerSeq
+//       -> the parameter producer thread (the message thread), like
+//          setParameter: it reads the producer side of the param mapping, which
+//          is only closed from that same thread.
 //
 // The failure rule lives in PluginHost, not here: on a miss the caller leaves
 // the block dry. There is deliberately no "fall back to the in-process
@@ -49,7 +59,15 @@ public:
     // before the first block, so the plugin never renders with defaults when a
     // scene had settings. Over the base64 cap the child refuses and `error`
     // says so; the caller keeps the in-process path or reports the failure.
-    bool setState(const juce::String& stateBase64, int timeoutMs, juce::String& error);
+    //
+    // paramSeq is the producer sequence the state was snapshotted at (0 when
+    // the caller did not take a snapshot). With a sequence the child keeps any
+    // parameter edit published after it queued and drops the older ones, which
+    // it can only do when it knows which edit that state already contains: a
+    // resync takes a sequence, a scene load or an adoption applies its state
+    // before any edit is made and passes 0.
+    bool setState(const juce::String& stateBase64, int timeoutMs, juce::String& error,
+                  std::uint64_t paramSeq = 0);
     juce::String getState(int timeoutMs, juce::String& error);
 
     // Re-prepares the child after a sample-rate / buffer-size change.
@@ -86,8 +104,15 @@ public:
     bool isDead() const;
     int exitCode() const;
     int childProcessId() const;
-    // Last state the child reported, used when a live fetch times out.
-    const juce::String& lastKnownState() const { return lastKnownState_; }
+    // Last state the child reported, used when a live fetch times out. Returns
+    // a copy: the stored string is rewritten by setState/getState, which may
+    // run on the resync worker while a caller on another thread reads it.
+    juce::String lastKnownState() const;
+    // Producer sequence the child's parameter ring has published. Read together
+    // with the editor's state to build a resync snapshot: taken before the
+    // state blob, it is the highest edit that blob is guaranteed to contain,
+    // and everything above it stays queued at the child.
+    std::uint64_t paramProducerSeq() const;
 
     // Whatever the child wrote to stdout, for the failure path. Only call this
     // after the child has exited: the output pipe blocks while it is open and
@@ -122,9 +147,14 @@ private:
 
     std::uint64_t lastSubmitted = 0;
     std::uint64_t lastParamGapCount = 0; // setParameter baseline, message thread only
-    juce::CriticalSection controlLock_;
+    // Serialises control round trips (request + wait + reply) and guards the
+    // state/sequence reads that accompany them. Mutable so the const accessors
+    // can take it too. Deliberately held for the whole round trip: the child
+    // answers one request at a time, so overlapping calls would otherwise
+    // interleave on the single request/response slot pair.
+    mutable juce::CriticalSection controlLock_;
     bool launched = false;
-    juce::String lastKnownState_;
+    juce::String lastKnownState_; // guarded by controlLock_
 
     std::atomic<bool> hostDead{false};
     std::atomic<bool> stopWatcher{false};

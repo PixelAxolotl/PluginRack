@@ -258,15 +258,19 @@ bool PluginProcessHost::controlCall(pluginHostIpc::ControlOp op, const juce::Str
 }
 
 bool PluginProcessHost::setState(const juce::String& stateBase64, int timeoutMs,
-                                 juce::String& error) {
+                                 juce::String& error, std::uint64_t paramSeq) {
     if (stateBase64.isEmpty()) return true;
     auto* object = new juce::DynamicObject();
     object->setProperty("state", stateBase64);
+    if (paramSeq > 0) object->setProperty("paramSeq", (juce::int64) paramSeq);
     juce::String reply;
     const bool ok =
         controlCall(pluginHostIpc::ControlOp::setState, juce::JSON::toString(juce::var(object), true),
                     timeoutMs, reply, error);
-    if (ok) lastKnownState_ = stateBase64;
+    if (ok) {
+        const juce::ScopedLock lock(controlLock_);
+        lastKnownState_ = stateBase64;
+    }
     return ok;
 }
 
@@ -276,8 +280,26 @@ juce::String PluginProcessHost::getState(int timeoutMs, juce::String& error) {
         return {};
     }
     const auto state = jsonValue(reply, "state").toString();
-    if (state.isNotEmpty()) lastKnownState_ = state;
+    if (state.isNotEmpty()) {
+        const juce::ScopedLock lock(controlLock_);
+        lastKnownState_ = state;
+    }
     return state;
+}
+
+juce::String PluginProcessHost::lastKnownState() const {
+    const juce::ScopedLock lock(controlLock_);
+    return lastKnownState_;
+}
+
+std::uint64_t PluginProcessHost::paramProducerSeq() const {
+    // Producer-side read, no lock: the param mapping is only closed from the
+    // same thread that owns the producer (see the header contract), and a stale
+    // sequence is harmless here - it can only make the child keep one more
+    // queued edit, never drop one the state skipped.
+    if (paramSection.data() == nullptr) return 0;
+    const auto* params = static_cast<const pluginHostIpc::ParamSection*>(paramSection.data());
+    return params->toHost.producerSeq.load(std::memory_order_acquire);
 }
 
 bool PluginProcessHost::prepare(double sampleRate, int blockSize, int timeoutMs,
@@ -432,10 +454,20 @@ void PluginProcessHost::stopWatcherThread() {
 
 void PluginProcessHost::killAndReap() {
     stopWatcherThread();
+    // Published before the kill: a control call on another thread (the
+    // param-resync worker) must see the host as dead rather than read a
+    // channel this call is about to unmap. start() clears it again.
+    hostDead.store(true, std::memory_order_release);
     if (child != nullptr && child->isRunning()) {
         child->kill();
         child->waitForProcessToFinish(5000);
     }
+    // Wake a control call still waiting for a reply so it takes the death flag
+    // now instead of sitting out the rest of its timeout; the lock below must
+    // never be entered while that call is still dereferencing the mapping.
+    controlResponseEvent.signal();
+
+    const juce::ScopedLock lock(controlLock_);
     child.reset();
     audioSection.close();
     paramSection.close();

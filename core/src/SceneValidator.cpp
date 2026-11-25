@@ -693,15 +693,14 @@ std::vector<SceneError> validate(const Scene& scene) {
         if (tap.kind != Tap::Kind::Item) {
             return;
         }
-        if (tap.itemId == 0) {
-            errors.push_back({SceneErrorCode::ValueOutOfRange, channelId,
-                              what + " tap item id must not be zero"});
-            return;
-        }
         const auto channel = channelById.find(channelId);
         if (channel == channelById.end()) {
             return; // the unknown channel is reported by the caller
         }
+        // One rule, the same one the engine resolves the tap with: the id must
+        // name a chain row. Zero is not special - an Eq row is id 0, and the
+        // patch view offers it as a tap source, so rejecting zero here would
+        // save a scene that cannot be loaded again.
         for (const ChainItem& item : channel->second->chain) {
             if (item.id == tap.itemId) {
                 return;
