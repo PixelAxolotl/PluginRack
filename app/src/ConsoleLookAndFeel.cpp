@@ -75,6 +75,14 @@ void ConsoleLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w
     g.drawLine(indicator, 2.0f);
 }
 
+juce::Label* ConsoleLookAndFeel::createSliderTextBox(juce::Slider& slider) {
+    auto* label = LookAndFeel_V4::createSliderTextBox(slider);
+    // 13 px mono matches the width of the 15 px sans text it replaces, so the
+    // fixed-width value boxes keep fitting "-60.0 dB" without shrinking.
+    label->setFont(theme::ui::numberFont(13.0f));
+    return label;
+}
+
 void ConsoleLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button,
                                               const juce::Colour& backgroundColour,
                                               bool shouldDrawButtonAsHighlighted,

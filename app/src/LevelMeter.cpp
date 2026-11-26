@@ -120,7 +120,7 @@ void LevelMeter::refreshValueGlyphs(ValueGlyphs& cache, const juce::String& text
     if (cache.text == text) return;
     cache.text = text;
     cache.glyphs.clear();
-    cache.glyphs.addLineOfText(juce::Font(juce::FontOptions(9.0f)), text, 0.0f, 0.0f);
+    cache.glyphs.addLineOfText(theme::ui::numberFont(9.0f), text, 0.0f, 0.0f);
     cache.bounds = cache.glyphs.getBoundingBox(0, -1, true);
 }
 
@@ -232,7 +232,7 @@ void LevelMeter::paint(juce::Graphics& g) {
     // dB scale, thinned so the marks never collide on a short meter. The
     // topmost mark is pushed below the bar's top edge so it cannot run into the
     // readouts above.
-    g.setFont(juce::Font(juce::FontOptions(8.0f)));
+    g.setFont(theme::ui::numberFont(8.0f));
     int lastLabelBottom = -10000;
     for (const int db : theme::metrics::kDbMarks) {
         const float proportion = (static_cast<float>(db) - kMinDb) / kDbSpan;

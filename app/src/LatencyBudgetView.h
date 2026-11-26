@@ -48,7 +48,7 @@ public:
                            juce::Justification::centredLeft, true);
             }
             g.setColour(valueColour);
-            g.setFont(bold ? theme::ui::bodyBoldFont() : theme::ui::bodyFont());
+            g.setFont(bold ? theme::ui::numberBoldFont() : theme::ui::numberFont());
             g.drawText(value, bounds, juce::Justification::centredRight, false);
             ++row;
         };

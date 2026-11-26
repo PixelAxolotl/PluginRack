@@ -6,10 +6,13 @@
 namespace {
 constexpr int kRowH = 64;
 constexpr int kLabelW = 190;
-constexpr int kSidePad = 28;
+// Canvas inset from the viewport edge: the same 24 px the page views use
+// between control groups, so the graph starts where the other pages' content
+// starts instead of floating in its own margin.
+constexpr int kSidePad = theme::ui::kSectionGap;
 constexpr int kPillH = 36;
 constexpr int kPointH = 30;
-constexpr int kCardPad = 10;
+constexpr int kCardPad = theme::ui::kRowGap;
 constexpr int kCardHeaderH = 30;
 
 // Dashed bezier: build the curve once, then let JUCE cut it along its arc
@@ -268,6 +271,7 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
         const int rowY = node.box.getY() + kCardHeaderH + kCardPad
                          + static_cast<int>(i) * kPointH;
         g.setColour(theme::dim());
+        g.setFont(theme::ui::captionFont());
         g.drawText(socket.label, node.box.withTrimmedLeft(kCardPad)
                                      .withY(rowY).withHeight(kPointH),
                    juce::Justification::centredLeft, true);
@@ -283,6 +287,7 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
         if (remaining > 0) {
             const double ms = 1000.0 * static_cast<double>(remaining) / sampleRate;
             g.setColour(theme::dim());
+            g.setFont(theme::ui::numberFont(11.0f));
             g.drawText("+" + juce::String(ms, 1) + " ms",
                        node.box.getRight() - 78, rowY,
                        64, kPointH, juce::Justification::centredRight, false);

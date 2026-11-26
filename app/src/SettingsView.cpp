@@ -62,7 +62,7 @@ SettingsView::SettingsView(AudioEngine& engine)
         body.addAndMakeVisible(label);
     };
     const auto styleStatValue = [this](juce::Label& label) {
-        label.setFont(theme::ui::bodyBoldFont());
+        label.setFont(theme::ui::numberBoldFont());
         label.setColour(juce::Label::textColourId, theme::text());
         label.setJustificationType(juce::Justification::centredLeft);
         label.setMinimumHorizontalScale(0.7f);
@@ -131,7 +131,7 @@ SettingsView::SettingsView(AudioEngine& engine)
     theme::ui::styleBetaLabel(roundTripBeta);
     add(roundTripBeta);
 
-    measuredLabel.setFont(juce::Font(juce::FontOptions(20.0f, juce::Font::bold)));
+    measuredLabel.setFont(theme::ui::numberBoldFont(20.0f));
     measuredLabel.setColour(juce::Label::textColourId, theme::text());
     add(measuredLabel);
 
@@ -939,6 +939,7 @@ void SettingsView::layoutBodyToFit() {
 
 int SettingsView::layoutBody(int width) {
     constexpr int pad = theme::ui::kPanelPad;
+    constexpr int kRowGap = theme::ui::kRowGap;
     constexpr int kStatH = 34;
     constexpr int kToggleH = 24;
     constexpr int kToggleGap = 4;
@@ -975,12 +976,12 @@ int SettingsView::layoutBody(int width) {
         const int panelTop = startSection(statusCaption, nullptr);
         const int issuesH =
             WrappedLabel::heightFor(issuesText.getText(), innerW, issuesText.getFont());
-        const int panelH = pad + kStatH + (issuesH > 0 ? 10 + issuesH : 0) + pad;
+        const int panelH = pad + kStatH + (issuesH > 0 ? kRowGap + issuesH : 0) + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
 
         auto inner = panel.reduced(pad);
         auto stats = inner.removeFromTop(kStatH);
-        constexpr int kStatGap = 18;
+        constexpr int kStatGap = theme::ui::kSpace3;
         const auto placeStat = [](juce::Rectangle<int> cell, juce::Label& caption,
                                   juce::Label& value) {
             caption.setBounds(cell.removeFromTop(13));
@@ -998,7 +999,7 @@ int SettingsView::layoutBody(int width) {
         placeStat(stats, bufferStatCaption, bufferStatValue);
 
         if (issuesH > 0)
-            issuesText.setBounds(inner.removeFromTop(10 + issuesH).withTrimmedTop(10));
+            issuesText.setBounds(inner.removeFromTop(kRowGap + issuesH).withTrimmedTop(kRowGap));
         else
             issuesText.setBounds({});
         endSection(panel);
@@ -1017,7 +1018,7 @@ int SettingsView::layoutBody(int width) {
         auto row = inner.removeFromTop(theme::ui::kControlH);
         inputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         inputBufferSizeCombo.setBounds(row.removeFromLeft(150));
-        row.removeFromLeft(18);
+        row.removeFromLeft(theme::ui::kSpace3);
         outputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         outputBufferSizeCombo.setBounds(row.removeFromLeft(150));
         endSection(panel);
@@ -1029,8 +1030,9 @@ int SettingsView::layoutBody(int width) {
         constexpr int kHeadlineH = 30;
         constexpr int kDetailH = 16;
         const int budgetH = hasBudget_ ? LatencyBudgetView::preferredHeight() : 0;
-        const int panelH = pad + kHeadlineH + 2 + kDetailH
-                           + (budgetH > 0 ? 8 + budgetH + 6 : 10) + kDetailH + pad;
+        const int panelH = pad + kHeadlineH + theme::ui::kSpace1 + kDetailH
+                           + (budgetH > 0 ? kRowGap + budgetH + kRowGap : kRowGap)
+                           + kDetailH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1038,29 +1040,29 @@ int SettingsView::layoutBody(int width) {
         measureButton.setBounds(headline.removeFromRight(theme::ui::kMeasureW)
                                     .withSizeKeepingCentre(theme::ui::kMeasureW,
                                                            theme::ui::kControlH));
-        headline.removeFromRight(10);
+        headline.removeFromRight(theme::ui::kSpace3);
         listenCombo.setBounds(headline.removeFromRight(200)
                                   .withSizeKeepingCentre(200, theme::ui::kControlH));
         headline.removeFromRight(theme::ui::kRowGap);
         listenLabel.setBounds(headline.removeFromRight(64)
                                   .withSizeKeepingCentre(64, theme::ui::kControlH));
-        headline.removeFromRight(12);
+        headline.removeFromRight(theme::ui::kSpace3);
         measuredLabel.setBounds(headline.withSizeKeepingCentre(headline.getWidth(), 26));
 
-        inner.removeFromTop(2);
+        inner.removeFromTop(theme::ui::kSpace1);
         measuredDetailLabel.setBounds(inner.removeFromTop(kDetailH));
         budgetView.setVisible(budgetH > 0);
         if (budgetH > 0) {
-            inner.removeFromTop(8);
+            inner.removeFromTop(kRowGap);
             // The stage list is read label to value; on a wide window that
             // distance would be a screen wide, so the rows keep a readable
             // measure instead of stretching to the panel edge.
             budgetView.setBounds(inner.removeFromTop(budgetH).removeFromLeft(
                 juce::jmin(inner.getWidth(), 760)));
-            inner.removeFromTop(6);
+            inner.removeFromTop(kRowGap);
         } else {
             budgetView.setBounds({});
-            inner.removeFromTop(10);
+            inner.removeFromTop(kRowGap);
         }
         renderLoadLabel.setBounds(inner.removeFromTop(kDetailH));
         endSection(panel);
@@ -1085,9 +1087,9 @@ int SettingsView::layoutBody(int width) {
         constexpr int kToggleCount = 9;
         const int toggleRows = twoColumns ? (kToggleCount + 1) / 2 : kToggleCount;
         const int togglesH = toggleRows * kToggleH + (toggleRows - 1) * kToggleGap;
-        const int panelH = pad + togglesH + 6 + theme::ui::kControlH
-                         + 6 + theme::ui::kControlH + 10
-                         + profileRowH + 6 + asioRowH + pad;
+        const int panelH = pad + togglesH + theme::ui::kSpace3 + theme::ui::kControlH
+                         + kRowGap + theme::ui::kControlH + theme::ui::kSpace3
+                         + profileRowH + kRowGap + asioRowH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1107,17 +1109,17 @@ int SettingsView::layoutBody(int width) {
         }
         inner.removeFromTop(togglesH);
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(theme::ui::kSpace3);
         auto probeCapRow = inner.removeFromTop(theme::ui::kControlH);
         probeCapLabel.setBounds(probeCapRow.removeFromLeft(160));
         probeCapChannels.setBounds(probeCapRow.removeFromLeft(200));
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(kRowGap);
         auto healthRow = inner.removeFromTop(theme::ui::kControlH);
         healthSensitivityLabel.setBounds(healthRow.removeFromLeft(160));
         healthSensitivityCombo.setBounds(healthRow.removeFromLeft(200));
 
-        inner.removeFromTop(10);
+        inner.removeFromTop(theme::ui::kSpace3);
         auto profileRow = inner.removeFromTop(profileRowH);
         profileButton.setBounds(profileRow.removeFromLeft(kActionW)
                                     .withSizeKeepingCentre(kActionW, theme::ui::kControlH));
@@ -1125,7 +1127,7 @@ int SettingsView::layoutBody(int width) {
         profileStatusLabel.setBounds(profileRow.withSizeKeepingCentre(
             profileRow.getWidth(), juce::jmax(1, profileStatusH)));
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(kRowGap);
         auto asioRow = inner.removeFromTop(asioRowH);
         forceAsioButton.setBounds(asioRow.removeFromLeft(kActionW)
                                       .withSizeKeepingCentre(kActionW, theme::ui::kControlH));
@@ -1138,7 +1140,7 @@ int SettingsView::layoutBody(int width) {
     // APP
     {
         const int panelTop = startSection(appCaption, nullptr);
-        const int panelH = pad + theme::ui::kControlH + 6 + theme::ui::kControlH + 6 + theme::ui::kControlH + pad;
+        const int panelH = pad + 3 * theme::ui::kControlH + 2 * kRowGap + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1146,19 +1148,19 @@ int SettingsView::layoutBody(int width) {
         rackThumbnailsLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         rackThumbnailFpsCombo.setBounds(row.removeFromLeft(90));
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(kRowGap);
         auto row2 = inner.removeFromTop(theme::ui::kControlH);
         peakHoldLabel.setBounds(row2.removeFromLeft(theme::ui::kLabelW));
         peakHoldCombo.setBounds(row2.removeFromLeft(90));
-        row2.removeFromLeft(24);
+        row2.removeFromLeft(theme::ui::kSpace4);
         closeToTrayToggle.setBounds(row2.removeFromLeft(320));
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(kRowGap);
         auto row3 = inner.removeFromTop(theme::ui::kControlH);
         clearFaultsButton.setBounds(row3.removeFromLeft(220));
-        row3.removeFromLeft(8);
+        row3.removeFromLeft(theme::ui::kRowGap);
         faultsLabel.setBounds(row3.removeFromLeft(260));
-        row3.removeFromLeft(24);
+        row3.removeFromLeft(theme::ui::kSpace4);
         latencyCompensationToggle.setBounds(row3.removeFromLeft(260));
         endSection(panel);
     }
@@ -1169,8 +1171,8 @@ int SettingsView::layoutBody(int width) {
         const bool hasDevices = !reloadDevices_.empty();
         const int rows = juce::jlimit(0, kMaxDeviceRows, (int) reloadDevices_.size());
         const int listH = rows * kDeviceRowH;
-        const int panelH = pad + theme::ui::kControlH + (hasDevices ? 6 + listH : 0) + 6
-                           + theme::ui::kControlH + pad;
+        const int panelH = pad + theme::ui::kControlH + (hasDevices ? kRowGap + listH : 0)
+                           + kRowGap + theme::ui::kControlH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1180,13 +1182,13 @@ int SettingsView::layoutBody(int width) {
         // which keeps the page's scroll the one the wheel reaches for.
         reloadDevicesViewport.setVisible(hasDevices);
         if (hasDevices) {
-            inner.removeFromTop(6);
+            inner.removeFromTop(kRowGap);
             reloadDevicesViewport.setBounds(inner.removeFromTop(listH).removeFromLeft(430));
         } else {
             reloadDevicesViewport.setBounds({});
         }
 
-        inner.removeFromTop(6);
+        inner.removeFromTop(kRowGap);
         autoReloadToggle.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(380));
         endSection(panel);
     }

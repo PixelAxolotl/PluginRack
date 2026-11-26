@@ -144,7 +144,7 @@ void RoutingMatrixComponent::rebuild() {
             auto* slider = sendSliders.add(new ValueEditSlider());
             slider->setName(name);
             slider->setSliderStyle(juce::Slider::LinearBar);
-            slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
+            slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 58, 20);
             slider->setRange(-60.0, 12.0, 0.1);
             slider->setTextValueSuffix(" dB");
             slider->setColour(juce::Slider::trackColourId, theme::cyan());

@@ -123,19 +123,29 @@ inline constexpr float kSectionPt = 10.0f; // uppercase section / column caption
 inline constexpr float kBodyPt = 12.0f;    // body and field text
 inline constexpr float kCaptionPt = 11.0f; // secondary line under a control
 
-inline constexpr int kPagePad = 12;     // page inset for page views
-inline constexpr int kHeaderH = 34;     // page title row
-inline constexpr int kHeaderGap = 10;   // title row to first section
-inline constexpr int kSectionH = 16;    // section caption row
-inline constexpr int kSectionGap = 14;  // between sections
-inline constexpr int kRowGap = 6;       // between controls on one row
+// Spacing scale, 4 px base. One decision per relationship instead of a
+// hand-picked number per row: rows inside a group sit kRowGap apart, a
+// related block inside a panel is kSpace3 away, and separate control groups
+// are kSectionGap apart. Page views draw every gap from these, so Settings
+// and Patches share one density.
+inline constexpr int kSpace1 = 4;
+inline constexpr int kSpace2 = 8;
+inline constexpr int kSpace3 = 16;
+inline constexpr int kSpace4 = 24;
+
+inline constexpr int kPagePad = kSpace3;     // page inset for page views
+inline constexpr int kHeaderH = 34;          // page title row
+inline constexpr int kHeaderGap = kSpace3;   // title row to first section
+inline constexpr int kSectionH = 16;         // section caption row
+inline constexpr int kSectionGap = kSpace4;  // between control groups
+inline constexpr int kRowGap = kSpace2;      // between controls on one row
 inline constexpr int kStripW = 148;      // mixer strip, inputs and outputs alike
 inline constexpr int kStripGap = 6;      // gutter between strips
 inline constexpr int kStripInset = 4;    // left edge of the first strip
 inline constexpr int kStripStep = kStripW + kStripGap;
 inline constexpr int kControlH = 24;    // standard field / button height
 inline constexpr int kMeasureW = 150;   // standard action button width
-inline constexpr int kPanelPad = 12;    // inset inside a captioned panel
+inline constexpr int kPanelPad = kSpace3;   // inset inside a captioned panel
 inline constexpr int kLabelW = 104;     // label column shared by settings rows
 
 inline juce::Font titleFont() {
@@ -156,6 +166,21 @@ inline juce::Font bodyBoldFont() {
 inline juce::Font captionFont() {
     return juce::Font(juce::FontOptions(kCaptionPt));
 }
+
+// Numbers are data, not prose. dB, ms, Hz, frames and counts are set in the
+// platform monospace face so a live value ("0.0 dB" -> "-12.5 dB") keeps every
+// digit in place instead of shifting the text around it. Text keeps the sans
+// face; only readouts, value boxes and axis labels use these.
+inline juce::Font numberFont(float heightPx) {
+    return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
+                                        heightPx, juce::Font::plain));
+}
+inline juce::Font numberBoldFont(float heightPx) {
+    return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
+                                        heightPx, juce::Font::bold));
+}
+inline juce::Font numberFont() { return numberFont(kBodyPt); }
+inline juce::Font numberBoldFont() { return numberBoldFont(kBodyPt); }
 
 // Panel fill + hairline, the console's only container treatment.
 inline void drawPanel(juce::Graphics& g, juce::Rectangle<int> bounds,
