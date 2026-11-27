@@ -342,24 +342,26 @@ TEST_CASE("taps and latency rules cover the paths render actually runs",
     CHECK(stripRun != std::string::npos);
     CHECK(stripPre < stripRun);
 
-    // Effects with no chain row still run through the fallback pass, so their
-    // windows must stay fed and their latency must reach the route delays. The
-    // plan records the unchained families; render walks that list and the
-    // fallback keeps the chain loop's pre/process/post tap order.
+    // A built-in runs only from its chain row: an effect with no row never
+    // reaches the render plan, so a removed row cannot leave a hidden
+    // processor (or its latency) in the path.
     CHECK(contains(cpp, "void buildRenderPlan(StripType& strip)"));
-    CHECK(contains(cpp,
-                    "appendUnchained(pluginrack::ChainItemType::Limiter, strip.limiterEffects)"));
+    CHECK_FALSE(contains(cpp, "appendUnchained"));
     const auto fallback = functionBody(cpp, "void runFallbackSteps");
-    CHECK(contains(fallback, "case pluginrack::ChainItemType::Limiter:"));
-    CHECK(contains(fallback, "strip.limiterTap.writeTap(false"));
-    CHECK(contains(fallback, "strip.limiterProcessors[step.index].process"));
-    CHECK(contains(fallback, "strip.limiterTap.writeTap(true"));
+    // The unchained EQ is the one remaining fallback: its own bypass flag
+    // engages it, and without an Eq row it closes the strip.
+    CHECK(contains(fallback, "pluginrack::ChainItemType::Eq"));
+    CHECK(contains(fallback, "strip.eq.process("));
+    CHECK_FALSE(contains(fallback, "strip.effectProcessors"));
+    CHECK_FALSE(contains(fallback, "strip.limiterProcessors"));
+    CHECK_FALSE(contains(fallback, "strip.spectralDenoiserProcessors"));
     CHECK(contains(cpp, "runFallbackSteps(*channel, channel->fallbackSteps"));
     CHECK(contains(cpp, "runFallbackSteps(*strip, strip->fallbackSteps"));
     const auto chainLatency = functionBody(header, "static int chainLatencySamples");
-    CHECK(contains(chainLatency, "pluginrack::limiterLatencySamples(effect, sampleRate)"));
-    CHECK(contains(chainLatency, "pluginrack::kSpectralDenoiserLatencySamples"));
-    CHECK(contains(chainLatency, "!effect.bypassed"));
+    CHECK(contains(chainLatency, "chainItemLatencySamples(strip, item, sampleRate)"));
+    CHECK_FALSE(contains(chainLatency, "limiterEffects"));
+    CHECK_FALSE(contains(chainLatency, "spectralDenoiserEffects"));
+    CHECK(contains(chainLatency, "eqLatencySamples"));
 
     // The EQ delay line runs from an Eq chain row or, without a row, from the
     // fallback pass that closes render's effect loop, so the report bills it
@@ -447,24 +449,45 @@ TEST_CASE("patches latency labels come from the engine's one rule table",
     const auto patches = readSource("app/src/PatchesView.cpp");
     const auto cpp = readSource("app/src/AudioEngine.cpp");
 
-    // The view no longer keeps its own Insert + denoiser count, which missed
-    // limiter look-ahead and the EQ delay line and read the first id match
-    // with its own rules.
+    // The badge reads the cumulative latency at the socket, not a residual:
+    // Input is 0, the row that adds a delay shows the new total, and Output
+    // shows the strip total. The engine stays the only source of the numbers.
     CHECK_FALSE(contains(patches, "PatchesView::channelLatency"));
     CHECK_FALSE(contains(patches, "PatchesView::tapLatency"));
     CHECK_FALSE(contains(patches, "pluginrack::kSpectralDenoiserLatencySamples"));
-    CHECK(contains(patches, "audioEngine.stripLatencySamples(*ch)"));
+    CHECK_FALSE(contains(patches, "audioEngine.stripLatencySamples"));
     CHECK(contains(patches, "audioEngine.stripTapLatencySamples(*ch, socket.tap)"));
+    CHECK(contains(patches, "juce::String(ms, 1) + \" ms\""));
 
-    // The accessor is the same chainLatencySamples table render compensates
-    // with, and the tap accessor the same Item resolution, so the "+X ms"
-    // residual stays in step with what the engine actually delays.
+    // The tap accessor is the same Item resolution render compensates with, so
+    // the cumulative readout stays in step with what the engine actually
+    // delays. The strip accessor still wraps the one chainLatencySamples table.
     const auto stripLatency =
         functionBody(cpp, "int AudioEngine::stripLatencySamples(const Channel& strip)");
     CHECK(contains(stripLatency, "chainLatencySamples(strip,"));
     const auto tapLatency =
         functionBody(cpp, "int AudioEngine::stripTapLatencySamples(const Channel& channel,");
     CHECK(contains(tapLatency, "tapLatencySamples("));
+}
+
+TEST_CASE("a chain row always resolves to an effect", "[underrun][chain]") {
+    const auto cpp = readSource("app/src/AudioEngine.cpp");
+
+    // The row is what runs and bills a built-in; a row with no effect is a
+    // dead card. Load and row insertion both restore the family default.
+    CHECK(contains(cpp, "bool ensureEffectForChainItem"));
+    CHECK(contains(cpp, "bool healDanglingChainRows"));
+    CHECK(contains(cpp, "makeDefaultSpectralDenoiserEffect(item.id)"));
+
+    // Load heals every restored strip kind before commit rebuilds the plans.
+    CHECK(contains(cpp, "healDanglingChainRows(*channel)"));
+    CHECK(contains(cpp, "healDanglingChainRows(*output)"));
+    CHECK(contains(cpp, "healDanglingChainRows(*bus)"));
+
+    const auto ensureChannel = functionBody(cpp, "void AudioEngine::ensureChannelChainItem");
+    CHECK(contains(ensureChannel, "ensureEffectForChainItem(*channel, item)"));
+    const auto ensureOutput = functionBody(cpp, "void AudioEngine::ensureOutputChainItem");
+    CHECK(contains(ensureOutput, "ensureEffectForChainItem(*output, item)"));
 }
 
 TEST_CASE("a built-in panel owns the editor bay until its card goes",
@@ -547,6 +570,11 @@ TEST_CASE("device startup overlaps probes and opens every stream once", "[underr
     CHECK_FALSE(contains(openPass, "clockOpened"));
     const auto strips = functionBody(engine, "void AudioEngine::openStripsDevicesNow");
     CHECK(countOccurrences(strips, "openAllDevicesPass(") == 1);
+    // The clock is the first output in the strip list, not the lowest id.
+    CHECK(contains(openPass, "strip list defines the engine rate"));
+    CHECK_FALSE(contains(openPass, "std::sort(outputsWanted"));
+    // The reload pins that choice for the reclaim tick.
+    CHECK(contains(openPass, "preferredClockOutputId = clockOutputId"));
     CHECK(contains(engine, "currentBufferSize = newBuf"));
     CHECK(contains(engine, "kProbeRenderBlockFrames"));
 }
@@ -1336,11 +1364,43 @@ TEST_CASE("an Auto output buffer settles on the device minimum and keeps it",
     CHECK(contains(open, "manager.setAudioDeviceSetup(liveSetup, true)"));
     CHECK(contains(open, "rememberBufferFor(selectedDeviceName"));
     // A refused size keeps the opened stream rather than failing the strip.
-    CHECK(contains(open, "if (manager.setAudioDeviceSetup(liveSetup, true).isEmpty())"));
+    CHECK(contains(open, "if (setupError.isEmpty())"));
 
     const auto policy = readSource("core/include/pluginrack/OutputBufferPolicy.h");
     CHECK(contains(policy, "if (requestedBufferSize > 0) return requestedBufferSize"));
     CHECK(contains(policy, "smallest == 0 || size < smallest"));
+}
+
+TEST_CASE("device teardown and reopen happen on the message thread",
+          "[devices][threading]") {
+    // A WASAPI device reopens itself from the message thread when the endpoint
+    // format changes. Deleting it from a device worker at the same time is
+    // what crashed the app, so every close and reopen is marshalled.
+    const auto device = readSource("app/src/DeviceStream.cpp");
+    const auto header = readSource("app/src/DeviceStream.h");
+    CHECK(contains(header, "void runOnMessageThreadAndWait"));
+    CHECK(contains(header, "void setMessageThreadJoining"));
+
+    const auto captureClose = functionBody(device, "void InputCapture::close()");
+    CHECK(contains(captureClose, "DeviceThreading::runOnMessageThreadAndWait"));
+    CHECK(contains(captureClose, "manager.closeAudioDevice()"));
+
+    const auto playbackClose = functionBody(device, "void OutputPlayback::close()");
+    CHECK(contains(playbackClose, "DeviceThreading::runOnMessageThreadAndWait"));
+    CHECK(contains(playbackClose, "manager.closeAudioDevice()"));
+
+    const auto open = functionBody(device, "juce::String openWithPreferredType");
+    CHECK(countOccurrences(open, "DeviceThreading::runOnMessageThreadAndWait") == 3);
+    CHECK(contains(open, "setupError = manager.setAudioDeviceSetup(liveSetup, true)"));
+    CHECK(contains(open, "if (setupError.isEmpty())"));
+    CHECK(countOccurrences(device, "DeviceThreading::runOnMessageThreadAndWait(") == 5);
+
+    // Quitting must not block the message thread on a worker that is waiting
+    // for that same thread to run its close.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto stop = functionBody(engine, "void AudioEngine::stopDeviceOpenThread()");
+    CHECK(contains(stop, "DeviceThreading::setMessageThreadJoining(true)"));
+    CHECK(contains(stop, "DeviceThreading::setMessageThreadJoining(false)"));
 }
 
 TEST_CASE("the budget says when capture and playback are different devices",
@@ -1479,6 +1539,11 @@ TEST_CASE("clock loss promotes or falls back instead of ending the session",
     CHECK(contains(reclaim, "publishRenderOutputsLocked()"));
     CHECK(contains(reclaim, "stopInternalClock()"));
     CHECK(contains(reclaim, "isSilentDeviceName(output->outputDeviceName)"));
+    // The preferred clock is pinned by the last reload, so a cosmetic reorder
+    // does not hand it over; first non-silent is only the fallback.
+    CHECK(contains(reclaim, "output->id == preferredClockOutputId"));
+    CHECK(contains(reclaim, "preferredClockOutputId = preferred->id"));
+    CHECK_FALSE(contains(reclaim, "output->id < preferred->id"));
     CHECK(contains(reclaim, "prepareToPlayImpl(reclaimedBuffer, true)"));
     CHECK(contains(reclaim, "reclaimGate_.shouldAttempt"));
     CHECK(contains(reclaim, "getCallbackCount()"));

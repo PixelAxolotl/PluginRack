@@ -319,6 +319,8 @@ TEST_CASE("channel trim adds to the fader gain") {
 TEST_CASE("mixer gate attenuates channel audio below threshold") {
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
+    // The gate runs from its chain row now, not from the effect vector alone.
+    scene.channels.front().chain = {{pluginrack::ChainItemType::Dynamics, 2}};
     addOutput(scene, 1);
     addRoute(scene, 1, 1);
 
@@ -998,12 +1000,13 @@ TEST_CASE("mixer aligns a dry route with a bus route through a latency insert") 
 }
 
 TEST_CASE("mixer compensates limiter look-ahead across tap points") {
-    // The limiter sits unchained so the fallback pass runs it; its default
-    // 1.5 ms look-ahead (72 samples) must show up in the strip latency the
-    // same way the physical delay does.
+    // The limiter is a chain row, so it runs; its default 1.5 ms look-ahead
+    // (72 samples) must show up in the strip latency the same way the physical
+    // delay does.
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     scene.channels[0].limiterEffects = {pluginrack::makeDefaultLimiterEffect(7)};
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Limiter, 7}};
     addOutput(scene, 1);
     addOutput(scene, 2);
     addBus(scene, 4);
@@ -1305,12 +1308,11 @@ TEST_CASE("mixer taps on a stale chain row still see the strip signal") {
     REQUIRE(std::fabs(rendered[0][0]) > 1.0e-3f);
 }
 
-TEST_CASE("mixer compensates an unchained limiter that shares an id with a chain row") {
+TEST_CASE("mixer ignores an unchained limiter that shares an id with a chain row") {
     // Built-in families mint ids independently, so a scene can hold a
-    // Dynamics row with id 1 and an unchained Limiter that is also id 1. The
-    // fallback pass still runs that limiter, so its look-ahead must count:
-    // tracking chain usage by id alone skipped it and left the input-tap send
-    // 72 samples ahead of the direct route.
+    // Dynamics row with id 1 and a Limiter that is also id 1 but has no row.
+    // Rows are the only thing that runs an effect, so the unchained limiter
+    // neither processes nor delays: no look-ahead may pad the tapped send.
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     scene.channels[0].effects = pluginrack::defaultDynamicsEffects(); // ids 1, 2
@@ -1327,19 +1329,17 @@ TEST_CASE("mixer compensates an unchained limiter that shares an id with a chain
 
     pluginrack::MixerEngine engine = prepareEngine(scene);
     const auto rendered = renderImpulse(engine, 2);
-    REQUIRE(firstNonZero(rendered[0]) == 72);
-    REQUIRE(firstNonZero(rendered[1]) == 72);
+    REQUIRE(firstNonZero(rendered[0]) == 0);
+    REQUIRE(firstNonZero(rendered[1]) == 0);
 }
 
-TEST_CASE("mixer compensates an unchained denoiser that shares an id with a chain row") {
-    // Same id collision as above, one family over: the unchained denoiser
-    // still runs through the fallback pass and keeps its 512-sample OLA delay.
+TEST_CASE("mixer ignores an unchained denoiser that shares an id with a chain row") {
+    // Same id collision as above, one family over: without a row the denoiser
+    // does not run, so its 512-sample OLA delay must not be in the path.
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);
     scene.channels[0].effects = pluginrack::defaultDynamicsEffects(); // ids 1, 2
     auto denoiser = pluginrack::makeDefaultSpectralDenoiserEffect(1);
-    // Active on purpose: only an unchained effect that runs counts. A 0 dB
-    // reduction keeps the mask flat so the impulse stays one sample wide.
     denoiser.reductionDb = 0.0f;
     scene.channels[0].spectralDenoiserEffects = {denoiser};
     scene.channels[0].chain = {{pluginrack::ChainItemType::Dynamics, 1}};
@@ -1354,14 +1354,13 @@ TEST_CASE("mixer compensates an unchained denoiser that shares an id with a chai
 
     pluginrack::MixerEngine engine = prepareEngine(scene);
     const auto rendered = renderImpulse(engine, 2, 5, 128);
-    REQUIRE(firstNonZero(rendered[0]) == 640);
-    REQUIRE(firstNonZero(rendered[1]) == 640);
+    REQUIRE(firstNonZero(rendered[0]) == 128);
+    REQUIRE(firstNonZero(rendered[1]) == 128);
 }
 
 TEST_CASE("mixer skips a bypassed denoiser that has no chain row") {
-    // The live engine's fallback pass ignores a bypassed effect outright, so a
-    // bypassed unchained denoiser neither processes nor delays. Counting its
-    // frame offline would compensate 512 samples that live audio never has.
+    // Rows are the only thing that runs an effect, bypassed or not, so an
+    // unchained denoiser neither processes nor delays.
     // A chained bypassed denoiser still runs (see the alignment test above).
     pluginrack::Scene scene = makeScene();
     addChannel(scene, 1);

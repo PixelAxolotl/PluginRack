@@ -99,8 +99,8 @@ public:
     // slice; buildRenderPlan does that once on the message thread so the audio
     // thread only switches on `type` and indexes a vector. The two step lists
     // reproduce the old passes exactly: renderSteps is the chain in order,
-    // fallbackSteps is the unchained-family pass (and the unchained EQ) that
-    // runs after it.
+    // fallbackSteps is the unchained EQ that runs after it when the chain has
+    // no Eq row.
     struct RenderStep {
         pluginrack::ChainItemType type = pluginrack::ChainItemType::Insert;
         // Index into the matching effect vector (and its parallel processor
@@ -822,11 +822,11 @@ public:
     }
     // Delay the strip's chain adds at the engine's current rate, from the same
     // rule table render charges tap compensation with (chainItemLatencySamples:
-    // inserts, chained denoisers, non-bypassed limiters, the EQ delay line,
-    // plus the unchained-fallback effects chainLatencySamples adds). Views that
-    // label latency must ask here instead of counting rows themselves; a
-    // second model goes stale the moment a family joins the table. Bus is an
-    // alias of Output, so these two overloads cover every strip kind.
+    // inserts, chained denoisers, non-bypassed limiters, the EQ delay line).
+    // Views that label latency must ask here instead of counting rows
+    // themselves; a second model goes stale the moment a family joins the
+    // table. Bus is an alias of Output, so these two overloads cover every
+    // strip kind.
     int stripLatencySamples(const Channel& strip) const;
     int stripLatencySamples(const Output& strip) const;
     // Delay between the strip input and one of its taps, using the same Item
@@ -1029,11 +1029,11 @@ private:
     void ensureTapPoint(Channel& channel, const pluginrack::Tap& tap);
     TapPoint* findTapPoint(Channel& channel, const pluginrack::Tap& tap);
     const TapPoint* findTapPoint(const Channel& channel, const pluginrack::Tap& tap) const;
-    // Resolve a strip's chain and its unchained-fallback pass into
-    // renderSteps/fallbackSteps, then refresh cachedChainLatencySamples and
-    // every TapPoint's cached latency. Requires stateLock; called from every
-    // setter that changes the chain, an effect vector, the inserts, the EQ
-    // state or the sample rate (see the report for the full list).
+    // Resolve a strip's chain into renderSteps/fallbackSteps, then refresh
+    // cachedChainLatencySamples and every TapPoint's cached latency. Requires
+    // stateLock; called from every setter that changes the chain, an effect
+    // vector, the inserts, the EQ state or the sample rate (see the report for
+    // the full list).
     void rebuildRenderPlan(Channel& channel, double sampleRate);
     void rebuildRenderPlan(Output& output, double sampleRate);
     // Resolve the side-chain source of one insert from its current settings.
@@ -1057,9 +1057,9 @@ private:
     // line then); the EQ contributes its delay line through eqLatencySamples,
     // gated by the strip's bypass flag, at its Eq chain row or - without one -
     // at the end of render's fallback pass. All at the engine's current rate.
-    // chainLatencySamples then adds the effects that render's fallback pass
-    // runs without a chain row, and tapLatencySamples falls back to that same
-    // total when its item is not in the chain.
+    // An effect with no chain row runs nothing, so it bills nothing;
+    // tapLatencySamples falls back to the chain total when its item is not in
+    // the chain.
     template <typename StripType>
     static int chainItemLatencySamples(const StripType& strip,
                                        const pluginrack::ChainItem& item,
@@ -1095,30 +1095,12 @@ private:
     }
     template <typename StripType>
     static int chainLatencySamples(const StripType& strip, double sampleRate) {
+        // The chain is the only thing that runs a built-in, so it is also the
+        // only thing that bills one: an effect with no row is silent and its
+        // latency is not in the path.
         int total = 0;
         for (const auto& item : strip.chain)
             total += chainItemLatencySamples(strip, item, sampleRate);
-        // Effects with no chain row still run through render()'s fallback pass
-        // (runFallbackSteps), so a route delay that ignored them would drift
-        // against the dry path. Only an effect that actually runs counts, and
-        // coverage is per family: ids are unique inside a family but a default
-        // Dynamics and a default Limiter both use id 1, so one id-keyed set
-        // would let a row of one family cover an unchained effect of another.
-        const auto covered = [&strip](pluginrack::ChainItemType type, std::uint32_t id) {
-            return std::any_of(strip.chain.begin(), strip.chain.end(),
-                               [type, id](const pluginrack::ChainItem& item) {
-                                   return item.type == type && item.id == id;
-                               });
-        };
-        for (const auto& effect : strip.limiterEffects) {
-            if (!effect.bypassed && !covered(pluginrack::ChainItemType::Limiter, effect.id))
-                total += pluginrack::limiterLatencySamples(effect, sampleRate);
-        }
-        for (const auto& effect : strip.spectralDenoiserEffects) {
-            if (!effect.bypassed
-                && !covered(pluginrack::ChainItemType::SpectralDenoiser, effect.id))
-                total += pluginrack::kSpectralDenoiserLatencySamples;
-        }
         // The EQ is one engine, not an effect vector: a row runs it in place,
         // and without a row render's fallback pass runs it last. Either path
         // bills the same expression, so the total never depends on which one
@@ -1275,6 +1257,10 @@ private:
     // use it to read one window per block instead of consuming it per channel.
     std::uint64_t renderEpoch_ = 0;
     std::uint32_t clockOutputId = 0;
+    // Output that owned the clock at the last device open. The reload pins it
+    // to the first output in the strip list; the reclaim tick returns the clock
+    // to this id, so a cosmetic reorder alone never moves the clock.
+    std::uint32_t preferredClockOutputId = 0;
     std::unique_ptr<InternalClock> internalClock_;
     // Read by the UI to describe the fallback without touching the timer
     // object, which is created and stopped on opener/message threads.

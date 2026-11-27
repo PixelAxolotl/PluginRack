@@ -255,16 +255,13 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
     g.strokePath(chevron, juce::PathStrokeType(1.8f));
 
     const auto& channel = audioEngine.getChannels();
-    int totalLatency = 0;
-    for (const auto& ch : channel) {
-        if (ch->id == node.id) {
-            totalLatency = audioEngine.stripLatencySamples(*ch);
-            break;
-        }
-    }
     const double engineRate = audioEngine.getSampleRate();
     const double sampleRate = engineRate > 0.0 ? engineRate : 48000.0;
 
+    // The badge is the cumulative latency at this socket, not the row's own
+    // contribution: Input reads 0, the row that adds a delay shows the new
+    // total in the strip colour, and Output reads the strip total.
+    int previousLatency = 0;
     g.setFont(theme::ui::captionFont());
     for (std::size_t i = 0; i < node.sockets.size(); ++i) {
         const auto& socket = node.sockets[i];
@@ -276,22 +273,23 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
                                      .withY(rowY).withHeight(kPointH),
                    juce::Justification::centredLeft, true);
 
-        int used = 0;
+        int latency = 0;
         for (const auto& ch : channel) {
             if (ch->id == node.id) {
-                used = audioEngine.stripTapLatencySamples(*ch, socket.tap);
+                latency = audioEngine.stripTapLatencySamples(*ch, socket.tap);
                 break;
             }
         }
-        const int remaining = totalLatency - used;
-        if (remaining > 0) {
-            const double ms = 1000.0 * static_cast<double>(remaining) / sampleRate;
-            g.setColour(theme::dim());
-            g.setFont(theme::ui::numberFont(11.0f));
-            g.drawText("+" + juce::String(ms, 1) + " ms",
-                       node.box.getRight() - 78, rowY,
-                       64, kPointH, juce::Justification::centredRight, false);
-        }
+        const bool addsLatency = latency > previousLatency;
+        previousLatency = latency;
+        const double ms = 1000.0 * static_cast<double>(latency) / sampleRate;
+        const juce::String text =
+            latency == 0 ? juce::String("0 ms") : juce::String(ms, 1) + " ms";
+        g.setColour(addsLatency ? accent : theme::dim());
+        g.setFont(theme::ui::numberFont(11.0f));
+        g.drawText(text,
+                   node.box.getRight() - 78, rowY,
+                   64, kPointH, juce::Justification::centredRight, false);
 
         g.setColour(accent);
         g.drawEllipse(socket.pos.x - 5.0f, socket.pos.y - 5.0f, 10.0f, 10.0f, 1.5f);

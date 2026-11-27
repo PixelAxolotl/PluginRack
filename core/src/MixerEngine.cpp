@@ -251,13 +251,6 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
         // buildStrip) and bills it there. Both paths bill the same expression,
         // matching the live engine's chainLatencySamples.
         int total = 0;
-        // Usage is tracked per family and per position, mirroring buildStrip():
-        // the built-in families share small ids (a default Dynamics and a
-        // default Limiter are both id 1), so one id-keyed set would read a
-        // chain row of one family as "covering" an unchained effect of another
-        // family whose latency the fallback pass still applies.
-        std::vector<char> usedLimiters(strip.limiterEffects.size(), 0);
-        std::vector<char> usedSpectralDenoisers(strip.spectralDenoiserEffects.size(), 0);
         bool usedEq = false;
         for (std::size_t row = 0; row < strip.chain.size(); ++row) {
             const ChainItem& item = strip.chain[row];
@@ -266,12 +259,10 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 added = chain != nullptr ? chain->latencySamples(item.id) : 0;
             } else if (item.type == ChainItemType::Limiter) {
                 if (const auto index = findByEffectId(strip.limiterEffects, item.id)) {
-                    usedLimiters[*index] = 1;
                     added = limiterLatencySamples(strip.limiterEffects[*index], sampleRate);
                 }
             } else if (item.type == ChainItemType::SpectralDenoiser) {
-                if (const auto index = findByEffectId(strip.spectralDenoiserEffects, item.id)) {
-                    usedSpectralDenoisers[*index] = 1;
+                if (findByEffectId(strip.spectralDenoiserEffects, item.id)) {
                     added = kSpectralDenoiserLatencySamples;
                 }
             } else if (item.type == ChainItemType::Eq) {
@@ -287,22 +278,9 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 itemLatency[item.id] = total;
             }
         }
-        // Rows missing from the chain still run through the fallback pass, in
-        // step order: unchained limiters before unchained denoiser frames.
-        // The limiter helper already reports 0 for a bypassed effect. The
-        // denoiser has no such short circuit, but the live engine skips a
-        // bypassed effect entirely in its fallback pass, so the offline model
-        // must not count a delay that live audio never runs.
-        for (std::size_t i = 0; i < usedLimiters.size(); ++i) {
-            if (usedLimiters[i] == 0) {
-                total += limiterLatencySamples(strip.limiterEffects[i], sampleRate);
-            }
-        }
-        for (std::size_t i = 0; i < usedSpectralDenoisers.size(); ++i) {
-            if (usedSpectralDenoisers[i] == 0 && !strip.spectralDenoiserEffects[i].bypassed) {
-                total += kSpectralDenoiserLatencySamples;
-            }
-        }
+        // An effect with no chain row runs nothing, so it bills nothing. That
+        // matches live render, where rows are the only thing that engages a
+        // built-in.
         // The EQ's fallback step is appended last by buildStrip(), so it bills
         // last here. The sum is order-independent; the position documents the
         // run order for the next reader.
@@ -475,18 +453,12 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     }
 
     // Resolve the running order once. The scene's chain names effects by id;
-    // anything the chain leaves out still runs, appended in the historical
-    // Dynamics -> Multiband -> DeEsser -> Limiter order so old scenes render
-    // exactly as before. Inserts render through their own InsertChain and are
-    // skipped here. The EQ keeps a row like live render, because that row runs
-    // it in place; without a row it runs as the last appended step, the same
-    // place the live engine's fallback pass runs it.
-    std::vector<char> usedDynamics(source.effects.size(), 0);
-    std::vector<char> usedMultiband(source.multibandEffects.size(), 0);
-    std::vector<char> usedDeEssers(source.deEsserEffects.size(), 0);
-    std::vector<char> usedLimiters(source.limiterEffects.size(), 0);
-    std::vector<char> usedFeedbackSuppressors(source.feedbackSuppressorEffects.size(), 0);
-    std::vector<char> usedSpectralDenoisers(source.spectralDenoiserEffects.size(), 0);
+    // an effect the chain leaves out does not run at all, matching live render,
+    // where a row is the only thing that engages a built-in. Inserts render
+    // through their own InsertChain and are skipped here. The EQ keeps a row
+    // like live render, because that row runs it in place; without a row it
+    // runs as the last appended step, the same place the live engine's
+    // fallback pass runs it.
     bool usedEq = false;
     for (std::size_t row = 0; row < source.chain.size(); ++row) {
         const ChainItem& item = source.chain[row];
@@ -501,7 +473,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
         switch (item.type) {
         case ChainItemType::Dynamics:
             if (const auto index = findByEffectId(source.effects, item.id)) {
-                usedDynamics[*index] = 1;
                 addStep(*index);
             } else {
                 // Stale row the validator tolerated: keep the slot so a tap
@@ -511,7 +482,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         case ChainItemType::Multiband:
             if (const auto index = findByEffectId(source.multibandEffects, item.id)) {
-                usedMultiband[*index] = 1;
                 addStep(*index);
             } else {
                 addStep(static_cast<std::size_t>(-1));
@@ -519,7 +489,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         case ChainItemType::DeEsser:
             if (const auto index = findByEffectId(source.deEsserEffects, item.id)) {
-                usedDeEssers[*index] = 1;
                 addStep(*index);
             } else {
                 addStep(static_cast<std::size_t>(-1));
@@ -527,7 +496,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         case ChainItemType::Limiter:
             if (const auto index = findByEffectId(source.limiterEffects, item.id)) {
-                usedLimiters[*index] = 1;
                 addStep(*index);
             } else {
                 addStep(static_cast<std::size_t>(-1));
@@ -535,7 +503,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         case ChainItemType::FeedbackSuppressor:
             if (const auto index = findByEffectId(source.feedbackSuppressorEffects, item.id)) {
-                usedFeedbackSuppressors[*index] = 1;
                 addStep(*index);
             } else {
                 addStep(static_cast<std::size_t>(-1));
@@ -543,7 +510,6 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         case ChainItemType::SpectralDenoiser:
             if (const auto index = findByEffectId(source.spectralDenoiserEffects, item.id)) {
-                usedSpectralDenoisers[*index] = 1;
                 addStep(*index);
             } else {
                 addStep(static_cast<std::size_t>(-1));
@@ -565,46 +531,9 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
             break;
         }
     }
-    for (std::size_t i = 0; i < usedDynamics.size(); ++i) {
-        if (usedDynamics[i] == 0) {
-            strip.steps.push_back({ChainItemType::Dynamics, i, source.effects[i].id});
-        }
-    }
-    for (std::size_t i = 0; i < usedMultiband.size(); ++i) {
-        if (usedMultiband[i] == 0) {
-            strip.steps.push_back({ChainItemType::Multiband, i, source.multibandEffects[i].id});
-        }
-    }
-    for (std::size_t i = 0; i < usedDeEssers.size(); ++i) {
-        if (usedDeEssers[i] == 0) {
-            strip.steps.push_back({ChainItemType::DeEsser, i, source.deEsserEffects[i].id});
-        }
-    }
-    for (std::size_t i = 0; i < usedLimiters.size(); ++i) {
-        // Same live-engine rule as the denoiser below: a bypassed effect with
-        // no chain row is skipped, so its item tap stays silent offline too.
-        if (usedLimiters[i] == 0 && !source.limiterEffects[i].bypassed) {
-            strip.steps.push_back({ChainItemType::Limiter, i, source.limiterEffects[i].id});
-        }
-    }
-    for (std::size_t i = 0; i < usedFeedbackSuppressors.size(); ++i) {
-        if (usedFeedbackSuppressors[i] == 0) {
-            strip.steps.push_back({ChainItemType::FeedbackSuppressor, i,
-                                   source.feedbackSuppressorEffects[i].id});
-        }
-    }
-    for (std::size_t i = 0; i < usedSpectralDenoisers.size(); ++i) {
-        // A bypassed denoiser with no chain row is skipped outright, matching
-        // the live engine's processNewMissing(): it neither processes nor
-        // delays, so the offline strip must not invent its frame delay either.
-        if (usedSpectralDenoisers[i] == 0 && !source.spectralDenoiserEffects[i].bypassed) {
-            strip.steps.push_back({ChainItemType::SpectralDenoiser, i,
-                                   source.spectralDenoiserEffects[i].id});
-        }
-    }
     // The EQ has no processor vector to scan, so its unchained fallback is a
     // single step closing the appended order, matching the live engine's
-    // processNewMissing() pass. The sentinel index and the cleared tap flag
+    // fallback pass. The sentinel index and the cleared tap flag
     // keep it from owning an item tap: with no row there is no id to name it.
     // The step is appended even while the strip is bypassed: the EQ can be
     // enabled after prepare (setChannelEqBypassed), and the live engine picks

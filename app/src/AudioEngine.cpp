@@ -124,7 +124,7 @@ void setWasapiProbeCapEnvironment(bool enabled, int channels) {
    #endif
 }
 
-// Resolve a strip's chain and its unchained-effect pass into RenderStep lists.
+// Resolve a strip's chain into RenderStep lists.
 // This is the only place that searches the chain for a row's effect or insert;
 // it runs on the message thread under stateLock whenever one of those vectors
 // can change, so render() only switches on a step's type and indexes a vector.
@@ -133,9 +133,12 @@ void setWasapiProbeCapEnvironment(bool enabled, int channels) {
 //    Insert row resolves its slot by id inside `inserts`;
 //  - a row's Item tap is owned by the first row carrying that id, even when a
 //    later row of another family shares it (Scene.h firstChainItemIndex);
-//  - the fallback pass runs the unchained families in the order the old
-//    processNewMissing calls did, then the EQ when the chain has no Eq row, in
-//    the same last position the offline mixer appends it.
+//  - an effect with no chain row does not run at all. The chain is the only
+//    thing that engages a built-in, so a removed row cannot leave a hidden
+//    processor (and its latency) in the path;
+//  - the EQ is the exception: its own bypass flag is its engage switch, and
+//    without an Eq row the fallback pass runs it last, the same position the
+//    offline mixer appends it.
 template <typename StripType>
 void buildRenderPlan(StripType& strip) {
     strip.renderSteps.clear();
@@ -191,35 +194,8 @@ void buildRenderPlan(StripType& strip) {
         strip.renderSteps.push_back(step);
     }
 
-    // Coverage is per family: ids are unique inside a family but a default
-    // Dynamics and a default Limiter both use id 1, so one id-keyed set would
-    // let a row of one family cover an unchained effect of another. This is the
-    // same ChainItem (type, id) comparison processNewMissing used.
-    const auto chained = [&strip](pluginrack::ChainItemType type, std::uint32_t id) {
-        return std::any_of(strip.chain.begin(), strip.chain.end(),
-                           [type, id](const pluginrack::ChainItem& item) {
-                               return item.type == type && item.id == id;
-                           });
-    };
-    const auto appendUnchained = [&strip, &chained](pluginrack::ChainItemType type,
-                                                     const auto& effects) {
-        for (std::size_t i = 0; i < effects.size(); ++i) {
-            if (chained(type, effects[i].id)) continue;
-            AudioEngine::RenderStep step;
-            step.type = type;
-            step.index = i;
-            step.itemId = effects[i].id;
-            strip.fallbackSteps.push_back(step);
-        }
-    };
-    appendUnchained(pluginrack::ChainItemType::Dynamics, strip.effects);
-    appendUnchained(pluginrack::ChainItemType::Multiband, strip.multibandEffects);
-    appendUnchained(pluginrack::ChainItemType::DeEsser, strip.deEsserEffects);
-    appendUnchained(pluginrack::ChainItemType::Limiter, strip.limiterEffects);
-    appendUnchained(pluginrack::ChainItemType::FeedbackSuppressor,
-                    strip.feedbackSuppressorEffects);
-    appendUnchained(pluginrack::ChainItemType::SpectralDenoiser,
-                    strip.spectralDenoiserEffects);
+    // The EQ has no effect vector of its own: it is either a row, or - with no
+    // row - the single fallback step that closes the strip.
     if (!strip.hasEqInChain) {
         AudioEngine::RenderStep step;
         step.type = pluginrack::ChainItemType::Eq;
@@ -227,14 +203,11 @@ void buildRenderPlan(StripType& strip) {
     }
 }
 
-// The unchained-effect pass, driven by the resolved fallbackSteps. Covers
-// scenes saved before per-strip ordering existed; removal sets the effect's
-// bypassed flag, so a removed effect stays silent here until picked again,
-// which unbypasses it. Same order, same bypass rule and same taps as the old
-// processNewMissing loop, with the tap written before and after the processor
-// so an editor on such a scene still shows the signal. The EQ entry keeps the
-// row path's tap order and stays gated by the bypass flag, so its taps and its
-// process() remain coupled exactly as before.
+// The unchained-EQ pass, driven by the resolved fallbackSteps. Built-in
+// effects only run from their chain row, but the EQ's own bypass flag is its
+// engage switch, so a strip with no Eq row still runs it here, last, in the
+// same position the offline mixer appends it. The tap order matches the row
+// path, and the bypass check keeps taps and process() coupled.
 template <typename StripType>
 void runFallbackSteps(StripType& strip, const std::vector<AudioEngine::RenderStep>& steps,
                       float* left, float* right, int frames) noexcept {
@@ -247,61 +220,9 @@ void runFallbackSteps(StripType& strip, const std::vector<AudioEngine::RenderSte
                 strip.eqTap.writeTap(true, left, right, frames);
             }
             break;
-        case pluginrack::ChainItemType::Dynamics:
-            if (step.index >= strip.effects.size()
-                || step.index >= strip.effectProcessors.size()
-                || strip.effects[step.index].bypassed)
-                break;
-            strip.dynamicsTap.writeTap(false, left, right, frames);
-            strip.effectProcessors[step.index].process(left, right, frames);
-            strip.dynamicsTap.writeTap(true, left, right, frames);
-            break;
-        case pluginrack::ChainItemType::Multiband:
-            if (step.index >= strip.multibandEffects.size()
-                || step.index >= strip.multibandProcessors.size()
-                || strip.multibandEffects[step.index].bypassed)
-                break;
-            strip.multibandTap.writeTap(false, left, right, frames);
-            strip.multibandProcessors[step.index].process(left, right, frames);
-            strip.multibandTap.writeTap(true, left, right, frames);
-            break;
-        case pluginrack::ChainItemType::DeEsser:
-            if (step.index >= strip.deEsserEffects.size()
-                || step.index >= strip.deEsserProcessors.size()
-                || strip.deEsserEffects[step.index].bypassed)
-                break;
-            strip.deEsserTap.writeTap(false, left, right, frames);
-            strip.deEsserProcessors[step.index].process(left, right, frames);
-            strip.deEsserTap.writeTap(true, left, right, frames);
-            break;
-        case pluginrack::ChainItemType::Limiter:
-            if (step.index >= strip.limiterEffects.size()
-                || step.index >= strip.limiterProcessors.size()
-                || strip.limiterEffects[step.index].bypassed)
-                break;
-            strip.limiterTap.writeTap(false, left, right, frames);
-            strip.limiterProcessors[step.index].process(left, right, frames);
-            strip.limiterTap.writeTap(true, left, right, frames);
-            break;
-        case pluginrack::ChainItemType::FeedbackSuppressor:
-            if (step.index >= strip.feedbackSuppressorEffects.size()
-                || step.index >= strip.feedbackSuppressorProcessors.size()
-                || strip.feedbackSuppressorEffects[step.index].bypassed)
-                break;
-            strip.feedbackTap.writeTap(false, left, right, frames);
-            strip.feedbackSuppressorProcessors[step.index].process(left, right, frames);
-            strip.feedbackTap.writeTap(true, left, right, frames);
-            break;
-        case pluginrack::ChainItemType::SpectralDenoiser:
-            // The denoiser has no analyzer tap, matching the chain loop.
-            if (step.index >= strip.spectralDenoiserEffects.size()
-                || step.index >= strip.spectralDenoiserProcessors.size()
-                || strip.spectralDenoiserEffects[step.index].bypassed)
-                break;
-            strip.spectralDenoiserProcessors[step.index].process(left, right, frames);
-            break;
-        case pluginrack::ChainItemType::Insert:
-            // Insert rows are only ever chained, so a plan never puts one here.
+        default:
+            // Built-in effects only run from their chain row; a plan never
+            // puts one here.
             break;
         }
     }
@@ -350,6 +271,86 @@ void prepareStripProcessors(StripType& strip, double sampleRate) {
     prepareProcessorFamily(strip.limiterProcessors, strip.limiterEffects, sampleRate);
     prepareProcessorFamily(strip.feedbackSuppressorProcessors, strip.feedbackSuppressorEffects, sampleRate);
     prepareProcessorFamily(strip.spectralDenoiserProcessors, strip.spectralDenoiserEffects, sampleRate);
+}
+
+// A chain row is the only thing that runs a built-in, but the row and the
+// effect it names live in separate lists. A scene that saved the row without
+// the effect (or a caller that added the row alone) leaves a card that runs
+// nothing, bills no latency and re-saves itself broken. Put the family's
+// default under the row's id so a row always resolves to an effect.
+template <typename StripType>
+bool ensureEffectForChainItem(StripType& strip, const pluginrack::ChainItem& item) {
+    switch (item.type) {
+    case pluginrack::ChainItemType::Dynamics: {
+        const bool present = std::any_of(
+            strip.effects.begin(), strip.effects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        // Which half of the Comp/Gate pair the row meant is not in the row;
+        // the default compressor is the safer guess for a row that has no
+        // effect left to describe it.
+        pluginrack::DynamicsEffect effect;
+        effect.id = item.id;
+        strip.effects.push_back(effect);
+        return true;
+    }
+    case pluginrack::ChainItemType::Multiband: {
+        const bool present = std::any_of(
+            strip.multibandEffects.begin(), strip.multibandEffects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        strip.multibandEffects.push_back(pluginrack::makeDefaultMultibandEffect(item.id));
+        return true;
+    }
+    case pluginrack::ChainItemType::DeEsser: {
+        const bool present = std::any_of(
+            strip.deEsserEffects.begin(), strip.deEsserEffects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        strip.deEsserEffects.push_back(pluginrack::makeDefaultDeEsserEffect(item.id));
+        return true;
+    }
+    case pluginrack::ChainItemType::Limiter: {
+        const bool present = std::any_of(
+            strip.limiterEffects.begin(), strip.limiterEffects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        strip.limiterEffects.push_back(pluginrack::makeDefaultLimiterEffect(item.id));
+        return true;
+    }
+    case pluginrack::ChainItemType::FeedbackSuppressor: {
+        const bool present = std::any_of(
+            strip.feedbackSuppressorEffects.begin(),
+            strip.feedbackSuppressorEffects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        strip.feedbackSuppressorEffects.push_back(
+            pluginrack::makeDefaultFeedbackSuppressorEffect(item.id));
+        return true;
+    }
+    case pluginrack::ChainItemType::SpectralDenoiser: {
+        const bool present = std::any_of(
+            strip.spectralDenoiserEffects.begin(),
+            strip.spectralDenoiserEffects.end(),
+            [&item](const auto& effect) { return effect.id == item.id; });
+        if (present) return false;
+        strip.spectralDenoiserEffects.push_back(
+            pluginrack::makeDefaultSpectralDenoiserEffect(item.id));
+        return true;
+    }
+    case pluginrack::ChainItemType::Eq:
+    case pluginrack::ChainItemType::Insert:
+    default:
+        return false;
+    }
+}
+
+template <typename StripType>
+bool healDanglingChainRows(StripType& strip) {
+    bool changed = false;
+    for (const auto& item : strip.chain)
+        changed |= ensureEffectForChainItem(strip, item);
+    return changed;
 }
 
 // Picks the class a menu row stood for. Falls back to the bundle's first class
@@ -2005,8 +2006,9 @@ void AudioEngine::removeChannelChainItem(std::uint32_t channelId, pluginrack::Ch
     if (channel == nullptr) return;
     channel->chain.erase(std::remove(channel->chain.begin(), channel->chain.end(), item),
                          channel->chain.end());
-    // A removed effect must stay silent through the fallback pass until the
-    // user picks it again (which unbypasses it).
+    // The row is gone, so the effect must not run: built-ins are engaged by
+    // their chain row alone. Bypass it as well, so re-adding the row starts
+    // from the same silent state the old fallback pass relied on.
     if (item.type == pluginrack::ChainItemType::Eq) {
         channel->eqBypassed = true;
     } else if (item.type == pluginrack::ChainItemType::Dynamics) {
@@ -2075,6 +2077,10 @@ void AudioEngine::ensureChannelChainItem(std::uint32_t channelId, pluginrack::Ch
     if (std::none_of(channel->chain.begin(), channel->chain.end(),
                      [&item](const pluginrack::ChainItem& entry) { return entry == item; })) {
         channel->chain.push_back(item);
+        // A row must never name an effect that is not there; callers usually
+        // create it first, this covers the ones that do not.
+        if (ensureEffectForChainItem(*channel, item))
+            prepareStripProcessors(*channel, currentSampleRate);
         bumpStructureRevision();
     }
     rebuildRenderPlan(*channel, currentSampleRate);
@@ -2087,6 +2093,8 @@ void AudioEngine::ensureOutputChainItem(std::uint32_t outputId, pluginrack::Chai
     if (std::none_of(output->chain.begin(), output->chain.end(),
                      [&item](const pluginrack::ChainItem& entry) { return entry == item; })) {
         output->chain.push_back(item);
+        if (ensureEffectForChainItem(*output, item))
+            prepareStripProcessors(*output, currentSampleRate);
         bumpStructureRevision();
     }
     rebuildRenderPlan(*output, currentSampleRate);
@@ -2399,8 +2407,8 @@ int AudioEngine::tapLatencySamples(const Channel& channel, const pluginrack::Tap
             return total;
         }
     }
-    // Output, or an item that left the chain: the send falls back to the end,
-    // where the unchained-fallback effects have run too.
+    // Output, or an item that left the chain: the send falls back to the end
+    // of the chain.
     return chainLatencySamples(channel, sampleRate);
 }
 
@@ -3874,10 +3882,17 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->feedbackSuppressorProcessors.push_back(std::move(pr)); }
         for (const auto& e : channel->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); channel->spectralDenoiserProcessors.push_back(std::move(pr)); }
         // An empty saved chain is a real empty state (no effects loaded).
-        // Scenes without per-strip ordering predate this field; their effects
-        // still run through the plan's fallback pass, so a missing chain
-        // degrades to the same audible behaviour without synthesising rows.
+        // Scenes without per-strip ordering predate this field; their rows are
+        // the only thing that can run an effect now, so an unchained effect
+        // stays dormant - its settings survive, re-adding the row brings it
+        // back - instead of being synthesised into the chain behind the UI.
         channel->chain = savedChannel.chain;
+        // A row whose effect is missing would be a card that runs nothing and
+        // bills no latency (the lastscene files show a denoiser row with an
+        // empty denoiser list); make the row resolve before the processors
+        // below are built for these effects.
+        if (healDanglingChainRows(*channel))
+            prepareStripProcessors(*channel, currentSampleRate);
         channel->effectProcessors.clear();
         channel->effectProcessors.reserve(channel->effects.size());
         for (const auto& effect : channel->effects) {
@@ -3974,6 +3989,8 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : output->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->feedbackSuppressorProcessors.push_back(std::move(pr)); }
         for (const auto& e : output->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); output->spectralDenoiserProcessors.push_back(std::move(pr)); }
         output->chain = savedOutput.chain;
+        if (healDanglingChainRows(*output))
+            prepareStripProcessors(*output, currentSampleRate);
         output->effectProcessors.clear();
         output->effectProcessors.reserve(output->effects.size());
         for (const auto& effect : output->effects) {
@@ -4079,6 +4096,8 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         for (const auto& e : bus->feedbackSuppressorEffects) { pluginrack::FeedbackSuppressorProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); bus->feedbackSuppressorProcessors.push_back(std::move(pr)); }
         for (const auto& e : bus->spectralDenoiserEffects) { pluginrack::SpectralDenoiserProcessor pr; pr.prepare(currentSampleRate); pr.setEffect(e); bus->spectralDenoiserProcessors.push_back(std::move(pr)); }
         bus->chain = savedBus.chain;
+        if (healDanglingChainRows(*bus))
+            prepareStripProcessors(*bus, currentSampleRate);
         bus->effectProcessors.clear();
         bus->effectProcessors.reserve(bus->effects.size());
         for (const auto& effect : bus->effects) {
@@ -5353,15 +5372,21 @@ bool AudioEngine::maybeReclaimClock() {
         const juce::ScopedLock lock(stateLock);
         if (outputs.empty()) return false;
 
-        // Mirror the opener's clock choice: the first output by id that has a
-        // real device assigned. An earlier strip set to "None - silent" does
-        // not hold the clock role, so it must not block the wait either.
+        // The output pinned by the last reload owns the clock. The first
+        // non-silent output is only the fallback when that strip was removed
+        // or set to "None - silent", and it becomes the new pin then. A
+        // reorder on its own therefore never hands the clock over.
         Output* preferred = nullptr;
         for (auto& output : outputs) {
             if (isSilentDeviceName(output->outputDeviceName)) continue;
-            if (preferred == nullptr || output->id < preferred->id) preferred = output.get();
+            if (preferred == nullptr) preferred = output.get();
+            if (output->id == preferredClockOutputId) {
+                preferred = output.get();
+                break;
+            }
         }
         if (preferred == nullptr) return false;
+        preferredClockOutputId = preferred->id;
         preferredId = preferred->id;
         preferredName = preferred->outputDeviceName;
         preferredLabel = preferred->name;
@@ -5785,15 +5810,15 @@ AudioEngine::InsertSlot* AudioEngine::findOutputInsert(std::uint32_t outputId, s
 
 namespace {
 // Built-in effects report their algorithmic delay here. Bypass preserves the
-// delay, so every denoiser named by the chain counts. An effect removed from
-// the chain is marked bypassed and no longer runs, so it must not count.
+// delay, so every denoiser named by the chain counts. An effect with no chain
+// row does not run at all, so it must not count.
 template <typename Strip>
 int spectralDenoiserLatencySamples(const Strip& strip) {
     int samples = 0;
     for (const auto& effect : strip.spectralDenoiserEffects) {
         const pluginrack::ChainItem item{pluginrack::ChainItemType::SpectralDenoiser, effect.id};
         const bool inChain = std::find(strip.chain.begin(), strip.chain.end(), item) != strip.chain.end();
-        if (inChain || !effect.bypassed) samples += pluginrack::kSpectralDenoiserLatencySamples;
+        if (inChain) samples += pluginrack::kSpectralDenoiserLatencySamples;
     }
     return samples;
 }
@@ -5803,8 +5828,14 @@ int spectralDenoiserLatencySamples(const Strip& strip) {
 template <typename Strip>
 int stripLimiterLatencySamples(const Strip& strip, double sampleRate) {
     int samples = 0;
-    for (const auto& effect : strip.limiterEffects) {
-        if (!effect.bypassed) samples += pluginrack::limiterLatencySamples(effect, sampleRate);
+    for (const auto& item : strip.chain) {
+        if (item.type != pluginrack::ChainItemType::Limiter) continue;
+        for (const auto& effect : strip.limiterEffects) {
+            if (effect.id == item.id) {
+                samples += pluginrack::limiterLatencySamples(effect, sampleRate);
+                break;
+            }
+        }
     }
     return samples;
 }
@@ -6180,11 +6211,19 @@ void AudioEngine::openStripsDevicesNow(const std::function<bool()>& shouldExit, 
 
 void AudioEngine::stopDeviceOpenThread() {
     if (deviceOpenThread_ != nullptr) {
+        // Device workers marshal their teardown onto this thread. While this
+        // thread is blocked joining them it cannot dispatch that work, so they
+        // must close in place: waiting on a queue we are not pumping would
+        // deadlock the shutdown.
+        const bool joiningFromMessageThread =
+            juce::MessageManager::existsAndIsCurrentThread();
+        if (joiningFromMessageThread) DeviceThreading::setMessageThreadJoining(true);
         deviceOpenThread_->signalThreadShouldExit();
         // Wait for an in-flight driver probe: the alternative is freeing the
         // strips this thread is still reading.
         deviceOpenThread_->stopThread(-1);
         deviceOpenThread_.reset();
+        if (joiningFromMessageThread) DeviceThreading::setMessageThreadJoining(false);
     }
     openingDevices_.store(false);
 }
@@ -6590,8 +6629,6 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
                 outputsWanted.push_back({output->id, output->outputDeviceName, output->name});
             }
         }
-        std::sort(outputsWanted.begin(), outputsWanted.end(),
-                  [](const Request& a, const Request& b) { return a.id < b.id; });
         std::set<juce::String> seenInputs;
         for (const auto& channel : channels) {
             if (isSilentDeviceName(channel->inputDeviceName)) {
@@ -6603,9 +6640,14 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
             }
         }
         openRate = currentSampleRate;
-        // Claim the clock role before the parallel open: the first output by
-        // id defines the engine rate, and no other stream may take over.
-        if (!outputsWanted.empty()) clockOutputId = outputsWanted.front().id;
+        // Claim the clock role before the parallel open: the first output in
+        // the strip list defines the engine rate, and no other stream may take
+        // over. Reordering the strips and reloading moves the clock.
+        if (!outputsWanted.empty()) {
+            clockOutputId = outputsWanted.front().id;
+            // Pin the choice for the reclaim tick: only a reload may move it.
+            preferredClockOutputId = clockOutputId;
+        }
     }
 
     deviceOpenTotal_.store((int) (outputsWanted.size() + inputsWanted.size()));
