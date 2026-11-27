@@ -23,6 +23,23 @@ juce::StringArray outputs();
 juce::StringArray asioDevices();
 }
 
+// Closing an AudioDeviceManager deletes the underlying WASAPI device. That
+// device is also an AsyncUpdater: the driver's own thread can ask the message
+// thread to reopen it at any moment, and doing both at once frees memory the
+// message thread is still inside. Streams therefore tear down on the message
+// thread even when a device worker started the close.
+namespace DeviceThreading {
+// Runs fn on the message thread and waits for it. On the message thread, with
+// no message loop running, or while that thread is joining a device worker
+// (see setMessageThreadJoining), fn runs in place instead.
+void runOnMessageThreadAndWait(const std::function<void()>& fn);
+
+// Set by the message thread immediately before it blocks waiting for a device
+// worker to exit. Those workers then close in place rather than queue work
+// onto a thread that is not pumping messages, which would deadlock.
+void setMessageThreadJoining(bool joining);
+}
+
 class InputCapture : public juce::AudioIODeviceCallback {
 public:
     InputCapture();

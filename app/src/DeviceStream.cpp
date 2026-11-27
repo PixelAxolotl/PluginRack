@@ -233,7 +233,13 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
             liveSetup.bufferSize = wanted;
             // A device may advertise a size it then refuses; keeping the opened
             // stream is better than failing the whole strip over a few ms.
-            if (manager.setAudioDeviceSetup(liveSetup, true).isEmpty()) {
+            // Reopening replaces the WASAPI device, so it belongs on the
+            // message thread with the device's own async reopen.
+            juce::String setupError;
+            DeviceThreading::runOnMessageThreadAndWait([&] {
+                setupError = manager.setAudioDeviceSetup(liveSetup, true);
+            });
+            if (setupError.isEmpty()) {
                 device = manager.getCurrentAudioDevice();
             }
         }
@@ -274,7 +280,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
 
         if (formatErr.isEmpty())
         {
-            manager.closeAudioDevice();
+            DeviceThreading::runOnMessageThreadAndWait([&] { manager.closeAudioDevice(); });
             err = manager.initialise (numInputChannels, numOutputChannels, &typeSetup, false,
                                       selectedDeviceName, &setup);
             device = err.isEmpty() ? manager.getCurrentAudioDevice() : nullptr;
@@ -292,7 +298,7 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
         }
     }
     if (err.isNotEmpty()) {
-        manager.closeAudioDevice();
+        DeviceThreading::runOnMessageThreadAndWait([&] { manager.closeAudioDevice(); });
         if (pluginrack::deviceBackendOf(chosenTypeName.toStdString()) == pluginrack::DeviceBackend::Asio) {
             // ASIO drivers are single-client. Once the clock holds the
             // interface, any second PluginRack stream (or another application)
@@ -305,6 +311,57 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
         return {};
     }
     return chosenTypeName;
+}
+}
+
+namespace DeviceThreading {
+namespace {
+std::atomic<bool> messageThreadIsJoining{false};
+}
+
+void setMessageThreadJoining(bool joining) {
+    messageThreadIsJoining.store(joining, std::memory_order_seq_cst);
+}
+
+void runOnMessageThreadAndWait(const std::function<void()>& fn) {
+    if (!fn) return;
+
+    // Already there, or there is no message loop to hand the work to (unit
+    // tests, headless tools, shutdown): run where we are.
+    if (juce::MessageManager::existsAndIsCurrentThread()
+        || messageThreadIsJoining.load(std::memory_order_acquire)
+        || juce::MessageManager::getInstanceWithoutCreating() == nullptr) {
+        fn();
+        return;
+    }
+
+    struct PendingCall {
+        std::function<void()> fn;
+        // Whoever wins this runs fn; the other side leaves it alone, so the
+        // close happens exactly once.
+        std::atomic<bool> claimed{false};
+        juce::WaitableEvent finished{false};
+    };
+    auto call = std::make_shared<PendingCall>();
+    call->fn = fn;
+    juce::MessageManager::callAsync([call] {
+        if (call->claimed.exchange(true)) return;
+        call->fn();
+        call->finished.signal();
+    });
+
+    for (;;) {
+        if (call->finished.wait(50)) return;
+        // The message thread is blocked joining a device worker and cannot
+        // dispatch this. Closing here is the lesser evil: it is not inside the
+        // device's own reopen callback, and the queued call is now a no-op.
+        if (messageThreadIsJoining.load(std::memory_order_acquire)
+            && !call->claimed.exchange(true)) {
+            call->fn();
+            call->finished.signal();
+            return;
+        }
+    }
 }
 }
 
@@ -519,8 +576,12 @@ juce::String InputCapture::open(const juce::String& preferredDeviceName,
 }
 
 void InputCapture::close() {
-    manager.removeAudioCallback(this);
-    manager.closeAudioDevice();
+    // The manager deletes its WASAPI device here, and that device may have an
+    // async reopen pending on the message thread. Do both on one thread.
+    DeviceThreading::runOnMessageThreadAndWait([this] {
+        manager.removeAudioCallback(this);
+        manager.closeAudioDevice();
+    });
     storage.setSize(0, 0, false, true, false);
     sampleRate = 0.0;
     activeDeviceType_.clear();
@@ -937,8 +998,12 @@ void OutputPlayback::close() {
     closing_.store(true, std::memory_order_relaxed);
     deviceStopped_.store(true, std::memory_order_relaxed);
     lastCallbackMs.store(0, std::memory_order_relaxed);
-    manager.removeAudioCallback(this);
-    manager.closeAudioDevice();
+    // Same reasoning as InputCapture::close(): the device's async reopen and
+    // its deletion must not run on two threads.
+    DeviceThreading::runOnMessageThreadAndWait([this] {
+        manager.removeAudioCallback(this);
+        manager.closeAudioDevice();
+    });
     duplex_.store(false, std::memory_order_relaxed);
     duplexInputChannels_.store(0, std::memory_order_relaxed);
     deviceInputLatency_.store(0, std::memory_order_relaxed);
