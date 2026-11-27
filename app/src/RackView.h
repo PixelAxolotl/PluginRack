@@ -375,6 +375,13 @@ private:
     // by what the previous snapshot actually cost.
     juce::uint32 lastSnapshotMs = 0;
     int lastSnapshotCostMs = 0;
+    // The focused VST's card mirrors the editor docked beside it, so it is
+    // refreshed rarely and never while the user may be working in the editor:
+    // every capture makes the plugin repaint its whole UI on the message thread,
+    // which is what made a docked editor feel sluggish.
+    juce::uint32 lastVstCaptureMs = 0;
+    juce::uint32 lastBayInteractionMs = 0;
+    bool editorBayInUse() const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RackView)
 };

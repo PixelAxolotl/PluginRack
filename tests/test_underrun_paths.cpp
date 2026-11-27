@@ -623,7 +623,7 @@ TEST_CASE("settings apply fails safe and reloads single devices",
     CHECK(contains(engine, "AudioEngine::reloadDeviceAsync"));
     CHECK(contains(engine, "forceReopen"));
     const auto settings = readSource("app/src/SettingsView.cpp");
-    CHECK(contains(settings, "Pending changes - press Apply"));
+    CHECK(contains(settings, "Settings pending - Apply to activate"));
     CHECK(contains(settings, "applyDeviceSettings"));
     const auto header = readSource("app/src/SettingsView.h");
     CHECK(contains(header, "Reload All Audio Devices"));

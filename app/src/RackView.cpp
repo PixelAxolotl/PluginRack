@@ -1173,24 +1173,35 @@ void RackView::timerCallback() {
                                 && !swappingEditor
                                 && dockedEditor->isShowing();
     const int targetWidth = juce::jmax(32, slotViewport.getWidth() - 2 * kSlotInset);
-    if (wantsThumbnail) {
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    if (wantsThumbnail && editorBayInUse()) lastBayInteractionMs = nowMs;
+    // The card only needs to follow the editor loosely; the editor itself is on
+    // screen right beside it.
+    constexpr juce::uint32 kVstThumbnailIntervalMs = 500;
+    constexpr juce::uint32 kVstThumbnailIdleMs = 600;
+    const bool bayIdle = nowMs - lastBayInteractionMs >= kVstThumbnailIdleMs;
+    const auto thumbnailIntervalMs = juce::jmax(
+        kVstThumbnailIntervalMs, static_cast<juce::uint32>(1000 / juce::jmax(1, fps)));
+    if (wantsThumbnail && bayIdle) {
         if (auto* pluginWindow = nativedisplay::pluginWindowOf(*dockedEditor)) {
             // The worker keeps only the newest request, so a slow plugin lowers
             // the thumbnail rate instead of backing the UI thread up.
-            const auto insertId = focusedInsertId;
-            juce::Component::SafePointer<RackView> safe(this);
-            thumbnailWorker.request(pluginWindow, targetWidth,
-                                    [safe, insertId](juce::Image thumbnail) {
-                if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
-            });
+            if (nowMs - lastVstCaptureMs >= thumbnailIntervalMs) {
+                lastVstCaptureMs = nowMs;
+                const auto insertId = focusedInsertId;
+                juce::Component::SafePointer<RackView> safe(this);
+                thumbnailWorker.request(pluginWindow, targetWidth,
+                                        [safe, insertId](juce::Image thumbnail) {
+                    if (safe != nullptr) safe->applyVstThumbnail(insertId, thumbnail);
+                });
+            }
         } else {
             // A software-drawn editor can only be rendered on the message thread, so
             // pace it with what the previous snapshot cost.
-            const auto now = juce::Time::getMillisecondCounter();
-            const auto interval = static_cast<juce::uint32>(
-                juce::jmax(1000 / juce::jmax(1, fps), 4 * lastSnapshotCostMs));
-            if (now - lastSnapshotMs >= interval) {
-                lastSnapshotMs = now;
+            const auto interval = juce::jmax(
+                thumbnailIntervalMs, static_cast<juce::uint32>(4 * lastSnapshotCostMs));
+            if (nowMs - lastSnapshotMs >= interval) {
+                lastSnapshotMs = nowMs;
                 const auto started = juce::Time::getMillisecondCounterHiRes();
                 const auto editorBounds = dockedEditor->getLocalBounds();
                 juce::Image thumb;
@@ -1205,9 +1216,20 @@ void RackView::timerCallback() {
                 applyVstThumbnail(focusedInsertId, thumb);
             }
         }
-    } else {
+    } else if (!swappingEditor) {
+        // Drops a capture that has not started yet. Never during a swap: the
+        // swap's readiness probe uses the same worker.
         thumbnailWorker.clearRequest();
     }
+}
+
+bool RackView::editorBayInUse() const {
+    // A plugin's UI is a native window, so JUCE never sees the clicks or drags
+    // inside it; the pointer position and the global button state are what is
+    // left to tell that the user is working in it.
+    const auto pointer = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition();
+    return editorHolder.getScreenBounds().toFloat().contains(pointer)
+           || juce::ModifierKeys::getCurrentModifiersRealtime().isAnyMouseButtonDown();
 }
 
 void RackView::applyVstThumbnail(std::uint32_t insertId, const juce::Image& thumbnail) {
@@ -1526,6 +1548,8 @@ void RackView::refreshEditor() {
     dockedEditorLayoutPasses = 0;
     knobWatcher.clear();
     thumbnailWorker.clearRequest();
+    // The new editor's card gets its first capture as soon as the bay is idle.
+    lastVstCaptureMs = 0;
     // The old editor belongs to a different plugin instance, so it may stay
     // docked during the build. An editor a floating window reparented away is
     // owned by that window: never delete it here.

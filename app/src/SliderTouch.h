@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 
+#include <cstdint>
 #include <functional>
 
 // Remembers the dial the user touched last (the rack's touch-and-slide strip
@@ -46,6 +47,9 @@ void recordDial(Dial dial);
 void clear();
 // The dial to drive, or nullptr when nothing has been touched yet.
 const Dial* current();
+// Changes whenever the dial is replaced or cleared, so a caller can tell
+// whether the dial it recorded is still the current one.
+std::uint32_t generation();
 
 // Single observer for "the dial changed"; pass {} to clear.
 void setObserver(std::function<void()> observer);

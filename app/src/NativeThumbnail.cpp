@@ -35,7 +35,10 @@ constexpr UINT kRenderFullContent = 0x00000002;
 // alpha is usually zero, which would make the result invisible) and reporting
 // whether every pixel came back identical - the signature of a failed capture.
 juce::Image toImage(const void* dibPixels, int width, int height, bool& uniform) {
-    juce::Image image(juce::Image::ARGB, width, height, false);
+    // A plain memory image: captures are built on the worker thread, where a
+    // native (Direct2D) image would need GPU work for every lock and rescale.
+    // The small result is uploaded once, when it is first drawn.
+    juce::Image image(juce::Image::ARGB, width, height, false, juce::SoftwareImageType());
     juce::Image::BitmapData dest(image, juce::Image::BitmapData::writeOnly);
     const auto* source = static_cast<const std::uint8_t*>(dibPixels);
 

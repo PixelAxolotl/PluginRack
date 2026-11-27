@@ -1,5 +1,6 @@
 #include "SliderTouch.h"
 
+#include <cstdint>
 #include <optional>
 
 #include "ValueEditSlider.h"
@@ -11,6 +12,7 @@ namespace {
 std::optional<Dial> lastDial;
 std::function<void()> observer;
 bool driving = false;
+std::uint32_t dialGeneration = 0;
 
 // The dial a press landed on: the event target itself or, for a press on a
 // slider's value box, its nearest slider ancestor.
@@ -113,18 +115,23 @@ void record(juce::Slider& slider) {
     }
 
     lastDial = std::move(dial);
+    ++dialGeneration;
     if (observer) observer();
 }
 
 void recordDial(Dial dial) {
     lastDial = std::move(dial);
+    ++dialGeneration;
     if (observer) observer();
 }
 
 void clear() {
     lastDial.reset();
+    ++dialGeneration;
     if (observer) observer();
 }
+
+std::uint32_t generation() { return dialGeneration; }
 
 const Dial* current() {
     return lastDial.has_value() ? &*lastDial : nullptr;
