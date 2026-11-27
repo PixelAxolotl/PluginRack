@@ -16,15 +16,20 @@ void PluginKnobWatcher::setPlugin(juce::AudioPluginInstance* newInstance) {
         parameters.push_back(parameter);
         if (parameter != nullptr) parameter->addListener(this);
     }
+    startTimerHz(20);
 }
 
 void PluginKnobWatcher::clear() {
+    stopTimer();
     // Detach first: the parameters belong to the processor, so this listener
-    // relationship must not outlive it.
+    // relationship must not outlive it. removeListener() waits for a callback
+    // in flight, so nothing can store into pendingValueIndex after this loop.
     for (auto* parameter : parameters)
         if (parameter != nullptr) parameter->removeListener(this);
     parameters.clear();
     instance = nullptr;
+    pendingValueIndex.store(-1, std::memory_order_relaxed);
+    boundIndex = -1;
 
     shared->alive = false; // any dial still pointing at a parameter goes inert
     shared = std::make_shared<Shared>();
@@ -68,20 +73,31 @@ void PluginKnobWatcher::parameterGestureChanged(int parameterIndex, bool gesture
 }
 
 void PluginKnobWatcher::parameterValueChanged(int parameterIndex, float) {
+    // Any thread, including the audio thread: one relaxed store, nothing else.
+    pendingValueIndex.store(parameterIndex, std::memory_order_relaxed);
+}
+
+void PluginKnobWatcher::timerCallback() {
     // Fallback for plugins that never report a gesture. While a knob is held
     // its gesture owns the strip, and edits made by the strip itself are
     // suppressed so a plugin's linked parameters cannot steal the target.
-    post([parameterIndex](PluginKnobWatcher& watcher) {
-        if (watcher.gestureIndex >= 0) return;
-        if (slider_touch::isDriving()) return;
-        if (juce::Time::getMillisecondCounter() < watcher.shared->suppressUntilMs) return;
-        watcher.bind(parameterIndex);
-    });
+    // Taken before the checks so a change made during a gesture is dropped.
+    const int index = pendingValueIndex.exchange(-1, std::memory_order_relaxed);
+    if (index < 0) return;
+    if (gestureIndex >= 0) return;
+    if (slider_touch::isDriving()) return;
+    if (juce::Time::getMillisecondCounter() < shared->suppressUntilMs) return;
+    bind(index);
 }
 
 void PluginKnobWatcher::bind(int parameterIndex) {
     auto* parameter = parameterForIndex(parameterIndex);
     if (parameter == nullptr) return;
+    // Already the strip's target: re-recording it would only rebuild the same
+    // dial and repaint the strip.
+    if (parameterIndex == boundIndex && slider_touch::generation() == boundGeneration
+        && slider_touch::current() != nullptr)
+        return;
 
     auto state = shared;
     slider_touch::Dial dial;
