@@ -121,8 +121,11 @@ are saved with the scene.
 
 Each channel and output strip has a device menu: **System Default**, **None -
 silent**, the available WASAPI/ASIO devices, and the app's own device types.
-The first output with a real device becomes the clock; its sample rate and render
-block drive the engine. Individual devices may use different driver buffer sizes;
+The first output in the strip list (left to right) with a real device becomes
+the clock; its sample rate and render block drive the engine. Drag strips by
+their grip to change the order, then press **Reload All Audio Devices**: only
+the reload hands the clock to the new first output, while a reorder on its own
+leaves it where it is. Individual devices may use different driver buffer sizes;
 the bounded FIFOs bridge those callbacks. The output strip that currently owns the
 clock shows a blue status dot (it turns red if that device reports an open error).
 Inputs are shared per device, so several channels can capture the same endpoint.
@@ -133,8 +136,10 @@ output at the same rate. When no output qualifies it keeps rendering on an
 internal clock at the last live rate, so the other outputs keep playing. The
 strips show the missing clock device and the toolbar reports the internal clock.
 
-When the first output's endpoint comes back, it reclaims the clock
-automatically. The engine reopens it at the session's current sample rate and,
+When the clock output's endpoint comes back, it reclaims the clock
+automatically. The reclaim follows the output that owned the clock at the last
+reload, not the current strip order. The engine reopens it at the session's
+current sample rate and,
 once its callback is live, hands the clock role back from the promoted output
 or the internal clock. A silent strip is skipped. A strip left on **System
 Default** is not reclaimed by name, because the OS default can point at a
