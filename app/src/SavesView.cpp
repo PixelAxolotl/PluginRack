@@ -14,6 +14,16 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
     nameLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(nameLabel);
 
+    const auto modified = SceneBridge::getSaveFile(name).getLastModificationTime();
+    metaLabel.setText(modified.toMilliseconds() != 0 ? "Modified " + modified.toString(true, false)
+                                                     : "",
+                      juce::dontSendNotification);
+    metaLabel.setJustificationType(juce::Justification::centredRight);
+    metaLabel.setFont(theme::ui::captionFont());
+    metaLabel.setColour(juce::Label::textColourId, theme::dim());
+    metaLabel.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(metaLabel);
+
     defButton.setClickingTogglesState(true);
     defButton.setToggleState(isDefault, juce::dontSendNotification);
     defButton.setTooltip("Load this save at startup");
@@ -28,11 +38,12 @@ SavesView::SaveRowComponent::SaveRowComponent(const juce::String& name, bool isD
     deleteButton.onClick = [this] { if (onDelete) onDelete(); };
     addAndMakeVisible(deleteButton);
 
-    loadButton.setTooltip("Load this save");
+    loadButton.setTooltip("Load this save into the live rig (replaces the current scene)");
     loadButton.onClick = [this] { if (onLoad) onLoad(); };
     addAndMakeVisible(loadButton);
     for (auto* button : {&defButton, &renameButton, &deleteButton, &loadButton})
         theme::ui::styleButton(*button);
+    deleteButton.setColour(juce::TextButton::textColourOffId, theme::red());
 }
 
 void SavesView::SaveRowComponent::setDefaultActive(bool isDefaultIn) {
@@ -59,15 +70,24 @@ void SavesView::SaveRowComponent::setActionsEnabled(bool enabled) {
 
 void SavesView::SaveRowComponent::resized() {
     auto area = getLocalBounds().reduced(12, 8);
-    deleteButton.setBounds(area.removeFromRight(70));
-    area.removeFromRight(8);
-    renameButton.setBounds(area.removeFromRight(70));
-    area.removeFromRight(8);
-    loadButton.setBounds(area.removeFromRight(60));
-    area.removeFromRight(8);
-    defButton.setBounds(area.removeFromRight(60));
-    area.removeFromRight(8);
-    nameLabel.setBounds(area);
+    // Actions sit with the save they act on; the date is a quiet right-hand
+    // column, not a reason to push Load/Edit/Delete a screen away.
+    const bool compact = area.getWidth() < 560;
+    metaLabel.setVisible(!compact);
+    const int nameW = compact ? juce::jmax(80, area.getWidth() / 2)
+                              : juce::jmin(360, area.getWidth() / 3);
+    nameLabel.setBounds(area.removeFromLeft(nameW));
+    area.removeFromLeft(theme::ui::kSpace3);
+    defButton.setBounds(area.removeFromLeft(50));
+    area.removeFromLeft(6);
+    loadButton.setBounds(area.removeFromLeft(60));
+    area.removeFromLeft(6);
+    renameButton.setBounds(area.removeFromLeft(60));
+    area.removeFromLeft(6);
+    deleteButton.setBounds(area.removeFromLeft(64));
+    if (compact) return;
+    area.removeFromLeft(theme::ui::kSpace3);
+    metaLabel.setBounds(area);
 }
 
 void SavesView::SaveRowComponent::paint(juce::Graphics& g) {

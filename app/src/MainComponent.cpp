@@ -143,6 +143,16 @@ void ToolbarComponent::setHasError(bool hasError) {
     resized();
 }
 
+void ToolbarComponent::setSaveState(const juce::String& saveName, bool dirty) {
+    saveButton.setButtonText(dirty ? "Save*" : "Save");
+    saveButton.setColour(juce::TextButton::textColourOffId,
+                         dirty ? theme::amber() : theme::text());
+    const juce::String target = saveName.isNotEmpty() ? "Overwrite save \"" + saveName + "\""
+                                                      : "Save this rig under a new name";
+    saveButton.setTooltip(target + " - stores the scene. Audio settings use Apply in Settings."
+                          + (dirty ? " (unsaved edits)" : ""));
+}
+
 void ToolbarComponent::paint(juce::Graphics& g) {
     g.fillAll(theme::panel());
     g.setColour(theme::border());
@@ -344,13 +354,27 @@ MainComponent::MainComponent()
         // Stay where the user is: overwrite the active save, or ask for a
         // name when nothing is active yet. No teleport to the Saves tab.
         if (refuseSaveWhileRestoring()) return;
-        if (activeSaveName_.isNotEmpty()) {
-            const auto error = SceneBridge::saveNamed(audioEngine.makeScene(), activeSaveName_);
-            if (error.isNotEmpty()) showError(error);
-            else router.refreshViews();
-        } else {
+        if (activeSaveName_.isEmpty()) {
             saveSceneAs();
+            return;
         }
+        const auto write = [this] {
+            const auto error = SceneBridge::saveNamed(audioEngine.makeScene(), activeSaveName_);
+            if (error.isNotEmpty()) {
+                showError(error);
+                return;
+            }
+            sceneChangedSinceSave_ = false;
+            router.refreshViews();
+        };
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::QuestionIcon, "Overwrite save",
+            "Overwrite save \"" + activeSaveName_ + "\" with the current rig?",
+            "Overwrite Save", "Cancel", nullptr,
+            juce::ModalCallbackFunction::create([safe, write](int result) {
+                if (result == 1 && safe != nullptr) write();
+            }));
     };
     toolbar.onMenu = [this] { showMenu(); };
     toolbar.onSnapshot = [this] { showSnapshotPlaceholder(); };
@@ -472,6 +496,7 @@ void MainComponent::timerCallback() {
     if (!hasError && (report.underruns + report.overruns) > 0) hasError = true;
     if (!hasError) hasError = !audioEngine.getDeviceErrors().empty();
     toolbar.setHasError(hasError);
+    toolbar.setSaveState(activeSaveName_, sceneChangedSinceSave_);
 
     // Autosave is a debounce, not a repeating snapshot. The cheap poll runs at
     // 1 Hz and only notices edits; the scene is captured and written once,
@@ -609,6 +634,8 @@ void MainComponent::showMenu() {
     juce::PopupMenu menu;
     menu.addItem("Save Scene As...", [this] { saveSceneAs(); });
     menu.addItem("Load Scene", [this] { loadScene(true); });
+    menu.addItem("Restore Scene Before Last Load", previousScene_.has_value(), false,
+                 [this] { undoLastLoad(); });
     menu.addItem("Open Scenes Folder", [this] {
         const auto dir = SceneBridge::getSceneFile().getParentDirectory();
         dir.createDirectory();
@@ -779,6 +806,14 @@ void MainComponent::showAudioErrors() {
         lines.add("Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / "
                   + juce::String((juce::int64)report.underruns) + " underruns.");
     }
+    const auto fifo = audioEngine.getFifoDiagnostics();
+    if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0)
+        lines.add("Input capture: " + juce::String((juce::int64)fifo.inputUnderruns)
+                  + " underruns / " + juce::String((juce::int64)fifo.inputOverruns) + " overruns");
+    if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0)
+        lines.add("Output safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
+                  + " low-watermark events / " + juce::String((juce::int64)fifo.renderMisses)
+                  + " render misses");
     for (const auto& [stripName, stripError] : audioEngine.getDeviceErrors())
         lines.add(stripName + ": " + stripError);
     if (lines.isEmpty()) lines.add("No audio errors.");
@@ -800,6 +835,7 @@ void MainComponent::saveScene() {
     if (refuseSaveWhileRestoring()) return;
     const auto error = SceneBridge::save(audioEngine.makeScene());
     if (error.isNotEmpty()) showError(error);
+    else sceneChangedSinceSave_ = false;
 }
 
 void MainComponent::saveSceneAs() {
@@ -818,11 +854,33 @@ void MainComponent::saveSceneAs() {
                 // The Save button now overwrites this name until another
                 // scene is loaded or saved.
                 safe->activeSaveName_ = name;
+                safe->sceneChangedSinceSave_ = false;
                 safe->refreshViews();
             }
         }
         delete w;
     }), true);
+}
+
+void MainComponent::undoLastLoad() {
+    if (!previousScene_.has_value() || refuseSaveWhileRestoring()) return;
+    const auto scene = *previousScene_;
+    juce::Component::SafePointer<MainComponent> safe(this);
+    const auto error = applySceneAsync(scene, true, [safe](const juce::String& pluginErrors) {
+        if (safe == nullptr || pluginErrors.isEmpty()) return;
+        safe->showError("The previous scene was restored, but some plugins could not be loaded:\n"
+                        + pluginErrors);
+    });
+    if (error.isNotEmpty()) {
+        // applySceneAsync captures the live rig before it swaps; a failed
+        // start must not throw away the undo we were about to use.
+        previousScene_ = scene;
+        showError(error);
+    } else {
+        // Do not chain undos: this was a correction, not a new load to undo.
+        previousScene_.reset();
+        sceneChangedSinceSave_ = true;
+    }
 }
 
 void MainComponent::loadScene(bool showMissingMessage) {
@@ -859,6 +917,10 @@ juce::String MainComponent::applySceneAsync(const pluginrack::Scene& scene, bool
         sceneLoading_.store(false);
         return "Audio is still starting up. Please try again in a moment.";
     }
+    // One-level undo: capture the rig being replaced before any strip is
+    // released. Startup has no rig yet, so it must not create a blank undo.
+    if (!audioEngine.getChannels().empty() || !audioEngine.getOutputs().empty())
+        previousScene_ = audioEngine.makeScene();
     // An editor must not outlive the processor that backs it; close them while
     // the old strips are still alive. refreshViews re-docks after the commit.
     router.releaseDockedEditor();

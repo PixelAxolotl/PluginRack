@@ -57,6 +57,7 @@ private:
         bool isSelected = false;
 
         juce::Label nameLabel;
+        juce::Label metaLabel;
         juce::TextButton defButton{"DEF"};
         juce::TextButton renameButton{"Edit"};
         juce::TextButton deleteButton{"Delete"};

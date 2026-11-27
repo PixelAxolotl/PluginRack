@@ -501,20 +501,20 @@ void SettingsView::refresh() {
         deviceIssues += stripName + ": " + stripError + "\n";
     deviceIssues = deviceIssues.trim();
 
-    juce::String countedIssues;
-    if (report.underruns + report.overruns > 0) countedIssues += "Glitches: " + juce::String((juce::int64)report.overruns) + " overruns / " + juce::String((juce::int64)report.underruns) + " underruns\n";
+    // Counters are live telemetry refreshed four times a second. Keep them on
+    // one stable line so a changing digit cannot change the card's line count.
+    juce::StringArray counterParts;
+    if (report.underruns + report.overruns > 0)
+        counterParts.add("Glitches (over/under) " + juce::String((juce::int64)report.overruns)
+                         + "/" + juce::String((juce::int64)report.underruns));
     const auto fifo = audioEngine.getFifoDiagnostics();
-    if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0) {
-        countedIssues += "Input capture: " + juce::String((juce::int64)fifo.inputUnderruns)
-            + " underruns / " + juce::String((juce::int64)fifo.inputOverruns)
-            + " overruns\n";
-    }
-    if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0) {
-        countedIssues += "Output safety: " + juce::String((juce::int64)fifo.outputLowWatermarks)
-            + " low-watermark events / " + juce::String((juce::int64)fifo.renderMisses)
-            + " render misses\n";
-    }
-    countedIssues = countedIssues.trim();
+    if (fifo.inputUnderruns > 0 || fifo.inputOverruns > 0)
+        counterParts.add("Input (under/over) " + juce::String((juce::int64)fifo.inputUnderruns)
+                         + "/" + juce::String((juce::int64)fifo.inputOverruns));
+    if (fifo.outputLowWatermarks > 0 || fifo.renderMisses > 0)
+        counterParts.add("Output (low/render) " + juce::String((juce::int64)fifo.outputLowWatermarks)
+                         + "/" + juce::String((juce::int64)fifo.renderMisses));
+    const juce::String countedIssues = counterParts.joinIntoString("   -   ");
 
     juce::String issues;
     juce::Colour issuesColour = theme::green();
@@ -525,10 +525,12 @@ void SettingsView::refresh() {
     } else if (countedIssues.isNotEmpty()) {
         issues = countedIssues;
         issuesColour = theme::amber();
-    } else {
-        issues = "No audio errors.";
     }
-    relayout |= setWrappedText(issuesText, issues, issuesColour);
+    // Say "clean" once, in the header. The status card only carries bad news,
+    // so its green line does not duplicate the header on a healthy rig.
+    // Its height is a fixed two-line slot, so live numbers never move the
+    // sections below; unabridged detail stays in the ! dialog on the toolbar.
+    setWrappedText(issuesText, issues, issuesColour);
 
     // The header keeps the answer visible when the body is scrolled down to the
     // tuning or device sections.
@@ -666,7 +668,7 @@ void SettingsView::updatePendingState() {
     // of it, so a new setting cannot be forgotten here (the previous
     // hand-written list had already lost three).
     dirty_ = !(staged_ == applied);
-    pendingLabel.setText(dirty_ ? "Pending changes - press Apply" : "",
+    pendingLabel.setText(dirty_ ? "Settings pending - Apply to activate (Save stores the scene)" : "",
                          juce::dontSendNotification);
     const bool busy = audioEngine.isOpeningDevices();
     applyButton.setEnabled(dirty_ && !busy);
@@ -974,9 +976,13 @@ int SettingsView::layoutBody(int width) {
     // AUDIO STATUS
     {
         const int panelTop = startSection(statusCaption, nullptr);
-        const int issuesH =
-            WrappedLabel::heightFor(issuesText.getText(), innerW, issuesText.getFont());
-        const int panelH = pad + kStatH + (issuesH > 0 ? kRowGap + issuesH : 0) + pad;
+        // A fixed slot is the point: device errors and glitch counters change
+        // every 250 ms, but the card's height - and therefore every section
+        // below it - must stay put while the user is tuning or scrolling.
+        constexpr int kStatusLines = 2;
+        const int lineH = WrappedLabel::heightFor("X", innerW, issuesText.getFont());
+        const int issuesSlotH = kStatusLines * lineH;
+        const int panelH = pad + kStatH + kRowGap + issuesSlotH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
 
         auto inner = panel.reduced(pad);
@@ -998,10 +1004,7 @@ int SettingsView::layoutBody(int width) {
         placeStat(latencyCell, latencyStatCaption, latencyStatValue);
         placeStat(stats, bufferStatCaption, bufferStatValue);
 
-        if (issuesH > 0)
-            issuesText.setBounds(inner.removeFromTop(kRowGap + issuesH).withTrimmedTop(kRowGap));
-        else
-            issuesText.setBounds({});
+        issuesText.setBounds(inner.removeFromTop(kRowGap + issuesSlotH).withTrimmedTop(kRowGap));
         endSection(panel);
     }
 
@@ -1016,9 +1019,12 @@ int SettingsView::layoutBody(int width) {
         auto inner = panel.reduced(pad);
 
         auto row = inner.removeFromTop(theme::ui::kControlH);
-        inputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
-        inputBufferSizeCombo.setBounds(row.removeFromLeft(150));
-        row.removeFromLeft(theme::ui::kSpace3);
+        // Two halves, not a short run against a dead right edge: the two
+        // buffers are independent, so they get equal lanes at every width.
+        auto inputRow = row.removeFromLeft(row.getWidth() / 2);
+        row.removeFromLeft(kRowGap);
+        inputBufferSizeLabel.setBounds(inputRow.removeFromLeft(theme::ui::kLabelW));
+        inputBufferSizeCombo.setBounds(inputRow.removeFromLeft(150));
         outputBufferSizeLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         outputBufferSizeCombo.setBounds(row.removeFromLeft(150));
         endSection(panel);
@@ -1105,7 +1111,7 @@ int SettingsView::layoutBody(int width) {
             const int line = twoColumns ? i / 2 : i;
             toggles[i]->setBounds(column * (columnW + kToggleColGap),
                                   inner.getY() + line * (kToggleH + kToggleGap),
-                                  juce::jmin(kToggleW, columnW), kToggleH);
+                                  columnW, kToggleH);
         }
         inner.removeFromTop(togglesH);
 
@@ -1140,28 +1146,29 @@ int SettingsView::layoutBody(int width) {
     // APP
     {
         const int panelTop = startSection(appCaption, nullptr);
-        const int panelH = pad + 3 * theme::ui::kControlH + 2 * kRowGap + pad;
+        const int panelH = pad + 2 * theme::ui::kControlH + kRowGap + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
+        const int halfW = (innerW - kRowGap) / 2;
 
         auto row = inner.removeFromTop(theme::ui::kControlH);
-        rackThumbnailsLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
-        rackThumbnailFpsCombo.setBounds(row.removeFromLeft(90));
+        auto leftRow = row.removeFromLeft(halfW);
+        row.removeFromLeft(kRowGap);
+        rackThumbnailsLabel.setBounds(leftRow.removeFromLeft(theme::ui::kLabelW));
+        rackThumbnailFpsCombo.setBounds(leftRow.removeFromLeft(90));
+        peakHoldLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
+        peakHoldCombo.setBounds(row.removeFromLeft(90));
 
         inner.removeFromTop(kRowGap);
         auto row2 = inner.removeFromTop(theme::ui::kControlH);
-        peakHoldLabel.setBounds(row2.removeFromLeft(theme::ui::kLabelW));
-        peakHoldCombo.setBounds(row2.removeFromLeft(90));
-        row2.removeFromLeft(theme::ui::kSpace4);
-        closeToTrayToggle.setBounds(row2.removeFromLeft(320));
-
-        inner.removeFromTop(kRowGap);
-        auto row3 = inner.removeFromTop(theme::ui::kControlH);
-        clearFaultsButton.setBounds(row3.removeFromLeft(220));
-        row3.removeFromLeft(theme::ui::kRowGap);
-        faultsLabel.setBounds(row3.removeFromLeft(260));
-        row3.removeFromLeft(theme::ui::kSpace4);
-        latencyCompensationToggle.setBounds(row3.removeFromLeft(260));
+        auto leftRow2 = row2.removeFromLeft(halfW);
+        row2.removeFromLeft(kRowGap);
+        clearFaultsButton.setBounds(leftRow2.removeFromLeft(220));
+        leftRow2.removeFromLeft(kRowGap);
+        faultsLabel.setBounds(leftRow2);
+        closeToTrayToggle.setBounds(row2.removeFromLeft(280));
+        row2.removeFromLeft(kRowGap);
+        latencyCompensationToggle.setBounds(row2.removeFromLeft(240));
         endSection(panel);
     }
 

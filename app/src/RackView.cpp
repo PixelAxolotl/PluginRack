@@ -203,7 +203,7 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engi
 
     noEditorLabel.setJustificationType(juce::Justification::centred);
     noEditorLabel.setFont(theme::ui::bodyFont());
-    noEditorLabel.setColour(juce::Label::textColourId, theme::dim());
+    noEditorLabel.setColour(juce::Label::textColourId, theme::text());
     editorHolder.addAndMakeVisible(noEditorLabel);
 
     noEditorBypass.setClickingTogglesState(true);
@@ -1388,7 +1388,8 @@ void RackView::refreshEditor() {
         closeDockedEditor();
         swappingEditor = false;
         editorWindowShown = false;
-        noEditorLabel.setText("No plugins - click + Add VST3 above", juce::dontSendNotification);
+        noEditorLabel.setText("No plugins on this strip.\nUse + Add VST3 above to load one.",
+                              juce::dontSendNotification);
         noEditorLabel.setVisible(true);
         noEditorBypass.setVisible(false);
         dockedEditor = nullptr;

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <functional>
+#include <optional>
 
 #include "AudioEngine.h"
 #include "IoView.h"
@@ -31,6 +32,9 @@ public:
     void setClockText(const juce::String& text, bool isWarning);
     void setLatencyText(const juce::String& text, juce::Colour colour, const juce::String& tooltip);
     void setHasError(bool hasError);
+    // Shows which named save the Save button overwrites and whether the live
+    // scene has edits that are not in that file yet.
+    void setSaveState(const juce::String& saveName, bool dirty);
 
     std::function<void(AppView)> onViewSelected;
     std::function<void()> onSave;
@@ -147,6 +151,10 @@ public:
 private:
     void saveScene();
     void saveSceneAs();
+    // Puts back the scene that was live before the most recent load or reset.
+    // One level only; it covers the "I loaded the wrong save" mistake without
+    // introducing a full undo stack in the middle of a live session.
+    void undoLastLoad();
     // True while a staged restore owns the rig: a save then would capture the
     // half-replaced strips, so the caller shows the message and stops.
     bool refuseSaveWhileRestoring();
@@ -186,6 +194,8 @@ private:
     // Name of the save the Save button overwrites. Set when a scene is
     // loaded or saved by name; empty means "untitled, ask for a name".
     juce::String activeSaveName_;
+    // The scene captured just before the last load/reset, for one-level undo.
+    std::optional<pluginrack::Scene> previousScene_;
     double smoothedLatencyMs = -1.0;
     std::atomic<bool> sceneLoading_{false};
     // Counts UI ticks between device-availability checks (see timerCallback).

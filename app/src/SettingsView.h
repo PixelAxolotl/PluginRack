@@ -105,8 +105,8 @@ private:
     juce::Label tuningBeta { "", "BETA" };
     juce::ToggleButton lowLatencyInputToggle { "Low-latency input (1-block read delay)" };
     juce::ToggleButton exclusiveToggle { "Prefer exclusive mode" };
-    juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO)" };
-    juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO" };
+    juce::ToggleButton lowLatencyOutputsToggle { "Low-latency outputs (2-block FIFO) - reopens outputs" };
+    juce::ToggleButton minimalClockFifoToggle { "Minimal clock FIFO - reopens devices" };
     juce::ToggleButton fullDuplexToggle { "Same-device input (one-block start)" };
     juce::ToggleButton probeCapToggle { "Cap WASAPI channel probe" };
     juce::Label probeCapLabel { "", "Max channels" };
