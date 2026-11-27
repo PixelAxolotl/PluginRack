@@ -683,6 +683,33 @@ TEST_CASE("a tap may name the eq row, which is id zero") {
     REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownTapItem);
 }
 
+TEST_CASE("a typed item tap must name a row of that type") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.schemaVersion = pluginrack::kSchemaVersion;
+    scene.channels.front().chain = {{pluginrack::ChainItemType::Dynamics, 1}};
+    pluginrack::Tap tap;
+    tap.kind = pluginrack::Tap::Kind::Item;
+    tap.itemId = 1;
+
+    tap.hasItemType = true;
+    tap.itemType = pluginrack::ChainItemType::Dynamics;
+    scene.routes.front().tap = tap;
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    // The same id from another family names no row, so the scene is rejected
+    // instead of silently resolving to the Gate row.
+    tap.itemType = pluginrack::ChainItemType::FeedbackSuppressor;
+    scene.routes.front().tap = tap;
+    const auto errors = pluginrack::validate(scene);
+    REQUIRE_FALSE(errors.empty());
+    REQUIRE(errors.front().code == pluginrack::SceneErrorCode::UnknownTapItem);
+
+    // An id-only tap keeps the older rule and only needs some row with the id.
+    tap.hasItemType = false;
+    scene.routes.front().tap = tap;
+    REQUIRE(pluginrack::validate(scene).empty());
+}
+
 TEST_CASE("bus count over the cap is rejected") {
     pluginrack::Scene scene = makeValidScene();
     for (std::size_t i = 0; i <= pluginrack::kMaxBuses; ++i) {

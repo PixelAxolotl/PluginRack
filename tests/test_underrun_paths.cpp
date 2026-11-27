@@ -399,38 +399,40 @@ TEST_CASE("an item tap pushes and bills the same chain row", "[underrun][latency
     const auto cpp = readSource("app/src/AudioEngine.cpp");
     const auto scene = readSource("core/include/pluginrack/Scene.h");
 
-    // One identity rule for Tap::Kind::Item, because every built-in family
-    // mints its own id 1: one strip can hold a Dynamics and a Limiter row that
-    // are both id 1.
-    const auto resolver = functionBody(scene, "int firstChainItemIndex");
-    CHECK(contains(resolver, "chain[static_cast<std::size_t>(i)].id == itemId"));
-    CHECK(contains(resolver, "return i;"));
+    // One identity rule for Tap::Kind::Item, keyed by the row's (id, type):
+    // every built-in family mints its own id 1, so one strip can hold a Gate
+    // (Dynamics) and a Feedback Suppressor row that are both id 1.
+    CHECK(contains(scene, "row.id == item.id && row.type == item.type"));
+    CHECK(contains(scene, "if (!tap.hasItemType) return firstChainItemIndex(chain, tap.itemId);"));
+    CHECK(contains(scene,
+                   "return firstChainItemIndex(chain, ChainItem{tap.itemType, tap.itemId});"));
 
     // Latency bills the chain up to and including that row...
     const auto latency = functionBody(cpp, "int AudioEngine::tapLatencySamples");
-    CHECK(contains(latency, "pluginrack::firstChainItemIndex(channel.chain, tap.itemId)"));
+    CHECK(contains(latency, "pluginrack::firstChainItemIndex(channel.chain, tap)"));
     CHECK(contains(latency, "for (int i = 0; i <= index; ++i)"));
 
     // ...and the plan marks the row that owns the tap; render pushes only when
-    // that step owns it, instead of at every row sharing the id (the later
-    // family's signal used to stay in the ring while the latency came from the
-    // first row).
+    // that step owns it, with the row's type so a sibling family's identical id
+    // cannot steal the ring.
     const auto plan = functionBody(cpp, "void buildRenderPlan");
-    CHECK(contains(plan, "pluginrack::firstChainItemIndex(strip.chain, item.id)"));
+    CHECK(contains(plan, "pluginrack::firstChainItemIndex(strip.chain, rowTap)"));
+    CHECK(contains(plan, "rowTap.itemType = item.type;"));
     CHECK(contains(plan, "step.tapOwned ="));
     const auto render = functionBody(cpp, "void AudioEngine::render");
     const auto guard = render.find("if (step.tapOwned) {");
-    const auto push = render.find("pluginrack::Tap{pluginrack::Tap::Kind::Item");
+    const auto push = render.find("pluginrack::Tap stepTap;");
     REQUIRE(guard != std::string::npos);
     REQUIRE(push != std::string::npos);
     CHECK(guard < push);
-    CHECK(countOccurrences(render, "pluginrack::Tap{pluginrack::Tap::Kind::Item") == 1);
+    CHECK(contains(render, "stepTap.itemType = step.type;"));
+    CHECK(countOccurrences(render, "pluginrack::Tap stepTap;") == 1);
 
-    // The offline renderer follows the same rule: only the first row carrying
-    // an id publishes the item tap, and the id latches at that row's total.
+    // The offline renderer follows the same rule: every row publishes under its
+    // (id, type) key, and only the owner of a duplicate pushes.
     const auto mixer = readSource("core/src/MixerEngine.cpp");
-    CHECK(contains(mixer, "pluginrack::firstChainItemIndex(source.chain, item.id)"));
-    CHECK(contains(mixer, "pluginrack::firstChainItemIndex(strip.chain, item.id)"));
+    CHECK(contains(mixer, "pluginrack::firstChainItemIndex(source.chain, item)"));
+    CHECK(contains(mixer, "itemTapKey(item.type, item.id)"));
     CHECK(contains(mixer, "step.tapOwned"));
 
     // ...and it runs the EQ the way live render does: inside the step loop, so

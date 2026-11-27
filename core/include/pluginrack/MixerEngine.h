@@ -108,8 +108,8 @@ private:
         ChainItemType type = ChainItemType::Insert;
         std::size_t index = 0;
         std::uint32_t id = 0;
-        // Item taps resolve an id to the first chain row that carries it, so a
-        // later row repeating an id from another family must not push the ring.
+        // Item taps name a row by (id, type); only the row that owns the tap
+        // pushes the ring, so a duplicate row cannot republish it.
         bool tapOwned = true;
     };
 
@@ -125,7 +125,8 @@ private:
         float* right = nullptr;
         int frames = 0;
     };
-    static void pushItemTap(void* ctx, std::uint32_t itemId);
+    static void pushItemTap(void* ctx, ChainItemType type, std::uint32_t itemId);
+    static void pushInsertTap(void* ctx, std::uint32_t itemId);
 
     struct StripDsp {
         EqEngine eq;
@@ -152,7 +153,7 @@ private:
 
     static StripDsp buildStrip(const Strip& source, double sampleRate, int maxFrames);
     static void processStrip(StripDsp& strip, float* left, float* right, int frames,
-                             void (*afterStep)(void*, std::uint32_t) = nullptr,
+                             void (*afterStep)(void*, ChainItemType, std::uint32_t) = nullptr,
                              void* ctx = nullptr);
 
     std::vector<ChannelCache> channels_;

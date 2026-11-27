@@ -119,22 +119,40 @@ TEST_CASE("a paired card moves to the top as one block") {
     CHECK(chain == expected);
 }
 
-TEST_CASE("an item tap resolves to the first chain row with its id") {
-    // Tap::Kind::Item carries only an id, and every built-in family mints its
-    // own id 1. The identity rule is the first row whose id matches: that is
-    // the row the engine pushes into the ring and the row whose delay it
-    // bills, so content and latency cannot come from different rows.
+TEST_CASE("an item tap resolves by its row's id and type") {
+    // Every built-in family mints its own id 1, so a Dynamics (Gate) row and a
+    // Feedback Suppressor row on one strip share an id. A tap minted now
+    // carries the row's type and matches that row exactly; a tap loaded from an
+    // older scene has no type and keeps the historical first-row-with-that-id
+    // rule.
     const std::vector<ChainItem> chain{{ChainItemType::Dynamics, 1},
                                        {ChainItemType::Eq, 0},
-                                       {ChainItemType::Limiter, 1}};
-    CHECK(pluginrack::firstChainItemIndex(chain, 1) == 0);
-    CHECK(pluginrack::firstChainItemIndex(chain, 0) == 1);
-    CHECK(pluginrack::firstChainItemIndex(chain, 7) == -1);
+                                       {ChainItemType::FeedbackSuppressor, 1}};
 
-    // The rule follows chain order, not the family: once the limiter row is
-    // first, id 1 is the limiter and the dynamics row is unreachable.
-    const std::vector<ChainItem> flipped{{ChainItemType::Limiter, 1},
-                                         {ChainItemType::Dynamics, 1}};
-    CHECK(pluginrack::firstChainItemIndex(flipped, 1) == 0);
-    CHECK(pluginrack::firstChainItemIndex(std::vector<ChainItem>{}, 1) == -1);
+    pluginrack::Tap typed;
+    typed.kind = pluginrack::Tap::Kind::Item;
+    typed.itemId = 1;
+    typed.hasItemType = true;
+    typed.itemType = ChainItemType::FeedbackSuppressor;
+    CHECK(pluginrack::firstChainItemIndex(chain, typed) == 2);
+
+    typed.itemType = ChainItemType::Dynamics;
+    CHECK(pluginrack::firstChainItemIndex(chain, typed) == 0);
+
+    typed.itemType = ChainItemType::Limiter; // no such row
+    CHECK(pluginrack::firstChainItemIndex(chain, typed) == -1);
+
+    // Legacy id-only taps keep the first-row rule.
+    pluginrack::Tap legacy;
+    legacy.kind = pluginrack::Tap::Kind::Item;
+    legacy.itemId = 1;
+    CHECK(pluginrack::firstChainItemIndex(chain, legacy) == 0);
+    CHECK(pluginrack::firstChainItemIndex(chain, 0u) == 1);
+    CHECK(pluginrack::firstChainItemIndex(chain, 7u) == -1);
+
+    // resolveItemTap pins a legacy tap to that row's type, so it stays put when
+    // another family joins the chain with the same id.
+    const auto resolved = pluginrack::resolveItemTap(chain, legacy);
+    CHECK(resolved.hasItemType);
+    CHECK(resolved.itemType == ChainItemType::Dynamics);
 }

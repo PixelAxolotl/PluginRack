@@ -630,7 +630,14 @@ void from_json(const nlohmann::json& j, Bus& bus) {
 void to_json(nlohmann::json& j, const Tap& tap) {
     switch (tap.kind) {
         case Tap::Kind::Input: j = "Input"; break;
-        case Tap::Kind::Item: j = nlohmann::json{{"item", tap.itemId}}; break;
+        case Tap::Kind::Item: {
+            j = nlohmann::json{{"item", tap.itemId}};
+            // The row's type keeps two families that share an id (Gate and
+            // Feedback Suppressor are both id 1) apart. Older builds ignore the
+            // extra key and fall back to the first row with the id.
+            if (tap.hasItemType) j["type"] = tap.itemType;
+            break;
+        }
         case Tap::Kind::Output: j = "Output"; break;
     }
 }
@@ -645,6 +652,10 @@ void from_json(const nlohmann::json& j, Tap& tap) {
     } else if (j.is_object()) {
         tap.kind = Tap::Kind::Item;
         tap.itemId = j.value("item", 0u);
+        if (j.contains("type")) {
+            j.at("type").get_to(tap.itemType);
+            tap.hasItemType = true;
+        }
     }
 }
 

@@ -1382,6 +1382,52 @@ TEST_CASE("mixer skips a bypassed denoiser that has no chain row") {
     REQUIRE(firstNonZero(rendered[1]) == 128);
 }
 
+TEST_CASE("mixer a typed tap picks its own row when two families share an id") {
+    // Gate and Feedback Suppressor are both id 1 on one strip. A tap that
+    // carries the row's type must address that row, not the first row with the
+    // id. Here the second id-1 row is a limiter with a hard ceiling, so the two
+    // copies are distinguishable by level: the Dynamics tap sees the impulse
+    // before the limiter, the Limiter tap after it.
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    scene.channels[0].effects = {pluginrack::defaultDynamicsEffects().front()};
+    auto limiter = pluginrack::makeDefaultLimiterEffect(1);
+    // -12 dB is the floor the scene validator accepts; the impulse must come
+    // out of the Limiter tap at about a quarter of the pre-limiter copy.
+    limiter.ceilingDb = -12.0f;
+    scene.channels[0].limiterEffects = {limiter};
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Dynamics, 1},
+                               {pluginrack::ChainItemType::Limiter, 1}};
+    addOutput(scene, 1);
+    addOutput(scene, 2);
+    addOutput(scene, 3);
+
+    pluginrack::Tap dynamicsTap;
+    dynamicsTap.kind = pluginrack::Tap::Kind::Item;
+    dynamicsTap.itemId = 1;
+    dynamicsTap.hasItemType = true;
+    dynamicsTap.itemType = pluginrack::ChainItemType::Dynamics;
+    addTappedRoute(scene, 1, 2, dynamicsTap);
+
+    pluginrack::Tap limiterTap;
+    limiterTap.kind = pluginrack::Tap::Kind::Item;
+    limiterTap.itemId = 1;
+    limiterTap.hasItemType = true;
+    limiterTap.itemType = pluginrack::ChainItemType::Limiter;
+    addTappedRoute(scene, 1, 3, limiterTap);
+    addRoute(scene, 1, 1);
+
+    pluginrack::MixerEngine engine = prepareEngine(scene);
+    const auto rendered = renderImpulse(engine, 3);
+    // Both taps are latency-compensated to the same block (72 samples of
+    // limiter look-ahead), but only the Limiter tap carries the squashed level:
+    // the default Dynamics row alone leaves the impulse at 0.5, the -12 dB
+    // ceiling takes the post-limiter copy down to about a quarter.
+    REQUIRE(firstNonZero(rendered[1]) == 72);
+    REQUIRE(firstNonZero(rendered[2]) == 72);
+    REQUIRE(std::fabs(rendered[1][72]) > 1.5f * std::fabs(rendered[2][72]));
+}
+
 TEST_CASE("mixer a duplicate-id row that owns no tap does not republish it") {
     // chain = [Dynamics 1, Limiter 1]: the Item tap on id 1 belongs to the
     // first row, the Dynamics. The Limiter row repeats the id but owns no tap,

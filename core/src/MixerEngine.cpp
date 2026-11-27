@@ -244,8 +244,15 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     auto clampDelay = [](int delay) {
         return delay < 0 ? 0 : (delay > kMaxTapDelaySamples ? kMaxTapDelaySamples : delay);
     };
-    auto computeStripLatency = [](const Strip& strip, const InsertChain* chain, double sampleRate,
-                                  std::unordered_map<std::uint32_t, int>& itemLatency) {
+    // An Item tap is keyed by (type, id): built-in families mint ids
+    // independently, so a Dynamics row and a Feedback Suppressor row can both
+    // be id 1 and only the type tells their taps apart.
+    const auto itemTapKey = [](ChainItemType type, std::uint32_t id) {
+        return (static_cast<std::uint64_t>(type) << 32) | id;
+    };
+    auto computeStripLatency = [&itemTapKey](const Strip& strip, const InsertChain* chain,
+                                             double sampleRate,
+                                             std::unordered_map<std::uint64_t, int>& itemLatency) {
         // The EQ delay ring runs at an Eq chain row, at that row's position;
         // a strip without the row runs it as the last appended step (see
         // buildStrip) and bills it there. Both paths bill the same expression,
@@ -272,11 +279,9 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                 added = eqLatencySamples(strip.eqEnabled, false, strip.eqDelayMs, sampleRate);
             }
             total += added;
-            // A tap names an id, and ids repeat across families: it resolves to
-            // the first row carrying that id, so only that row publishes.
-            if (pluginrack::firstChainItemIndex(strip.chain, item.id) == static_cast<int>(row)) {
-                itemLatency[item.id] = total;
-            }
+            // Every row can be named by its own (id, type), so each one
+            // publishes the running total at its position.
+            itemLatency[itemTapKey(item.type, item.id)] = total;
         }
         // An effect with no chain row runs nothing, so it bills nothing. That
         // matches live render, where rows are the only thing that engages a
@@ -291,8 +296,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     };
     auto addTap = [](std::vector<TapState>& taps, const Tap& tap) {
         for (const TapState& existing : taps) {
-            if (existing.tap.kind == tap.kind &&
-                (tap.kind != Tap::Kind::Item || existing.tap.itemId == tap.itemId)) {
+            if (existing.tap == tap) {
                 return;
             }
         }
@@ -302,8 +306,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     };
     auto findTap = [](const std::vector<TapState>& taps, const Tap& tap) -> std::size_t {
         for (std::size_t i = 0; i < taps.size(); ++i) {
-            if (taps[i].tap.kind == tap.kind &&
-                (tap.kind != Tap::Kind::Item || taps[i].tap.itemId == tap.itemId)) {
+            if (taps[i].tap == tap) {
                 return i;
             }
         }
@@ -312,14 +315,16 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
 
     channelTaps_.assign(scene.channels.size(), {});
     for (const Route& route : scene.routes) {
-        addTap(channelTaps_[channelIndex[route.channelId]], route.tap);
+        const std::size_t c = static_cast<std::size_t>(channelIndex[route.channelId]);
+        addTap(channelTaps_[c], pluginrack::resolveItemTap(scene.channels[c].chain, route.tap));
     }
     for (const BusSend& send : scene.busSends) {
-        addTap(channelTaps_[channelIndex[send.channelId]], send.tap);
+        const std::size_t c = static_cast<std::size_t>(channelIndex[send.channelId]);
+        addTap(channelTaps_[c], pluginrack::resolveItemTap(scene.channels[c].chain, send.tap));
     }
     std::vector<int> channelLatencies(scene.channels.size(), 0);
     for (std::size_t c = 0; c < scene.channels.size(); ++c) {
-        std::unordered_map<std::uint32_t, int> itemLatency;
+        std::unordered_map<std::uint64_t, int> itemLatency;
         channelLatencies[c] = computeStripLatency(
             scene.channels[c],
             c < insertChains_.size() ? insertChains_[c].get() : nullptr,
@@ -331,9 +336,17 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
             } else if (state.tap.kind == Tap::Kind::Output) {
                 state.latencySamples = channelLatencies[c];
             } else {
-                const auto it = itemLatency.find(state.tap.itemId);
-                state.latencySamples =
-                    it != itemLatency.end() ? it->second : channelLatencies[c];
+                // TapState.tap is resolved: a legacy id-only tap was pinned to
+                // the first row carrying the id when it was added above.
+                const int row =
+                    pluginrack::firstChainItemIndex(scene.channels[c].chain, state.tap);
+                int latency = channelLatencies[c];
+                if (row >= 0) {
+                    const ChainItem& item = scene.channels[c].chain[static_cast<std::size_t>(row)];
+                    const auto it = itemLatency.find(itemTapKey(item.type, item.id));
+                    if (it != itemLatency.end()) latency = it->second;
+                }
+                state.latencySamples = latency;
             }
             state.ring.prepare(ringCapacity);
         }
@@ -341,7 +354,7 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
 
     busLatencies_.assign(scene.buses.size(), 0);
     for (std::size_t b = 0; b < scene.buses.size(); ++b) {
-        std::unordered_map<std::uint32_t, int> itemLatency;
+        std::unordered_map<std::uint64_t, int> itemLatency;
         busLatencies_[b] = computeStripLatency(
             scene.buses[b],
             b < busInsertChains_.size() ? busInsertChains_[b].get() : nullptr,
@@ -364,7 +377,9 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     for (std::size_t i = 0; i < scene.routes.size(); ++i) {
         RouteCache& cache = routes_[i];
         const std::vector<TapState>& taps = channelTaps_[cache.channelIndex];
-        cache.tapIndex = findTap(taps, scene.routes[i].tap);
+        cache.tapIndex = findTap(
+            taps, pluginrack::resolveItemTap(
+                      scene.channels[cache.channelIndex].chain, scene.routes[i].tap));
         const int tapLatency = taps[cache.tapIndex].latencySamples;
         cache.delaySamples = clampDelay(
             channelLatencies[cache.channelIndex] - tapLatency + maxBusLatency);
@@ -372,7 +387,9 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
     for (std::size_t i = 0; i < scene.busSends.size(); ++i) {
         BusSendCache& cache = busSends_[i];
         const std::vector<TapState>& taps = channelTaps_[cache.channelIndex];
-        cache.tapIndex = findTap(taps, scene.busSends[i].tap);
+        cache.tapIndex = findTap(
+            taps, pluginrack::resolveItemTap(
+                      scene.channels[cache.channelIndex].chain, scene.busSends[i].tap));
         const int tapLatency = taps[cache.tapIndex].latencySamples;
         cache.delaySamples = clampDelay(
             channelLatencies[cache.channelIndex] - tapLatency);
@@ -462,11 +479,11 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
     bool usedEq = false;
     for (std::size_t row = 0; row < source.chain.size(); ++row) {
         const ChainItem& item = source.chain[row];
-        // An item tap names an id, and the built-in families reuse small ids, so
-        // a tap means the first row carrying that id; a later row repeating it
-        // must not push the ring. Same rule as pluginrack::firstChainItemIndex.
+        // An item tap names a row by (id, type); a duplicate row of the same
+        // family must not push the ring. Same rule as
+        // pluginrack::firstChainItemIndex.
         const bool tapOwned =
-            pluginrack::firstChainItemIndex(source.chain, item.id) == static_cast<int>(row);
+            pluginrack::firstChainItemIndex(source.chain, item) == static_cast<int>(row);
         auto addStep = [&strip, &item, tapOwned](std::size_t index) {
             strip.steps.push_back({item.type, index, item.id, tapOwned});
         };
@@ -548,7 +565,8 @@ MixerEngine::StripDsp MixerEngine::buildStrip(const Strip& source, double sample
 }
 
 void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int frames,
-                               void (*afterStep)(void*, std::uint32_t), void* ctx) {
+                               void (*afterStep)(void*, ChainItemType, std::uint32_t),
+                               void* ctx) {
     for (const Step& step : strip.steps) {
         switch (step.type) {
         case ChainItemType::Dynamics:
@@ -582,18 +600,25 @@ void MixerEngine::processStrip(StripDsp& strip, float* left, float* right, int f
             break;
         }
         if (afterStep != nullptr && step.tapOwned) {
-            afterStep(ctx, step.id);
+            afterStep(ctx, step.type, step.id);
         }
     }
 }
 
-void MixerEngine::pushItemTap(void* ctx, std::uint32_t itemId) {
+void MixerEngine::pushItemTap(void* ctx, ChainItemType type, std::uint32_t itemId) {
     auto* push = static_cast<TapPush*>(ctx);
     for (TapState& state : *push->taps) {
-        if (state.tap.kind == Tap::Kind::Item && state.tap.itemId == itemId) {
+        if (state.tap.kind == Tap::Kind::Item && state.tap.itemId == itemId
+            && (!state.tap.hasItemType || state.tap.itemType == type)) {
             state.ring.push(push->left, push->right, push->frames);
         }
     }
+}
+
+void MixerEngine::pushInsertTap(void* ctx, std::uint32_t itemId) {
+    // InsertChain pushes per slot id; the tap must name an Insert row, not a
+    // built-in row that happens to share the id.
+    pushItemTap(ctx, ChainItemType::Insert, itemId);
 }
 
 void MixerEngine::setChannelEq(int ch, const std::vector<EqBand>& bands) {    if (dsp_ == nullptr) {
@@ -792,7 +817,7 @@ void MixerEngine::render(std::span<const AudioBlock> channelInputs,
                          scratchLeft, scratchRight, frames};
             insertChains_[c]->process(
                 scratchBlock,
-                c < channelTaps_.size() ? &MixerEngine::pushItemTap : nullptr, &push);
+                c < channelTaps_.size() ? &MixerEngine::pushInsertTap : nullptr, &push);
             // The chain scrubs after each VST; scrub the strip boundary as
             // well so a plugin that wrote past its block cannot leak.
             if (scrubEnabled_) {

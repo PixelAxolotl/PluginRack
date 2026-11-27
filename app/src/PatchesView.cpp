@@ -298,13 +298,14 @@ void PatchesView::paintInputCard(juce::Graphics& g, const Node& node, bool selec
 
 juce::Point<int> PatchesView::socketPoint(const Node& node,
                                           const pluginrack::Tap& tap) const {
-    // Sockets are deduped in rebuild(), so the first id match here is the one
-    // the engine resolves (pluginrack::firstChainItemIndex).
+    // A tap names a chain row by (id, type); a legacy id-only tap falls back to
+    // the first socket carrying the id, the row the engine resolves it to.
     for (const auto& socket : node.sockets) {
-        if (socket.tap.kind == tap.kind &&
-            (tap.kind != pluginrack::Tap::Kind::Item || socket.tap.itemId == tap.itemId)) {
-            return socket.pos;
-        }
+        if (socket.tap.kind != tap.kind) continue;
+        if (tap.kind != pluginrack::Tap::Kind::Item) return socket.pos;
+        if (socket.tap.itemId != tap.itemId) continue;
+        if (tap.hasItemType && socket.tap.itemType != tap.itemType) continue;
+        return socket.pos;
     }
     return node.port;
 }
@@ -650,17 +651,17 @@ void PatchesView::rebuild() {
         node.sockets.push_back(inputSocket);
         for (std::size_t i = 0; i < ch->chain.size(); ++i) {
             const auto& item = ch->chain[i];
-            // A tap is keyed by chain id alone (Tap::Kind::Item) and the
-            // built-in families mint ids independently, so one strip can hold
-            // a Dynamics row and a Limiter row that are both id 1. The tap
-            // identity rule is the first matching row
-            // (pluginrack::firstChainItemIndex): a later row sharing the id
-            // could never be addressed, so the card does not offer it.
-            if (static_cast<int>(i) != pluginrack::firstChainItemIndex(ch->chain, item.id))
+            // A tap names a row by (id, type). Built-in families mint ids
+            // independently, so one strip can hold a Gate row and a Feedback
+            // Suppressor row that are both id 1; the type keeps them distinct,
+            // so every row is a source and no row disappears from the card.
+            if (static_cast<int>(i) != pluginrack::firstChainItemIndex(ch->chain, item))
                 continue;
             Socket socket;
             socket.tap.kind = pluginrack::Tap::Kind::Item;
             socket.tap.itemId = item.id;
+            socket.tap.hasItemType = true;
+            socket.tap.itemType = item.type;
             socket.label = chainItemLabel(*ch, item);
             node.sockets.push_back(socket);
         }

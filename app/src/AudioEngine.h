@@ -107,10 +107,10 @@ public:
         // vector); size_t(-1) when the row names nothing the strip still owns.
         std::size_t index = std::size_t(-1);
         std::uint32_t itemId = 0;
-        // True for the one chain row that owns this item's Item tap - the row
-        // pluginrack::firstChainItemIndex resolves. Later rows that share the
-        // id must not push, so the ring and the billed latency stay on the
-        // first row.
+        // True for the chain row that owns this item's Item tap - the row
+        // pluginrack::firstChainItemIndex resolves for the tap's (id, type).
+        // A duplicate row of the same family must not push, so the ring and the
+        // billed latency stay on the first row.
         bool tapOwned = false;
         // Resolved VST slot for an Insert row; nullptr when the id is gone.
         InsertSlot* insert = nullptr;

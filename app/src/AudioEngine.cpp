@@ -131,8 +131,8 @@ void setWasapiProbeCapEnvironment(bool enabled, int channels) {
 // The rules are the ones render() used inline:
 //  - a built-in row resolves its effect by id inside its own family vector, an
 //    Insert row resolves its slot by id inside `inserts`;
-//  - a row's Item tap is owned by the first row carrying that id, even when a
-//    later row of another family shares it (Scene.h firstChainItemIndex);
+//  - a row's Item tap is owned by the row carrying its (id, type), even when a
+//    row of another family shares the id (Scene.h firstChainItemIndex);
 //  - an effect with no chain row does not run at all. The chain is the only
 //    thing that engages a built-in, so a removed row cannot leave a hidden
 //    processor (and its latency) in the path;
@@ -158,8 +158,13 @@ void buildRenderPlan(StripType& strip) {
         AudioEngine::RenderStep step;
         step.type = item.type;
         step.itemId = item.id;
+        pluginrack::Tap rowTap;
+        rowTap.kind = pluginrack::Tap::Kind::Item;
+        rowTap.itemId = item.id;
+        rowTap.hasItemType = true;
+        rowTap.itemType = item.type;
         step.tapOwned =
-            pluginrack::firstChainItemIndex(strip.chain, item.id) == static_cast<int>(row);
+            pluginrack::firstChainItemIndex(strip.chain, rowTap) == static_cast<int>(row);
         switch (item.type) {
         case pluginrack::ChainItemType::Eq:
             strip.hasEqInChain = true;
@@ -988,15 +993,19 @@ void AudioEngine::render(int frames) {
                     // escaped one plugin must not reach the next one's state or
                     // the mix bus.
                     scrubRange(channel->buffer, start, count);
-                    // The plan put the Item tap on the first chain row with its
-                    // id (Scene.h firstChainItemIndex), the same row
+                    // The plan put the Item tap on the row carrying this step's
+                    // (id, type) (Scene.h firstChainItemIndex), the same row
                     // tapLatencySamples measures. Built-in families mint ids
-                    // independently, so a later row of another family can share
-                    // the id; pushing there too would leave the ring holding
-                    // that row's signal while the latency came from the first.
+                    // independently, so a Gate row and a Feedback Suppressor row
+                    // can both be id 1; the type is what keeps their taps (and
+                    // their latency) on the right row.
                     if (step.tapOwned) {
-                        if (auto* point = findTapPoint(
-                                *channel, pluginrack::Tap{pluginrack::Tap::Kind::Item, step.itemId})) {
+                        pluginrack::Tap stepTap;
+                        stepTap.kind = pluginrack::Tap::Kind::Item;
+                        stepTap.itemId = step.itemId;
+                        stepTap.hasItemType = true;
+                        stepTap.itemType = step.type;
+                        if (auto* point = findTapPoint(*channel, stepTap)) {
                             point->ring.push(block.getReadPointer(0), block.getReadPointer(1), count);
                         }
                     }
@@ -2394,10 +2403,10 @@ int AudioEngine::tapLatencySamples(const Channel& channel, const pluginrack::Tap
     // in AudioEngine.h); only the items up to and including the tapped one
     // have run by the time the tap fires. The tapped item resolves through the
     // shared identity rule (Scene.h firstChainItemIndex), exactly as the render
-    // push does: ids are minted per family, so a later row in another family
-    // can share the id and must not be the one this latency is measured at.
+    // push does: a typed tap names its own (id, type) row, and a legacy
+    // id-only tap keeps meaning the first row with that id.
     if (tap.kind == Kind::Item) {
-        const int index = pluginrack::firstChainItemIndex(channel.chain, tap.itemId);
+        const int index = pluginrack::firstChainItemIndex(channel.chain, tap);
         if (index >= 0) {
             int total = 0;
             for (int i = 0; i <= index; ++i) {
@@ -2433,22 +2442,26 @@ void AudioEngine::ensureTapPoint(Channel& channel, const pluginrack::Tap& tap) {
     if (tap.kind == pluginrack::Tap::Kind::Output) {
         return;
     }
-    if (findTapPoint(channel, tap) != nullptr) {
+    const auto resolved = pluginrack::resolveItemTap(channel.chain, tap);
+    if (findTapPoint(channel, resolved) != nullptr) {
         return;
     }
     TapPoint point;
-    point.tap = tap;
+    point.tap = resolved;
     point.ring.prepare(pluginrack::kMaxTapDelaySamples
                        + juce::jmax(currentBufferSize, maxBlockFrames_) + 2);
     // Cache the delay this point bills so sends/routes never re-walk the chain.
     point.cachedLatencySamples = tapLatencySamples(
-        channel, tap, currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
+        channel, resolved, currentSampleRate > 0.0 ? currentSampleRate : 48000.0);
     channel.tapPoints.push_back(std::move(point));
 }
 
 AudioEngine::TapPoint* AudioEngine::findTapPoint(Channel& channel, const pluginrack::Tap& tap) {
+    // A legacy id-only tap resolves to the first row with the id, the same row
+    // ensureTapPoint stored; typed taps match their own row.
+    const auto resolved = pluginrack::resolveItemTap(channel.chain, tap);
     for (auto& point : channel.tapPoints) {
-        if (point.tap == tap) {
+        if (point.tap == resolved) {
             return &point;
         }
     }
@@ -2457,8 +2470,9 @@ AudioEngine::TapPoint* AudioEngine::findTapPoint(Channel& channel, const pluginr
 
 const AudioEngine::TapPoint* AudioEngine::findTapPoint(const Channel& channel,
                                                        const pluginrack::Tap& tap) const {
+    const auto resolved = pluginrack::resolveItemTap(channel.chain, tap);
     for (const auto& point : channel.tapPoints) {
-        if (point.tap == tap) {
+        if (point.tap == resolved) {
             return &point;
         }
     }

@@ -817,3 +817,39 @@ TEST_CASE("pre-v8 scenes drop side-chain routing and buses") {
             pluginrack::SideChainTap::PostFader);
     REQUIRE(loaded.scene->channels.front().inserts.front().sideChainGainDb == 0.0f);
 }
+
+TEST_CASE("an item tap carries its chain row type and older taps stay id-only") {
+    // New saves name the row's type, so a Gate and a Feedback Suppressor that
+    // both mint id 1 stay distinguishable.
+    const std::string json = R"({
+        "schemaVersion": 11,
+        "channels": [{"id": 1, "chain": [{"type": "FeedbackSuppressor", "id": 1}]}],
+        "outputs": [{"id": 1}],
+        "routes": [{"channelId": 1, "outputId": 1, "sendGainDb": 0,
+                    "tap": {"item": 1, "type": "FeedbackSuppressor"}}]
+    })";
+    const pluginrack::SceneLoadResult typed = pluginrack::fromJson(json);
+    REQUIRE(typed.errors.empty());
+    REQUIRE(typed.scene.has_value());
+    const auto& typedTap = typed.scene->routes.front().tap;
+    REQUIRE(typedTap.hasItemType);
+    REQUIRE(typedTap.itemType == pluginrack::ChainItemType::FeedbackSuppressor);
+    REQUIRE(pluginrack::toJson(*typed.scene).find(
+                "\"tap\":{\"item\":1,\"type\":\"FeedbackSuppressor\"}")
+            != std::string::npos);
+
+    // A tap written before taps carried a type still loads and keeps the
+    // historical meaning: the first row with that id.
+    const std::string legacyJson = R"({
+        "schemaVersion": 11,
+        "channels": [{"id": 1, "chain": [{"type": "FeedbackSuppressor", "id": 1}]}],
+        "outputs": [{"id": 1}],
+        "routes": [{"channelId": 1, "outputId": 1, "sendGainDb": 0,
+                    "tap": {"item": 1}}]
+    })";
+    const pluginrack::SceneLoadResult legacy = pluginrack::fromJson(legacyJson);
+    REQUIRE(legacy.errors.empty());
+    REQUIRE(legacy.scene.has_value());
+    REQUIRE_FALSE(legacy.scene->routes.front().tap.hasItemType);
+    REQUIRE(legacy.scene->routes.front().tap.itemId == 1u);
+}

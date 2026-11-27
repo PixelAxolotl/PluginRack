@@ -697,12 +697,13 @@ std::vector<SceneError> validate(const Scene& scene) {
         if (channel == channelById.end()) {
             return; // the unknown channel is reported by the caller
         }
-        // One rule, the same one the engine resolves the tap with: the id must
-        // name a chain row. Zero is not special - an Eq row is id 0, and the
-        // patch view offers it as a tap source, so rejecting zero here would
-        // save a scene that cannot be loaded again.
+        // One rule, the same one the engine resolves the tap with: the id (and,
+        // when the tap names it, the type) must name a chain row. Zero is not
+        // special - an Eq row is id 0, and the patch view offers it as a tap
+        // source, so rejecting zero here would save a scene that cannot be
+        // loaded again.
         for (const ChainItem& item : channel->second->chain) {
-            if (item.id == tap.itemId) {
+            if (item.id == tap.itemId && (!tap.hasItemType || item.type == tap.itemType)) {
                 return;
             }
         }

@@ -79,13 +79,24 @@ struct ChainItem {
     bool operator==(const ChainItem&) const = default;
 };
 
-// The one identity rule for Tap::Kind::Item. Built-in families mint ids
-// independently, so a Dynamics row and a Limiter row on the same strip can
-// both be id 1; the tap carries no type, so "the first chain row whose id
-// matches" is what identifies it. The live engine resolves both the ring it
-// writes (AudioEngine::render) and the latency it bills
+// The one identity rule for Tap::Kind::Item, keyed by the row's (id, type).
+// Built-in families mint ids independently, so a Dynamics row and a Feedback
+// Suppressor row on the same strip can both be id 1; the type is what tells
+// them apart. The live engine resolves both the ring it writes
+// (AudioEngine::render) and the latency it bills
 // (AudioEngine::tapLatencySamples) through this function, so a tap's signal
 // and its delay always come from the same row. Returns -1 when no row matches.
+inline int firstChainItemIndex(const std::vector<ChainItem>& chain,
+                               const ChainItem& item) {
+    for (int i = 0; i < static_cast<int>(chain.size()); ++i) {
+        const auto& row = chain[static_cast<std::size_t>(i)];
+        if (row.id == item.id && row.type == item.type) return i;
+    }
+    return -1;
+}
+
+// Legacy id-only lookup: a tap minted before taps carried their row's type.
+// It means the first row with that id, the rule every older scene relies on.
 inline int firstChainItemIndex(const std::vector<ChainItem>& chain,
                                std::uint32_t itemId) {
     for (int i = 0; i < static_cast<int>(chain.size()); ++i) {
@@ -96,22 +107,48 @@ inline int firstChainItemIndex(const std::vector<ChainItem>& chain,
 
 // A point in a channel's audio path that a send taps. Input is the trimmed
 // signal before the chain, Output is the post-fader signal, and Item is the
-// output of one chain item (identified by ChainItem::id so reordering the
-// chain keeps the tap on the same processor). Output is the default, which
+// output of one chain item (identified by ChainItem::id and type so reordering
+// the chain keeps the tap on the same processor). Output is the default, which
 // reproduces the pre-schema-10 behaviour.
 //
 // Item ids are not unique across families: every built-in family mints its own
-// id 1. The tap therefore means the first chain row with that id, per
-// firstChainItemIndex above; that is the row whose output the engine pushes
-// into the tap ring and whose delay it bills.
+// id 1. A tap minted now therefore carries the row's type too, which is what
+// tells a Gate row (Dynamics, id 1) apart from a Feedback Suppressor row (id 1)
+// on the same strip. Taps loaded from older scenes have no type; they keep the
+// historical meaning "the first chain row with that id" (firstChainItemIndex).
 struct Tap {
     enum class Kind { Input, Item, Output };
 
     Kind kind = Kind::Output;
     std::uint32_t itemId = 0;
+    // True when itemType names the tapped row. False is a legacy id-only tap.
+    bool hasItemType = false;
+    ChainItemType itemType = ChainItemType::Insert;
 
     bool operator==(const Tap&) const = default;
 };
+
+// Resolve an Item tap to a row index using the one identity rule: a typed tap
+// matches its own (id, type) row, a legacy tap matches the first row with its
+// id. Returns -1 when nothing matches (a row that left the chain).
+inline int firstChainItemIndex(const std::vector<ChainItem>& chain, const Tap& tap) {
+    if (tap.kind != Tap::Kind::Item) return -1;
+    if (!tap.hasItemType) return firstChainItemIndex(chain, tap.itemId);
+    return firstChainItemIndex(chain, ChainItem{tap.itemType, tap.itemId});
+}
+
+// Fill in a legacy Item tap's type from the first row that carries its id, so
+// the tap points at one row for good. Untyped taps that match nothing (a row
+// that left the chain) are returned unchanged.
+inline Tap resolveItemTap(const std::vector<ChainItem>& chain, Tap tap) {
+    if (tap.kind != Tap::Kind::Item || tap.hasItemType) return tap;
+    const int index = firstChainItemIndex(chain, tap.itemId);
+    if (index >= 0) {
+        tap.hasItemType = true;
+        tap.itemType = chain[static_cast<std::size_t>(index)].type;
+    }
+    return tap;
+}
 
 // Everything a channel and an output share: identity, level, inserts, the
 // effect chain and the EQ. Both strip kinds render through the same
