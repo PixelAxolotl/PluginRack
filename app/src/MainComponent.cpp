@@ -221,10 +221,7 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
                     if (onSaveIdentityChanged) onSaveIdentityChanged(oldName, newName);
                 })
     , settingsView(audioEngine) {
-    rackView.onJumpToMixer = [this] {
-        setView(AppView::Mixer);
-        if (onViewChanged) onViewChanged(AppView::Mixer);
-    };
+    rackView.onJumpToMixer = [this] { setView(AppView::Mixer); };
     rackView.onStructureChanged = [this] {
         if (onStructureChanged) onStructureChanged();
     };
@@ -280,6 +277,12 @@ void ViewRouter::setView(AppView view) {
     ioView.setVisible(view == AppView::IO);
     savesView.setVisible(view == AppView::Saves);
     settingsView.setVisible(view == AppView::Settings);
+
+    // Every path that changes view must reach the toolbar, not just toolbar
+    // clicks: double-clicking a strip jumps to the rack from inside a view,
+    // and a stale toggle leaves the old tab lit. Guarded because the router
+    // sets its initial view before the host wires this up.
+    if (onViewChanged) onViewChanged(view);
 }
 
 void ViewRouter::refreshViews() {
