@@ -6,7 +6,7 @@
 #include "Theme.h"
 
 namespace {
-constexpr int kCaptionH = 56; // linked-dial name + "TOUCH / AND / SLIDE"
+constexpr int kCaptionH = 56; // linked-dial name + "TOUCH / SLIDE"
 constexpr int kReadoutH = 26;
 constexpr int kThumbW = 28;
 constexpr int kThumbH = 16;
@@ -55,8 +55,10 @@ void TouchSlideBar::paint(juce::Graphics& g) {
 
     g.setColour(theme::dim().withAlpha(0.85f));
     g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
-    const char* lines[3] = { "TOUCH", "AND", "SLIDE" };
-    for (int i = 0; i < 3; ++i)
+    // Two words fit the narrow strip; three stacked words read as a wrapped
+    // accident rather than a caption.
+    const char* lines[2] = { "TOUCH", "SLIDE" };
+    for (int i = 0; i < 2; ++i)
         g.drawText(lines[i], caption.removeFromTop(12), juce::Justification::centred, false);
 
     const auto track = trackBounds();

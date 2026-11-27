@@ -3007,7 +3007,7 @@ void RackView::SourceRowList::paint(juce::Graphics& g) {
         g.setColour(theme::bg().withAlpha(0.75f));
         g.setFont(theme::ui::captionFont());
         g.drawFittedText(devices[i], text, juce::Justification::centredLeft, 1);
-        area.removeFromTop(2);
+        area.removeFromTop(theme::ui::kTightGap);
     }
 }
 
@@ -3166,7 +3166,7 @@ void RackView::rebuild() {
 }
 
 void RackView::resized() {
-    auto area = getLocalBounds().reduced(8);
+    auto area = getLocalBounds().reduced(theme::ui::kRowGap);
     if (emptyLabel.isVisible()) {
         emptyLabel.setBounds(area);
         return;
@@ -3176,7 +3176,7 @@ void RackView::resized() {
     const int pluginW = 220;
     const int rightW = 110;
     const int touchW = 64;
-    const int gap = 8;
+    const int gap = theme::ui::kRowGap;
 
     auto leftArea = area.removeFromLeft(leftW);
     area.removeFromLeft(gap);
@@ -3190,81 +3190,81 @@ void RackView::resized() {
 
     touchBar.setBounds(touchArea);
 
-    // left column
-    auto la = leftArea.reduced(4);
-    la.removeFromTop(14);
+    // left column — one shared scale for the gutters between groups
+    auto la = leftArea.reduced(theme::ui::kSpace1);
+    la.removeFromTop(theme::ui::kSpace3);
     auto selectorRow = la.removeFromTop(32);
     channelCombo.setBounds(selectorRow);
-    la.removeFromTop(6);
+    la.removeFromTop(theme::ui::kRowGap);
     nameLabel.setBounds(la.removeFromTop(20));
     subLabel.setBounds(la.removeFromTop(16));
-    la.removeFromTop(10);
+    la.removeFromTop(theme::ui::kSpace2);
 
     if (currentChannel() != nullptr) {
         auto inputRow = la.removeFromTop(theme::metrics::kFieldH);
         if (inputEditing) {
             modeCombo.setBounds(inputRow.removeFromLeft(44));
-            inputRow.removeFromLeft(2);
+            inputRow.removeFromLeft(theme::ui::kTightGap);
             inputComboA.setBounds(inputRow.removeFromLeft(36));
-            inputRow.removeFromLeft(2);
+            inputRow.removeFromLeft(theme::ui::kTightGap);
             if (inputComboB.isVisible()) {
                 inputComboB.setBounds(inputRow.removeFromLeft(36));
-                inputRow.removeFromLeft(2);
+                inputRow.removeFromLeft(theme::ui::kTightGap);
             }
             inputChip.setBounds(inputRow);
         } else {
             inputChip.setBounds(inputRow);
         }
-        la.removeFromTop(2);
+        la.removeFromTop(theme::ui::kTightGap);
     }
 
     // Trim and Pan share one row, matching the Mixer channel strip.
     if (currentChannel() != nullptr) {
         auto controlsRow = la.removeFromTop(74);
-        const int knobCellW = (controlsRow.getWidth() - 4) / 2;
+        const int knobCellW = (controlsRow.getWidth() - theme::ui::kSpace1) / 2;
         auto trimCell = controlsRow.removeFromLeft(knobCellW);
-        controlsRow.removeFromLeft(4);
+        controlsRow.removeFromLeft(theme::ui::kSpace1);
         auto panCell = controlsRow.removeFromLeft(knobCellW);
         trimCaption.setBounds(trimCell.removeFromTop(14));
-        trimKnob.setBounds(trimCell.reduced(2));
+        trimKnob.setBounds(trimCell.reduced(theme::ui::kTightGap));
         panCaption.setBounds(panCell.removeFromTop(14));
-        panSlider.setBounds(panCell.reduced(2));
-        la.removeFromTop(4);
+        panSlider.setBounds(panCell.reduced(theme::ui::kTightGap));
+        la.removeFromTop(theme::ui::kSpace1);
     }
 
-    la.removeFromBottom(6); // breathing room above the panel edge
+    la.removeFromBottom(theme::ui::kRowGap); // breathing room above the panel edge
     auto btnRow = la.removeFromBottom(24);
-    la.removeFromBottom(14);
+    la.removeFromBottom(theme::ui::kSpace3);
 
     auto faderRow = la;
     auto meterColumn = faderRow.removeFromRight(LevelMeter::kPreferredWidth);
-    faderRow.removeFromRight(4);
+    faderRow.removeFromRight(theme::ui::kSpace1);
     gainCaption.setBounds(faderRow.removeFromTop(14));
-    gainSlider.setBounds(faderRow.reduced(0, 4));
+    gainSlider.setBounds(faderRow.reduced(0, theme::ui::kSpace1));
     // The meter lines its bars up with the fader's travel itself, and takes
     // the strip above that travel for the Peak/RMS readouts.
     if (meter != nullptr) meter->setBounds(meterColumn);
 
     if (soloButton.isVisible()) {
-        const int third = btnRow.getWidth() / 3 - 3;
+        const int third = btnRow.getWidth() / 3 - theme::ui::kSpace1;
         muteButton.setBounds(btnRow.removeFromLeft(third));
-        btnRow.removeFromLeft(4);
+        btnRow.removeFromLeft(theme::ui::kSpace1);
         soloButton.setBounds(btnRow.removeFromLeft(third));
-        btnRow.removeFromLeft(4);
+        btnRow.removeFromLeft(theme::ui::kSpace1);
         mixerButton.setBounds(btnRow);
     } else {
-        const int half = btnRow.getWidth() / 2 - 2;
+        const int half = btnRow.getWidth() / 2 - theme::ui::kTightGap;
         muteButton.setBounds(btnRow.removeFromLeft(half));
-        btnRow.removeFromLeft(4);
+        btnRow.removeFromLeft(theme::ui::kSpace1);
         mixerButton.setBounds(btnRow);
     }
 
     // plugin column
-    auto pa = pluginArea.reduced(4);
+    auto pa = pluginArea.reduced(theme::ui::kSpace1);
     // Built-in effects and VST inserts share one ordered list in the rack.
-    pa.removeFromTop(14);
+    pa.removeFromTop(theme::ui::kSpace3);
     insertsHeader.setBounds(pa.removeFromTop(16));
-    pa.removeFromTop(4);
+    pa.removeFromTop(theme::ui::kSpace1);
     slotViewport.setBounds(pa);
     layoutSlots();
 
@@ -3273,10 +3273,10 @@ void RackView::resized() {
     // directly would cover the panel outline. A focused VST insert also gets
     // the side-chain strip pinned above its editor.
     updateSideChainBar();
-    auto editorArea = centerArea.reduced(2);
+    auto editorArea = centerArea.reduced(theme::ui::kTightGap);
     if (sideChainBarVisible) {
         sideChainBar.setBounds(editorArea.removeFromTop(SideChainBar::kHeight));
-        editorArea.removeFromTop(4);
+        editorArea.removeFromTop(theme::ui::kSpace1);
     }
     editorViewport.setBounds(editorArea);
     const int vw = juce::jmax(0, editorViewport.getWidth());
@@ -3323,20 +3323,20 @@ void RackView::resized() {
         auto noArea = editorHolder.getLocalBounds();
         if (noEditorBypass.isVisible()) {
             noEditorBypass.setBounds(noArea.removeFromTop(24).removeFromRight(100));
-            noArea.removeFromTop(4);
+            noArea.removeFromTop(theme::ui::kSpace1);
         }
         noEditorLabel.setBounds(noArea);
     }
 
     // right column
-    auto ra = rightArea.reduced(4);
-    ra.removeFromTop(14);
+    auto ra = rightArea.reduced(theme::ui::kSpace1);
+    ra.removeFromTop(theme::ui::kSpace3);
     outputHeader.setBounds(ra.removeFromTop(20));
-    ra.removeFromTop(4);
+    ra.removeFromTop(theme::ui::kSpace1);
     sourceList.setBounds(ra);
     int y = ra.getY();
     const int btnH = 26;
-    const int btnGap = 4;
+    const int btnGap = theme::ui::kSpace1;
     for (auto* b : outputButtons) {
         b->setBounds(ra.getX(), y, ra.getWidth(), btnH);
         y += btnH + btnGap;
@@ -3356,12 +3356,12 @@ void RackView::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
     if (emptyLabel.isVisible()) return;
 
-    auto area = getLocalBounds().reduced(8);
+    auto area = getLocalBounds().reduced(theme::ui::kRowGap);
     const int leftW = 160;
     const int pluginW = 220;
     const int rightW = 110;
     const int touchW = 64;
-    const int gap = 8;
+    const int gap = theme::ui::kRowGap;
     auto leftArea = area.removeFromLeft(leftW);
     area.removeFromLeft(gap);
     auto rightArea = area.removeFromRight(rightW);

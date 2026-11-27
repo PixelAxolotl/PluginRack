@@ -132,6 +132,9 @@ inline constexpr int kSpace1 = 4;
 inline constexpr int kSpace2 = 8;
 inline constexpr int kSpace3 = 16;
 inline constexpr int kSpace4 = 24;
+// Half-step for controls that sit inside a single row (adjacent combo boxes,
+// routing chips). Dense strips use it instead of inventing a new number.
+inline constexpr int kTightGap = 2;
 
 inline constexpr int kPagePad = kSpace3;     // page inset for page views
 inline constexpr int kHeaderH = 34;          // page title row

@@ -589,7 +589,7 @@ void ChannelStrip::refreshDynamicsButtons() {
 }
 
 void ChannelStrip::resized() {
-    auto area = getLocalBounds().reduced(4);
+    auto area = getLocalBounds().reduced(theme::ui::kSpace1);
 
     // Header: the strip's own buttons take a short row of their own so the
     // channel name keeps the full width instead of collapsing to "Cha...".
@@ -600,55 +600,55 @@ void ChannelStrip::resized() {
                            ? actionsRow.removeFromLeft(theme::metrics::kActionH)
                            : juce::Rectangle<int>();
     removeChannelButton.setBounds(actionsRow.removeFromRight(theme::metrics::kCloseW));
-    actionsRow.removeFromRight(2);
+    actionsRow.removeFromRight(theme::ui::kTightGap);
     splitButton.setBounds(actionsRow.removeFromRight(theme::metrics::kActionW));
-    area.removeFromTop(2);
+    area.removeFromTop(theme::ui::kTightGap);
     deviceControl.setBounds(area.removeFromTop(theme::metrics::kDeviceH));
-    area.removeFromTop(4);
+    area.removeFromTop(theme::ui::kSpace1);
 
     // Input chip, or the mapping controls it swaps into when clicked.
     auto inputRow = area.removeFromTop(theme::metrics::kFieldH);
     if (inputEditing) {
         modeCombo.setBounds(inputRow.removeFromLeft(44));
-        inputRow.removeFromLeft(2);
+        inputRow.removeFromLeft(theme::ui::kTightGap);
         inputComboA.setBounds(inputRow.removeFromLeft(36));
-        inputRow.removeFromLeft(2);
+        inputRow.removeFromLeft(theme::ui::kTightGap);
         if (inputComboB.isVisible()) {
             inputComboB.setBounds(inputRow.removeFromLeft(36));
-            inputRow.removeFromLeft(2);
+            inputRow.removeFromLeft(theme::ui::kTightGap);
         }
         inputChip.setBounds(inputRow);
     } else {
         inputChip.setBounds(inputRow);
     }
-    area.removeFromTop(2);
+    area.removeFromTop(theme::ui::kTightGap);
 
     // Trim and Pan share one row, above the chain: the first two things a
     // channel is reached for sit where the eye lands, not below eight slots.
     auto gainRow = area.removeFromTop(74);
-    const int knobCellW = (gainRow.getWidth() - 4) / 2;
+    const int knobCellW = (gainRow.getWidth() - theme::ui::kSpace1) / 2;
     auto trimCell = gainRow.removeFromLeft(knobCellW);
-    gainRow.removeFromLeft(4);
+    gainRow.removeFromLeft(theme::ui::kSpace1);
     auto panCell = gainRow.removeFromLeft(knobCellW);
     levelLabel.setBounds(trimCell.removeFromTop(14));
-    levelKnob.setBounds(trimCell.reduced(2));
+    levelKnob.setBounds(trimCell.reduced(theme::ui::kTightGap));
     panLabel.setBounds(panCell.removeFromTop(14));
-    panKnob.setBounds(panCell.reduced(2));
-    area.removeFromTop(4);
+    panKnob.setBounds(panCell.reduced(theme::ui::kTightGap));
+    area.removeFromTop(theme::ui::kSpace1);
 
     // Unified built-in and VST chain: 3 built-ins + the live inserts.
     // The rows give height back before they squeeze the fader out of the strip.
     vstHeader.setBounds(area.removeFromTop(14));
     const int routingRows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
-    const int reservedBelow = routingRows * 20 + 4 + 150;  // routing + fader
+    const int reservedBelow = routingRows * 20 + theme::ui::kSpace1 + 150; // routing + fader
     const int rowCount = juce::jmax(1, slots.size());
-    const int chainSpace = juce::jmax(0, area.getHeight() - 4 - reservedBelow);
+    const int chainSpace = juce::jmax(0, area.getHeight() - theme::ui::kSpace1 - reservedBelow);
     const int slotH = juce::jlimit(14, 20, (chainSpace - 2 * rowCount) / rowCount);
     for (int i = 0; i < (int)slots.size(); ++i) {
         slots[i]->setBounds(area.removeFromTop(slotH));
-        area.removeFromTop(2);
+        area.removeFromTop(theme::ui::kTightGap);
     }
-    area.removeFromTop(4);
+    area.removeFromTop(theme::ui::kSpace1);
 
     // routing buttons (compact)
     const int rows = juce::jmax(1, ((int)routingButtons.size() + 3) / 4);
@@ -662,21 +662,21 @@ void ChannelStrip::resized() {
                                     routingArea.getY() + row * 20,
                                     juce::jmax(1, cellW - 2), 18);
     }
-    area.removeFromTop(4);
+    area.removeFromTop(theme::ui::kSpace1);
 
     // fader + meter (bottom, dominant). The meter lines its bars up with the
     // fader's travel itself and keeps the readouts in the strip above the
     // travel, so it takes the fader's full height.
     auto footer = area.removeFromBottom(theme::metrics::kRowH); // M / S
-    const int half = (footer.getWidth() - 4) / 2;
+    const int half = (footer.getWidth() - theme::ui::kSpace1) / 2;
     auto fm = area;
     auto meterColumn = fm.removeFromRight(LevelMeter::kPreferredWidth);
-    fm.removeFromRight(4);
+    fm.removeFromRight(theme::ui::kSpace1);
     faderSlider.setBounds(fm);
     levelMeter.setBounds(meterColumn);
 
     muteButton.setBounds(footer.removeFromLeft(half));
-    footer.removeFromLeft(4);
+    footer.removeFromLeft(theme::ui::kSpace1);
     soloButton.setBounds(footer);
 }
 

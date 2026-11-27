@@ -82,9 +82,12 @@ SettingsView::SettingsView(AudioEngine& engine)
     add(issuesText);
 
     styleCaption(bufferCaption);
+    // Every field label in this page shares one grammar: dim body text,
+    // right-aligned against the fixed control column.
     for (auto* label : { &inputBufferSizeLabel, &outputBufferSizeLabel }) {
         label->setFont(theme::ui::bodyFont());
-        label->setColour(juce::Label::textColourId, theme::text());
+        label->setColour(juce::Label::textColourId, theme::dim());
+        label->setJustificationType(juce::Justification::centredRight);
         add(*label);
     }
     inputBufferSizeLabel.setText("Input buffer", juce::dontSendNotification);
@@ -241,7 +244,12 @@ SettingsView::SettingsView(AudioEngine& engine)
         updatePendingState();
     };
 
-    styleCaption(probeCapLabel);
+    // Threshold rows share one label style: body text, dimmed, right-aligned
+    // against the fixed control column. Health sensitivity already used it;
+    // Max channels used a section caption, so the two read differently.
+    probeCapLabel.setFont(theme::ui::bodyFont());
+    probeCapLabel.setColour(juce::Label::textColourId, theme::dim());
+    probeCapLabel.setJustificationType(juce::Justification::centredRight);
     add(probeCapLabel);
     probeCapChannels.setSliderStyle(juce::Slider::IncDecButtons);
     probeCapChannels.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 64,
@@ -351,7 +359,8 @@ SettingsView::SettingsView(AudioEngine& engine)
     styleCaption(appCaption);
 
     rackThumbnailsLabel.setFont(theme::ui::bodyFont());
-    rackThumbnailsLabel.setColour(juce::Label::textColourId, theme::text());
+    rackThumbnailsLabel.setColour(juce::Label::textColourId, theme::dim());
+    rackThumbnailsLabel.setJustificationType(juce::Justification::centredRight);
     rackThumbnailsLabel.setTooltip(
         "How often the Rack view redraws the snapshot of the plugin editor it "
         "shows in each insert card.");
@@ -370,7 +379,8 @@ SettingsView::SettingsView(AudioEngine& engine)
     add(rackThumbnailFpsCombo);
 
     peakHoldLabel.setFont(theme::ui::bodyFont());
-    peakHoldLabel.setColour(juce::Label::textColourId, theme::text());
+    peakHoldLabel.setColour(juce::Label::textColourId, theme::dim());
+    peakHoldLabel.setJustificationType(juce::Justification::centredRight);
     peakHoldLabel.setTooltip("How long every level meter keeps its peak line before it falls back.");
     add(peakHoldLabel);
 
@@ -944,7 +954,7 @@ int SettingsView::layoutBody(int width) {
     constexpr int kRowGap = theme::ui::kRowGap;
     constexpr int kStatH = 34;
     constexpr int kToggleH = 24;
-    constexpr int kToggleGap = 4;
+    constexpr int kToggleGap = theme::ui::kRowGap;
     constexpr int kDeviceRowH = 24;
     constexpr int kMaxDeviceRows = 6;
     const int innerW = juce::jmax(1, width - 2 * pad);
@@ -1085,8 +1095,11 @@ int SettingsView::layoutBody(int width) {
                                                         asioStatusLabel.getFont());
         const int profileRowH = juce::jmax(theme::ui::kControlH, profileStatusH);
         const int asioRowH = juce::jmax(theme::ui::kControlH, asioStatusH);
-        constexpr int kToggleW = 430;
-        constexpr int kToggleColGap = 24;
+        // Two readable columns, not half the window: splitting the whole panel
+        // left a wide empty gutter between the two lists. 420 px holds the
+        // longest label ("Low-latency outputs... reopens outputs") on one line.
+        constexpr int kToggleW = 420;
+        constexpr int kToggleColGap = theme::ui::kSectionGap;
         // Nine opt-in switches read as one list in a narrow window and as rows
         // of two when the panel is wide enough to hold them side by side.
         const bool twoColumns = innerW >= 2 * kToggleW + kToggleColGap;
@@ -1105,11 +1118,14 @@ int SettingsView::layoutBody(int width) {
             &slicedRenderToggle, &scrubToggle, &healthReloadToggle,
             &probeCapToggle,
         }};
-        const int columnW = twoColumns ? (innerW - kToggleColGap) / 2 : innerW;
+        const int columnW = twoColumns ? kToggleW : innerW;
         for (int i = 0; i < (int) toggles.size(); ++i) {
             const int column = twoColumns ? i % 2 : 0;
             const int line = twoColumns ? i / 2 : i;
-            toggles[i]->setBounds(column * (columnW + kToggleColGap),
+            // Start from the panel's inner edge, not the body origin: the
+            // tick boxes were previously flush against the panel border while
+            // every other control sat one panel pad inside it.
+            toggles[i]->setBounds(inner.getX() + column * (columnW + kToggleColGap),
                                   inner.getY() + line * (kToggleH + kToggleGap),
                                   columnW, kToggleH);
         }

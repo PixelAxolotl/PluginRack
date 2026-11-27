@@ -69,9 +69,9 @@ void SavesView::SaveRowComponent::setActionsEnabled(bool enabled) {
 }
 
 void SavesView::SaveRowComponent::resized() {
-    auto area = getLocalBounds().reduced(12, 8);
-    // Actions sit with the save they act on; the date is a quiet right-hand
-    // column, not a reason to push Load/Edit/Delete a screen away.
+    auto area = getLocalBounds().reduced(theme::ui::kSpace3, theme::ui::kRowGap);
+    // Actions sit with the save they act on; the date follows that group as a
+    // quiet column instead of being stranded at the far right of a wide row.
     const bool compact = area.getWidth() < 560;
     metaLabel.setVisible(!compact);
     const int nameW = compact ? juce::jmax(80, area.getWidth() / 2)
@@ -79,15 +79,15 @@ void SavesView::SaveRowComponent::resized() {
     nameLabel.setBounds(area.removeFromLeft(nameW));
     area.removeFromLeft(theme::ui::kSpace3);
     defButton.setBounds(area.removeFromLeft(50));
-    area.removeFromLeft(6);
+    area.removeFromLeft(theme::ui::kRowGap);
     loadButton.setBounds(area.removeFromLeft(60));
-    area.removeFromLeft(6);
+    area.removeFromLeft(theme::ui::kRowGap);
     renameButton.setBounds(area.removeFromLeft(60));
-    area.removeFromLeft(6);
+    area.removeFromLeft(theme::ui::kRowGap);
     deleteButton.setBounds(area.removeFromLeft(64));
     if (compact) return;
-    area.removeFromLeft(theme::ui::kSpace3);
-    metaLabel.setBounds(area);
+    area.removeFromLeft(theme::ui::kSectionGap);
+    metaLabel.setBounds(area.removeFromLeft(220));
 }
 
 void SavesView::SaveRowComponent::paint(juce::Graphics& g) {
@@ -115,15 +115,7 @@ SavesView::SavesView(std::function<juce::String(const pluginrack::Scene&, std::f
     : onRestore(std::move(onRestoreIn))
     , onLoaded(std::move(onLoadedIn))
     , onSaveIdentityChanged(std::move(onSaveIdentityChangedIn)) {
-    titleLabel.setText("Saves", juce::dontSendNotification);
-    titleLabel.setFont(theme::ui::titleFont());
-    titleLabel.setColour(juce::Label::textColourId, theme::text());
-    addAndMakeVisible(titleLabel);
-
-    statusLabel.setJustificationType(juce::Justification::centredRight);
-    statusLabel.setFont(theme::ui::captionFont());
-    statusLabel.setColour(juce::Label::textColourId, theme::dim());
-    addAndMakeVisible(statusLabel);
+    addAndMakeVisible(header);
 
     viewport.setViewedComponent(&content, false);
     viewport.setScrollBarsShown(true, false);
@@ -191,7 +183,7 @@ void SavesView::updateSelection() {
 }
 
 void SavesView::setLoading(bool isLoading) {
-    statusLabel.setText(isLoading ? "Loading..." : juce::String(), juce::dontSendNotification);
+    header.setStatus(isLoading ? "Loading..." : juce::String());
     for (auto& row : rows) {
         row->setLoadEnabled(!isLoading);
         row->setActionsEnabled(!isLoading);
@@ -277,17 +269,11 @@ void SavesView::confirmDelete(const juce::String& name) {
 
 void SavesView::paint(juce::Graphics& g) {
     g.fillAll(theme::bg());
-    g.setColour(theme::border().withAlpha(0.8f));
-    g.drawHorizontalLine(theme::ui::kPagePad + theme::ui::kHeaderH - 1,
-                         (float)theme::ui::kPagePad,
-                         (float)(getWidth() - theme::ui::kPagePad));
 }
 
 void SavesView::resized() {
     auto area = getLocalBounds().reduced(theme::ui::kPagePad);
-    auto top = area.removeFromTop(theme::ui::kHeaderH);
-    statusLabel.setBounds(top.removeFromRight(200));
-    titleLabel.setBounds(top);
+    header.setBounds(area.removeFromTop(theme::ui::kHeaderH));
     area.removeFromTop(theme::ui::kHeaderGap);
     viewport.setBounds(area);
     layoutRows();

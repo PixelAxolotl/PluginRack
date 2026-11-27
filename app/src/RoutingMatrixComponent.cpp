@@ -8,6 +8,13 @@ constexpr int columnWidth = 200;
 constexpr int bandHeight = 18;
 constexpr int headerHeight = 54;
 constexpr int rowHeight = 72;
+// Send bars inside one cell: a half-step inset on the side label, and the
+// shared row gap between L and R so the pair doesn't read as one block.
+constexpr int kCellInsetX = theme::ui::kTightGap;
+constexpr int kCellInsetY = theme::ui::kSpace1;
+constexpr int kSideW = 18;
+constexpr int kBarH = 28;
+constexpr int kSliderW = columnWidth - 32;
 }
 
 RoutingMatrixComponent::RoutingMatrixComponent(AudioEngine& engine)
@@ -64,10 +71,14 @@ void RoutingMatrixComponent::resized() {
     for (const Cell& cell : cells) {
         const int x = rowHeaderWidth + cell.column * columnWidth;
         const int y = headerHeight + cell.row * rowHeight;
-        cell.sideL->setBounds(x + 2, y + 4, 18, 28);
-        cell.sliderL->setBounds(x + 20, y + 4, columnWidth - 32, 28);
-        cell.sideR->setBounds(x + 2, y + 36, 18, 28);
-        cell.sliderR->setBounds(x + 20, y + 36, columnWidth - 32, 28);
+        const int barX = x + kCellInsetX;
+        const int sliderX = barX + kSideW;
+        const int leftY = y + kCellInsetY;
+        const int rightY = leftY + kBarH + theme::ui::kRowGap;
+        cell.sideL->setBounds(barX, leftY, kSideW, kBarH);
+        cell.sliderL->setBounds(sliderX, leftY, kSliderW, kBarH);
+        cell.sideR->setBounds(barX, rightY, kSideW, kBarH);
+        cell.sliderR->setBounds(sliderX, rightY, kSliderW, kBarH);
     }
 }
 

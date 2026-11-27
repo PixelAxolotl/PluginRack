@@ -9,6 +9,8 @@
 
 #include <pluginrack/Scene.h>
 
+#include "PageHeader.h"
+
 class SavesView final : public juce::Component {
 public:
     // onRestore starts a staged restore and returns an immediate error; the
@@ -78,8 +80,7 @@ private:
     std::function<void(const juce::String&)> onLoaded;
     std::function<void(const juce::String&, const juce::String&)> onSaveIdentityChanged;
 
-    juce::Label titleLabel;
-    juce::Label statusLabel;
+    PageHeader header{"Saves"};
     juce::Viewport viewport;
     juce::Component content;
     std::vector<std::unique_ptr<SaveRowComponent>> rows;
