@@ -109,6 +109,14 @@ void addPluginBranches(juce::PopupMenu& menu,
     }
 }
 
+// First-launch progress row: sits above the plugin branches while the
+// library is still walking folders, so the empty menu explains itself.
+void addScanProgressRow(juce::PopupMenu& menu) {
+    auto& library = PluginLibrary::getInstance();
+    if (!library.isScanning()) return;
+    menu.addItem("Scanning plugins... " + library.getStatusText(), false, false, [] {});
+}
+
 void reopenMenu(juce::Component::SafePointer<juce::Component> anchor, ChooseCallback onChoose,
                 PluginMenu::BuiltInCallback onBuiltIn = {}) {
     juce::MessageManager::callAsync(
@@ -180,6 +188,74 @@ private:
     bool listening = false;
 };
 
+// First-launch scan: the menu is built with whatever the library has right
+// now (nothing on a fresh launch), then rebuilt once when that first scan
+// finishes. Armed only by showAddPluginMenu when it starts the first scan;
+// rescan/add-folder flows keep using ScanRefresh above.
+class FirstScanRefresh final : public juce::ChangeListener {
+public:
+    static void watch(juce::Component::SafePointer<juce::Component> anchor,
+                      ChooseCallback onChoose,
+                      PluginMenu::BuiltInCallback onBuiltIn) {
+        cancel();
+        auto* refresh = new FirstScanRefresh();
+        refresh->anchor = anchor;
+        refresh->onChoose = std::move(onChoose);
+        refresh->onBuiltIn = std::move(onBuiltIn);
+        PluginLibrary::getInstance().addChangeListener(refresh);
+        getSlot().reset(refresh);
+    }
+
+    // Fired by the shown menu's showMenuAsync callback: the user dismissed
+    // the menu or picked something before the scan finished, so never reshow.
+    static void onMenuClosed() {
+        auto& slot = getSlot();
+        if (slot != nullptr && !slot->reshown) cancel();
+    }
+
+    static void cancel() {
+        auto& slot = getSlot();
+        if (slot != nullptr) {
+            PluginLibrary::getInstance().removeChangeListener(slot.get());
+            slot.reset();
+        }
+    }
+
+private:
+    void changeListenerCallback(juce::ChangeBroadcaster*) override {
+        auto& library = PluginLibrary::getInstance();
+        if (anchor == nullptr) {
+            cancel();
+            return;
+        }
+        // Still walking folders, or a broadcast unrelated to the first scan.
+        if (library.isScanning() || !library.hasScanned()) return;
+        // First scan done: rebuild once with the fresh catalogue.
+        reshown = true;
+        auto anchorCopy = anchor;
+        auto choose = std::move(onChoose);
+        auto builtIn = std::move(onBuiltIn);
+        // Remove the listener BEFORE the programmatic dismiss: that dismiss
+        // fires the old menu's async callback, and onMenuClosed must no-op.
+        cancel();
+        juce::PopupMenu::dismissAllActiveMenus();
+        if (builtIn)
+            PluginMenu::showAddPluginMenu(*anchorCopy, std::move(choose), std::move(builtIn));
+        else
+            PluginMenu::showAddPluginMenu(*anchorCopy, std::move(choose));
+    }
+
+    static std::unique_ptr<FirstScanRefresh>& getSlot() {
+        static std::unique_ptr<FirstScanRefresh> slot;
+        return slot;
+    }
+
+    juce::Component::SafePointer<juce::Component> anchor;
+    ChooseCallback onChoose;
+    PluginMenu::BuiltInCallback onBuiltIn;
+    bool reshown = false;
+};
+
 void addPluginFolder(juce::Component::SafePointer<juce::Component> anchor, ChooseCallback onChoose,
                      PluginMenu::BuiltInCallback onBuiltIn = {}) {
     activeChooser = std::make_unique<juce::FileChooser>(
@@ -239,6 +315,7 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
                         juce::Component::SafePointer<juce::Component> anchor,
                         const ChooseCallback& onChoose) {
     menu.addSectionHeader("ADD PLUGIN");
+    addScanProgressRow(menu);
     addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);
     addActionRows(menu, anchor, onChoose);
 }
@@ -278,6 +355,7 @@ void buildAddPluginMenu(juce::PopupMenu& menu,
     });
     menu.addSubMenu("Built-In effects", builtInMenu);
 
+    addScanProgressRow(menu);
     addPluginBranches(menu, PluginLibrary::getInstance().getPlugins(), onChoose);
     addActionRows(menu, anchor, onChoose, onBuiltIn);
 }
@@ -295,16 +373,27 @@ void showAddPluginMenu(juce::Component& anchor, std::function<void(const juce::F
     auto& library = PluginLibrary::getInstance();
     // First click after launch: the cache is loaded, but a library that was
     // never scanned still needs one so the menu has something to show.
-    if (!library.hasScanned() && !library.isScanning()) library.beginBackgroundScan();
+    bool startedFirstScan = false;
+    if (!library.hasScanned() && !library.isScanning()) {
+        library.beginBackgroundScan();
+        startedFirstScan = true;
+    }
 
     const juce::Component::SafePointer<juce::Component> safeAnchor(&anchor);
+
+    // Rebuild once when the scan this call started finishes, so the open menu
+    // fills in. The menu's own close callback disarms this if the user
+    // dismisses or picks first. An already-scanned library never arms it.
+    if (startedFirstScan && library.isScanning())
+        FirstScanRefresh::watch(safeAnchor, onChoose, onBuiltIn);
 
     juce::PopupMenu menu;
     buildAddPluginMenu(menu, safeAnchor, std::move(onChoose), std::move(onBuiltIn));
 
     menu.showMenuAsync(juce::PopupMenu::Options()
                            .withTargetComponent(anchor)
-                           .withMinimumWidth(260));
+                           .withMinimumWidth(260),
+                       [](int) { FirstScanRefresh::onMenuClosed(); });
 }
 
 } // namespace PluginMenu

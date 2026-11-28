@@ -159,15 +159,26 @@ int RestrictedHost::runHost(const juce::File& file, int pluginUniqueId,
     std::cout << "HOSTSTEP scanned " << descriptions.size() << "\n";
     std::cout.flush();
 
-    // Pick the class the app asked for; fall back to the first class.
+    // Pick the class the app asked for. A saved id that matches no class must
+    // fail: applying the saved state to the first class would load a
+    // different plugin with foreign parameters.
     juce::PluginDescription chosen = descriptions.getReference(0);
+    bool matched = pluginUniqueId == 0 && descriptions.size() == 1;
     if (pluginUniqueId != 0) {
         for (const auto& description : descriptions) {
             if (description.uniqueId == pluginUniqueId) {
                 chosen = description;
+                matched = true;
                 break;
             }
         }
+    }
+    if (!matched && (pluginUniqueId != 0
+                     || (descriptions.size() > 1 && stateBase64.isNotEmpty()))) {
+        hostFail("The saved plugin class is no longer installed in "
+                 + file.getFileName()
+                 + ". The insert is left empty instead of loading a different plugin.");
+        return 1;
     }
 
     juce::String instError;

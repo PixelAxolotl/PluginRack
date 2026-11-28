@@ -40,6 +40,10 @@ private:
 
     void timerCallback() override;
     void selectTab(Tab tab);
+    // Rebuilds the channel-pair picker from the selected output: items 1/2,
+    // 3/4, ... up to the open device's width, or a fixed 1/2..7/8 list while
+    // the device is unknown. Disabled with no selection, no device, or a bus.
+    void updatePairCombo();
 
     AudioEngine& audioEngine;
 
@@ -47,6 +51,12 @@ private:
     juce::TextButton inputsTab{ "Inputs" };
     juce::TextButton outputsTab{ "Outputs" };
     juce::TextButton busesTab{ "Buses" };
+    // Compact device channel-pair picker for the selected output strip. The
+    // strips themselves belong to MixerComponent, so the picker lives in the
+    // tab row instead of on the strip.
+    juce::Label pairLabel{ {}, "From:" };
+    juce::ComboBox pairCombo;
+    std::uint32_t selectedOutputId = 0;
     MixerComponent inputsBoard;
     MixerComponent outputsBoard;
     MixerComponent busesBoard;

@@ -20,11 +20,12 @@ public:
     void rebuild();
 
 private:
-    // Selection state. -1 = nothing selected.
+    // Selection state. id = 0 means nothing selected; the id is the
+    // stable Node id so rebuild() cannot retarget the selection.
     struct Selection {
         enum class Kind { Input, Bus, Output };
         Kind kind = Kind::Input;
-        int index = -1;
+        std::uint32_t id = 0;
     };
 
     struct Socket {
@@ -82,6 +83,7 @@ private:
     void deleteCable(const Cable& cable);
     void updateStatusText();
     void updateLayout();
+    int selectedIndex() const;
 
     AudioEngine& audioEngine;
     PageHeader header{"Patches"};

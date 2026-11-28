@@ -40,6 +40,14 @@ void runOnMessageThreadAndWait(const std::function<void()>& fn);
 void setMessageThreadJoining(bool joining);
 }
 
+// Windows shared-mode default formats this process rewrote are recorded per
+// endpoint and written back here. Idempotent and never throws; a no-op on
+// other platforms. Called from the stream destructors so a normal teardown
+// restores the machine-wide setting the format rewrite changed.
+namespace DeviceStream {
+void restoreOriginalEndpointFormats() noexcept;
+}
+
 class InputCapture : public juce::AudioIODeviceCallback {
 public:
     InputCapture();
@@ -295,6 +303,12 @@ public:
     // pure latency once rendering starts — this retargets it and lets the
     // device callback discard the stale backlog.
     void setTargetFillBlocks(int blocks);
+    // Device channel pair this stream plays on, as a zero-based even offset:
+    // 0 = device channels 1/2, 2 = 3/4. Installed before open() starts the
+    // device callback (same rule as the render hook): the audio thread only
+    // reads it, never writes it.
+    void setFirstChannel(int firstChannel);
+    int getFirstChannel() const { return pairOffset_; }
 
     void push(const juce::AudioBuffer<float>& src, int frames);
     // Fills the FIFO with a fade-to-silence block. Used by the engine's
@@ -366,4 +380,13 @@ private:
     std::atomic<bool> trimToTarget{false};
     float* const* currentOutputChannels = nullptr;
     int currentNumOutputChannels = 0;
+    // Requested pair offset (see setFirstChannel). The write paths remap
+    // through effectivePairOffset(), so a device that opened narrower than
+    // the requested pair falls back to 1/2 instead of going silent.
+    int pairOffset_ = 0;
+    // First device channel the pair plays on, or 0 when the open device is
+    // narrower than the requested pair.
+    int effectivePairOffset(int numChannels) const {
+        return (pairOffset_ > 0 && pairOffset_ + 1 < numChannels) ? pairOffset_ : 0;
+    }
 };

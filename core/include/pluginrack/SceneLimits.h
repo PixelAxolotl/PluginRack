@@ -12,6 +12,10 @@ inline constexpr std::int64_t kMaxSceneFileBytes = 8 * 1024 * 1024;
 // Bus caps shared by the validator and both engines, so the engine refuses to
 // create what the validator would reject on the next load.
 inline constexpr std::size_t kMaxBuses = 16;
+// Strip caps, same rule: "+ Out" and "+ Ch" used to exceed them, and the
+// scene then failed validation so every autosave was refused.
+inline constexpr std::size_t kMaxOutputs = 32;
+inline constexpr std::size_t kMaxChannels = 64;
 inline constexpr std::size_t kMaxBusSends = 1024;
 inline constexpr std::size_t kMaxBusRoutes = 512;
 // Channel -> output routes; lent to the live engine so connectSend cannot

@@ -19,7 +19,7 @@ Address the highest-impact reliability and UX issues found in the 2026-11-16 `po
 - **Retracted:** the `PluginLibrary` lifetime item (#6) — the class derives from
   `juce::DeletedAtShutdown` (`app/src/PluginLibrary.h:15`), so JUCE deletes it at
   shutdown.
-- **Verification for #1:** build + full test suite green (`55356 assertions in 364
+- **Verification for #1:** build + full test suite green (`1150187 assertions in 526
   test cases`); `--test-load-save "M Audio Duo ASIO 4ms"` restored a scene while the
   message thread stayed alive, and the startup path logged each staged plugin
   (`scene: instantiating ... (n of total)`) before opening devices.
@@ -322,7 +322,7 @@ that JUCE deletes during shutdown, as the comment says. There is no leak to fix.
 - `tests/test_underrun_paths.cpp`: ASIO retarget/rollback literal.
 
 Verified: `tools\build-and-copy.ps1` green, `pluginrack_tests.exe`
-`All tests passed (56903 assertions in 369 test cases)`.
+`All tests passed (1150187 assertions in 526 test cases)`.
 
 Engine/plugin-host follow-up audit (after the fixes above) reported five
 issues: device opener mid-probe vs. commit, stale buffer sizing at commit,

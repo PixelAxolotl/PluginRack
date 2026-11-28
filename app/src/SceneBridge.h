@@ -40,6 +40,13 @@ public:
     // Returns the pending note and deletes it, so it is shown exactly once.
     static juce::String takeSaveFailureNote();
 
+    // Clean-exit marker for crash recovery: shutdown() writes it after the
+    // exit autosave, so a last-scene file newer than the marker means the
+    // process died without exiting cleanly.
+    static juce::File getCleanExitMarkerFile();
+    static void writeCleanExitMarker();
+    static bool hasUncleanAutosave();
+
     static std::optional<pluginrack::Scene> load(juce::String& errorMessage);
     static std::optional<pluginrack::Scene> load(const juce::File& file, juce::String& errorMessage);
     static std::optional<pluginrack::Scene> loadNamed(const juce::String& name, juce::String& errorMessage);

@@ -47,6 +47,7 @@ private:
     TimeTraceData timeTrace;
     void syncControls();
     void applyPreset(int id);
+    void syncPresetLabel();
     float grDb = 0.0f, peakDb = -60.0f;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LimiterWindow)
 };

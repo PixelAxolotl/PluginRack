@@ -318,6 +318,28 @@ inline EffectHeaderBounds layoutEffectHeader(juce::Rectangle<int> header) {
     return bounds;
 }
 
+// Places a floating effect window where the user can see it: centred on the
+// main display, stepped down-right for each window already placed so two
+// copies of the same editor do not land exactly on top of each other.
+inline void placeEffectWindow(juce::TopLevelWindow& window, int width, int height) {
+    static int opened = 0;
+    constexpr int kStep = 24;
+    constexpr int kCycle = 8;
+    const int offset = (opened++ % kCycle) * kStep;
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()) {
+        const auto area = display->userBounds.toNearestInt();
+        const int x = juce::jlimit(area.getX(),
+                                   juce::jmax(area.getX(), area.getRight() - width),
+                                   area.getCentreX() - width / 2 + offset);
+        const int y = juce::jlimit(area.getY(),
+                                   juce::jmax(area.getY(), area.getBottom() - height),
+                                   area.getCentreY() - height / 2 + offset);
+        window.setBounds(x, y, width, height);
+    } else {
+        window.centreWithSize(width, height);
+    }
+}
+
 } // namespace ui
 
 } // namespace theme

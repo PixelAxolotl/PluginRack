@@ -18,6 +18,17 @@ bool paramsFinite(const EqBand& band) noexcept {
 
 } // namespace
 
+int eqBandStageCount(const EqBand& band) noexcept {
+    if (band.type != EqType::HighPass && band.type != EqType::LowPass) {
+        return 1; // slope is a cut-off concept; bells and shelves stay single
+    }
+    switch (band.slopeDbPerOct) {
+    case 24: return 2;
+    case 48: return 4;
+    default: return 1; // 12 dB/oct, and whatever an unvalidated scene holds
+    }
+}
+
 std::vector<EqBand> defaultEqBands() {
     return {
         EqBand{EqType::HighPass, 80.0f, 0.0f, 0.707f, true, false},
@@ -49,7 +60,7 @@ void EqEngine::prepare(double sampleRate) {
     // memory from the previous rate leaks into the first block after a
     // device or rate change.
     for (auto& filter : filters_) {
-        filter.s1L = filter.s2L = filter.s1R = filter.s2R = 0.0f;
+        clearState(filter);
     }
     delaySmooth_ = sampleRate_ > 0.0
                        ? static_cast<float>(1.0 - std::exp(-1.0 / (kDelaySmoothSeconds * sampleRate_)))
@@ -176,6 +187,7 @@ void EqEngine::rebuild() {
 }
 
 void EqEngine::computeCoeffs(const EqBand& band, double sampleRate, BandFilter& out) noexcept {
+    out.stages = eqBandStageCount(band);
     switch (band.type) {
     case EqType::HighPass:
         out.coeffs = dsp::highPass(band.freqHz, sampleRate, dsp::kButterworthQ);
@@ -195,6 +207,15 @@ void EqEngine::computeCoeffs(const EqBand& band, double sampleRate, BandFilter& 
     }
 }
 
+void EqEngine::clearState(BandFilter& filter) noexcept {
+    for (int stage = 0; stage < kMaxStages; ++stage) {
+        filter.s1L[stage] = 0.0f;
+        filter.s2L[stage] = 0.0f;
+        filter.s1R[stage] = 0.0f;
+        filter.s2R[stage] = 0.0f;
+    }
+}
+
 void EqEngine::setPhaseFlip(bool flip) noexcept { phaseFlip_ = flip; }
 
 void EqEngine::process(float* L, float* R, int n) noexcept {
@@ -211,8 +232,13 @@ void EqEngine::process(float* L, float* R, int n) noexcept {
             continue;
         }
         BandFilter& f = filters_[i];
-        dsp::applyBiquad(L, n, f.coeffs, f.s1L, f.s2L);
-        dsp::applyBiquad(R, n, f.coeffs, f.s1R, f.s2R);
+        // Cascade: each stage is the same biquad with its own state, so the
+        // 1-stage path stays bit-identical to the old single-stage filter.
+        for (int stage = 0; stage < f.stages; ++stage) {
+            const auto s = static_cast<std::size_t>(stage);
+            dsp::applyBiquad(L, n, f.coeffs, f.s1L[s], f.s2L[s]);
+            dsp::applyBiquad(R, n, f.coeffs, f.s1R[s], f.s2R[s]);
+        }
     }
     // Polarity flip: invert phase after the chain, even on a flat EQ so the
     // flip stays live when no band is active.
@@ -226,10 +252,7 @@ void EqEngine::process(float* L, float* R, int n) noexcept {
 
 void EqEngine::reset() noexcept {
     for (BandFilter& f : filters_) {
-        f.s1L = 0.0f;
-        f.s2L = 0.0f;
-        f.s1R = 0.0f;
-        f.s2R = 0.0f;
+        clearState(f);
     }
     if (delayCapacity_ > 0) {
         std::fill(delayL_.begin(), delayL_.end(), 0.0f);

@@ -20,6 +20,7 @@
 #include <pluginrack/DeviceCache.h>
 #include <pluginrack/EqEngine.h>
 #include <pluginrack/LatencyProfile.h>
+#include <pluginrack/LoudnessMeter.h>
 #include <pluginrack/Meters.h>
 #include <pluginrack/Scene.h>
 #include <pluginrack/TapDelay.h>
@@ -192,6 +193,10 @@ public:
         // same point as the peaks and read by the UI without a lock.
         juce::Atomic<float> rmsL{0.0f};
         juce::Atomic<float> rmsR{0.0f};
+        // Momentary loudness (K-weighted, 400 ms) for the LUFS readout. The
+        // meter belongs to the audio thread; lufs is the published value.
+        juce::Atomic<float> lufs{-70.0f};
+        pluginrack::LoudnessMeter loudnessMeter;
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
@@ -313,6 +318,11 @@ public:
         juce::Atomic<bool> muted{false};
         pluginrack::ChannelLayout layout = pluginrack::ChannelLayout::Stereo;
         juce::Atomic<bool> flipped{false};
+        // Device channel pair this output plays on, as a zero-based even
+        // offset: 0 = device channels 1/2, 2 = 3/4. Guarded by stateLock:
+        // setOutputFirstChannel writes it, the device opener reads it, and
+        // the scene save/load maps it.
+        int firstChannel = 0;
         std::vector<std::unique_ptr<InsertSlot>> inserts;
         std::vector<pluginrack::ChainItem> chain;
         juce::AudioBuffer<float> buffer;
@@ -473,6 +483,10 @@ public:
     // message thread consumes the result through takeDeviceOpenErrors() /
     // consumeDeviceOpenFinished().
     void openStripsDevicesAsync();
+    // Reopens only the capture streams after a mapping/layout change, on the
+    // same worker: opening a capture is a driver call that can block for
+    // seconds, so the message thread that made the edit must not run it.
+    void reopenInputsAsync();
     bool isOpeningDevices() const { return openingDevices_.load(std::memory_order_relaxed); }
     int getDeviceOpenProgress() const { return deviceOpenProgress_.load(std::memory_order_relaxed); }
     int getDeviceOpenTotal() const { return deviceOpenTotal_.load(std::memory_order_relaxed); }
@@ -594,6 +608,10 @@ public:
     void addOutput();
     juce::String removeOutput(std::uint32_t outputId);
     juce::String setChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
+    // Names a capture device on a strip without opening it: the caller batches
+    // several assignments (a mono split) and then calls reopenInputsAsync()
+    // so the shared capture opens once at the widest mapping.
+    void assignChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName);
     juce::String setOutputDevice(std::uint32_t outputId, const juce::String& deviceName);
     juce::String setDeviceBufferSize(int size);
     juce::String setInputBufferSize(int size);
@@ -705,6 +723,9 @@ public:
     void setChannelGain(std::uint32_t channelId, float gainDb);
     void setChannelTrim(std::uint32_t channelId, float trimDb);
     void setChannelPan(std::uint32_t channelId, float pan);
+    // Rename with a reason: empty string means the name was applied, anything
+    // else is the message the rename dialog shows while it stays open.
+    juce::String renameChannel(std::uint32_t channelId, const juce::String& name);
     void setChannelName(std::uint32_t channelId, const juce::String& name);
     void setChannelMuted(std::uint32_t channelId, bool muted);
     void setChannelSoloed(std::uint32_t channelId, bool soloed);
@@ -724,9 +745,19 @@ public:
     float getSendGainR(std::uint32_t channelId, std::uint32_t outputId) const;
     void setOutputGain(std::uint32_t outputId, float gainDb);
     void setOutputMuted(std::uint32_t outputId, bool muted);
+    juce::String renameOutput(std::uint32_t outputId, const juce::String& name);
     void setOutputName(std::uint32_t outputId, const juce::String& name);
     void setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout);
     void setOutputFlipped(std::uint32_t outputId, bool flipped);
+    // Picks which device channel pair this output plays on (0 = 1/2, 2 = 3/4).
+    // Odd or negative values snap to the pair below. The pair only takes
+    // effect on a live stream, so a device-carrying output reopens alone on
+    // the background opener; silent outputs just store it for later.
+    void setOutputFirstChannel(std::uint32_t outputId, int firstChannel);
+    int getOutputFirstChannel(std::uint32_t outputId) const;
+    // Physical channels the open device exposes; 0 when nothing is open, so
+    // the picker can fall back to a fixed list.
+    int getOutputDeviceChannelCount(std::uint32_t outputId) const;
 
     // EQ API mirroring core MixerEngine: setChannelEq/setOutputEq swap bands
     // (bypass state kept) and rebuild coefficients on the message thread
@@ -1050,13 +1081,14 @@ private:
     // Latency a strip's chain adds, and how much of it sits before a tap.
     // One rule table, shared with tapLatencySamples and getLatencyReport:
     // an insert reports its plugin latency; a denoiser named by the chain
-    // always contributes its 512-sample OLA delay, because render calls
-    // process() for chain items even when the effect is bypassed and the
-    // processor delays even a bypassed signal; a limiter's look-ahead counts
-    // only while the effect is not bypassed (its processor skips the delay
-    // line then); the EQ contributes its delay line through eqLatencySamples,
-    // gated by the strip's bypass flag, at its Eq chain row or - without one -
-    // at the end of render's fallback pass. All at the engine's current rate.
+    // always contributes its one-frame OLA delay, which follows its FFT size,
+    // because render calls process() for chain items even when the effect is
+    // bypassed and the processor delays even a bypassed signal; a limiter's
+    // look-ahead counts only while the effect is not bypassed (its processor
+    // skips the delay line then); the EQ contributes its delay line through
+    // eqLatencySamples, gated by the strip's bypass flag, at its Eq chain row
+    // or - without one - at the end of render's fallback pass. All at the
+    // engine's current rate.
     // An effect with no chain row runs nothing, so it bills nothing;
     // tapLatencySamples falls back to the chain total when its item is not in
     // the chain.
@@ -1074,7 +1106,7 @@ private:
         if (item.type == pluginrack::ChainItemType::SpectralDenoiser) {
             for (const auto& effect : strip.spectralDenoiserEffects) {
                 if (effect.id == item.id)
-                    return pluginrack::kSpectralDenoiserLatencySamples;
+                    return pluginrack::spectralDenoiserLatencySamples(effect);
             }
             return 0;
         }
@@ -1129,14 +1161,19 @@ private:
                                            double engineRate = 0.0);
     // engineRate lets the startup opener open every output against one
     // snapshot of the clock rate instead of racing the clock's own open.
+    // forceReopen skips the already-open fast path: an explicit Reload or a
+    // buffer-size change must probe the driver again even when the device and
+    // format look unchanged.
     juce::String setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
-                                     double engineRate);
+                                     double engineRate, bool forceReopen = false);
     void prepareToPlayImpl(int maxBlockFrames, bool openInputs);
     // One full open pass over every output and input; returns the errors
     // without publishing them, so the caller can retry with previous settings.
     juce::String openAllDevicesPass(const std::function<bool()>& shouldExit, bool forceInputs);
     void openStripsDevicesNow(const std::function<bool()>& shouldExit, bool forceInputs);
-    void startDeviceJob(std::function<void(const std::function<bool()>&)> job);
+    // Returns false when a job is already running; the caller then leaves its
+    // work to that job through inputsReopenPending_ (or simply retries later).
+    bool startDeviceJob(std::function<void(const std::function<bool()>&)> job);
     // Tracks which endpoints are mid-open so the UI can show them all.
     void beginDeviceOpen(const juce::String& label);
     void endDeviceOpen(const juce::String& label);
@@ -1164,6 +1201,18 @@ private:
     // Drops captures no channel references anymore (closes their device).
     // Requires stateLock.
     void pruneUnusedCaptures();
+    // Scene-restore stream carry-over (see commitSceneRestore): moves the
+    // playbacks/captures the new scene still names at the same open format
+    // into the fresh strips instead of closing and reopening them. Requires
+    // stateLock and runs on the message thread; it never touches a JUCE
+    // device object — only ownership moves, and closes still happen outside
+    // the lock. Fills oldPlaybacks with the streams that really retired.
+    // Returns the new strip id that inherited the clock, or 0 when the clock
+    // did not survive.
+    std::uint32_t carryOverSceneDevicesLocked(
+        std::vector<std::unique_ptr<Output>>& oldOutputs,
+        const std::vector<std::unique_ptr<Channel>>& oldChannels,
+        std::vector<OutputPlayback*>& oldPlaybacks);
     void cancelLatencyMeasurementImpl();
     // Clock failover: promote the next live output in the same rate class, or
     // keep rendering on a free-running internal clock when none qualifies.
@@ -1280,6 +1329,10 @@ private:
     std::shared_ptr<std::atomic<bool>> prepareAliveToken_ =
         std::make_shared<std::atomic<bool>>(true);
     std::atomic<bool> openingDevices_{false};
+    // A mapping edit arrived while a device job was already running; that job
+    // may have read the old channel state, so the inputs get one more pass
+    // when it finishes instead of the edit being dropped.
+    std::atomic<bool> inputsReopenPending_{false};
     std::atomic<int> deviceOpenProgress_{0};
     std::atomic<int> deviceOpenTotal_{0};
     std::atomic<bool> deviceOpenFinished_{false};

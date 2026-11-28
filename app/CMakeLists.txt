@@ -76,8 +76,6 @@ target_sources(pluginrack_app PRIVATE
     src/PluginKnobWatcher.h
     src/RackView.cpp
     src/RackView.h
-    src/RoutingMatrixComponent.cpp
-    src/RoutingMatrixComponent.h
     src/PatchesView.cpp
     src/PatchesView.h
     src/StripDialog.cpp
@@ -109,6 +107,8 @@ target_sources(pluginrack_app PRIVATE
     src/SpectralDenoiserWindow.h
     src/ValueEditSlider.cpp
     src/ValueEditSlider.h
+    src/WasapiLoopbackCapture.cpp
+    src/WasapiLoopbackCapture.h
     src/WindowsEndpointFormat.cpp
     src/WindowsEndpointFormat.h
     src/WrappedLabel.h)

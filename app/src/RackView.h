@@ -288,6 +288,8 @@ private:
 
     // Right output routing
     juce::Label outputHeader;
+    juce::Viewport outputViewport;
+    juce::Component outputHolder;
     juce::OwnedArray<juce::TextButton> outputButtons;
     // Shown instead of the sends when an output is selected: the input channels
     // that feed it, each with the device it is receiving from. Painted as rows

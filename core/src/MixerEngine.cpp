@@ -269,8 +269,9 @@ bool MixerEngine::prepare(const Scene& scene, int maxBlockFrames, std::string* e
                     added = limiterLatencySamples(strip.limiterEffects[*index], sampleRate);
                 }
             } else if (item.type == ChainItemType::SpectralDenoiser) {
-                if (findByEffectId(strip.spectralDenoiserEffects, item.id)) {
-                    added = kSpectralDenoiserLatencySamples;
+                if (const auto index = findByEffectId(strip.spectralDenoiserEffects, item.id)) {
+                    added = spectralDenoiserLatencySamples(
+                        strip.spectralDenoiserEffects[*index]);
                 }
             } else if (item.type == ChainItemType::Eq) {
                 // Offline keeps only the bypass flag, so it stands in for the

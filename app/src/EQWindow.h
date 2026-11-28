@@ -177,6 +177,10 @@ private:
     juce::Label gainLabel{"", "Gain"};
     juce::Label qLabel{"", "Q"};
     juce::Label delayLabel{"", "Delay"};
+    // HP/LP steepness for the selected point: 12, 24 or 48 dB/oct. Bells and
+    // shelves ignore it, like the gain/Q knobs a filter point ignores.
+    juce::Label slopeLabel{"", "Slope"};
+    juce::ComboBox slopeCombo;
     ValueEditSlider freqKnob;
     ValueEditSlider gainKnob;
     ValueEditSlider qKnob;

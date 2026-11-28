@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "pluginrack/DeviceRegistry.h"
+#include "pluginrack/LimiterEffect.h"
 #include "pluginrack/OfflineRenderer.h"
 #include "pluginrack/SceneAvailability.h"
 #include "pluginrack/WavWriter.h"
@@ -141,6 +142,70 @@ TEST_CASE("render returns one buffer per output") {    pluginrack::Scene scene =
     REQUIRE(result.size() == 2);
     REQUIRE(result[0].size() == static_cast<std::size_t>(kFrames) * 2);
     REQUIRE(result[1].size() == static_cast<std::size_t>(kFrames) * 2);
+}
+
+TEST_CASE("offline chain passes the eq high-pass slope through to the output") {
+    // End-to-end audio check for the slope setting: the same 60 Hz tone
+    // rendered through a 500 Hz high-pass must come out quieter at 48 dB/oct
+    // than at 12 dB/oct.
+    auto renderWithSlope = [](int slope) {
+        pluginrack::Scene scene = makeScene();
+        addChannel(scene, 1);
+        addOutput(scene, 1);
+        addRoute(scene, 1, 1);
+        scene.channels[0].eqEnabled = true;
+        scene.channels[0].chain = {{pluginrack::ChainItemType::Eq, 0}};
+        auto bands = pluginrack::defaultEqBands();
+        bands[0].freqHz = 500.0f;
+        bands[0].slopeDbPerOct = slope;
+        scene.channels[0].eqBands = bands;
+        const auto buffer =
+            pluginrack::renderSine(scene, allAvailable(scene), 60.0f, 0.5f, 24000);
+        float peak = 0.0f;
+        for (std::size_t i = 12000 * 2; i < buffer[0].size(); ++i) {
+            peak = std::max(peak, std::fabs(buffer[0][i]));
+        }
+        return peak;
+    };
+
+    const float gentle = renderWithSlope(12);
+    const float steep = renderWithSlope(48);
+    REQUIRE(gentle > 0.0f);
+    REQUIRE(steep < gentle * 0.5f);
+}
+
+TEST_CASE("offline chain holds the limiter ceiling on a loud sine") {
+    pluginrack::Scene scene = makeScene();
+    addChannel(scene, 1);
+    addOutput(scene, 1);
+    addRoute(scene, 1, 1);
+    // A default strip carries no limiter: add one and route it in the chain.
+    pluginrack::LimiterEffect limiter;
+    limiter.ceilingDb = -6.0f;
+    scene.channels[0].limiterEffects = {limiter};
+    scene.channels[0].chain = {{pluginrack::ChainItemType::Limiter, 0}};
+
+    auto measurePeak = [](const std::vector<std::vector<float>>& buffer) {
+        float peak = 0.0f;
+        for (std::size_t i = 12000 * 2; i < buffer[0].size(); ++i) {
+            peak = std::max(peak, std::fabs(buffer[0][i]));
+        }
+        return peak;
+    };
+
+    pluginrack::Scene plain = scene;
+    plain.channels[0].limiterEffects.clear();
+    plain.channels[0].chain.clear();
+    const float reference =
+        measurePeak(pluginrack::renderSine(plain, allAvailable(plain), 440.0f, 1.0f, 24000));
+
+    const float limited =
+        measurePeak(pluginrack::renderSine(scene, allAvailable(scene), 440.0f, 1.0f, 24000));
+    REQUIRE(reference > 0.1f);
+    // -6 dBFS is 0.5012 of full scale: the limited peak lands near that
+    // fraction of the unprocessed one.
+    REQUIRE(limited / reference <= 0.53f);
+    REQUIRE(limited / reference > 0.44f);
 }
 
 TEST_CASE("wav header is 16-bit stereo at 48 kHz") {

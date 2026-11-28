@@ -34,8 +34,9 @@ built-in effects.
   feedback suppressor.
 - **Insert latency readout** — rack cards show the processing delay each plugin
   reports, so look-ahead and linear-phase plugins are visible at a glance.
-- **Routing matrix** — every channel can feed every output with an independent
-  per-cell send level; outputs can be added and removed while audio is running.
+- **Routing sends** — every channel can feed every output with an independent
+  per-cell send level, set from the send chips on the Mixer and Rack strips;
+  outputs can be added and removed while audio is running.
 - **Multiple output devices** — each output strip picks its own device. The first
   live output owns the engine clock; every stream shares its sample rate and
   block size.
@@ -62,8 +63,8 @@ exempt: they are short-lived children of the running app and keep working.
 
 ### Views
 
-The toolbar switches between seven views: Racks, Mixer, Patches, I/O,
-Routing, Saves, Settings.
+The toolbar switches between six views: Racks, Mixer, Patches, I/O,
+Saves, Settings.
 
 - **Racks** — per-channel strips: name, trim/gain, pan, fader and meter, mute/solo,
   the insert list, the docked plugin editor, and routing toggles. Every filled
@@ -89,8 +90,6 @@ Routing, Saves, Settings.
   **Outputs** tab so a large rack can be patched one side at a time. The strips
   reorder there too, from the same grip. Double-click a strip to open its Rack
   page, like in the Mixer.
-- **Routing** — the full channel-to-output matrix with an independent send level
-  per cell, L and R linked by default (hold Alt for an independent L/R trim).
 - **Saves** — scene save/load and the autosave/last-session entries.
 - **Settings** — clock summary, buffers, round-trip measurement, latency tuning,
   device reloads, and the Rack thumbnail refresh rate.
@@ -105,7 +104,12 @@ focus its editor, right-click for bypass/removal options. The built-in cards
 (EQ, Dynamics, Multiband Comp, De-esser, Limiter, Feedback Suppressor) open their
 own editors; the Dynamics card opens the panel that carries both compressor and
 gate, and each has its own **Enable** switch there. The gate starts bypassed,
-so its knobs do nothing until it is switched on. The Feedback Suppressor takes a
+so its knobs do nothing until it is switched on. Gate knobs include **Hold**,
+**Hyst** (hysteresis) and **SC Hz** (a detector-only side-chain high-pass); the
+compressor adds an **RMS** detector switch and a **Mix** control, the EQ picks
+12, 24 or 48 dB/oct high/low-pass slopes, the limiter catches inter-sample
+peaks, and the Spectral Denoiser offers 512, 1024, 2048 or 4096-sample FFTs.
+The Feedback Suppressor takes a
 single **Strength** control and hunts narrow notches automatically. Insert state
 is saved with the scene.
 
@@ -129,6 +133,15 @@ leaves it where it is. Individual devices may use different driver buffer sizes;
 the bounded FIFOs bridge those callbacks. The output strip that currently owns the
 clock shows a blue status dot (it turns red if that device reports an open error).
 Inputs are shared per device, so several channels can capture the same endpoint.
+On the I/O view's Outputs tab, **From** picks which device channel starts an
+output's stereo pair, so a device numbered 1, 2, 3, ... can play 3/4 or 4/5
+instead of always 1/2.
+
+On Windows the input list also offers **System loopback (WASAPI)**: it records
+what the default output endpoint is playing (shared mode, same rate as the
+engine) without opening a physical input. It is capture-only, so it can feed
+any number of channels but never owns the clock, and only one loopback device
+can be open at a time.
 
 If the clock device disappears or stops delivering callbacks (unplugged,
 disabled, or the system default switched), the engine promotes the next live
@@ -187,6 +200,10 @@ low-latency operation.
   driver that runs a larger period than it reports). **Render p99** under it
   shows how much of a block the engine spends, which is the real reason a
   smaller buffer glitches.
+- **Meters** — the button beside **Peak hold** switches the second readout row
+  between **RMS** and momentary loudness (**LUFS**, K-weighted and averaged over
+  400 ms). Channel strips have a loudness source; output and bus strips keep
+  showing RMS.
 - **Low-latency input** *(BETA)* — the capture starts with one render block of
   read delay instead of two (about 10 ms). The read delay is now adaptive: a
   real starvation adds a fraction of a block, and a long calm period gives the
@@ -220,6 +237,12 @@ frames and at 96 kHz 960 or 1920. PluginRack asks for 48 kHz and `Auto`, so a
 960-sample buffer means you are at 20 ms per direction — pick an explicit size
 (128, 256) and press **Apply**, and if the driver refuses it the app restores the
 previous size and says so. Exclusive WASAPI or ASIO is the only way to go lower.
+
+Changing the engine rate can rewrite a shared-mode endpoint's Windows default
+format so the device opens at that rate; PluginRack records the previous
+default and writes it back on exit. If the app crashes instead of exiting, the
+endpoint keeps the changed default until the next run or until it is reset by
+hand in Windows Sound settings.
 
 ### ASIO
 
@@ -282,8 +305,12 @@ Scenes are stored as JSON under:
 ```
 
 `Save` writes a new named save; **Saves** lists them with **Load**, **Edit**
-(rename), **Delete** and **DEF** (the save opened on startup). The last session
-is written on exit.
+(rename), **Delete** and **DEF** (the save opened on startup). The selected row
+also answers Return (load), Delete (delete) and F2 (rename). The previous
+session's autosave is listed as a read-only row: it loads, but cannot be
+renamed, deleted or made the startup default because the next exit rewrites it.
+The page shows a short hint while there are no saves yet. The last session is
+written on exit.
 
 Scenes are validated both ways: `save()` refuses to write a scene the engine
 could not restore, and `load()` refuses to apply one. A hand-edited file with
@@ -297,6 +324,11 @@ Because an empty scene is invalid, a channel strip cannot be removed once it is
 the last one; the strip reports that instead of disappearing. Exit autosave
 failures cannot open a dialog (the process ends immediately afterwards), so the
 reason is logged and shown on the next launch.
+
+If the previous run crashed instead of exiting, its last scene is newer than
+the clean-exit marker (`scenes/clean-exit.txt`, written last in `shutdown()`),
+and the next launch asks once whether to restore that session. Answering either
+way rewrites the marker, so the prompt fires once per crash.
 
 An insert also records which class inside a multi-class `.vst3` bundle it
 hosts, so reopening a scene loads the plugin that was picked rather than the

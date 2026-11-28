@@ -8,18 +8,19 @@
 
 // Shared rename + colour dialog for input and output strips. The name field
 // edits the strip name; the swatch row picks the identity hue from the
-// curated palette. On OK both are applied through onApply.
+// curated palette. On OK both are applied through onApply, which returns an
+// empty string on success or the message to show while the dialog stays open.
 class StripDialog final : public juce::Component {
 public:
     static void show(const juce::String& title, const juce::String& currentName,
                      float currentHue,
-                     std::function<void(const juce::String& newName, float newHue)> onApply);
+                     std::function<juce::String(const juce::String& newName, float newHue)> onApply);
 
 private:
     class Body final : public juce::Component {
     public:
         Body(const juce::String& currentName, float currentHue,
-             std::function<void(const juce::String&, float)> onApply);
+             std::function<juce::String(const juce::String&, float)> onApply);
         juce::TextEditor& getTextEditor() { return nameEditor; }
         void resized() override;
         void paint(juce::Graphics& g) override;
@@ -45,7 +46,9 @@ private:
         juce::TextButton okButton{"OK"};
         juce::TextButton cancelButton{"Cancel"};
         float pickedHue = 0.0f;
-        std::function<void(const juce::String&, float)> onApply;
+        // Non-empty after a refused OK: shown in the dialog, which stays open.
+        juce::String errorText;
+        std::function<juce::String(const juce::String&, float)> onApply;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Body)
     };

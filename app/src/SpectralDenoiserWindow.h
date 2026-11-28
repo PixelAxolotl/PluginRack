@@ -28,6 +28,7 @@ public:
 
 private:
     void ensureTrims();
+    std::size_t profileBinCount() const;
     int bandAt(int x) const;
     juce::Rectangle<float> plotArea() const;
     juce::Rectangle<float> meterArea() const;
@@ -89,6 +90,8 @@ private:
     juce::Label modeLabel{"", "SPECTRAL DENOISER"};
     juce::TextButton enableButton{"Enable"};
     juce::ComboBox modeCombo;
+    juce::ComboBox fftCombo;
+    juce::Label fftLabel{"", "FFT"};
     ValueEditSlider reduction;
     juce::Label reductionLabel{"", "Max Reduction"};
     ValueEditSlider thresholdOffset;

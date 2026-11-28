@@ -109,6 +109,7 @@ private:
     // any direct band edit in mouseDrag/mouseDoubleClick.
     struct CachedBandShape {
         pluginrack::dsp::Biquad coeffs{};
+        int stages = 1;           // cascade depth: the response is coeffs^stages
         bool contributes = false; // active band with finite coefficients
     };
     void invalidateCurvePaths() noexcept { curvePathsDirty = true; }

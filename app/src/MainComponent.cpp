@@ -48,7 +48,7 @@ juce::Image appLogoImage() {
 
 ToolbarComponent::ToolbarComponent() {
     logoImage = appLogoImage();
-    for (auto* b : { &racksButton, &mixerButton, &patchesButton, &routingButton, &ioButton,
+    for (auto* b : { &racksButton, &mixerButton, &patchesButton, &ioButton,
                      &savesButton, &settingsButton }) {
         b->setClickingTogglesState(true);
         theme::ui::styleButton(*b);
@@ -57,7 +57,6 @@ ToolbarComponent::ToolbarComponent() {
     racksButton.onClick = [this] { selectView(AppView::Rack); };
     mixerButton.onClick = [this] { selectView(AppView::Mixer); };
     patchesButton.onClick = [this] { selectView(AppView::Patches); };
-    routingButton.onClick = [this] { selectView(AppView::Routing); };
     ioButton.onClick = [this] { selectView(AppView::IO); };
     savesButton.onClick = [this] { selectView(AppView::Saves); };
     settingsButton.onClick = [this] { selectView(AppView::Settings); };
@@ -65,7 +64,6 @@ ToolbarComponent::ToolbarComponent() {
     racksButton.setTooltip("Rack view: plugin chains");
     mixerButton.setTooltip("Mixer view: faders, meters, inline routing");
     patchesButton.setTooltip("Patches view: inputs to outputs map");
-    routingButton.setTooltip("Routing view: full channel/output matrix");
     ioButton.setTooltip("I/O view: input and output devices");
     savesButton.setTooltip("Saves view: saved scenes");
     settingsButton.setTooltip("Settings view: buffer, latency tuning, diagnostics");
@@ -93,7 +91,6 @@ ToolbarComponent::ToolbarComponent() {
     addAndMakeVisible(mixerButton);
     addAndMakeVisible(patchesButton);
     addAndMakeVisible(ioButton);
-    addAndMakeVisible(routingButton);
     addAndMakeVisible(savesButton);
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(snapshotButton);
@@ -119,7 +116,6 @@ void ToolbarComponent::updateNavToggles() {
     racksButton.setToggleState(currentView == AppView::Rack, juce::dontSendNotification);
     mixerButton.setToggleState(currentView == AppView::Mixer, juce::dontSendNotification);
     patchesButton.setToggleState(currentView == AppView::Patches, juce::dontSendNotification);
-    routingButton.setToggleState(currentView == AppView::Routing, juce::dontSendNotification);
     ioButton.setToggleState(currentView == AppView::IO, juce::dontSendNotification);
     savesButton.setToggleState(currentView == AppView::Saves, juce::dontSendNotification);
     settingsButton.setToggleState(currentView == AppView::Settings, juce::dontSendNotification);
@@ -190,8 +186,6 @@ void ToolbarComponent::resized() {
     area.removeFromLeft(4);
     ioButton.setBounds(area.removeFromLeft(48));
     area.removeFromLeft(4);
-    routingButton.setBounds(area.removeFromLeft(64));
-    area.removeFromLeft(4);
     savesButton.setBounds(area.removeFromLeft(64));
     area.removeFromLeft(4);
     settingsButton.setBounds(area.removeFromLeft(64));
@@ -215,7 +209,6 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     : audioEngine(engine)
     , mixerView(mixerViewIn)
     , rackView(audioEngine)
-    , routingView(audioEngine)
     , patchesView(audioEngine)
     , ioView(audioEngine)
     , savesView([this](const pluginrack::Scene& scene,
@@ -262,7 +255,6 @@ ViewRouter::ViewRouter(AudioEngine& engine, MixerComponent& mixerViewIn)
     };
     addAndMakeVisible(mixerView);
     addAndMakeVisible(rackView);
-    addAndMakeVisible(routingView);
     addAndMakeVisible(patchesView);
     addAndMakeVisible(ioView);
     addAndMakeVisible(savesView);
@@ -275,14 +267,12 @@ void ViewRouter::setView(AppView view) {
     currentView = view;
     if (view == AppView::Rack) rackView.rebuild();
     if (view == AppView::Mixer) mixerView.rebuild();
-    if (view == AppView::Routing) routingView.rebuild();
     if (view == AppView::Patches) patchesView.rebuild();
     if (view == AppView::IO) ioView.rebuild();
     if (view == AppView::Saves) savesView.rebuild();
     if (view == AppView::Settings) settingsView.refresh();
     mixerView.setVisible(view == AppView::Mixer);
     rackView.setVisible(view == AppView::Rack);
-    routingView.setVisible(view == AppView::Routing);
     patchesView.setVisible(view == AppView::Patches);
     ioView.setVisible(view == AppView::IO);
     savesView.setVisible(view == AppView::Saves);
@@ -305,7 +295,6 @@ void ViewRouter::refreshViews() {
     // rebuilt, so a rename made anywhere (rack, mixer, scene load) reaches the
     // fader instead of leaving it in its construction-time colour.
     mixerView.refreshStrips();
-    routingView.rebuild();
     patchesView.rebuild();
     ioView.rebuild();
     savesView.rebuild();
@@ -320,7 +309,6 @@ void ViewRouter::refreshDeviceStrips() {
 void ViewRouter::resized() {
     mixerView.setBounds(getLocalBounds());
     rackView.setBounds(getLocalBounds());
-    routingView.setBounds(getLocalBounds());
     patchesView.setBounds(getLocalBounds());
     ioView.setBounds(getLocalBounds());
     savesView.setBounds(getLocalBounds());
@@ -345,7 +333,10 @@ MainComponent::MainComponent()
                                        std::function<void(const juce::String&)> finished) {
         return applySceneAsync(scene, true, std::move(finished));
     };
-    router.onSaveLoaded = [this](const juce::String& name) { activeSaveName_ = name; };
+    router.onSaveLoaded = [this](const juce::String& name) {
+        activeSaveName_ = name;
+        namedSaveDirty_ = false;
+    };
     router.onSaveIdentityChanged = [this](const juce::String& oldName,
                                           const juce::String& newName) {
         if (activeSaveName_.equalsIgnoreCase(oldName)) activeSaveName_ = newName;
@@ -365,6 +356,7 @@ MainComponent::MainComponent()
                 return;
             }
             sceneChangedSinceSave_ = false;
+            namedSaveDirty_ = false;
             router.refreshViews();
         };
         juce::Component::SafePointer<MainComponent> safe(this);
@@ -496,7 +488,7 @@ void MainComponent::timerCallback() {
     if (!hasError && (report.underruns + report.overruns) > 0) hasError = true;
     if (!hasError) hasError = !audioEngine.getDeviceErrors().empty();
     toolbar.setHasError(hasError);
-    toolbar.setSaveState(activeSaveName_, sceneChangedSinceSave_);
+    toolbar.setSaveState(activeSaveName_, namedSaveDirty_);
 
     // Autosave is a debounce, not a repeating snapshot. The cheap poll runs at
     // 1 Hz and only notices edits; the scene is captured and written once,
@@ -632,15 +624,19 @@ void MainComponent::resized() {
 
 void MainComponent::showMenu() {
     juce::PopupMenu menu;
-    menu.addItem("Save Scene As...", [this] { saveSceneAs(); });
-    menu.addItem("Load Scene", [this] { loadScene(true); });
-    menu.addItem("Restore Scene Before Last Load", previousScene_.has_value(), false,
-                 [this] { undoLastLoad(); });
-    menu.addItem("Open Scenes Folder", [this] {
+    // Grouped under one label so "Load Scene" is found by its old name instead
+    // of hiding in a flat list.
+    juce::PopupMenu sceneMenu;
+    sceneMenu.addItem("Save Scene As...", [this] { saveSceneAs(); });
+    sceneMenu.addItem("Load Scene", [this] { loadScene(true); });
+    sceneMenu.addItem("Restore Scene Before Last Load", previousScene_.has_value(), false,
+                      [this] { undoLastLoad(); });
+    sceneMenu.addItem("Open Scenes Folder", [this] {
         const auto dir = SceneBridge::getSceneFile().getParentDirectory();
         dir.createDirectory();
         dir.startAsProcess();
     });
+    menu.addSubMenu("Scene", sceneMenu);
     menu.addSeparator();
     menu.addItem("Reset to Defaults", [this] {
         // A staged restore owns the live strips until its commit; mutating
@@ -835,7 +831,10 @@ void MainComponent::saveScene() {
     if (refuseSaveWhileRestoring()) return;
     const auto error = SceneBridge::save(audioEngine.makeScene());
     if (error.isNotEmpty()) showError(error);
-    else sceneChangedSinceSave_ = false;
+    else {
+        sceneChangedSinceSave_ = false;
+        namedSaveDirty_ = false;
+    }
 }
 
 void MainComponent::saveSceneAs() {
@@ -848,18 +847,35 @@ void MainComponent::saveSceneAs() {
     w->enterModalState(true, juce::ModalCallbackFunction::create([safe, w](int result) {
         if (result == 1 && safe != nullptr) {
             const auto name = w->getTextEditorContents("name");
-            const auto error = SceneBridge::saveNamed(safe->audioEngine.makeScene(), name);
-            if (error.isNotEmpty()) safe->showError(error);
-            else {
+            const auto write = [safe, name] {
+                if (safe == nullptr) return;
+                const auto error = SceneBridge::saveNamed(safe->audioEngine.makeScene(), name);
+                if (error.isNotEmpty()) {
+                    safe->showError(error);
+                    return;
+                }
                 // The Save button now overwrites this name until another
                 // scene is loaded or saved.
                 safe->activeSaveName_ = name;
                 safe->sceneChangedSinceSave_ = false;
+                safe->namedSaveDirty_ = false;
                 safe->refreshViews();
+            };
+            // Same guard as toolbar Save: an existing name is overwritten
+            // only after the user confirms it.
+            if (SceneBridge::getSaveFile(name).existsAsFile()) {
+                juce::AlertWindow::showOkCancelBox(
+                    juce::MessageBoxIconType::QuestionIcon, "Overwrite save",
+                    "A save named \"" + name + "\" already exists. Overwrite it?",
+                    "Overwrite Save", "Cancel", nullptr,
+                    juce::ModalCallbackFunction::create(
+                        [write](int confirmed) { if (confirmed == 1) write(); }));
+            } else {
+                write();
             }
         }
         delete w;
-    }), true);
+    }), false);
 }
 
 void MainComponent::undoLastLoad() {
@@ -880,6 +896,7 @@ void MainComponent::undoLastLoad() {
         // Do not chain undos: this was a correction, not a new load to undo.
         previousScene_.reset();
         sceneChangedSinceSave_ = true;
+        namedSaveDirty_ = true;
     }
 }
 
@@ -900,7 +917,10 @@ void MainComponent::loadScene(bool showMissingMessage) {
         } else {
             // The startup scene becomes the active save, so Save overwrites it.
             const auto defaultName = SceneBridge::getDefaultSaveName();
-            if (defaultName.isNotEmpty()) safe->activeSaveName_ = defaultName;
+            if (defaultName.isNotEmpty()) {
+                safe->activeSaveName_ = defaultName;
+                safe->namedSaveDirty_ = false;
+            }
         }
     });
     if (startError.isNotEmpty()) showError(startError);
@@ -975,6 +995,64 @@ juce::String MainComponent::applyScene(const pluginrack::Scene& scene, bool open
 }
 
 void MainComponent::initialiseAudio() {
+    // Crash recovery: the last scene is newer than the clean-exit marker, so
+    // the previous run died without reaching shutdown(). Ask once, non-
+    // blocking, now the window is up; answering either way rewrites the
+    // marker, so this fires once per crash.
+    if (SceneBridge::hasUncleanAutosave()) {
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::QuestionIcon, "PluginRack",
+            "PluginRack closed unexpectedly. Restore the session from before the crash?",
+            "Restore", "Continue Normally", nullptr,
+            juce::ModalCallbackFunction::create([safe](int result) {
+                SceneBridge::writeCleanExitMarker();
+                if (safe == nullptr) return;
+                if (result == 1) safe->restoreCrashedSession();
+                else safe->startNormalSession();
+            }));
+        return;
+    }
+    startNormalSession();
+}
+
+void MainComponent::restoreCrashedSession() {
+    juce::String error;
+    auto saved = SceneBridge::load(SceneBridge::getLastSceneFile(), error);
+    if (error.isNotEmpty()) {
+        showError(error);
+        audioEngine.openDefaultDevicesAsync();
+    } else if (saved.has_value()) {
+        // Same staged restore the startup path uses: one plugin per
+        // message-loop turn, devices open on the worker once it lands.
+        juce::Component::SafePointer<MainComponent> safe(this);
+        const auto startError = applySceneAsync(*saved, /*openDevicesNow=*/false,
+                                                [safe](const juce::String& pluginErrors) {
+            if (safe == nullptr) return;
+            if (pluginErrors.isNotEmpty())
+                safe->showError("The session was restored, but some plugins could not be restored:\n"
+                                + pluginErrors);
+            safe->audioEngine.openStripsDevicesAsync();
+        });
+        if (startError.isNotEmpty()) {
+            showError(startError);
+            audioEngine.openDefaultDevicesAsync();
+        }
+    } else {
+        audioEngine.openDefaultDevicesAsync();
+    }
+    // The restored crash session has no named save behind it, so Save must
+    // ask for a name instead of claiming everything is written.
+    namedSaveDirty_ = true;
+    const auto saveFailure = SceneBridge::takeSaveFailureNote();
+    if (saveFailure.isNotEmpty()) {
+        showError("The session from your last quit could not be saved, so the previous "
+                  "session was restored.\n" + saveFailure);
+    }
+    timerCallback();
+}
+
+void MainComponent::startNormalSession() {
     juce::String error;
     auto saved = SceneBridge::loadDefaultOrLast(error);
     if (error.isNotEmpty()) {
@@ -1081,6 +1159,7 @@ void MainComponent::pollSceneChanges() {
         sceneChangedSinceSave_ = true;
         juce::Logger::writeToLog("autosave: change detected, saving after 30 s of quiet");
     }
+    namedSaveDirty_ = true;
 }
 
 void MainComponent::checkFullSceneSafetyNet() {
@@ -1110,6 +1189,7 @@ void MainComponent::checkFullSceneSafetyNet() {
         sceneChangedSinceSave_ = true;
         juce::Logger::writeToLog("autosave: scene changed without a parameter notification");
     }
+    namedSaveDirty_ = true;
 }
 
 void MainComponent::autosaveIfChanged() {
@@ -1145,6 +1225,10 @@ void MainComponent::autosaveIfChanged() {
     const auto error = SceneBridge::saveLast(scene);
     if (error.isNotEmpty()) {
         juce::Logger::writeToLog("autosave failed: " + error);
+        if (!autosaveFailureShown_) {
+            autosaveFailureShown_ = true;
+            showError("Auto-save failed: " + error);
+        }
         // Retry after another quiet interval instead of on every tick.
         lastSceneChangeMs_ = juce::Time::getMillisecondCounterHiRes();
         return;

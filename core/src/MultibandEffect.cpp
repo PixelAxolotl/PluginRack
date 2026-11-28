@@ -35,6 +35,33 @@ float multibandStaticGainDb(float levelDb, const MultibandBand& band) {
     return 0.0f;
 }
 
+MultibandCrossover multibandCrossoverCoefficients(float freqHz, double sampleRateHz) noexcept {
+    const double rate = sampleRateHz > 0.0 ? sampleRateHz : 48000.0;
+    MultibandCrossover split;
+    split.lowPass = dsp::lowPass(freqHz, rate, dsp::kButterworthQ, 20.0);
+    split.highPass = dsp::highPass(freqHz, rate, dsp::kButterworthQ, 20.0);
+    return split;
+}
+
+float multibandBandMagnitude(const MultibandEffect& effect, std::size_t bandIndex,
+                             float freqHz, double sampleRateHz) noexcept {
+    const std::size_t bands = effect.bands.size();
+    if (bands == 0 || bandIndex >= bands || effect.crossovers.size() != bands - 1) return 0.0f;
+    const double rate = sampleRateHz > 0.0 ? sampleRateHz : 48000.0;
+    double magnitude = 1.0;
+    for (std::size_t x = 0; x < bandIndex; ++x) {
+        const auto split = multibandCrossoverCoefficients(effect.crossovers[x], rate);
+        const auto high = static_cast<double>(dsp::biquadMagnitude(split.highPass, freqHz, rate));
+        magnitude *= high * high;
+    }
+    if (bandIndex + 1 < bands) {
+        const auto split = multibandCrossoverCoefficients(effect.crossovers[bandIndex], rate);
+        const auto low = static_cast<double>(dsp::biquadMagnitude(split.lowPass, freqHz, rate));
+        magnitude *= low * low;
+    }
+    return static_cast<float>(magnitude);
+}
+
 void MultibandProcessor::prepare(double sampleRate, int maxBlockFrames) {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     rebuild();
@@ -49,6 +76,8 @@ void MultibandProcessor::setEffect(const MultibandEffect& effect) {
 
 void MultibandProcessor::reset() noexcept {
     for (auto& st : hpStates_) st = {};
+    for (auto& st : lpStates_) st = {};
+    for (auto& st : apStates_) st = {};
     for (auto& env : envelopes_) env = {};
     autoMakeupDb_ = 0.0f;
     reductions_.assign(envelopes_.size(), 0.0f);
@@ -63,17 +92,24 @@ void MultibandProcessor::rebuild() {
             if (activeSolo_ < 0) activeSolo_ = i;
         }
     }
-    const std::size_t xovers = static_cast<std::size_t>(bands - 1);
-    hpStates_.assign(xovers, {});
-    hpCoeffs_.resize(xovers);
-    for (std::size_t x = 0; x < xovers; ++x) {
-        // Band split crossovers share the Butterworth poles with every other
-        // filter. Only the high-pass side runs: band 0 is the arithmetic
-        // complement of the first high-pass (see process()), so the LP/HP
-        // phase mismatch that produced a −93.6 dB null at the first crossover
-        // cannot exist, and half the biquads are gone.
-        hpCoeffs_[x] = dsp::highPass(effect_.crossovers[x], sampleRate_,
-                                     dsp::kButterworthQ, 20.0);
+    // Linkwitz-Riley 4th order: each split is a 2nd-order Butterworth section
+    // run twice, so LP4(f) + HP4(f) is an allpass. The bands are the products
+    // of the paths (band b = HP0..HP(b-1) * LP_b), and every band also carries
+    // A_x = LP4(x) + HP4(x) for each split x above it, since a plain product
+    // tree is only flat at the split itself: without that compensation two
+    // bands 1.6 octaves apart sum ~1.3 dB down between them.
+    const std::size_t splits = static_cast<std::size_t>(bands - 1);
+    hpCoeffs_.assign(splits * 2, dsp::Biquad{});
+    lpCoeffs_.assign(splits * 2, dsp::Biquad{});
+    hpStates_.assign(splits * 2, {});
+    lpStates_.assign(splits * 2, {});
+    apStates_.assign(static_cast<std::size_t>(bands) * splits, {});
+    for (std::size_t x = 0; x < splits; ++x) {
+        const auto split = multibandCrossoverCoefficients(effect_.crossovers[x], sampleRate_);
+        lpCoeffs_[x * 2] = split.lowPass;
+        lpCoeffs_[x * 2 + 1] = split.lowPass;
+        hpCoeffs_[x * 2] = split.highPass;
+        hpCoeffs_[x * 2 + 1] = split.highPass;
     }
     envelopes_.assign(static_cast<std::size_t>(bands), {});
     reductions_.assign(static_cast<std::size_t>(bands), 0.0f);
@@ -82,35 +118,40 @@ void MultibandProcessor::rebuild() {
 
 void MultibandProcessor::reserveScratch(int frames) {
     if (frames <= 0) return;
-    // prepare() runs before setEffect(), when crossovers is still empty.
-    // Allocate for the largest band count the validator allows (6 bands = 5
-    // crossovers), or process() writes past these buffers once the real
-    // effect arrives.
-    constexpr std::size_t kMaxCrossovers = 5;
-    const std::size_t xovers = std::max(kMaxCrossovers,
-                                        effect_.crossovers.size());
+    // prepare() runs before setEffect(), when crossovers is still empty. The
+    // LR4 tree needs a fixed set of planes whatever the band count (the path
+    // remainder, one band buffer, one allpass buffer and the output), so
+    // sizing by frames alone covers the six-band, five-crossover maximum and
+    // anything wider the validator would accept.
     const std::size_t n = std::max(static_cast<std::size_t>(frames),
                                    bufL_.size());
-    // An effect with more crossovers than the previous one needs a wider
-    // scratch plane even when the frame count never grew — and vice versa,
-    // a longer block needs wider rows even when the plane already fits the
-    // old product. Both dimensions are checked before skipping.
-    if (bufL_.size() >= n && hpL_.size() >= n * xovers) return;
+    // Both dimensions are checked before skipping: a longer block needs wider
+    // rows even when the plane count already fits.
+    if (bufL_.size() >= n && pathL_.size() >= n && apL_.size() >= n) return;
     bufL_.assign(n, 0.0f); bufR_.assign(n, 0.0f);
+    apL_.assign(n, 0.0f); apR_.assign(n, 0.0f);
     outL_.assign(n, 0.0f); outR_.assign(n, 0.0f);
-    hpL_.assign(n * xovers, 0.0f);
-    hpR_.assign(n * xovers, 0.0f);
+    pathL_.assign(n, 0.0f); pathR_.assign(n, 0.0f);
+}
+
+void MultibandProcessor::applyCascadePair(float* left, float* right, int frames,
+                                          const dsp::Biquad& coefficients,
+                                          BiquadState& first, BiquadState& second) noexcept {
+    dsp::applyBiquad(left, frames, coefficients, first.s1L, first.s2L);
+    dsp::applyBiquad(right, frames, coefficients, first.s1R, first.s2R);
+    dsp::applyBiquad(left, frames, coefficients, second.s1L, second.s2L);
+    dsp::applyBiquad(right, frames, coefficients, second.s1R, second.s2R);
 }
 
 void MultibandProcessor::process(float* left, float* right, int frames) noexcept {
     if (left == nullptr || right == nullptr || frames <= 0 || effect_.bypassed) return;
     const int bands = static_cast<int>(effect_.bands.size());
     if (bands <= 0 || static_cast<int>(effect_.crossovers.size()) != bands - 1) return;
-    if (!prepared_ || static_cast<int>(hpStates_.size()) != bands - 1) rebuild();
+    if (!prepared_ || static_cast<int>(hpStates_.size()) != (bands - 1) * 2) rebuild();
     if (!prepared_) return;
-    const int xovers = bands - 1;
     if (static_cast<int>(bufL_.size()) < frames
-        || hpL_.size() < static_cast<std::size_t>(frames) * xovers) {
+        || static_cast<int>(pathL_.size()) < frames
+        || static_cast<int>(apL_.size()) < frames) {
         reserveScratch(frames);
     }
     // A single NaN/Inf sample must not poison the split or the envelopes for
@@ -120,55 +161,66 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
         if (!std::isfinite(left[i])) left[i] = 0.0f;
         if (!std::isfinite(right[i])) right[i] = 0.0f;
     }
-    for (int x = 0; x < xovers; ++x) {
-        float* hl = hpL_.data() + static_cast<std::size_t>(x) * frames;
-        float* hr = hpR_.data() + static_cast<std::size_t>(x) * frames;
-        for (int i = 0; i < frames; ++i) { hl[i] = left[i]; hr[i] = right[i]; }
-        auto& hps = hpStates_[static_cast<std::size_t>(x)];
-        dsp::applyBiquad(hl, frames, hpCoeffs_[static_cast<std::size_t>(x)], hps.s1L, hps.s2L);
-        dsp::applyBiquad(hr, frames, hpCoeffs_[static_cast<std::size_t>(x)], hps.s1R, hps.s2R);
+    for (int i = 0; i < frames; ++i) {
+        pathL_[static_cast<std::size_t>(i)] = left[i];
+        pathR_[static_cast<std::size_t>(i)] = right[i];
     }
     std::fill_n(outL_.data(), frames, 0.0f);
     std::fill_n(outR_.data(), frames, 0.0f);
     float totalGr = 0.0f;
     int activeCount = 0;
+    const int splits = bands - 1;
+    // Replace the running path with its high-pass, so the next band splits
+    // what this split left over.
+    const auto advancePath = [this, frames, splits](int b) {
+        if (b >= splits) return;
+        const auto index = static_cast<std::size_t>(b) * 2;
+        applyCascadePair(pathL_.data(), pathR_.data(), frames,
+                         hpCoeffs_[index], hpStates_[index], hpStates_[index + 1]);
+    };
     for (int b = 0; b < bands; ++b) {
         const auto& band = effect_.bands[static_cast<std::size_t>(b)];
         const bool muted = activeSolo_ >= 0 && activeSolo_ != b;
-        for (int i = 0; i < frames; ++i) {
-            float l = 0.0f;
-            float r = 0.0f;
-            if (b == 0) {
-                // Low band is the exact arithmetic complement of the first
-                // high-pass (with no crossovers it is the input itself), so
-                // the bands telescope to the input at every frequency and the
-                // Butterworth crossover null disappears.
-                if (xovers == 0) {
-                    l = left[i];
-                    r = right[i];
-                } else {
-                    l = left[i] - hpL_[static_cast<std::size_t>(i)];
-                    r = right[i] - hpR_[static_cast<std::size_t>(i)];
-                }
-            } else {
-                l = hpL_[static_cast<std::size_t>(b - 1) * frames + i];
-                r = hpR_[static_cast<std::size_t>(b - 1) * frames + i];
-                if (b < bands - 1) {
-                    l -= hpL_[static_cast<std::size_t>(b) * frames + i];
-                    r -= hpR_[static_cast<std::size_t>(b) * frames + i];
-                }
+        // The band core is the running high-pass path's low-pass; the last
+        // band has no low-pass and takes the path itself.
+        std::copy_n(pathL_.data(), frames, bufL_.data());
+        std::copy_n(pathR_.data(), frames, bufR_.data());
+        if (b < splits) {
+            const auto index = static_cast<std::size_t>(b) * 2;
+            applyCascadePair(bufL_.data(), bufR_.data(), frames,
+                             lpCoeffs_[index], lpStates_[index], lpStates_[index + 1]);
+        }
+        // Allpass compensation for every split above this band. A_x is
+        // LP4(x) and HP4(x) in parallel, summed.
+        for (int x = b + 1; x < splits; ++x) {
+            auto& state = apStates_[static_cast<std::size_t>(b) * static_cast<std::size_t>(splits)
+                                    + static_cast<std::size_t>(x)];
+            std::copy_n(bufL_.data(), frames, apL_.data());
+            std::copy_n(bufR_.data(), frames, apR_.data());
+            const auto index = static_cast<std::size_t>(x) * 2;
+            applyCascadePair(bufL_.data(), bufR_.data(), frames,
+                             lpCoeffs_[index], state.lowA, state.lowB);
+            applyCascadePair(apL_.data(), apR_.data(), frames,
+                             hpCoeffs_[index], state.highA, state.highB);
+            for (int i = 0; i < frames; ++i) {
+                bufL_[static_cast<std::size_t>(i)] += apL_[static_cast<std::size_t>(i)];
+                bufR_[static_cast<std::size_t>(i)] += apR_[static_cast<std::size_t>(i)];
             }
-            bufL_[static_cast<std::size_t>(i)] = l;
-            bufR_[static_cast<std::size_t>(i)] = r;
         }
         reductions_[static_cast<std::size_t>(b)] = 0.0f;
-        if (muted) continue;
+        if (muted) {
+            // Skipped bands still advance the tree so the ones after them see
+            // the right path.
+            advancePath(b);
+            continue;
+        }
         if (band.bypassed || !band.enabled) {
             // A band that is off keeps its audio; only the dynamics stop.
             for (int i = 0; i < frames; ++i) {
                 outL_[static_cast<std::size_t>(i)] += bufL_[static_cast<std::size_t>(i)];
                 outR_[static_cast<std::size_t>(i)] += bufR_[static_cast<std::size_t>(i)];
             }
+            advancePath(b);
             continue;
         }
         const float inputGain = dsp::dbToGain(band.inputGainDb);
@@ -227,6 +279,7 @@ void MultibandProcessor::process(float* left, float* right, int frames) noexcept
         reductions_[static_cast<std::size_t>(b)] = grSum / static_cast<float>(frames);
         totalGr += reductions_[static_cast<std::size_t>(b)];
         ++activeCount;
+        advancePath(b);
     }
     for (int i = 0; i < frames; ++i) {
         left[i] = outL_[static_cast<std::size_t>(i)];

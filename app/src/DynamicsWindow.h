@@ -95,10 +95,16 @@ private:
     juce::Label gateRangeLabel{"", "Range"};
     juce::Label gateAttackLabel{"", "Attack"};
     juce::Label gateReleaseLabel{"", "Release"};
+    juce::Label gateHoldLabel{"", "Hold"};
+    juce::Label gateHysteresisLabel{"", "Hyst"};
+    juce::Label gateSidechainLabel{"", "SC Hz"};
     ValueEditSlider gateThreshold;
     ValueEditSlider gateRange;
     ValueEditSlider gateAttack;
     ValueEditSlider gateRelease;
+    ValueEditSlider gateHold;
+    ValueEditSlider gateHysteresis;
+    ValueEditSlider gateSidechain;
 
     // Simulated detector gain (<= 0 dB, makeup excluded) so the dot lags the
     // curve through attack and overshoots it on release.
@@ -115,6 +121,10 @@ private:
     juce::Label makeupLabel{"", "Output"};
     juce::Label inputGainLabel{"", "Input"};
     juce::Label kneeLabel{"", "Knee"};
+    juce::Label mixLabel{"", "Mix"};
+    // RMS detection is a switch, not a knob: the detector choice is binary.
+    // Hidden on the gate page, which keeps the peak detector.
+    juce::TextButton rmsButton{"RMS"};
     juce::ComboBox presetCombo;
     juce::ComboBox gatePresetCombo;
     ValueEditSlider threshold;
@@ -124,6 +134,7 @@ private:
     ValueEditSlider makeup;
     ValueEditSlider inputGain;
     ValueEditSlider knee;
+    ValueEditSlider mix;
     std::array<float, 512> tapL{};
     std::array<float, 512> tapR{};
 

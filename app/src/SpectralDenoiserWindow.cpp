@@ -62,10 +62,18 @@ juce::Rectangle<float> SpectralDenoiserProfileView::meterArea() const {
     return area.removeFromBottom(kMeterHeight);
 }
 
+std::size_t SpectralDenoiserProfileView::profileBinCount() const {
+    // A profile carries the resolution it was learned at, so it still draws
+    // correctly after the transform size changes.
+    return effect.noiseProfile.empty()
+        ? static_cast<std::size_t>(pluginrack::kSpectralDenoiserBinCount)
+        : effect.noiseProfile.size();
+}
+
 float SpectralDenoiserProfileView::frequencyForBin(std::size_t bin) const {
     const double rate = effect.profileSampleRate > 0.0 ? effect.profileSampleRate : 48000.0;
     return static_cast<float>(static_cast<double>(bin) * rate * 0.5
-                              / static_cast<double>(pluginrack::kSpectralDenoiserBinCount - 1));
+                              / static_cast<double>(profileBinCount() - 1));
 }
 
 float SpectralDenoiserProfileView::frequencyForBandCentre(int band) const {
@@ -140,8 +148,8 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
 
     if (hasProfile && reference > 0.0f) {
         const double rate = effect.profileSampleRate > 0.0 ? effect.profileSampleRate : 48000.0;
-        const double binHz = rate * 0.5
-            / static_cast<double>(pluginrack::kSpectralDenoiserBinCount - 1);
+        const auto binCount = static_cast<int>(profileBinCount());
+        const double binHz = rate * 0.5 / static_cast<double>(binCount - 1);
         // First average neighbouring bins in a narrow log window, which removes
         // the bin-to-bin jitter of raw values.
         const double halfWindow = std::pow(2.0, 1.0 / 48.0);
@@ -157,11 +165,10 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
             const double hz = pluginrack::kSpectralDenoiserTrimLowHz
                 * std::pow(nyquist / pluginrack::kSpectralDenoiserTrimLowHz, position);
             const int lowBin = std::clamp(
-                static_cast<int>(std::floor(hz / halfWindow / binHz)), 0,
-                pluginrack::kSpectralDenoiserBinCount - 1);
+                static_cast<int>(std::floor(hz / halfWindow / binHz)), 0, binCount - 1);
             const int highBin = std::clamp(
                 static_cast<int>(std::ceil(hz * halfWindow / binHz)), lowBin,
-                pluginrack::kSpectralDenoiserBinCount - 1);
+                binCount - 1);
             double sum = 0.0;
             for (int bin = lowBin; bin <= highBin; ++bin) {
                 sum += std::max(static_cast<double>(
@@ -209,7 +216,7 @@ void SpectralDenoiserProfileView::paint(juce::Graphics& g) {
         const float binWidth = frequencyForBin(1) - frequencyForBin(0);
         const std::size_t centreBin = static_cast<std::size_t>(std::clamp(
             static_cast<int>(std::lround(frequencyForBandCentre(band) / binWidth)),
-            0, pluginrack::kSpectralDenoiserBinCount - 1));
+            0, static_cast<int>(profileBinCount()) - 1));
         return 10.0f * std::log10(
             std::max(effect.noiseProfile[centreBin], 1.0e-12f) / reference);
     };
@@ -392,7 +399,7 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
     setResizable(false, false);
     setContentOwned(&content, false);
     setUsingNativeTitleBar(true);
-    centreWithSize(kWidth, kHeight);
+    theme::ui::placeEffectWindow(*this, kWidth, kHeight);
 
     theme::ui::styleTitleLabel(modeLabel);
     content.addAndMakeVisible(modeLabel);
@@ -418,6 +425,32 @@ SpectralDenoiserWindow::SpectralDenoiserWindow(const juce::String& title,
         if (apply) apply(effect, false);
         refreshStatus();
     };
+
+    theme::ui::styleCombo(fftCombo);
+    for (std::size_t i = 0; i < pluginrack::kSpectralDenoiserFftSizes.size(); ++i) {
+        const int size = pluginrack::kSpectralDenoiserFftSizes[i];
+        fftCombo.addItem(juce::String(size), static_cast<int>(i) + 1);
+        if (pluginrack::spectralDenoiserFftSizeOrDefault(effect.fftSize) == size) {
+            fftCombo.setSelectedId(static_cast<int>(i) + 1, juce::dontSendNotification);
+        }
+    }
+    content.addAndMakeVisible(fftCombo);
+    fftCombo.onChange = [this] {
+        const int index = fftCombo.getSelectedId() - 1;
+        if (index < 0
+            || index >= static_cast<int>(pluginrack::kSpectralDenoiserFftSizes.size())) {
+            return;
+        }
+        effect.fftSize =
+            pluginrack::kSpectralDenoiserFftSizes[static_cast<std::size_t>(index)];
+        if (apply) apply(effect, false);
+        refreshStatus();
+    };
+
+    fftLabel.setJustificationType(juce::Justification::centredRight);
+    fftLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
+    fftLabel.setColour(juce::Label::textColourId, theme::dim());
+    content.addAndMakeVisible(fftLabel);
 
     theme::ui::styleButton(learnButton);
     content.addAndMakeVisible(learnButton);
@@ -637,6 +670,10 @@ void SpectralDenoiserWindow::resized() {
     listenButton.setBounds(topRow.removeFromLeft(84));
     topRow.removeFromLeft(8);
     afterTrimButton.setBounds(topRow.removeFromLeft(96));
+    topRow.removeFromLeft(10);
+    fftLabel.setBounds(topRow.removeFromLeft(28));
+    topRow.removeFromLeft(4);
+    fftCombo.setBounds(topRow.removeFromLeft(76));
 
     area.removeFromTop(4);
     statusLabel.setBounds(area.removeFromTop(18));

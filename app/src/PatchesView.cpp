@@ -108,18 +108,19 @@ void PatchesView::paintCanvas(juce::Graphics& g) {
 
     // Cables first (behind the labels), drawn as dashed cubic curves.
     // When one node is selected, only its connections are drawn.
-    const auto cableVisible = [this](const Cable& cable) {
-        if (selection.index < 0) return true;
+    const int sel = selectedIndex();
+    const auto cableVisible = [this, sel](const Cable& cable) {
+        if (sel < 0) return true;
         const bool input = selection.kind == Selection::Kind::Input
                            && cable.kind != Cable::Kind::BusToOutput
-                           && cable.from == selection.index;
+                           && cable.from == sel;
         const bool bus = selection.kind == Selection::Kind::Bus
-                         && ((cable.kind == Cable::Kind::InputToBus && cable.to == selection.index)
+                         && ((cable.kind == Cable::Kind::InputToBus && cable.to == sel)
                              || (cable.kind == Cable::Kind::BusToOutput
-                                 && cable.from == selection.index));
+                                 && cable.from == sel));
         const bool output = selection.kind == Selection::Kind::Output
                             && cable.kind != Cable::Kind::InputToBus
-                            && cable.to == selection.index;
+                            && cable.to == sel;
         return input || bus || output;
     };
     for (const auto& cable : cables) {
@@ -170,10 +171,10 @@ void PatchesView::paintCanvas(juce::Graphics& g) {
         const auto& node = inputs[static_cast<std::size_t>(i)];
         if (node.expanded) {
             paintInputCard(g, node,
-                           selection.kind == Selection::Kind::Input && selection.index == i);
+                           selection.kind == Selection::Kind::Input && sel == i);
         } else {
             const auto accent = theme::stripColour(node.hue);
-            const bool selected = selection.kind == Selection::Kind::Input && selection.index == i;
+            const bool selected = selection.kind == Selection::Kind::Input && sel == i;
             g.setColour(selected ? accent : theme::panel());
             g.fillRoundedRectangle(node.box.toFloat(), 8.0f);
             g.setColour(accent);
@@ -198,8 +199,8 @@ void PatchesView::paintCanvas(juce::Graphics& g) {
                 g.drawEllipse(node.port.x - 5.0f, node.port.y - 5.0f, 10.0f, 10.0f, 1.5f);
         }
     }
-    paintPills(buses, selection.kind == Selection::Kind::Bus ? selection.index : -1);
-    paintPills(outputs, selection.kind == Selection::Kind::Output ? selection.index : -1);
+    paintPills(buses, selection.kind == Selection::Kind::Bus ? sel : -1);
+    paintPills(outputs, selection.kind == Selection::Kind::Output ? sel : -1);
 
     if (dragging) {
         juce::Point<int> from;
@@ -412,7 +413,7 @@ void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
             draggingBus = true;
             dragBusIndex = i;
             dragBusGrabOffset = pos.y - box.getY();
-            selection = {Selection::Kind::Bus, i};
+            selection = {Selection::Kind::Bus, buses[static_cast<std::size_t>(i)].id};
             updateStatusText();
             repaint();
             return;
@@ -425,7 +426,7 @@ void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
         return kNoMatch;
     };
     if (const int i = hit(outputs); i >= 0) {
-        selection = {Selection::Kind::Output, i};
+        selection = {Selection::Kind::Output, outputs[static_cast<std::size_t>(i)].id};
         updateStatusText();
         canvasContent.repaint();
         return;
@@ -438,13 +439,13 @@ void PatchesView::canvasMouseDown(const juce::MouseEvent& e) {
                                           + kCardHeaderH;
         if (!inputs[static_cast<std::size_t>(i)].expanded || onHeader)
             expandedInput = expandedInput == i ? -1 : i;
-        selection = {Selection::Kind::Input, i};
+        selection = {Selection::Kind::Input, inputs[static_cast<std::size_t>(i)].id};
         updateStatusText();
         updateLayout();
         return;
     }
-    if (selection.index >= 0) {
-        selection.index = -1;
+    if (selection.id != 0) {
+        selection.id = 0;
         updateStatusText();
         canvasContent.repaint();
     }
@@ -566,12 +567,25 @@ void PatchesView::deleteCable(const Cable& cable) {
     rebuild();
 }
 
+int PatchesView::selectedIndex() const {
+    if (selection.id == 0) return -1;
+    const std::vector<Node>* nodes = nullptr;
+    switch (selection.kind) {
+    case Selection::Kind::Input: nodes = &inputs; break;
+    case Selection::Kind::Bus: nodes = &buses; break;
+    case Selection::Kind::Output: nodes = &outputs; break;
+    }
+    for (int i = 0; i < static_cast<int>(nodes->size()); ++i)
+        if ((*nodes)[static_cast<std::size_t>(i)].id == selection.id) return i;
+    return -1;
+}
+
 void PatchesView::updateStatusText() {
     header.setStatus(juce::String(inputs.size()) + " inputs - "
                      + juce::String(buses.size()) + " buses - "
                      + juce::String(outputs.size()) + " outputs - "
                      + juce::String(cables.size()) + " patches"
-                     + (selection.index >= 0 ? " - showing selected" : ""));
+                     + (selectedIndex() >= 0 ? " - showing selected" : ""));
 }
 
 void PatchesView::updateLayout() {
@@ -615,6 +629,7 @@ void PatchesView::updateLayout() {
         bus.port = {busX + kLabelW + 10, ry + kPillH / 2};
         contentH = juce::jmax(contentH, ry + kPillH + 16);
     }
+    contentH = juce::jmax(contentH, 8 + static_cast<int>(outputs.size()) * kRowH + 16);
     canvasContent.setSize(w, contentH);
     for (std::size_t i = 0; i < outputs.size(); ++i) {
         const int ry = 8 + static_cast<int>(i) * kRowH;
@@ -752,6 +767,9 @@ void PatchesView::rebuild() {
             outList[static_cast<std::size_t>(oi)]->colourHue);
         cables.push_back(cable);
     }
+
+    if (selection.id != 0 && selectedIndex() < 0)
+        selection.id = 0;
 
     updateStatusText();
     updateLayout();

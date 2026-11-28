@@ -10,8 +10,6 @@
 namespace pluginrack {
 namespace {
 
-constexpr std::size_t kOverlapSize = static_cast<std::size_t>(kSpectralDenoiserFftSize) * 4;
-constexpr std::size_t kOverlapMask = kOverlapSize - 1;
 constexpr float kSilencePower = 1.0e-12f;
 
 float clampReduction(float db) noexcept {
@@ -21,12 +19,12 @@ float clampReduction(float db) noexcept {
     return std::clamp(db, kSpectralDenoiserMinReductionDb, kSpectralDenoiserMaxReductionDb);
 }
 
-int learnFrameTarget(double sampleRate, float seconds) noexcept {
+int learnFrameTarget(double sampleRate, float seconds, int hopSize) noexcept {
     const double length = std::clamp(static_cast<double>(seconds),
                                      static_cast<double>(kSpectralDenoiserMinLearnSeconds),
                                      static_cast<double>(kSpectralDenoiserMaxLearnSeconds));
     const auto frames = static_cast<int>(
-        std::lround(sampleRate * length / kSpectralDenoiserHopSize));
+        std::lround(sampleRate * length / static_cast<double>(hopSize)));
     return std::max(frames, 1);
 }
 
@@ -49,6 +47,11 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
     sampleRate_ = other.sampleRate_;
     effect_ = other.effect_;
     prepared_ = other.prepared_;
+    fftSize_ = other.fftSize_;
+    binCount_ = other.binCount_;
+    hopSize_ = other.hopSize_;
+    overlapSize_ = other.overlapSize_;
+    overlapMask_ = other.overlapMask_;
     window_ = other.window_;
     inputLeft_ = other.inputLeft_;
     inputRight_ = other.inputRight_;
@@ -95,8 +98,16 @@ SpectralDenoiserProcessor& SpectralDenoiserProcessor::operator=(const SpectralDe
 
 void SpectralDenoiserProcessor::prepare(double sampleRate) {
     sampleRate_ = std::max(sampleRate, static_cast<double>(kSpectralDenoiserMinSampleRate));
-    const auto fftSize = static_cast<std::size_t>(kSpectralDenoiserFftSize);
-    const auto bins = static_cast<std::size_t>(kSpectralDenoiserBinCount);
+    // The effect carries the size; prepare() is what materialises it. An
+    // unsupported value is clamped here so the transform always gets a power
+    // of two.
+    fftSize_ = spectralDenoiserFftSizeOrDefault(effect_.fftSize);
+    binCount_ = spectralDenoiserBinCount(fftSize_);
+    hopSize_ = spectralDenoiserHopSize(fftSize_);
+    overlapSize_ = fftSize_ * 4;
+    overlapMask_ = static_cast<std::size_t>(overlapSize_ - 1);
+    const auto fftSize = static_cast<std::size_t>(fftSize_);
+    const auto bins = static_cast<std::size_t>(binCount_);
 
     window_.assign(fftSize, 0.0f);
     double windowSumSquares = 0.0;
@@ -107,13 +118,13 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
         windowSumSquares += value * value;
     }
     overlapNorm_ = windowSumSquares > 0.0
-        ? static_cast<float>(static_cast<double>(kSpectralDenoiserHopSize) / windowSumSquares)
+        ? static_cast<float>(static_cast<double>(hopSize_) / windowSumSquares)
         : 1.0f;
 
     inputLeft_.assign(fftSize, 0.0f);
     inputRight_.assign(fftSize, 0.0f);
-    overlapLeft_.assign(kOverlapSize, 0.0f);
-    overlapRight_.assign(kOverlapSize, 0.0f);
+    overlapLeft_.assign(static_cast<std::size_t>(overlapSize_), 0.0f);
+    overlapRight_.assign(static_cast<std::size_t>(overlapSize_), 0.0f);
     reLeft_.assign(fftSize, 0.0f);
     imLeft_.assign(fftSize, 0.0f);
     reRight_.assign(fftSize, 0.0f);
@@ -132,7 +143,7 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
     learnSum_.assign(bins, 0.0);
     pendingProfile_.assign(bins, 0.0f);
 
-    learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds);
+    learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds, hopSize_);
     updateSmoothing();
 
     prepared_ = true;
@@ -143,18 +154,26 @@ void SpectralDenoiserProcessor::prepare(double sampleRate) {
 
 void SpectralDenoiserProcessor::setEffect(const SpectralDenoiserEffect& effect) {
     effect_ = effect;
-    if (prepared_) {
-        rebuildNoiseFromProfile();
-        rebuildTrimGains();
-        learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds);
-        updateSmoothing();
+    if (!prepared_) {
+        return;
     }
+    // A new transform size invalidates every buffer below, including the
+    // overlap tail. prepare() reallocates at the new size and ends with
+    // reset(), so not one sample of the old frame layout survives.
+    if (spectralDenoiserFftSizeOrDefault(effect_.fftSize) != fftSize_) {
+        prepare(sampleRate_);
+        return;
+    }
+    rebuildNoiseFromProfile();
+    rebuildTrimGains();
+    learnTargetFrames_ = learnFrameTarget(sampleRate_, effect_.learnSeconds, hopSize_);
+    updateSmoothing();
 }
 
 void SpectralDenoiserProcessor::updateSmoothing() {
     // Frames arrive every hop; express the time constants in frames. Speed
     // scales both ends so one control can go from gentle to snappy.
-    const auto frameRate = static_cast<double>(sampleRate_) / kSpectralDenoiserHopSize;
+    const auto frameRate = static_cast<double>(sampleRate_) / static_cast<double>(hopSize_);
     const float speed = std::clamp(effect_.speed, kSpectralDenoiserMinSpeed,
                                    kSpectralDenoiserMaxSpeed);
     attackCoeff_ = dsp::smoothingCoeff(frameRate, 10.0f / speed);
@@ -169,12 +188,18 @@ void SpectralDenoiserProcessor::rebuildNoiseFromProfile() {
     }
 
     const double sourceRate = effect_.profileSampleRate;
-    const auto bins = static_cast<std::size_t>(kSpectralDenoiserBinCount);
+    const auto bins = static_cast<std::size_t>(binCount_);
+    const auto sourceBins = effect_.noiseProfile.size();
+    // The profile's own length names the transform size it was learned at, so
+    // a later sample-rate or FFT-size change maps bin frequencies, not indices.
+    const double sourceFftSize = static_cast<double>((sourceBins - 1) * 2);
+    const double sourceBinWidth = sourceRate / sourceFftSize;
+    const double binWidth = sampleRate_ / static_cast<double>(fftSize_);
     for (std::size_t k = 0; k < bins; ++k) {
         // Map this bin's frequency back to the bins captured at the profile rate.
-        const double position = static_cast<double>(k) * sampleRate_ / sourceRate;
-        if (position >= static_cast<double>(bins - 1)) {
-            noise_[k] = std::max(effect_.noiseProfile[bins - 1], 0.0f);
+        const double position = static_cast<double>(k) * binWidth / sourceBinWidth;
+        if (position >= static_cast<double>(sourceBins - 1)) {
+            noise_[k] = std::max(effect_.noiseProfile[sourceBins - 1], 0.0f);
             continue;
         }
         const auto index = static_cast<std::size_t>(position);
@@ -187,7 +212,7 @@ void SpectralDenoiserProcessor::rebuildNoiseFromProfile() {
 }
 
 void SpectralDenoiserProcessor::rebuildTrimGains() {
-    const auto bins = static_cast<std::size_t>(kSpectralDenoiserBinCount);
+    const auto bins = static_cast<std::size_t>(binCount_);
     trimGain_.assign(bins, 1.0f);
     if (effect_.profileTrimDb.size()
         != static_cast<std::size_t>(kSpectralDenoiserTrimBandCount)) {
@@ -196,7 +221,7 @@ void SpectralDenoiserProcessor::rebuildTrimGains() {
     const double nyquist = sampleRate_ * 0.5;
     for (std::size_t k = 0; k < bins; ++k) {
         const double frequency = static_cast<double>(k) * sampleRate_
-            / static_cast<double>(kSpectralDenoiserFftSize);
+            / static_cast<double>(fftSize_);
         trimGain_[k] = dsp::dbToGain(
             spectralDenoiserTrimDbAt(effect_.profileTrimDb, frequency, nyquist));
     }
@@ -235,6 +260,11 @@ void SpectralDenoiserProcessor::reset() noexcept {
 }
 
 void SpectralDenoiserProcessor::startLearning() noexcept {
+    // A pass that finished while the window was closed (or after the profile
+    // was cleared) still leaves the old result marked ready. Without this a
+    // new Learn jumps straight to 100% and hands the stale profile back.
+    profileReady_.store(false, std::memory_order_release);
+    learnFrames_.store(0, std::memory_order_relaxed);
     learnRequest_.store(true, std::memory_order_release);
 }
 
@@ -264,7 +294,7 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
         return;
     }
 
-    constexpr std::size_t fftSize = static_cast<std::size_t>(kSpectralDenoiserFftSize);
+    const auto fftSize = static_cast<std::size_t>(fftSize_);
     const float mix = std::clamp(effect_.mixPercent, kSpectralDenoiserMinMixPercent,
                                  kSpectralDenoiserMaxMixPercent)
         * 0.01f;
@@ -290,7 +320,7 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
         inputWrite_ = (inputWrite_ + 1) & (fftSize - 1);
         ++inputSamples_;
 
-        if (++hopCounter_ >= kSpectralDenoiserHopSize) {
+        if (++hopCounter_ >= hopSize_) {
             hopCounter_ = 0;
             if (inputSamples_ >= fftSize) {
                 processFrame();
@@ -299,7 +329,7 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
 
         if (inputSamples_ > fftSize) {
             const std::uint64_t position = inputSamples_ - fftSize - 1;
-            const auto slot = static_cast<std::size_t>(position & kOverlapMask);
+            const auto slot = static_cast<std::size_t>(position & overlapMask_);
             const float wetLeft = overlapLeft_[slot];
             const float wetRight = overlapRight_[slot];
             overlapLeft_[slot] = 0.0f;
@@ -322,8 +352,8 @@ void SpectralDenoiserProcessor::process(float* left, float* right, int frames) n
 }
 
 void SpectralDenoiserProcessor::processFrame() noexcept {
-    const auto bins = static_cast<std::size_t>(kSpectralDenoiserBinCount);
-    const auto fftSize = static_cast<std::size_t>(kSpectralDenoiserFftSize);
+    const auto bins = static_cast<std::size_t>(binCount_);
+    const auto fftSize = static_cast<std::size_t>(fftSize_);
     const std::uint64_t frameStart = inputSamples_ - fftSize;
     const std::size_t oldest = inputWrite_;
 
@@ -501,7 +531,7 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     // Read the meter at each band centre. Log bands below the FFT resolution
     // contain no bin of their own; sampling the gain curve keeps every bar
     // populated instead of leaving holes.
-    const double binWidth = sampleRate_ / kSpectralDenoiserFftSize;
+    const double binWidth = sampleRate_ / static_cast<double>(fftSize_);
     const double nyquist = sampleRate_ * 0.5;
     const double bandRatio = nyquist / kSpectralDenoiserTrimLowHz;
     for (std::size_t band = 0; band < bandReductionDb_.size(); ++band) {
@@ -552,14 +582,15 @@ void SpectralDenoiserProcessor::processFrame() noexcept {
     // imaginary parts are the reconstructed frames fed to the same OLA path.
     for (std::size_t n = 0; n < fftSize; ++n) {
         const float w = window_[n] * overlapNorm_;
-        const auto slot = static_cast<std::size_t>((frameStart + n) & kOverlapMask);
+        const auto slot = static_cast<std::size_t>((frameStart + n) & overlapMask_);
         overlapLeft_[slot] += reRight_[n] * w;
         overlapRight_[slot] += imRight_[n] * w;
     }
 }
 
-void SpectralDenoiserProcessor::fft(std::vector<float>& re, std::vector<float>& im, bool inverse) const noexcept {
-    const int n = kSpectralDenoiserFftSize;
+void SpectralDenoiserProcessor::fft(std::vector<float>& re, std::vector<float>& im,
+                                    bool inverse) const noexcept {
+    const int n = fftSize_;
 
     for (int i = 1, j = 0; i < n; ++i) {
         int bit = n >> 1;

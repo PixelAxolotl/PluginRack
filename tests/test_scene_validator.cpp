@@ -168,6 +168,36 @@ TEST_CASE("scene rejects out-of-range output eq bands") {
     REQUIRE(errors[0].message.find("eqBands") != std::string::npos);
 }
 
+TEST_CASE("scene rejects an eq slope that is not 12, 24 or 48") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().eqEnabled = true;
+
+    SECTION("channel 13 dB/oct") {
+        scene.channels.front().eqBands[0].slopeDbPerOct = 13;
+    }
+    SECTION("channel zero") {
+        scene.channels.front().eqBands[0].slopeDbPerOct = 0;
+    }
+    SECTION("output 36 dB/oct") {
+        scene.outputs.front().eqEnabled = true;
+        scene.outputs.front().eqBands[6].slopeDbPerOct = 36;
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("slopeDbPerOct") != std::string::npos);
+}
+
+TEST_CASE("scene accepts every eq slope") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.channels.front().eqEnabled = true;
+    for (const int slope : { 12, 24, 48 }) {
+        scene.channels.front().eqBands[0].slopeDbPerOct = slope;
+        REQUIRE(pluginrack::validate(scene).empty());
+    }
+}
+
 TEST_CASE("scene accepts eq delay at both ends of the range") {
     pluginrack::Scene scene = makeValidScene();
     scene.schemaVersion = 3;
@@ -409,6 +439,60 @@ TEST_CASE("dynamics parameters are bounded at the top of the UI ranges") {
     REQUIRE(errors[0].message.find("dynamics") != std::string::npos);
 }
 
+TEST_CASE("gate and compressor depth fields are bounded") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::DynamicsEffect& effect = scene.channels.front().effects.front();
+
+    SECTION("hold above 2000 ms") {
+        effect.holdMs = 2001.0f;
+    }
+    SECTION("negative hysteresis") {
+        effect.hysteresisDb = -1.0f;
+    }
+    SECTION("side-chain above 1000 Hz") {
+        effect.sidechainHz = 1001.0f;
+    }
+    SECTION("mix above 100 percent") {
+        effect.mixPercent = 101.0f;
+    }
+    SECTION("non-finite hold") {
+        effect.holdMs = std::numeric_limits<float>::quiet_NaN();
+    }
+
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("dynamics") != std::string::npos);
+}
+
+TEST_CASE("gate and compressor depth errors name the offending field") {
+    pluginrack::Scene scene = makeValidScene();
+    pluginrack::DynamicsEffect& effect = scene.channels.front().effects.front();
+
+    effect.holdMs = 2001.0f;
+    const std::vector<pluginrack::SceneError> holdErrors = pluginrack::validate(scene);
+    REQUIRE(holdErrors.size() == 1);
+    REQUIRE(holdErrors[0].message.find("holdMs") != std::string::npos);
+
+    effect.holdMs = 0.0f;
+    effect.hysteresisDb = 25.0f;
+    const std::vector<pluginrack::SceneError> hysteresisErrors = pluginrack::validate(scene);
+    REQUIRE(hysteresisErrors.size() == 1);
+    REQUIRE(hysteresisErrors[0].message.find("hysteresisDb") != std::string::npos);
+
+    effect.hysteresisDb = 0.0f;
+    effect.sidechainHz = 1001.0f;
+    const std::vector<pluginrack::SceneError> sidechainErrors = pluginrack::validate(scene);
+    REQUIRE(sidechainErrors.size() == 1);
+    REQUIRE(sidechainErrors[0].message.find("sidechainHz") != std::string::npos);
+
+    effect.sidechainHz = 0.0f;
+    effect.mixPercent = 101.0f;
+    const std::vector<pluginrack::SceneError> mixErrors = pluginrack::validate(scene);
+    REQUIRE(mixErrors.size() == 1);
+    REQUIRE(mixErrors[0].message.find("mixPercent") != std::string::npos);
+}
+
 TEST_CASE("built-in default effects pass validation") {
     pluginrack::Scene scene = makeValidScene();
     REQUIRE(scene.channels.front().effects.size() == 2);
@@ -519,7 +603,9 @@ TEST_CASE("collection caps are enforced") {
         REQUIRE(errors.empty());
     }
     SECTION("too many chain rows") {
-        for (std::uint32_t i = 0; i < 17; ++i)
+        // The cap leaves room for every insert the engine allows (64) plus the
+        // built-ins, so it takes 81 rows to trip it.
+        for (std::uint32_t i = 0; i < 81; ++i)
             scene.channels.front().chain.push_back({pluginrack::ChainItemType::Insert, i + 1});
         const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
         REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
@@ -789,4 +875,50 @@ TEST_CASE("bus insert cannot side-chain from its own bus") {
         if (error.message.find("feedback loop") != std::string::npos) feedback = true;
     }
     REQUIRE(feedback);
+}
+
+TEST_CASE("output firstChannel starts the pair on any device channel", "[scene][device]") {
+    pluginrack::Scene scene = makeValidScene();
+    scene.outputs.front().firstChannel = 0;
+    REQUIRE(pluginrack::validate(scene).empty());
+    scene.outputs.front().firstChannel = 2;
+    REQUIRE(pluginrack::validate(scene).empty());
+    // Odd starts are valid: a device numbered 1, 2, 3, ... can host a pair on
+    // channels 3/4.
+    scene.outputs.front().firstChannel = 1;
+    REQUIRE(pluginrack::validate(scene).empty());
+    scene.outputs.front().firstChannel = 62;
+    REQUIRE(pluginrack::validate(scene).empty());
+
+    scene.outputs.front().firstChannel = -2;
+    auto errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("firstChannel") != std::string::npos);
+
+    scene.outputs.front().firstChannel = 64;
+    errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].message.find("firstChannel") != std::string::npos);
+}
+
+TEST_CASE("spectral denoiser fft size must be a supported size") {
+    pluginrack::Scene scene = makeValidScene();
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect(1);
+    scene.channels.front().spectralDenoiserEffects = {effect};
+
+    for (const int fftSize : pluginrack::kSpectralDenoiserFftSizes) {
+        effect.fftSize = fftSize;
+        scene.channels.front().spectralDenoiserEffects = {effect};
+        REQUIRE(pluginrack::validate(scene).empty());
+    }
+
+    effect.fftSize = 1000;
+    scene.channels.front().spectralDenoiserEffects = {effect};
+    const std::vector<pluginrack::SceneError> errors = pluginrack::validate(scene);
+    REQUIRE(errors.size() == 1);
+    REQUIRE(errors[0].code == pluginrack::SceneErrorCode::ValueOutOfRange);
+    REQUIRE(errors[0].entityId == 1);
+    REQUIRE(errors[0].message.find("fftSize") != std::string::npos);
 }

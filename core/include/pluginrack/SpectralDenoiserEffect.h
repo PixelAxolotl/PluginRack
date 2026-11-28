@@ -10,11 +10,47 @@
 
 namespace pluginrack {
 
-// 512-point frame with 75% overlap: one full frame of latency, no lookahead.
-inline constexpr int kSpectralDenoiserFftSize = 512;
-inline constexpr int kSpectralDenoiserHopSize = 128;
+// 75% overlap at every size: one full frame of latency, no lookahead.
+// 512 samples is the default and reproduces the original block exactly; the
+// larger sizes trade latency for frequency resolution.
+inline constexpr int kSpectralDenoiserDefaultFftSize = 512;
+inline constexpr std::array<int, 4> kSpectralDenoiserFftSizes{512, 1024, 2048, 4096};
+inline constexpr int kSpectralDenoiserFftSize = kSpectralDenoiserDefaultFftSize;
+inline constexpr int kSpectralDenoiserHopSize = kSpectralDenoiserFftSize / 4;
 inline constexpr int kSpectralDenoiserBinCount = kSpectralDenoiserFftSize / 2 + 1;
 inline constexpr int kSpectralDenoiserLatencySamples = kSpectralDenoiserFftSize;
+
+inline constexpr int spectralDenoiserHopSize(int fftSize) noexcept { return fftSize / 4; }
+inline constexpr int spectralDenoiserBinCount(int fftSize) noexcept { return fftSize / 2 + 1; }
+
+inline constexpr bool isSpectralDenoiserFftSizeSupported(int fftSize) noexcept {
+    for (const int supported : kSpectralDenoiserFftSizes) {
+        if (fftSize == supported) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// An unsupported size falls back to the default instead of feeding the FFT a
+// non-power-of-two length. Scenes are validated first; this also guards
+// effects built by hand.
+inline constexpr int spectralDenoiserFftSizeOrDefault(int fftSize) noexcept {
+    return isSpectralDenoiserFftSizeSupported(fftSize) ? fftSize
+                                                       : kSpectralDenoiserDefaultFftSize;
+}
+
+// A learned profile carries one bin per point up to Nyquist, so its length
+// names the transform size it was captured with.
+inline constexpr bool isSpectralDenoiserProfileSize(std::size_t bins) noexcept {
+    for (const int supported : kSpectralDenoiserFftSizes) {
+        if (bins == static_cast<std::size_t>(spectralDenoiserBinCount(supported))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline constexpr float kSpectralDenoiserMinReductionDb = 0.0f;
 inline constexpr float kSpectralDenoiserMaxReductionDb = 40.0f;
 inline constexpr float kSpectralDenoiserDefaultReductionDb = 12.0f;
@@ -116,10 +152,13 @@ struct SpectralDenoiserEffect {
     float learnSeconds = 1.0f;
     // 100 keeps one mask for both sides; lower blends toward per-side gains.
     float stereoLinkPercent = kSpectralDenoiserMaxStereoLinkPercent;
+    // Transform size in samples: 512, 1024, 2048 or 4096. The hop follows at
+    // 75% overlap, so latency equals this size.
+    int fftSize = kSpectralDenoiserDefaultFftSize;
 
     bool hasProfile() const noexcept {
         return profileSampleRate > 0.0
-            && noiseProfile.size() == static_cast<std::size_t>(kSpectralDenoiserBinCount);
+            && isSpectralDenoiserProfileSize(noiseProfile.size());
     }
 
     bool operator==(const SpectralDenoiserEffect&) const = default;
@@ -127,9 +166,17 @@ struct SpectralDenoiserEffect {
 
 SpectralDenoiserEffect makeDefaultSpectralDenoiserEffect(std::uint32_t id = 1);
 
+// One full frame of delay, so the reported latency follows the size.
+inline int spectralDenoiserLatencySamples(const SpectralDenoiserEffect& effect) noexcept {
+    return spectralDenoiserFftSizeOrDefault(effect.fftSize);
+}
+
 // Streaming STFT denoiser. All buffers are allocated in prepare(); process()
-// never allocates. The two channels share one complex FFT per hop (left in the
-// real part, right in the imaginary part) and are split back before the masks.
+// never allocates. A change of FFT size in setEffect() reallocates and resets
+// the same way, which is safe because setEffect() runs on the message thread
+// under the engine's state lock. The two channels share one complex FFT per
+// hop (left in the real part, right in the imaginary part) and are split back
+// before the masks.
 // One gain mask is shared by default; the stereo link control blends toward
 // per-side masks that use the same noise estimate.
 class SpectralDenoiserProcessor {
@@ -154,7 +201,9 @@ public:
     float learnProgress() const noexcept;
     bool takeLearnedProfile(std::vector<float>& profile, double& sampleRate) noexcept;
 
-    static constexpr int latencySamples() noexcept { return kSpectralDenoiserLatencySamples; }
+    // Allocated transform size; may differ from effect_.fftSize only until
+    // the next setEffect/prepare.
+    int latencySamples() const noexcept { return fftSize_; }
     float currentReductionDb() const noexcept {
         return currentReductionDb_.load(std::memory_order_relaxed);
     }
@@ -178,6 +227,13 @@ private:
     double sampleRate_ = 48000.0;
     SpectralDenoiserEffect effect_{};
     bool prepared_ = false;
+
+    // Buffer geometry for the size the vectors below were allocated at.
+    int fftSize_ = kSpectralDenoiserDefaultFftSize;
+    int binCount_ = kSpectralDenoiserBinCount;
+    int hopSize_ = kSpectralDenoiserHopSize;
+    int overlapSize_ = kSpectralDenoiserDefaultFftSize * 4;
+    std::size_t overlapMask_ = static_cast<std::size_t>(kSpectralDenoiserDefaultFftSize) * 4 - 1;
 
     std::vector<float> window_;
     std::vector<float> inputLeft_;

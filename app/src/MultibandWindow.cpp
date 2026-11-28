@@ -33,7 +33,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
     setResizable(false, false);
     setContentOwned(&content, false);
     setUsingNativeTitleBar(true);
-    centreWithSize(kWidth, kHeight);
+    theme::ui::placeEffectWindow(*this, kWidth, kHeight);
 
     hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
@@ -86,6 +86,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
     curve.onEffectChanged = [this](const MultibandEffect& changed) {
         effect = changed;
         syncControls();
+        syncPresetLabel();
         if (apply) apply(effect, false);
     };
 
@@ -167,6 +168,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(threshold.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     ratio.onValueChange = [this] {
@@ -175,6 +177,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(ratio.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     attack.onValueChange = [this] {
@@ -183,6 +186,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(attack.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     release.onValueChange = [this] {
@@ -191,6 +195,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(release.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     knee.onValueChange = [this] {
@@ -199,6 +204,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(knee.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     makeup.onValueChange = [this] {
@@ -207,6 +213,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(makeup.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
     inputGain.onValueChange = [this] {
@@ -215,6 +222,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
                 static_cast<float>(inputGain.getValue());
             curve.setEffect(effect);
             if (apply) apply(effect, false);
+            syncPresetLabel();
         }
     };
 
@@ -233,6 +241,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         syncControls();
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
     soloButton.setClickingTogglesState(true);
     soloButton.onClick = [this] {
@@ -240,6 +249,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         effect.bands[static_cast<std::size_t>(selectedBand)].soloed = soloButton.getToggleState();
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
     muteButton.setClickingTogglesState(true);
     muteButton.onClick = [this] {
@@ -247,6 +257,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         effect.bands[static_cast<std::size_t>(selectedBand)].bypassed = muteButton.getToggleState();
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
     addBandButton.onClick = [this] {
         if (effect.bands.size() >= 6) return;
@@ -257,6 +268,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         selectBand(static_cast<int>(effect.bands.size()) - 1);
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
     removeBandButton.onClick = [this] {
         if (effect.bands.size() <= 2) return;
@@ -266,6 +278,7 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         selectBand(std::min(selectedBand, static_cast<int>(effect.bands.size()) - 1));
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
     autoMakeupButton.setClickingTogglesState(true);
     autoMakeupButton.setToggleState(effect.autoMakeup, juce::dontSendNotification);
@@ -273,9 +286,11 @@ MultibandWindow::MultibandWindow(const juce::String& title,
         effect.autoMakeup = autoMakeupButton.getToggleState();
         curve.setEffect(effect);
         if (apply) apply(effect, false);
+        syncPresetLabel();
     };
 
     syncControls();
+    syncPresetLabel();
     setVisible(true);
     startTimer(33);
 }
@@ -328,6 +343,7 @@ void MultibandWindow::syncControls() {
 }
 
 void MultibandWindow::applyPreset(int id) {
+    if (id == 1) return; // Custom: nothing to write
     if (id == 2) {
         effect = makeDefaultMultibandEffect(effect.id);
     } else if (id == 3) {
@@ -348,7 +364,37 @@ void MultibandWindow::applyPreset(int id) {
     MultibandCurveComponent::normaliseEffect(effect);
     curve.setEffect(effect);
     syncControls();
+    syncPresetLabel();
     if (apply) apply(effect, false);
+}
+
+void MultibandWindow::syncPresetLabel() {
+    // Default is the only exact match: the factory shape including band
+    // count, crossovers and every band field (id/bypassed excluded: the
+    // header preset describes the curve, not the enable state).
+    int match = 1;
+    auto def = makeDefaultMultibandEffect(effect.id);
+    def.bypassed = effect.bypassed;
+    if (effect == def) {
+        match = 2;
+    } else {
+        // Gentle/Tight only rewrite threshold/ratio/attack/release on every
+        // band, so the match checks just those four fields; knee, makeup,
+        // input gain, mode, crossovers, band count and auto-makeup are
+        // ignored (inexact by construction — see report).
+        const auto allBands = [&](float thr, float rat, float atk, float rel) {
+            if (effect.bands.empty()) return false;
+            for (const auto& b : effect.bands)
+                if (b.thresholdDb != thr || b.ratio != rat || b.attackMs != atk
+                    || b.releaseMs != rel)
+                    return false;
+            return true;
+        };
+        if (allBands(-18.0f, 2.0f, 20.0f, 200.0f)) match = 3;
+        else if (allBands(-12.0f, 8.0f, 3.0f, 80.0f)) match = 4;
+    }
+    // Notification off: re-entrant onChange would re-apply a preset, as in EQWindow.
+    presetCombo.setSelectedId(match, juce::dontSendNotification);
 }
 
 void MultibandWindow::setBypassed(bool bypassed) {

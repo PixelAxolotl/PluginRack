@@ -6,13 +6,30 @@
 #include <cmath>
 
 namespace {
+// Base name for the strips a split creates. A default "Ch 1" turns into
+// "Input", and a trailing number is dropped so splitting an already split
+// strip ("Input 1") does not grow into "Input 1 1 1".
+juce::String splitBaseName(const juce::String& name) {
+    if (name.startsWith("Ch ")) return "Input";
+    // Strip every trailing " N" segment: a strip that was split twice reads
+    // "Input 1 2", and one more split should give "Input 1", not "Input 1 2 1".
+    juce::String base = name;
+    for (;;) {
+        int end = base.length();
+        while (end > 0 && juce::CharacterFunctions::isDigit(base[end - 1])) --end;
+        if (end > 0 && end < base.length() && base[end - 1] == ' ')
+            base = base.substring(0, end - 1);
+        else
+            return base;
+    }
+}
 }
 
 ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engine)
     : channel(channelState),
       audioEngine(engine),
       levelMeter(faderSlider, channelState.peakL, channelState.peakR, channelState.rmsL,
-                 channelState.rmsR) {
+                 channelState.rmsR, &channelState.lufs) {
     deviceControl.setTitle(channel.name);
     refreshInput();
 
@@ -76,16 +93,19 @@ ChannelStrip::ChannelStrip(AudioEngine::Channel& channelState, AudioEngine& engi
     deviceControl.setOnRename([this] {
         juce::Component::SafePointer<ChannelStrip> safe(this);
         StripDialog::show("Rename channel", channel.name, channel.colourHue,
-                          [safe](const juce::String& newName, float newHue) {
-            if (safe == nullptr) return;
-            safe->audioEngine.setChannelName(safe->channel.id, newName);
+                          [safe](const juce::String& newName, float newHue) -> juce::String {
+            if (safe == nullptr) return {};
+            const auto error = safe->audioEngine.renameChannel(safe->channel.id, newName);
+            if (error.isNotEmpty()) return error;
             safe->audioEngine.setChannelColourHue(safe->channel.id, newHue);
-            safe->deviceControl.setTitle(newName);
+            // Title from the engine, which holds the name that was applied.
+            safe->deviceControl.setTitle(safe->channel.name);
             safe->refreshColour();
             safe->repaint();
             // The strip shows the new name already; only the mirrored views
             // (rack, routing, saves) need a refresh, so no board rebuild.
             if (safe->onRenamed) safe->onRenamed();
+            return {};
         });
     });
     addAndMakeVisible(deviceControl);
@@ -607,19 +627,24 @@ void ChannelStrip::resized() {
     area.removeFromTop(theme::ui::kSpace1);
 
     // Input chip, or the mapping controls it swaps into when clicked.
-    auto inputRow = area.removeFromTop(theme::metrics::kFieldH);
+    // While editing the combos get their own row and the chip keeps a
+    // full-width row below, so the stereo pair never squeezes it to ~18 px.
     if (inputEditing) {
-        modeCombo.setBounds(inputRow.removeFromLeft(44));
-        inputRow.removeFromLeft(theme::ui::kTightGap);
-        inputComboA.setBounds(inputRow.removeFromLeft(36));
-        inputRow.removeFromLeft(theme::ui::kTightGap);
+        auto editRow = area.removeFromTop(theme::metrics::kFieldH);
+        modeCombo.setBounds(editRow.removeFromLeft(44));
+        editRow.removeFromLeft(theme::ui::kTightGap);
         if (inputComboB.isVisible()) {
-            inputComboB.setBounds(inputRow.removeFromLeft(36));
-            inputRow.removeFromLeft(theme::ui::kTightGap);
+            const int comboW = (editRow.getWidth() - theme::ui::kTightGap) / 2;
+            inputComboA.setBounds(editRow.removeFromLeft(comboW));
+            editRow.removeFromLeft(theme::ui::kTightGap);
+            inputComboB.setBounds(editRow);
+        } else {
+            inputComboA.setBounds(editRow);
         }
-        inputChip.setBounds(inputRow);
+        area.removeFromTop(theme::ui::kTightGap);
+        inputChip.setBounds(area.removeFromTop(theme::metrics::kFieldH));
     } else {
-        inputChip.setBounds(inputRow);
+        inputChip.setBounds(area.removeFromTop(theme::metrics::kFieldH));
     }
     area.removeFromTop(theme::ui::kTightGap);
 
@@ -779,6 +804,7 @@ void ChannelStrip::refreshRouting() {
         if (i < (int)routingOutputIds.size() && i < (int)outputs.size()) {
             const float g = audioEngine.getSendGain(channel.id, routingOutputIds[i]);
             on = g > AudioEngine::kSendAudibleDb;
+            if (on) lastOnSendGain[routingOutputIds[i]] = g;
             enabled = true;
         }
         routingButtons[i]->setEnabled(enabled);
@@ -888,24 +914,35 @@ void ChannelStrip::splitIntoMonoChannels() {
             const std::uint32_t firstId = safe->channel.id;
             // Keep a custom name: "Shure SM7B" becomes "Shure SM7B 1", while
             // the default "Ch 1" still becomes "Input 1".
-            const juce::String baseName = safe->channel.name.startsWith("Ch ")
-                                              ? "Input"
-                                              : safe->channel.name;
-            engine.setChannelMapping(firstId, pluginrack::ChannelLayout::Mono, {0});
-            engine.setChannelName(firstId, baseName + " 1");
+            const juce::String baseName = splitBaseName(safe->channel.name);
+            // Add every strip before touching a mapping: a mapping edit starts
+            // the background capture reopen, and addChannel() refuses while
+            // that job is running.
+            std::vector<std::uint32_t> ids{firstId};
             for (int i = 1; i < inputs; ++i) {
+                // addChannel() refuses at the strip limit; without the count
+                // check the rename would land on whatever strip was last.
+                const auto before = engine.getChannels().size();
                 engine.addChannel();
                 const auto& chans = engine.getChannels();
-                if (chans.empty()) break;
-                const std::uint32_t newId = chans.back()->id;
-                engine.setChannelName(newId, baseName + " " + juce::String(i + 1));
-                engine.setChannelMapping(newId, pluginrack::ChannelLayout::Mono, {i});
-                const auto err = engine.setChannelInputDevice(newId, device);
-                if (err.isNotEmpty()) {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::MessageBoxIconType::WarningIcon, "PluginRack", err);
-                }
+                if (chans.size() <= before) break;
+                ids.push_back(chans.back()->id);
+                // Name the device without opening it per strip: one worker
+                // pass opens the shared capture at the widest mapping.
+                engine.assignChannelInputDevice(chans.back()->id, device);
             }
+            if (ids.size() < 2) {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::InfoIcon, "PluginRack",
+                    "Split failed: audio was busy. Please try again.");
+                return;
+            }
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                engine.setChannelMapping(ids[i], pluginrack::ChannelLayout::Mono,
+                                         {static_cast<int>(i)});
+                engine.setChannelName(ids[i], baseName + " " + juce::String(i + 1));
+            }
+            engine.reopenInputsAsync();
             // Copy the callback: this strip is destroyed when the mixer rebuilds.
             auto callback = safe->rebuildCallback;
             juce::MessageManager::callAsync([callback] { if (callback) callback(); });
@@ -1207,7 +1244,15 @@ void ChannelStrip::rebuildRoutingButtons() {
         const std::uint32_t outputId = output->id;
         routingOutputIds.push_back(outputId);
         btn->onClick = [this, btn, outputId] {
-            audioEngine.setSendGain(channel.id, outputId, btn->getToggleState() ? 0.0f : AudioEngine::kSendOffDb);
+            if (btn->getToggleState()) {
+                const auto remembered = lastOnSendGain.find(outputId);
+                audioEngine.setSendGain(channel.id, outputId,
+                                        remembered != lastOnSendGain.end() ? remembered->second : 0.0f);
+            } else {
+                const float g = audioEngine.getSendGain(channel.id, outputId);
+                if (g > AudioEngine::kSendAudibleDb) lastOnSendGain[outputId] = g;
+                audioEngine.setSendGain(channel.id, outputId, AudioEngine::kSendOffDb);
+            }
         };
         addAndMakeVisible(*btn);
     }

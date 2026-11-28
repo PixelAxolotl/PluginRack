@@ -156,14 +156,16 @@ juce::Point<float> EQCurveComponent::nodePosition(const pluginrack::EqBand& band
 
 double EQCurveComponent::bandShapeDb(const pluginrack::EqBand& band,
                                      double sampleRateHz, double hz) {
-    // Same coefficients the engine applies: the RBJ maths now lives once in
-    // core DspMath (the old local copy's shelf alpha went NaN under the sqrt
-    // for Q > 1, so a shelved curve could diverge from what you heard).
+    // Same coefficients and cascade depth the engine applies: the RBJ maths now
+    // lives once in core DspMath (the old local copy's shelf alpha went NaN
+    // under the sqrt for Q > 1, so a shelved curve could diverge from what you
+    // heard), and eqBandStageCount is the engine's own stage rule.
     const auto c = coefficientSet(band, sampleRateHz);
     // Mirrors EqEngine's non-finite band guard: a poisoned coefficient set
     // draws as no contribution instead of dragging the curve to NaN.
     if (!pluginrack::dsp::isFinite(c)) return 0.0;
-    return magnitudeDbFromCoeffs(c, hz, sampleRateHz);
+    return static_cast<double>(pluginrack::eqBandStageCount(band)) *
+           magnitudeDbFromCoeffs(c, hz, sampleRateHz);
 }
 
 double EQCurveComponent::magnitudeDbAt(double hz) const {
@@ -258,6 +260,7 @@ void EQCurveComponent::rebuildCurvePaths() {
         const auto coeffs = coefficientSet(bands[i], sampleRateHz);
         if (!pluginrack::dsp::isFinite(coeffs)) continue; // draws no contribution
         cachedBandShapes[i].coeffs = coeffs;
+        cachedBandShapes[i].stages = pluginrack::eqBandStageCount(bands[i]);
         cachedBandShapes[i].contributes = true;
         anyContribution = true;
     }
@@ -266,9 +269,11 @@ void EQCurveComponent::rebuildCurvePaths() {
     // solo set (it has always been: only a non-finite set flattens it to 0 dB).
     const bool hasSelected = selectedBand >= 0 && selectedBand < static_cast<int>(bands.size());
     pluginrack::dsp::Biquad selectedCoeffs{};
+    int selectedStages = 1;
     bool selectedFinite = false;
     if (hasSelected) {
         selectedCoeffs = coefficientSet(bands[static_cast<std::size_t>(selectedBand)], sampleRateHz);
+        selectedStages = pluginrack::eqBandStageCount(bands[static_cast<std::size_t>(selectedBand)]);
         selectedFinite = pluginrack::dsp::isFinite(selectedCoeffs);
     }
 
@@ -281,7 +286,8 @@ void EQCurveComponent::rebuildCurvePaths() {
         if (anyContribution) {
             for (const auto& shape : cachedBandShapes) {
                 if (shape.contributes)
-                    totalDb += magnitudeDbFromCoeffs(shape.coeffs, freqHz, sampleRateHz);
+                    totalDb += static_cast<double>(shape.stages)
+                             * magnitudeDbFromCoeffs(shape.coeffs, freqHz, sampleRateHz);
             }
         }
         const float y = gainToY(totalDb);
@@ -290,7 +296,8 @@ void EQCurveComponent::rebuildCurvePaths() {
 
         if (hasSelected) {
             const double bandDb = selectedFinite
-                ? magnitudeDbFromCoeffs(selectedCoeffs, freqHz, sampleRateHz)
+                ? static_cast<double>(selectedStages)
+                      * magnitudeDbFromCoeffs(selectedCoeffs, freqHz, sampleRateHz)
                 : 0.0;
             const float bandY = gainToY(bandDb);
             if (x == 0) cachedSelectedPath.startNewSubPath(px, bandY);

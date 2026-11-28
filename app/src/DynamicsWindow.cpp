@@ -76,7 +76,7 @@ DynamicsWindow::DynamicsWindow(
     // Used as-is when this opens as a floating window (the mixer strips): open
     // in the middle of the screen instead of JUCE's default top-left corner.
     // The rack docks it into the editor bay and overrides the bounds.
-    centreWithSize(kMinWidth, kMinHeight);
+    theme::ui::placeEffectWindow(*this, kMinWidth, kMinHeight);
     // The gate row edits the strip's gate effect, which lives alongside the
     // compressor; only the compressor panel shows it.
     hasGate = type == pluginrack::DynamicsEffectType::Compressor && gate != nullptr;
@@ -121,6 +121,17 @@ DynamicsWindow::DynamicsWindow(
         if (apply) apply(effect, true);
     };
     content.addAndMakeVisible(enableButton);
+
+    theme::ui::styleButton(rmsButton);
+    rmsButton.setClickingTogglesState(true);
+    rmsButton.setToggleState(effect.rmsDetector, juce::dontSendNotification);
+    rmsButton.setTooltip("Detect the compressor level with RMS averaging instead of peak");
+    rmsButton.onClick = [this] {
+        effect.rmsDetector = rmsButton.getToggleState();
+        if (apply) apply(effect, false);
+    };
+    rmsButton.setVisible(type == pluginrack::DynamicsEffectType::Compressor);
+    content.addAndMakeVisible(rmsButton);
 
     // The gate has its own preset list so the compressor's choice never
     // rewrites gate settings (and vice versa).
@@ -199,8 +210,11 @@ DynamicsWindow::DynamicsWindow(
           [this](float value) { effect.inputGainDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
     setup(knee, 0.0, 24.0, effect.kneeDb, " dB", defaults.kneeDb, theme::violet(),
           [this](float value) { effect.kneeDb = value; curve.setEffect(effect); if (apply) apply(effect, false); });
+    setup(mix, pluginrack::kDynamicsMinMixPercent, pluginrack::kDynamicsMaxMixPercent,
+          effect.mixPercent, " %", defaults.mixPercent, theme::amber(),
+          [this](float value) { effect.mixPercent = value; if (apply) apply(effect, false); });
     for (auto* label : {&thresholdLabel, &ratioLabel, &attackLabel, &releaseLabel, &makeupLabel,
-                        &inputGainLabel, &kneeLabel}) {
+                        &inputGainLabel, &kneeLabel, &mixLabel}) {
         label->setJustificationType(juce::Justification::centred);
         label->setColour(juce::Label::textColourId, theme::dim());
         content.addAndMakeVisible(*label);
@@ -213,6 +227,7 @@ DynamicsWindow::DynamicsWindow(
     makeup.setName("Output");
     inputGain.setName("Input");
     knee.setName("Knee");
+    mix.setName("Mix");
 
     // Second row: the same strip's gate, so both panels drive one effect.
     if (hasGate) {
@@ -238,7 +253,8 @@ DynamicsWindow::DynamicsWindow(
         content.addAndMakeVisible(gateEnableButton);
 
         for (auto* label : {&gateThresholdLabel, &gateRangeLabel, &gateAttackLabel,
-                            &gateReleaseLabel}) {
+                            &gateReleaseLabel, &gateHoldLabel, &gateHysteresisLabel,
+                            &gateSidechainLabel}) {
             label->setJustificationType(juce::Justification::centred);
             label->setColour(juce::Label::textColourId, theme::dim());
             content.addAndMakeVisible(*label);
@@ -256,12 +272,26 @@ DynamicsWindow::DynamicsWindow(
                   [this, gateChanged](float value) { gateEffect.attackMs = value; gateChanged(); });
         setupGate(gateRelease, 10.0, 1000.0, gateEffect.releaseMs, " ms", gateDefaults.releaseMs, theme::violet(),
                   [this, gateChanged](float value) { gateEffect.releaseMs = value; gateChanged(); });
+        setupGate(gateHold, pluginrack::kDynamicsMinHoldMs, pluginrack::kDynamicsMaxHoldMs,
+                  gateEffect.holdMs, " ms", gateDefaults.holdMs, theme::cyan(),
+                  [this, gateChanged](float value) { gateEffect.holdMs = value; gateChanged(); });
+        setupGate(gateHysteresis, pluginrack::kDynamicsMinHysteresisDb,
+                  pluginrack::kDynamicsMaxHysteresisDb, gateEffect.hysteresisDb, " dB",
+                  gateDefaults.hysteresisDb, theme::amber(),
+                  [this, gateChanged](float value) { gateEffect.hysteresisDb = value; gateChanged(); });
+        setupGate(gateSidechain, pluginrack::kDynamicsMinSidechainHz,
+                  pluginrack::kDynamicsMaxSidechainHz, gateEffect.sidechainHz, " Hz",
+                  gateDefaults.sidechainHz, theme::violet(),
+                  [this, gateChanged](float value) { gateEffect.sidechainHz = value; gateChanged(); });
         curve.setGate(gateEffect, !gateEffect.bypassed);
     }
     gateThreshold.setName("Gate Thresh");
     gateRange.setName("Gate Range");
     gateAttack.setName("Gate Attack");
     gateRelease.setName("Gate Rel");
+    gateHold.setName("Gate Hold");
+    gateHysteresis.setName("Gate Hyst");
+    gateSidechain.setName("Gate SC");
     if (type == pluginrack::DynamicsEffectType::Gate) {
         ratioLabel.setText("Range", juce::dontSendNotification);
         makeup.setVisible(false);
@@ -270,6 +300,8 @@ DynamicsWindow::DynamicsWindow(
         inputGainLabel.setVisible(false);
         knee.setVisible(false);
         kneeLabel.setVisible(false);
+        mix.setVisible(false);
+        mixLabel.setVisible(false);
     }
     // Match the other four built-in windows (860x560) so the header, knob row,
     // and curve are the same size everywhere. The old 780x520 and 680x250 sizes
@@ -317,7 +349,7 @@ void DynamicsWindow::applyGatePreset(int itemId) {
 }
 
 void DynamicsWindow::syncControls() {
-    const std::array<std::pair<juce::Slider*, float>, 7> values{{
+    const std::array<std::pair<juce::Slider*, float>, 8> values{{
         { &inputGain, effect.inputGainDb },
         { &threshold, effect.thresholdDb },
         { &ratio, effect.ratio },
@@ -325,10 +357,12 @@ void DynamicsWindow::syncControls() {
         { &release, effect.releaseMs },
         { &knee, effect.kneeDb },
         { &makeup, effect.makeupDb },
+        { &mix, effect.mixPercent },
     }};
     for (const auto& [slider, value] : values)
         slider->setValue(static_cast<double>(value), juce::dontSendNotification);
     enableButton.setToggleState(!effect.bypassed, juce::dontSendNotification);
+    rmsButton.setToggleState(effect.rmsDetector, juce::dontSendNotification);
 }
 
 void DynamicsWindow::paint(juce::Graphics& g) {
@@ -346,9 +380,15 @@ void DynamicsWindow::resized() {
     modeLabel.setBounds(header.title.reduced(12, 0));
     presetCombo.setBounds(header.preset);
     enableButton.setBounds(header.enable);
+    // The RMS switch shares the header bar's free middle, left of the preset
+    // box, so it never competes with the knob row for space.
+    if (type == pluginrack::DynamicsEffectType::Compressor) {
+        rmsButton.setBounds(header.preset.withWidth(64).translated(
+            -(64 + theme::ui::kEffectHeaderGap), 0));
+    }
     area.removeFromTop(6);
 
-    const std::vector<std::pair<juce::Label*, juce::Slider*>> mainKnobs{
+    std::vector<std::pair<juce::Label*, juce::Slider*>> mainKnobs{
         { &inputGainLabel, &inputGain },
         { &thresholdLabel, &threshold },
         { &ratioLabel, &ratio },
@@ -357,11 +397,18 @@ void DynamicsWindow::resized() {
         { &kneeLabel, &knee },
         { &makeupLabel, &makeup },
     };
+    // The gate page has no dry/wet blend; the compressor panel gains one knob.
+    if (type == pluginrack::DynamicsEffectType::Compressor) {
+        mainKnobs.push_back({ &mixLabel, &mix });
+    }
     const std::vector<std::pair<juce::Label*, juce::Slider*>> gateKnobs{
         { &gateThresholdLabel, &gateThreshold },
         { &gateRangeLabel, &gateRange },
         { &gateAttackLabel, &gateAttack },
         { &gateReleaseLabel, &gateRelease },
+        { &gateHoldLabel, &gateHold },
+        { &gateHysteresisLabel, &gateHysteresis },
+        { &gateSidechainLabel, &gateSidechain },
     };
 
     if (type == pluginrack::DynamicsEffectType::Compressor) {
@@ -371,8 +418,9 @@ void DynamicsWindow::resized() {
             // knobs below, instead of a caption wedged against the combo.
             auto gateRow = area.removeFromBottom(132);
             {
-                const int gateSlotW = juce::jmax(1, gateRow.getWidth() / 4);
-                for (int i = 0; i < 4; ++i) {
+                const int gateSlots = static_cast<int>(gateKnobs.size());
+                const int gateSlotW = juce::jmax(1, gateRow.getWidth() / gateSlots);
+                for (int i = 0; i < gateSlots; ++i) {
                     auto slot = juce::Rectangle<int>(gateRow.getX() + i * gateSlotW,
                                                      gateRow.getY(), gateSlotW,
                                                      gateRow.getHeight());
@@ -397,8 +445,9 @@ void DynamicsWindow::resized() {
         area.removeFromRight(8);
         curve.setBounds(area);
         {
-            const int slotW = juce::jmax(1, knobsRow.getWidth() / 7);
-            for (int i = 0; i < 7; ++i) {
+            const int mainSlots = static_cast<int>(mainKnobs.size());
+            const int slotW = juce::jmax(1, knobsRow.getWidth() / mainSlots);
+            for (int i = 0; i < mainSlots; ++i) {
                 auto slot = juce::Rectangle<int>(knobsRow.getX() + i * slotW,
                                                  knobsRow.getY(), slotW,
                                                  knobsRow.getHeight());
@@ -412,8 +461,9 @@ void DynamicsWindow::resized() {
         gauge.setBounds(area.removeFromRight(180));
         area.removeFromRight(8);
         {
-            const int slotW = juce::jmax(1, knobsRow.getWidth() / 7);
-            for (int i = 0; i < 7; ++i) {
+            const int mainSlots = static_cast<int>(mainKnobs.size());
+            const int slotW = juce::jmax(1, knobsRow.getWidth() / mainSlots);
+            for (int i = 0; i < mainSlots; ++i) {
                 auto slot = juce::Rectangle<int>(knobsRow.getX() + i * slotW,
                                                  knobsRow.getY(), slotW,
                                                  knobsRow.getHeight());
@@ -443,6 +493,9 @@ void DynamicsWindow::syncGateControls() {
     gateRange.setValue(static_cast<double>(gateEffect.ratio), juce::dontSendNotification);
     gateAttack.setValue(static_cast<double>(gateEffect.attackMs), juce::dontSendNotification);
     gateRelease.setValue(static_cast<double>(gateEffect.releaseMs), juce::dontSendNotification);
+    gateHold.setValue(static_cast<double>(gateEffect.holdMs), juce::dontSendNotification);
+    gateHysteresis.setValue(static_cast<double>(gateEffect.hysteresisDb), juce::dontSendNotification);
+    gateSidechain.setValue(static_cast<double>(gateEffect.sidechainHz), juce::dontSendNotification);
     gateEnableButton.setToggleState(!gateEffect.bypassed, juce::dontSendNotification);
 }
 

@@ -87,6 +87,7 @@ private:
     std::vector<float> gainReductionDb;
     void selectBand(int i);
     void applyPreset(int id);
+    void syncPresetLabel();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MultibandWindow)
 };

@@ -10,7 +10,7 @@ LimiterWindow::LimiterWindow(const juce::String& title, const LimiterEffect& ini
       effect(initialEffect), apply(std::move(applyCallback)),
       historyInput(240, -60.0f), historyReduction(240, 0.0f), historyOutput(240, -60.0f) {
     setResizable(false, false); setContentOwned(&content, false); setUsingNativeTitleBar(true);
-    centreWithSize(kWidth, kHeight);
+    theme::ui::placeEffectWindow(*this, kWidth, kHeight);
     modeLabel.setText("LIMITER", juce::dontSendNotification);
     theme::ui::styleTitleLabel(modeLabel);
     content.addAndMakeVisible(modeLabel); content.addAndMakeVisible(graph); content.addAndMakeVisible(enableButton);
@@ -50,10 +50,10 @@ LimiterWindow::LimiterWindow(const juce::String& title, const LimiterEffect& ini
         label->setFont(juce::Font(juce::FontOptions(11.0f)));
         label->setColour(juce::Label::textColourId, theme::dim());
     }
-    inputGain.onValueChange = [this] { effect.inputGainDb = (float)inputGain.getValue(); apply(effect, false); };
-    ceiling.onValueChange = [this] { effect.ceilingDb = (float)ceiling.getValue(); apply(effect, false); };
-    lookahead.onValueChange = [this] { effect.lookaheadMs = (float)lookahead.getValue(); apply(effect, false); };
-    release.onValueChange = [this] { effect.releaseMs = (float)release.getValue(); apply(effect, false); };
+    inputGain.onValueChange = [this] { effect.inputGainDb = (float)inputGain.getValue(); apply(effect, false); syncPresetLabel(); };
+    ceiling.onValueChange = [this] { effect.ceilingDb = (float)ceiling.getValue(); apply(effect, false); syncPresetLabel(); };
+    lookahead.onValueChange = [this] { effect.lookaheadMs = (float)lookahead.getValue(); apply(effect, false); syncPresetLabel(); };
+    release.onValueChange = [this] { effect.releaseMs = (float)release.getValue(); apply(effect, false); syncPresetLabel(); };
     graph.setMode(TraceGraphMode::Time);
     graph.setOverlayPainter([this](juce::Graphics& g, juce::Rectangle<float> graphBounds) {
         const auto ceilingY = graphBounds.getBottom()
@@ -62,6 +62,7 @@ LimiterWindow::LimiterWindow(const juce::String& title, const LimiterEffect& ini
         g.drawHorizontalLine(juce::roundToInt(ceilingY), graphBounds.getX(), graphBounds.getRight());
     });
     syncControls();
+    syncPresetLabel();
     setVisible(true);
     startTimer(33);
 }
@@ -74,10 +75,32 @@ void LimiterWindow::syncControls() {
 }
 
 void LimiterWindow::applyPreset(int id) {
+    if (id == 1) return; // Custom: nothing to write
     if (id == 2) effect = makeDefaultLimiterEffect();
     if (id == 3) { effect.ceilingDb = -1.0f; effect.inputGainDb = 0; effect.lookaheadMs = 3.0f; }
     if (id == 4) { effect.ceilingDb = -0.1f; effect.inputGainDb = 6.0f; }
-    syncControls(); apply(effect, false);
+    syncControls(); syncPresetLabel(); apply(effect, false);
+}
+
+void LimiterWindow::syncPresetLabel() {
+    // Default compares every DSP field (id/bypassed excluded: the header
+    // preset describes the curve, not the enable state). Safe only rewrites
+    // ceiling/input/lookahead and Loud only ceiling/input, so release (and
+    // lookahead for Loud) are ignored for those two (inexact by
+    // construction — see report).
+    int match = 1;
+    auto def = makeDefaultLimiterEffect(effect.id);
+    def.bypassed = effect.bypassed;
+    if (effect == def) {
+        match = 2;
+    } else if (effect.ceilingDb == -1.0f && effect.inputGainDb == 0.0f
+               && effect.lookaheadMs == 3.0f) {
+        match = 3;
+    } else if (effect.ceilingDb == -0.1f && effect.inputGainDb == 6.0f) {
+        match = 4;
+    }
+    // Notification off: re-entrant onChange would re-apply a preset, as in EQWindow.
+    presetCombo.setSelectedId(match, juce::dontSendNotification);
 }
 
 void LimiterWindow::setBypassed(bool b) { effect.bypassed = b; enableButton.setToggleState(!b, juce::dontSendNotification); }

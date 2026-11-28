@@ -623,7 +623,7 @@ TEST_CASE("settings apply fails safe and reloads single devices",
     CHECK(contains(engine, "AudioEngine::reloadDeviceAsync"));
     CHECK(contains(engine, "forceReopen"));
     const auto settings = readSource("app/src/SettingsView.cpp");
-    CHECK(contains(settings, "Pending changes - press Apply"));
+    CHECK(contains(settings, "Settings pending - Apply to activate"));
     CHECK(contains(settings, "applyDeviceSettings"));
     const auto header = readSource("app/src/SettingsView.h");
     CHECK(contains(header, "Reload All Audio Devices"));
@@ -938,7 +938,7 @@ TEST_CASE("exit autosave never swallows a failed save", "[app][session]") {
     const auto bridge = readSource("app/src/SceneBridge.cpp");
     CHECK(contains(bridge, "SceneBridge::writeSaveFailureNote"));
     CHECK(contains(bridge, "SceneBridge::takeSaveFailureNote"));
-    const auto startup = functionBody(mainComponent, "void MainComponent::initialiseAudio");
+    const auto startup = functionBody(mainComponent, "void MainComponent::startNormalSession");
     CHECK(contains(startup, "takeSaveFailureNote"));
 }
 
@@ -1909,6 +1909,39 @@ TEST_CASE("a short miss run does not bury a child slot as crashed", "[app][ipc][
     CHECK(contains(timer, "if (childFailed_.load(std::memory_order_acquire)) {"));
 }
 
+TEST_CASE("a crash offers the newest autosave once on the next launch", "[app][session]") {
+    const auto shutdown = functionBody(readSource("app/src/Main.cpp"),
+                                       "void shutdown() override");
+    // The marker is written after the exit autosave and immediately before
+    // the process ends: a crash or kill skips it by definition. The last
+    // occurrence is the real exit; earlier ones are the crash handler.
+    const auto saveIdx = shutdown.find("saveSceneOnExit()");
+    const auto markerIdx = shutdown.find("writeCleanExitMarker()");
+    const auto exitIdx = shutdown.rfind("TerminateProcess");
+    REQUIRE(saveIdx != std::string::npos);
+    REQUIRE(markerIdx != std::string::npos);
+    REQUIRE(exitIdx != std::string::npos);
+    CHECK(saveIdx < markerIdx);
+    CHECK(markerIdx < exitIdx);
+
+    const auto bridgeHeader = readSource("app/src/SceneBridge.h");
+    CHECK(contains(bridgeHeader, "hasUncleanAutosave"));
+    CHECK(contains(bridgeHeader, "writeCleanExitMarker"));
+    const auto bridge = readSource("app/src/SceneBridge.cpp");
+    CHECK(contains(bridge, "clean-exit.txt"));
+    CHECK(contains(bridge, "SceneBridge::hasUncleanAutosave"));
+
+    // Startup asks non-blocking and reuses the staged restore; answering
+    // either way rewrites the marker so the prompt fires once per crash.
+    const auto startup = readSource("app/src/MainComponent.cpp");
+    CHECK(contains(startup, "hasUncleanAutosave"));
+    CHECK(contains(startup, "closed unexpectedly"));
+    CHECK(contains(startup, "showOkCancelBox"));
+    CHECK(contains(startup, "restoreCrashedSession"));
+    CHECK(contains(startup, "applySceneAsync"));
+    CHECK(contains(startup, "writeCleanExitMarker"));
+}
+
 TEST_CASE("a strip fader follows a colour change made after it was built", "[app][ui]") {
     const auto channelCpp = readSource("app/src/ChannelStrip.cpp");
     const auto mixerCpp = readSource("app/src/MixerComponent.cpp");
@@ -1946,4 +1979,131 @@ TEST_CASE("a strip fader follows a colour change made after it was built", "[app
     const auto outputCtor = functionBody(mixerCpp, "MixerComponent::OutputStrip::OutputStrip(");
     CHECK(contains(outputCtor, "refreshColour();"));
     CHECK_FALSE(contains(outputCtor, "setColour(juce::Slider::thumbColourId, outputAccent)"));
+}
+
+TEST_CASE("a scene restore carries matching streams instead of reopening them", "[app][audio]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    const auto commit = functionBody(engine, "juce::String AudioEngine::commitSceneRestore");
+
+    // The commit hands the old strips to the carry-over and only closes what
+    // it retires: an unchanged rig keeps its devices, FIFOs and render hooks,
+    // so the switch costs no 3-12 s reopen silence.
+    CHECK(contains(commit, "carryOverSceneDevicesLocked(oldOutputs, oldChannels, oldPlaybacks);"));
+    CHECK_FALSE(contains(commit, "clockOutputId = 0;"));
+    CHECK_FALSE(contains(commit, "retiredOutputs_"));
+
+    // The helper only matches the same device at the same open format: name,
+    // layout, rate, channel count and buffer size all gate the carry, and a
+    // remapped capture reopens (correctness over speed) instead of feeding
+    // the wrong physical inputs.
+    const auto carry = functionBody(engine, "AudioEngine::carryOverSceneDevicesLocked");
+    CHECK(contains(carry, "getSampleRate() != liveRate"));
+    CHECK(contains(carry, "getNumDeviceOutputChannels()"));
+    CHECK(contains(carry, "getBufferSize()"));
+    CHECK(contains(carry, "clockOutputId = carriedClockId"));
+    CHECK(contains(carry, "setRenderActive(true)"));
+    CHECK(contains(carry, "requestedBufferSize"));
+    CHECK(contains(carry, "renderBlockFrames"));
+    CHECK(contains(carry, "correctness over"));
+    // Retired streams still take the old deferred-close path.
+    CHECK(contains(carry, "oldPlaybacks.push_back(p.playback.get())"));
+
+    // The background opener must not reopen a carried stream: it returns early
+    // when the strip already runs at the wanted format, and only an explicit
+    // Reload or buffer-size change forces the probe again.
+    const auto opener = functionBody(engine, "AudioEngine::setOutputDeviceImpl");
+    CHECK(contains(opener, "if (!forceReopen)"));
+    CHECK(contains(opener, "forceReopen"));
+    // The pass that follows the commit keeps a carried live clock instead of
+    // re-pinning the role to the first strip and reopening a working device.
+    const auto pass = functionBody(engine, "AudioEngine::openAllDevicesPass");
+    CHECK(contains(pass, "carriedClockAlive"));
+    CHECK(contains(pass, "clockRequestIdx"));
+}
+
+TEST_CASE("a mapping edit reopens captures on the worker, once per split", "[app][audio]") {
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    // The three UI setters change channel state and queue the reopen: an
+    // inline driver open on the message thread is what froze the window.
+    for (const auto* setter : {"void AudioEngine::setChannelLayout",
+                               "void AudioEngine::setChannelInputChannels",
+                               "void AudioEngine::setChannelMapping"}) {
+        const auto body = functionBody(engine, setter);
+        CHECK(contains(body, "reopenInputsAsync();"));
+        CHECK_FALSE(contains(body, "reassignChannelInputDevice("));
+        CHECK_FALSE(contains(body, "setChannelInputDeviceImpl("));
+    }
+    // The worker pass is the one place that opens; a mapping edit that lands
+    // while a job runs is replayed after it instead of being dropped.
+    const auto reopen = functionBody(engine, "void AudioEngine::reopenInputsAsync");
+    CHECK(contains(reopen, "prepareInputs();"));
+    CHECK(contains(reopen, "inputsReopenPending_.store(true"));
+    const auto now = functionBody(engine, "void AudioEngine::openStripsDevicesNow");
+    CHECK(contains(now, "inputsReopenPending_.exchange(false"));
+
+    // A mono split names the device on every new strip without opening it,
+    // then queues one pass for the whole split: N strips, one device open.
+    const auto strip = readSource("app/src/ChannelStrip.cpp");
+    const auto split = functionBody(strip, "void ChannelStrip::splitIntoMonoChannels");
+    CHECK(contains(split, "assignChannelInputDevice("));
+    CHECK(contains(split, "reopenInputsAsync();"));
+    CHECK_FALSE(contains(split, "setChannelInputDevice("));
+    CHECK(contains(split, "chans.size() <= before"));
+}
+
+TEST_CASE("the eq slope picker writes 48 for its top item", "[app][ui]") {
+    // The combo IDs are 1, 2, 3 but the engine values are 12, 24, 48: a plain
+    // 12 * id wrote 36, the validator rejected it and the combo snapped back
+    // to 12 on the next refresh (24 worked because 12 * 2 happens to be 24).
+    const auto source = readSource("app/src/EQWindow.cpp");
+    CHECK(contains(source, "slopeCombo.addItem(\"48 dB/oct\", 3)"));
+    CHECK(contains(source, "id == 3 ? 48 : 12 * id"));
+    CHECK(contains(source, "slopeDbPerOct == 48 ? 3"));
+
+    // A slope the validator rejects used to poison the live scene: every
+    // autosave then failed, so nothing was written. The engine setters keep
+    // the values legal instead of trusting the UI.
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "snapEqBandSlopes(channel->eqBands);"));
+    CHECK(contains(engine, "snapEqBandSlopes(output->eqBands);"));
+}
+
+TEST_CASE("a refused rename does not retitle the strip") {
+    // The setters keep the old name when a rename is empty, duplicate or too
+    // long. Titling from the request left the strip showing a name the scene
+    // never had, so both strips title from the engine state.
+    const auto strip = readSource("app/src/ChannelStrip.cpp");
+    CHECK(contains(strip, "setTitle(safe->channel.name);"));
+    const auto mixer = readSource("app/src/MixerComponent.cpp");
+    CHECK(contains(mixer, "setTitle(safe->output.name);"));
+}
+
+TEST_CASE("the engine refuses strips past the scene caps") {
+    // Adding more outputs than the validator accepts made every autosave fail
+    // with "scene has 40 outputs, expected at most 32". Engine and validator
+    // now share the caps, and the add buttons stop at them.
+    const auto limits = readSource("core/include/pluginrack/SceneLimits.h");
+    CHECK(contains(limits, "inline constexpr std::size_t kMaxOutputs = 32;"));
+    CHECK(contains(limits, "inline constexpr std::size_t kMaxChannels = 64;"));
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "channels.size() >= pluginrack::kMaxChannels"));
+    CHECK(contains(engine, "outputs.size() >= pluginrack::kMaxOutputs"));
+    const auto validator = readSource("core/src/SceneValidator.cpp");
+    CHECK(contains(validator, "pluginrack::kMaxOutputs"));
+    CHECK(contains(validator, "pluginrack::kMaxChannels"));
+}
+
+TEST_CASE("a refused rename keeps the dialog open with its reason") {
+    // The dialog used to close on any OK, so an empty or duplicate name just
+    // made the rename vanish. The apply callback returns the reason and the
+    // dialog stays open on the same text.
+    const auto dialog = readSource("app/src/StripDialog.cpp");
+    CHECK(contains(dialog, "errorText = onApply ? onApply(newName, pickedHue)"));
+    CHECK(contains(dialog, "if (errorText.isNotEmpty()) {"));
+    CHECK(contains(dialog, "nameEditor.selectAll();"));
+    const auto engine = readSource("app/src/AudioEngine.cpp");
+    CHECK(contains(engine, "juce::String AudioEngine::renameChannel"));
+    CHECK(contains(engine, "juce::String AudioEngine::renameOutput"));
+    CHECK(contains(engine, "That name is already used."));
+    CHECK(contains(engine, "Enter a name."));
 }

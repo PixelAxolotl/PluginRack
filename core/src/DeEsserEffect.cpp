@@ -49,8 +49,7 @@ float deEsserBandLevelDb(const float* left, const float* right, int frames,
             peak = std::max({peak, std::fabs(left[i]), std::fabs(right[i])});
         return dsp::gainToDb(peak);
     }
-    const auto band = dsp::bandPass(effect.freqHz, sampleRateHz > 0.0 ? sampleRateHz : 48000.0,
-                                    effect.q, kMinBandHz, kMaxBandHz);
+    const auto band = deEsserBandCoefficients(effect, sampleRateHz);
     float peak = 0.0f;
     for (int i = 0; i < frames; ++i) {
         const float bandL = dsp::applyBiquadSample(left[i], band, stateS1L, stateS2L);
@@ -58,6 +57,12 @@ float deEsserBandLevelDb(const float* left, const float* right, int frames,
         peak = std::max({peak, std::fabs(bandL), std::fabs(bandR)});
     }
     return dsp::gainToDb(peak);
+}
+
+dsp::Biquad deEsserBandCoefficients(const DeEsserEffect& effect, double sampleRateHz) noexcept {
+    if (!std::isfinite(effect.freqHz) || !std::isfinite(effect.q)) return dsp::Biquad{};
+    return dsp::bandPass(effect.freqHz, sampleRateHz > 0.0 ? sampleRateHz : 48000.0,
+                         effect.q, kMinBandHz, kMaxBandHz);
 }
 
 void DeEsserProcessor::prepare(double sampleRate) {
@@ -82,7 +87,7 @@ void DeEsserProcessor::rebuild() {
     // Non-finite settings never reach here in process() either, so leave the
     // previous coefficients in place instead of inventing a 6 kHz band.
     if (!paramsFinite(effect_)) return;
-    band_ = dsp::bandPass(effect_.freqHz, sampleRate_, effect_.q, kMinBandHz, kMaxBandHz);
+    band_ = deEsserBandCoefficients(effect_, sampleRate_);
 }
 
 void DeEsserProcessor::process(float* left, float* right, int frames) noexcept {

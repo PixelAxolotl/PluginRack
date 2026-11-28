@@ -27,16 +27,11 @@ public:
 
 void StripDialog::show(const juce::String& title, const juce::String& currentName,
                        float currentHue,
-                       std::function<void(const juce::String& newName, float newHue)> onApply) {
-    // Only one rename dialog at a time: a second invocation just brings the
-    // existing window forward instead of stacking another one on top of it.
-    static juce::Component::SafePointer<StripDialogWindow> currentWindow;
-    if (currentWindow != nullptr) {
-        currentWindow->toFront(true);
-        return;
-    }
+                       std::function<juce::String(const juce::String& newName, float newHue)> onApply) {
+    // Per-invocation: every rename opens its own window, which owns itself
+    // and self-deletes on close (see StripDialogWindow::closeButtonPressed).
+    // No shared instance is kept, so two strips can each hold a dialog open.
     auto* window = new StripDialogWindow(title);
-    currentWindow = window;
     auto* body = new Body(currentName, currentHue, std::move(onApply));
     window->setContentOwned(body, false);
     window->setSize(kDialogW, kDialogH);
@@ -47,12 +42,17 @@ void StripDialog::show(const juce::String& title, const juce::String& currentNam
 }
 
 StripDialog::Body::Body(const juce::String& currentName, float currentHue,
-                        std::function<void(const juce::String&, float)> apply)
+                        std::function<juce::String(const juce::String&, float)> apply)
     : pickedHue(currentHue), onApply(std::move(apply)) {
     nameEditor.setText(currentName, juce::dontSendNotification);
     nameEditor.setReturnKeyStartsNewLine(false);
     nameEditor.setMultiLine(false);
     nameEditor.onReturnKey = [this] { applyAndClose(); };
+    nameEditor.onTextChange = [this] {
+        if (errorText.isEmpty()) return;
+        errorText.clear();
+        repaint();
+    };
     addAndMakeVisible(nameEditor);
 
     for (const float hue : theme::stripHues()) {
@@ -91,7 +91,14 @@ void StripDialog::Body::applyAndClose() {
     // in the hex field must not silently drop it.
     applyHexField(hexEditor.getText());
     const auto newName = nameEditor.getText();
-    if (onApply) onApply(newName, pickedHue);
+    errorText = onApply ? onApply(newName, pickedHue) : juce::String();
+    if (errorText.isNotEmpty()) {
+        // Refused: keep the dialog open on the same name so it can be fixed.
+        nameEditor.grabKeyboardFocus();
+        nameEditor.selectAll();
+        repaint();
+        return;
+    }
     closeWindow();
 }
 
@@ -143,6 +150,13 @@ void StripDialog::Body::resized() {
 
 void StripDialog::Body::paint(juce::Graphics& g) {
     g.fillAll(theme::panel());
+    if (errorText.isEmpty()) return;
+    // Sits on the hex row, left of the colour field.
+    auto row = getLocalBounds().reduced(16).withTrimmedTop(28 + 6 + 2 * (26 + 10) + 6);
+    row = row.removeFromTop(28).withTrimmedRight(120);
+    g.setColour(theme::red());
+    g.setFont(theme::ui::bodyFont());
+    g.drawFittedText(errorText, row, juce::Justification::centredLeft, 2);
 }
 
 void StripDialog::Body::Swatch::mouseDown(const juce::MouseEvent&) {

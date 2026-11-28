@@ -78,17 +78,33 @@ void MultibandCurveComponent::setEffect(const pluginrack::MultibandEffect& newEf
     effect = newEffect;
     normaliseEffect(effect);
     selectedBand = juce::jlimit(0, static_cast<int>(effect.bands.size()) - 1, selectedBand);
-    targetTraceDb = pluginrack::makeMultibandTargetTrace(effect, 256);
-    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb);
+    targetTraceDb = pluginrack::makeMultibandTargetTrace(
+        effect, 256, static_cast<float>(kMinFreqHz), static_cast<float>(kMaxFreqHz),
+        spectrumSampleRateHz);
+    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb,
+                                             static_cast<float>(kMinFreqHz),
+                                             static_cast<float>(kMaxFreqHz), spectrumSampleRateHz);
     repaint();
 }
 
 void MultibandCurveComponent::setSpectrum(const float* magnitudeDb, int numBins, double rateHz) {
+    const bool rateChanged = rateHz > 0.0 && !juce::approximatelyEqual(rateHz, spectrumSampleRateHz);
     if (rateHz > 0.0) spectrumSampleRateHz = rateHz;
     if (magnitudeDb == nullptr || numBins <= 0) {
         spectrumDb.clear();
     } else {
         spectrumDb.assign(magnitudeDb, magnitudeDb + numBins);
+    }
+    // The traces are the real filter responses at the device rate: a rate
+    // change moves every split, so rebuild them once instead of drawing the
+    // 48 kHz shape on a 44.1 kHz device.
+    if (rateChanged) {
+        targetTraceDb = pluginrack::makeMultibandTargetTrace(
+            effect, 256, static_cast<float>(kMinFreqHz), static_cast<float>(kMaxFreqHz),
+            spectrumSampleRateHz);
+        pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb,
+                                                 static_cast<float>(kMinFreqHz),
+                                                 static_cast<float>(kMaxFreqHz), spectrumSampleRateHz);
     }
     repaint();
 }
@@ -110,7 +126,9 @@ void MultibandCurveComponent::setGainReduction(const std::vector<float>& reducti
     if (gainChangeTraceDb.size() == kTraceBins && !reductionsMoved(reductionsDb, reductions))
         return;
     reductionsDb = reductions;
-    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb);
+    pluginrack::fillMultibandGainChangeTrace(effect, reductionsDb, kTraceBins, gainChangeTraceDb,
+                                             static_cast<float>(kMinFreqHz),
+                                             static_cast<float>(kMaxFreqHz), spectrumSampleRateHz);
     repaint();
 }
 

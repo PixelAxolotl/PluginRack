@@ -131,6 +131,9 @@ private:
 
     juce::OwnedArray<juce::TextButton> routingButtons;
     std::vector<std::uint32_t> routingOutputIds;
+    // Last audible gain per output id. Toggling a chip back on restores the
+    // send level a scene or the matrix set, instead of jumping to 0 dB.
+    std::map<std::uint32_t, float> lastOnSendGain;
 
     juce::Label faderLabel{"", "dB"};
     ValueEditSlider faderSlider;

@@ -11,12 +11,11 @@
 #include "MixerComponent.h"
 #include "PatchesView.h"
 #include "RackView.h"
-#include "RoutingMatrixComponent.h"
 #include "SavesView.h"
 #include "SettingsView.h"
 #include "Theme.h"
 
-enum class AppView { Rack = 0, Mixer, Routing, IO, Saves, Settings, Patches };
+enum class AppView { Rack = 0, Mixer, IO, Saves, Settings, Patches };
 
 // Persistent 56 px header: wordmark, view navigation, snapshot placeholder,
 // audio status, error affordance, scene buttons. Paints the same bar the
@@ -51,7 +50,6 @@ private:
     juce::TextButton racksButton{"Racks"};
     juce::TextButton mixerButton{"Mixer"};
     juce::TextButton patchesButton{"Patches"};
-    juce::TextButton routingButton{"Routing"};
     juce::TextButton ioButton{"I/O"};
     juce::TextButton settingsButton{"Settings"};
     juce::TextButton snapshotButton{"Snapshot"};
@@ -117,7 +115,6 @@ private:
     AudioEngine& audioEngine;
     MixerComponent& mixerView;
     RackView rackView;
-    RoutingMatrixComponent routingView;
     PatchesView patchesView;
     IoView ioView;
     SavesView savesView;
@@ -169,6 +166,10 @@ private:
     // matches what is on disk.
     void autosaveIfChanged();
     void loadScene(bool showMissingMessage);
+    // Crash recovery: restores the newest last-scene file after an unclean
+    // exit, or starts the normal startup scene when the user declines.
+    void restoreCrashedSession();
+    void startNormalSession();
     // Applies a parsed scene synchronously and returns plugin load errors.
     // Diagnostics and tests use this blocking form; the UI goes through
     // applySceneAsync below so slow plugins do not freeze the window.
@@ -210,6 +211,12 @@ private:
     double nextFullSceneCheckMs_ = 0.0;
     double lastSceneChangeMs_ = 0.0;
     bool sceneChangedSinceSave_ = false;
+    // Edits not yet in the active *named* save. Autosave writes the session
+    // snapshot, not the named file, so it must never clear this flag.
+    bool namedSaveDirty_ = false;
+    // One warning per session when autosave cannot write: a failing validator
+    // used to leave the user with no save and only a log line.
+    bool autosaveFailureShown_ = false;
     bool haveChangeBaseline_ = false;
     juce::uint64 lastStructureHash_ = 0;
     juce::uint64 lastStructureRevision_ = 0;

@@ -20,7 +20,7 @@ namespace pluginrack {
 // Bumped only when an older file must be read differently. The writer stamps
 // this value, the reader compares against it, and the validator rejects
 // anything newer, so the number lives in one place.
-inline constexpr int kSchemaVersion = 11;
+inline constexpr int kSchemaVersion = 15;
 
 // Where an insert's side-chain input is fed from. None keeps the pre-v8
 // behaviour (the plugin's side-chain bus is disabled). Channel and Output
@@ -212,6 +212,10 @@ struct Output : Strip {
     OutputKind kind = OutputKind::Physical;
     std::string deviceId;
     bool flipped = false;
+    // Zero-based device channel pair this output plays on: 0 plays device
+    // channels 1/2, 2 plays 3/4, and so on. Absent in scenes written before
+    // schema 12, where every output played 1/2.
+    int firstChannel = 0;
 
     bool operator==(const Output&) const = default;
 };

@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 
+#include "pluginrack/DspMath.h"
 #include "pluginrack/LimiterEffect.h"
 #include "pluginrack/SceneCodec.h"
 
@@ -24,6 +25,31 @@ TEST_CASE("limiter clamps above ceiling") {
     const float ceiling = std::pow(10.0f, -1.0f / 20.0f);
     REQUIRE(peak <= ceiling * 1.02f);
     REQUIRE(p.gainReductionDb() > 0.0f);
+}
+
+TEST_CASE("limiter detects inter-sample peaks") {
+    // fs/4 sine at 45 degrees: every sample reads 0.7071, but the true peak
+    // between samples is 1.0. A sample-peak detector would not move; the 4x
+    // oversampled detector must open the gain.
+    auto effect = pluginrack::makeDefaultLimiterEffect();
+    effect.ceilingDb = -1.0f;
+    effect.lookaheadMs = 1.5f;
+    pluginrack::LimiterProcessor p;
+    p.prepare(48000.0);
+    p.setEffect(effect);
+    constexpr int frames = 4800;
+    constexpr double twoPi = 2.0 * pluginrack::dsp::kPi;
+    std::vector<float> L(frames);
+    std::vector<float> R(frames);
+    for (int i = 0; i < frames; ++i) {
+        const float value = static_cast<float>(
+            std::sin(twoPi * 12000.0 * i / 48000.0 + twoPi / 8.0));
+        L[static_cast<std::size_t>(i)] = value;
+        R[static_cast<std::size_t>(i)] = value;
+    }
+    p.process(L.data(), R.data(), frames);
+    REQUIRE(p.gainReductionDb() > 0.25f);
+    for (const float sample : L) REQUIRE(std::isfinite(sample));
 }
 
 TEST_CASE("limiter passes quiet audio") {

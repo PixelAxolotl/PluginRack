@@ -15,6 +15,15 @@ constexpr int kAutoBufferItemId = 1; // ComboBox ids must be non-zero.
 constexpr std::uint32_t kAutoReloadCooldownMs = 5000;
 constexpr int kMaxAutoReloadRounds = 3;
 
+// Shared-mode default-format disclosure shown under the device reload
+// controls. A free function (not a member) because the view's header is
+// frozen for this change; the label itself is parented to the body in the
+// constructor, which owns and destroys it.
+juce::String sharedModeNoteText() {
+    return juce::String("Changing sample rate or bit depth can update this Windows "
+                        "device's shared-mode format; PluginRack restores it when it exits.");
+}
+
 // The driver chooses the actual buffer size (often 480). Make sure the combo
 // contains it so the current value is visible, not just the presets.
 void showDeviceBuffer(juce::ComboBox& combo, int current) {
@@ -395,6 +404,20 @@ SettingsView::SettingsView(AudioEngine& engine)
     };
     add(peakHoldCombo);
 
+    // The second readout row shows RMS or momentary loudness. Loudness is
+    // K-weighted and averaged over 400 ms, so it reads lower than RMS.
+    theme::ui::styleButton(meterReadoutButton);
+    meterReadoutButton.setClickingTogglesState(true);
+    meterReadoutButton.setTooltip("Second meter row: RMS level or momentary loudness (LUFS)");
+    meterReadoutButton.onClick = [this] {
+        LevelMeter::setReadoutMode(meterReadoutButton.getToggleState()
+                                       ? LevelMeter::Readout::Lufs
+                                       : LevelMeter::Readout::Rms);
+        meterReadoutButton.setButtonText(LevelMeter::readoutMode() == LevelMeter::Readout::Lufs
+                                             ? "LUFS" : "RMS");
+    };
+    add(meterReadoutButton);
+
     theme::ui::styleToggle(closeToTrayToggle);
     closeToTrayToggle.setTooltip("Keep PluginRack running in the system tray when the window is closed.");
     closeToTrayToggle.onClick = [this] {
@@ -447,6 +470,13 @@ SettingsView::SettingsView(AudioEngine& engine)
         refresh();
     };
     add(autoReloadToggle);
+
+    // The engine rewrites a shared-mode endpoint's Windows default format to
+    // reach the engine rate; layoutBody() places it under the reload toggle.
+    auto* sharedModeNote = new WrappedLabel();
+    sharedModeNote->setComponentID("sharedModeNote");
+    sharedModeNote->setText(sharedModeNoteText(), theme::dim());
+    body.addAndMakeVisible(sharedModeNote);
 
     startTimer(250);
     refresh();
@@ -650,6 +680,11 @@ void SettingsView::refresh() {
     }
     if (!peakHoldCombo.isPopupActive())
         peakHoldCombo.setSelectedId(LevelMeter::peakHoldMs(), juce::dontSendNotification);
+    {
+        const bool lufs = LevelMeter::readoutMode() == LevelMeter::Readout::Lufs;
+        meterReadoutButton.setToggleState(lufs, juce::dontSendNotification);
+        meterReadoutButton.setButtonText(lufs ? "LUFS" : "RMS");
+    }
     reloadAllButton.setEnabled(!busy);
     reloadDevicesViewport.setEnabled(!busy);
     updatePendingState();
@@ -1174,6 +1209,8 @@ int SettingsView::layoutBody(int width) {
         rackThumbnailFpsCombo.setBounds(leftRow.removeFromLeft(90));
         peakHoldLabel.setBounds(row.removeFromLeft(theme::ui::kLabelW));
         peakHoldCombo.setBounds(row.removeFromLeft(90));
+        row.removeFromLeft(kRowGap);
+        meterReadoutButton.setBounds(row.removeFromLeft(64));
 
         inner.removeFromTop(kRowGap);
         auto row2 = inner.removeFromTop(theme::ui::kControlH);
@@ -1194,8 +1231,11 @@ int SettingsView::layoutBody(int width) {
         const bool hasDevices = !reloadDevices_.empty();
         const int rows = juce::jlimit(0, kMaxDeviceRows, (int) reloadDevices_.size());
         const int listH = rows * kDeviceRowH;
+        // The disclosure wraps, so reserve its height at this width.
+        const int noteH = WrappedLabel::heightFor(sharedModeNoteText(), innerW,
+                                                  theme::ui::captionFont());
         const int panelH = pad + theme::ui::kControlH + (hasDevices ? kRowGap + listH : 0)
-                           + kRowGap + theme::ui::kControlH + pad;
+                           + kRowGap + theme::ui::kControlH + kRowGap + noteH + pad;
         const auto panel = juce::Rectangle<int>(0, panelTop, width, panelH);
         auto inner = panel.reduced(pad);
 
@@ -1213,6 +1253,9 @@ int SettingsView::layoutBody(int width) {
 
         inner.removeFromTop(kRowGap);
         autoReloadToggle.setBounds(inner.removeFromTop(theme::ui::kControlH).removeFromLeft(380));
+        inner.removeFromTop(kRowGap);
+        if (auto* note = body.findChildWithID("sharedModeNote"))
+            note->setBounds(inner.removeFromTop(noteH));
         endSection(panel);
     }
 

@@ -41,6 +41,41 @@ struct Biquad {
     float a2 = 0.0f;
 };
 
+// Complex value of the biquad's frequency response at `freqHz`. Reads
+// coefficients only, so a trace or a test evaluates exactly what the render
+// path runs. The probe is held 1 Hz inside Nyquist, where a low-pass's
+// numerator and denominator both reach 0/0.
+struct Response {
+    float re = 0.0f;
+    float im = 0.0f;
+};
+
+inline Response biquadResponse(const Biquad& c, double freqHz, double sampleRateHz) noexcept {
+    if (!(sampleRateHz > 0.0) || !std::isfinite(freqHz)) return {};
+    const double f = std::clamp(freqHz, 0.0, std::max(0.0, sampleRateHz * 0.5 - 1.0));
+    const double w = 2.0 * kPi * f / sampleRateHz;
+    const double cos1 = std::cos(w);
+    const double sin1 = std::sin(w);
+    const double cos2 = std::cos(2.0 * w);
+    const double sin2 = std::sin(2.0 * w);
+    const double numRe = static_cast<double>(c.b0) + c.b1 * cos1 + c.b2 * cos2;
+    const double numIm = -(static_cast<double>(c.b1) * sin1 + c.b2 * sin2);
+    const double denRe = 1.0 + static_cast<double>(c.a1) * cos1 + c.a2 * cos2;
+    const double denIm = -(static_cast<double>(c.a1) * sin1 + c.a2 * sin2);
+    const double numSq = numRe * numRe + numIm * numIm;
+    const double denSq = denRe * denRe + denIm * denIm;
+    if (!std::isfinite(numSq) || !std::isfinite(denSq) || denSq < 1.0e-30) return {};
+    // (numRe + j numIm) / (denRe + j denIm)
+    const double inv = 1.0 / denSq;
+    return {static_cast<float>((numRe * denRe + numIm * denIm) * inv),
+            static_cast<float>((numIm * denRe - numRe * denIm) * inv)};
+}
+
+inline float biquadMagnitude(const Biquad& c, double freqHz, double sampleRateHz) noexcept {
+    const auto r = biquadResponse(c, freqHz, sampleRateHz);
+    return std::sqrt(r.re * r.re + r.im * r.im);
+}
+
 inline bool isFinite(const Biquad& c) noexcept {
     return std::isfinite(c.b0) && std::isfinite(c.b1) && std::isfinite(c.b2) &&
            std::isfinite(c.a1) && std::isfinite(c.a2);
@@ -95,6 +130,18 @@ inline double clampFrequency(double freqHz, double sampleRateHz, double minHz = 
 }
 
 inline double clampQ(double q) noexcept { return std::clamp(q, kMinQ, kMaxQ); }
+
+// RBJ shelf slope S derived from the user's Q. S = 1 is the steepest slope the
+// RBJ design can take at ordinary shelf gains: S above 1 drives the radicand
+// (A + 1/A)(1/S - 1) + 2 negative (Q 3 and +12 dB is a normal user setting),
+// which is the NaN the old clamp existed to hide. So the slope folds back past
+// Q = 1: min(q, 1/q) keeps the Q <= 1 behaviour exactly as it was (S = q),
+// equals 1 at Q = 1, and stays inside (0.05, 1], where the radicand is >= 2
+// and the coefficients stay finite at every rate.
+inline double shelfSlope(double q) noexcept {
+    const double clamped = clampQ(q);
+    return std::min(clamped, 1.0 / clamped);
+}
 
 // Shared RBJ denominators: b/a normalised by a0.
 inline Biquad normalise(double b0, double b1, double b2, double a0, double a1, double a2) noexcept {
@@ -159,10 +206,9 @@ inline Biquad lowShelf(double freqHz, double q, double gainDb, double sampleRate
     const double w = 2.0 * kPi * f / sampleRateHz;
     const double cosW = std::cos(w);
     const double a = std::pow(10.0, gainDb / 40.0);
-    // RBJ shelf slope S, not a bell Q: S above 1 makes the radicand negative
-    // (Q 3 and +12 dB is a normal user setting), so clamp the slope and the
-    // radicand. A NaN here poisons every sample the strip outputs.
-    const double slope = std::min(clampQ(q), 1.0);
+    // RBJ shelf slope S, not a bell Q: S is folded to (0.05, 1] by shelfSlope
+    // so the radicand can never go negative and a NaN never reaches a sample.
+    const double slope = shelfSlope(q);
     const double alpha = std::sin(w) * 0.5 *
         std::sqrt(std::max(0.0, (a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0));
     const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;
@@ -181,7 +227,7 @@ inline Biquad highShelf(double freqHz, double q, double gainDb, double sampleRat
     const double cosW = std::cos(w);
     const double a = std::pow(10.0, gainDb / 40.0);
     // Same shelf-slope rule as lowShelf.
-    const double slope = std::min(clampQ(q), 1.0);
+    const double slope = shelfSlope(q);
     const double alpha = std::sin(w) * 0.5 *
         std::sqrt(std::max(0.0, (a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0));
     const double twoSqrtAAlpha = 2.0 * std::sqrt(a) * alpha;

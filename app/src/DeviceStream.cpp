@@ -1,6 +1,7 @@
 #include "DeviceStream.h"
 
 #include "RealtimeThread.h"
+#include "WasapiLoopbackCapture.h"
 #include "WindowsEndpointFormat.h"
 
 #include <pluginrack/DeviceTypePolicy.h>
@@ -11,6 +12,13 @@
 #include <cstring>
 #include <map>
 #include <vector>
+
+#if JUCE_WINDOWS
+#include <mmdeviceapi.h>
+#include <mmreg.h>
+#include <objbase.h>
+#include <propidl.h>
+#endif
 
 namespace {
 // Every declick ramp the streams apply is this length, so the fade in, the
@@ -75,6 +83,10 @@ void rememberBufferFor(const juce::String& deviceName, int bufferSize) {
 }
 
 std::unique_ptr<juce::AudioIODeviceType> createTypeInstance(const juce::String& name) {
+    // The loopback capture is a synthetic type, not a backend: it only exists
+    // so "System loopback (WASAPI)" can be picked as an input device.
+    if (name == WasapiLoopbackDeviceType::kTypeName)
+        return std::unique_ptr<juce::AudioIODeviceType>(new WasapiLoopbackDeviceType());
     switch (pluginrack::deviceBackendOf(name.toRawUTF8())) {
         case pluginrack::DeviceBackend::SharedLowLatency:
             return std::unique_ptr<juce::AudioIODeviceType>(
@@ -114,6 +126,260 @@ juce::AudioIODeviceType* ensureTypeRegistered(juce::AudioDeviceManager& manager,
     return raw;
 }
 
+#if JUCE_WINDOWS
+// Process-wide record of Windows endpoint default formats this process
+// rewrote, keyed by endpoint id: the format as seen before the first rewrite.
+// First touch wins, so a second request never stores an already-changed value
+// as the original. The PolicyConfig access below mirrors
+// WindowsEndpointFormat.cpp (same Vista-era interface and member order);
+// only the read path and the record live here, next to the code that decides
+// a rewrite is needed.
+
+template <typename ComClass>
+class ComRef
+{
+public:
+    ComRef() = default;
+    ComRef (const ComRef&) = delete;
+    ComRef& operator= (const ComRef&) = delete;
+    ~ComRef() { if (p != nullptr) p->Release(); }
+
+    ComClass* operator->() const noexcept { return p; }
+    ComClass* get() const noexcept { return p; }
+    explicit operator bool() const noexcept { return p != nullptr; }
+
+    ComClass** resetAndGetPointerAddress()
+    {
+        if (p != nullptr)
+        {
+            p->Release();
+            p = nullptr;
+        }
+        return &p;
+    }
+
+private:
+    ComClass* p = nullptr;
+};
+
+GUID makeFormatGuid (unsigned long a, unsigned short b, unsigned short c,
+                     const unsigned char (&tail)[8])
+{
+    GUID g {};
+    g.Data1 = a; g.Data2 = b; g.Data3 = c;
+    for (int i = 0; i < 8; ++i) g.Data4[i] = tail[i];
+    return g;
+}
+
+// PKEY_Device_FriendlyName: the value JUCE names its WASAPI endpoints with.
+PROPERTYKEY formatFriendlyNameKey()
+{
+    PROPERTYKEY key {};
+    key.fmtid = makeFormatGuid (0xa45c254e, 0xdf1c, 0x4efd,
+                                { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 });
+    key.pid = 14;
+    return key;
+}
+
+GUID formatPolicyConfigVistaClassId()
+{
+    return makeFormatGuid (0x294935ce, 0xf637, 0x4e7c,
+                           { 0xa4, 0x1b, 0xab, 0x25, 0x54, 0x60, 0xb8, 0x62 });
+}
+
+GUID formatPolicyConfigVistaInterfaceId()
+{
+    return makeFormatGuid (0x568b9108, 0x44bf, 0x40b4,
+                           { 0x90, 0x06, 0x86, 0xaf, 0xe5, 0xb5, 0xa6, 0x20 });
+}
+
+// Same declaration as WindowsEndpointFormat.cpp: only the three members used
+// here are declared, in the same order, so the vtable layout matches.
+struct IPolicyConfigVista : public IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE getMixFormat (PCWSTR, WAVEFORMATEX**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE getDeviceFormat (PCWSTR, INT, WAVEFORMATEX**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE setDeviceFormat (PCWSTR, WAVEFORMATEX*, WAVEFORMATEX*) = 0;
+};
+
+bool formatLooksLikeAudio (const WAVEFORMATEX* format)
+{
+    if (format == nullptr)
+        return false;
+
+    return format->nChannels > 0 && format->nChannels <= 64
+        && format->nSamplesPerSec >= 8000 && format->nSamplesPerSec <= 384000
+        && (format->wBitsPerSample == 8 || format->wBitsPerSample == 16
+            || format->wBitsPerSample == 24 || format->wBitsPerSample == 32);
+}
+
+// The endpoint id is what PolicyConfig keys on; the app only knows the name.
+// COM must already be initialized by the caller.
+juce::String findFormatEndpointId (bool wantInput, const juce::String& name)
+{
+    ComRef<IMMDeviceEnumerator> enumerator;
+    if (FAILED (CoCreateInstance (__uuidof (MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof (IMMDeviceEnumerator),
+                                  reinterpret_cast<void**> (enumerator.resetAndGetPointerAddress()))))
+        return {};
+
+    ComRef<IMMDeviceCollection> devices;
+    if (FAILED (enumerator->EnumAudioEndpoints (wantInput ? eCapture : eRender,
+                                                DEVICE_STATE_ACTIVE,
+                                                devices.resetAndGetPointerAddress())))
+        return {};
+
+    UINT count = 0;
+    if (FAILED (devices->GetCount (&count)))
+        return {};
+
+    const auto key = formatFriendlyNameKey();
+
+    for (UINT i = 0; i < count; ++i)
+    {
+        ComRef<IMMDevice> device;
+        if (FAILED (devices->Item (i, device.resetAndGetPointerAddress())))
+            continue;
+
+        ComRef<IPropertyStore> store;
+        if (FAILED (device->OpenPropertyStore (STGM_READ, store.resetAndGetPointerAddress())))
+            continue;
+
+        PROPVARIANT value;
+        PropVariantInit (&value);
+        const auto read = store->GetValue (key, &value);
+        const juce::String friendly (SUCCEEDED (read) && value.vt == VT_LPWSTR && value.pwszVal != nullptr
+                                         ? juce::String (value.pwszVal)
+                                         : juce::String());
+        PropVariantClear (&value);
+
+        if (friendly.isEmpty() || friendly != name)
+            continue;
+
+        LPWSTR id = nullptr;
+        if (SUCCEEDED (device->GetId (&id)) && id != nullptr)
+        {
+            const juce::String result (id);
+            CoTaskMemFree (id);
+            return result;
+        }
+    }
+
+    return {};
+}
+
+// COM must already be initialized by the caller.
+bool readFormatEndpointFormat (const juce::String& endpointId, WAVEFORMATEXTENSIBLE& out)
+{
+    ComRef<IPolicyConfigVista> policy;
+    if (FAILED (CoCreateInstance (formatPolicyConfigVistaClassId(), nullptr, CLSCTX_ALL,
+                                  formatPolicyConfigVistaInterfaceId(),
+                                  reinterpret_cast<void**> (policy.resetAndGetPointerAddress())))
+        || ! policy)
+        return false;
+
+    const auto idText = endpointId.toWideCharPointer();
+    WAVEFORMATEX* current = nullptr;
+    const bool ok = SUCCEEDED (policy->getDeviceFormat (idText, 0, &current))
+                 && formatLooksLikeAudio (current);
+    if (ok)
+    {
+        const auto extra = static_cast<size_t> (current->cbSize);
+        const auto maxExtra = sizeof (WAVEFORMATEXTENSIBLE) - sizeof (WAVEFORMATEX);
+        std::memset (&out, 0, sizeof (out));
+        std::memcpy (&out, current, sizeof (WAVEFORMATEX) + juce::jmin (extra, maxExtra));
+    }
+    if (current != nullptr) CoTaskMemFree (current);
+    return ok;
+}
+
+juce::CriticalSection originalFormatsLock;
+std::map<juce::String, WAVEFORMATEXTENSIBLE> originalFormats;
+
+// Records the endpoint's current default format the first time this process
+// is about to change it. Records nothing when the endpoint is unknown, when
+// its format cannot be read, or when it already matches wantedRate (the write
+// below is then a no-op too, mirroring setDefaultSampleRate's 1 Hz tolerance).
+void noteOriginalFormatOnce (const juce::String& endpointName, bool wantInput, double wantedRate)
+{
+    if (endpointName.isEmpty() || wantedRate <= 0.0)
+        return;
+
+    // The caller may already hold COM on this thread, so a changed-mode
+    // result is not a failure; only a successful init needs the matching
+    // uninit.
+    const auto init = CoInitializeEx (nullptr, COINIT_MULTITHREADED);
+    const bool shouldUninit = SUCCEEDED (init);
+
+    const auto endpointId = findFormatEndpointId (wantInput, endpointName);
+    if (endpointId.isNotEmpty())
+    {
+        const juce::ScopedLock sl (originalFormatsLock);
+        if (originalFormats.find (endpointId) == originalFormats.end())
+        {
+            WAVEFORMATEXTENSIBLE current {};
+            if (readFormatEndpointFormat (endpointId, current)
+                && std::abs (static_cast<double> (current.Format.nSamplesPerSec) - wantedRate) >= 1.0)
+            {
+                originalFormats[endpointId] = current;
+            }
+        }
+    }
+
+    if (shouldUninit)
+        CoUninitialize();
+}
+
+// Writes every recorded original back through PolicyConfig. Never throws:
+// teardown paths call this, and a failing restore must not take the shutdown
+// down with it.
+void restoreOriginalFormatsImpl() noexcept
+{
+    try
+    {
+        std::map<juce::String, WAVEFORMATEXTENSIBLE> pending;
+        {
+            const juce::ScopedLock sl (originalFormatsLock);
+            originalFormats.swap (pending);
+        }
+        if (pending.empty())
+            return;
+
+        const auto init = CoInitializeEx (nullptr, COINIT_MULTITHREADED);
+        const bool shouldUninit = SUCCEEDED (init);
+        {
+            ComRef<IPolicyConfigVista> policy;
+            if (SUCCEEDED (CoCreateInstance (formatPolicyConfigVistaClassId(), nullptr, CLSCTX_ALL,
+                                             formatPolicyConfigVistaInterfaceId(),
+                                             reinterpret_cast<void**> (policy.resetAndGetPointerAddress())))
+                && policy)
+            {
+                for (const auto& [endpointId, saved] : pending)
+                {
+                    const auto idText = endpointId.toWideCharPointer();
+                    WAVEFORMATEXTENSIBLE restore = saved;
+                    const auto result = policy->setDeviceFormat (idText, &restore.Format,
+                                                                 &restore.Format);
+                    juce::Logger::writeToLog ("device: restore endpoint format id=\""
+                        + endpointId + "\" rate=" + juce::String ((int) saved.Format.nSamplesPerSec)
+                        + (SUCCEEDED (result) ? " ok" : " failed"));
+                }
+            }
+            else
+            {
+                juce::Logger::writeToLog ("device: restore endpoint formats skipped"
+                                          " (policy config unavailable)");
+            }
+        }
+        if (shouldUninit)
+            CoUninitialize();
+    }
+    catch (...)
+    {
+    }
+}
+#endif
+
 // Opens preferredDeviceName (empty = system default) once, in the first device
 // type that actually carries it, passing the full AudioDeviceSetup with the
 // name explicit instead of relying on a wildcard match. The type is selected
@@ -147,6 +413,10 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     juce::StringArray typeOrder;
     for (const auto name : pluginrack::deviceTypeOrder(role, preferExclusive, asioAvailable()))
         typeOrder.add(deviceTypeName(name));
+    // The synthetic loopback type is only reachable by its own name: no
+    // backend order can select it, and its device name is unique.
+    if (wantInput && preferredDeviceName == WasapiLoopbackDevice::kDeviceName)
+        typeOrder.insert(0, WasapiLoopbackDeviceType::kTypeName);
 
     juce::AudioIODeviceType* chosenType = nullptr;
     juce::String chosenTypeName;
@@ -271,6 +541,12 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     if (err.isEmpty() && engineSampleRate > 0.0 && device != nullptr
         && std::abs (device->getCurrentSampleRate() - engineSampleRate) > 0.5)
     {
+#if JUCE_WINDOWS
+        // Record the endpoint's current default before the rewrite below, so
+        // the process can put it back at shutdown. First touch wins and an
+        // already-matching endpoint records nothing.
+        noteOriginalFormatOnce (selectedDeviceName, wantInput, engineSampleRate);
+#endif
         const auto formatErr = pluginrack::endpointformat::setDefaultSampleRate (
             selectedDeviceName, wantInput, engineSampleRate);
 
@@ -313,6 +589,15 @@ juce::String openWithPreferredType(juce::AudioDeviceManager& manager,
     return chosenTypeName;
 }
 }
+
+namespace DeviceStream {
+void restoreOriginalEndpointFormats() noexcept
+{
+#if JUCE_WINDOWS
+    restoreOriginalFormatsImpl();
+#endif
+}
+} // namespace DeviceStream
 
 namespace DeviceThreading {
 namespace {
@@ -394,6 +679,9 @@ juce::StringArray enumerate(bool wantInputs) {
     juce::AudioDeviceManager manager;
     juce::OwnedArray<juce::AudioIODeviceType> types;
     manager.createAudioDeviceTypes(types);
+    // Capture-only loopback is offered next to the real endpoints; it is not
+    // a backend the manager knows about, so the list adds it explicitly.
+    if (wantInputs) types.add(new WasapiLoopbackDeviceType());
 
     juce::StringArray names;
     for (auto* type : types) {
@@ -459,6 +747,9 @@ juce::StringArray asioDevices() {
 InputCapture::InputCapture() = default;
 
 InputCapture::~InputCapture() {
+    // The endpoint default is restored once on exit (Main.cpp shutdown), not
+    // here: another stream may still be running on the same shared endpoint,
+    // and putting the old rate back under it would stall it.
     close();
 }
 
@@ -887,6 +1178,7 @@ void InputCapture::audioDeviceStopped() {
 OutputPlayback::OutputPlayback() = default;
 
 OutputPlayback::~OutputPlayback() {
+    // Same as InputCapture: restore happens once on exit, not per stream.
     close();
 }
 
@@ -908,11 +1200,24 @@ juce::String OutputPlayback::open(const juce::String& preferredDeviceName,
 
     // One attempt in the preferred device type (shared, or exclusive when it
     // was explicitly enabled). A refusal is reported, never retried.
+    // The pair offset rides along: playing 3/4 needs the device opened with
+    // room for four channels, not two.
     activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
-                                              0, 2,
+                                              0, 2 + pairOffset_,
                                               engineSampleRate, requestedBufferSize, errorOut,
                                               preferExclusive, role,
                                               duplexInputChannels);
+    if (activeDeviceType_.isEmpty() && pairOffset_ > 0) {
+        // The endpoint refuses a wider open (a stereo pair in shared mode is
+        // the usual case). Fall back to stereo and let the write path play
+        // 1/2 instead of leaving the strip silent.
+        errorOut.clear();
+        activeDeviceType_ = openWithPreferredType(manager, preferredDeviceName, /*wantInput*/ false,
+                                                  0, 2,
+                                                  engineSampleRate, requestedBufferSize, errorOut,
+                                                  preferExclusive, role,
+                                                  duplexInputChannels);
+    }
     if (activeDeviceType_.isEmpty()) {
         return errorOut;
     }
@@ -1035,6 +1340,13 @@ void OutputPlayback::setTargetFillBlocks(int blocks) {
     trimToTarget.store(true, std::memory_order_release);
 }
 
+void OutputPlayback::setFirstChannel(int firstChannel) {
+    // Any start channel is legal (the UI offers one per device channel). The
+    // write paths bound-check through effectivePairOffset, which falls back to
+    // 1/2 when the device opened narrower than the requested pair.
+    pairOffset_ = juce::jmax(0, firstChannel);
+}
+
 void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
     if (frames <= 0) return;
 
@@ -1048,11 +1360,12 @@ void OutputPlayback::push(const juce::AudioBuffer<float>& src, int frames) {
             return;
         }
         const int srcChans = juce::jmax(1, src.getNumChannels());
-        const int chans = juce::jmin(2, currentNumOutputChannels);
-        for (int ch = 0; ch < chans; ++ch) {
+        const int base = effectivePairOffset(currentNumOutputChannels);
+        const int chans = juce::jmin(2, currentNumOutputChannels - base);
+        for (int ch = base; ch < base + chans; ++ch) {
             float* dst = currentOutputChannels[ch];
             if (dst == nullptr) continue;
-            const int srcCh = juce::jmin(ch, srcChans - 1);
+            const int srcCh = juce::jmin(ch - base, srcChans - 1);
             std::memcpy(dst, src.getReadPointer(srcCh),
                         sizeof(float) * (std::size_t) frames);
         }
@@ -1127,7 +1440,9 @@ void OutputPlayback::pushSilence(int frames) {
     if (duplex_.load(std::memory_order_relaxed)) {
         // Nothing is queued in duplex mode: silence the device buffer directly.
         if (currentOutputChannels != nullptr) {
-            for (int ch = 0; ch < juce::jmin(2, currentNumOutputChannels); ++ch) {
+            const int base = effectivePairOffset(currentNumOutputChannels);
+            const int chans = juce::jmin(2, currentNumOutputChannels - base);
+            for (int ch = base; ch < base + chans; ++ch) {
                 if (currentOutputChannels[ch] != nullptr) {
                     juce::FloatVectorOperations::clear(currentOutputChannels[ch], frames);
                 }
@@ -1288,7 +1603,8 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
         }
     }
 
-    const int chans = juce::jmin(2, numOutputChannels);
+    const int pairBase = effectivePairOffset(numOutputChannels);
+    const int chans = juce::jmin(2, numOutputChannels - pairBase);
     const bool exactRead = !shortRead && std::abs(readRatio - 1.0) < 1.0e-12
                         && sourceFrames == numSamples;
     const int fadeIn = shortRead ? 0 : juce::jmin(deviceFadeInRemaining, numSamples);
@@ -1299,7 +1615,7 @@ void OutputPlayback::audioDeviceIOCallbackWithContext (const float* const* input
             : this->storage.getReadPointer(channel)[readHandle.startIndex2 + index - b1];
     };
     for (int ch = 0; ch < chans; ++ch) {
-        float* out = outputChannelData[ch];
+        float* out = outputChannelData[pairBase + ch];
         if (out == nullptr) continue;
         if (exactRead) {
             const float* src = storage.getReadPointer(ch);

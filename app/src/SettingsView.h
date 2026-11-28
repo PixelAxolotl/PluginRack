@@ -135,6 +135,7 @@ private:
     // How long a meter holds its peak line. Session-wide, applied at once.
     juce::Label peakHoldLabel { "", "Peak hold" };
     juce::ComboBox peakHoldCombo;
+    juce::TextButton meterReadoutButton{ "RMS" };
     juce::ToggleButton closeToTrayToggle { "Minimize to system tray when closed" };
     // Aligns every tap path at the outputs: shorter paths wait for the longest
     // one, including the dry route. Applied straight to the engine.

@@ -1081,12 +1081,21 @@ PluginHost::LoadedPlugin PluginHost::loadFromFile(const juce::File& file, double
         return loaded;
     }
     // A bundle can hold several classes; the scene records which one this slot
-    // was created from. An unknown or absent id keeps the old first-class
-    // behaviour instead of failing the load.
+    // was created from. A saved id that matches no class must fail: falling
+    // back to the first class would apply one plugin's state to a different
+    // plugin, silently loading foreign parameters.
     for (const auto& description : descriptions) {
         if (pluginUniqueId != 0 && description.uniqueId == pluginUniqueId) {
             return instantiate(description, file, sampleRate, bufferSize, stateBase64);
         }
+    }
+    if (stateBase64.isNotEmpty() && (pluginUniqueId != 0 || descriptions.size() > 1)) {
+        LoadedPlugin loaded;
+        loaded.path = file.getFullPathName();
+        loaded.error = "The saved plugin class is no longer installed in "
+            + file.getFileName()
+            + ". The insert is left empty instead of loading a different plugin.";
+        return loaded;
     }
     return instantiate(descriptions.getReference(0), file, sampleRate, bufferSize, stateBase64);
 }

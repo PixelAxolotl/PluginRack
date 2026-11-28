@@ -9,22 +9,28 @@
 
 namespace pluginrack {
 
+// Every trace below is the engine's own response: the multiband curves
+// evaluate the LR4 split coefficients the processor runs, the de-esser curve
+// its band-pass and gain law. `sampleRateHz` must match the audio device.
 std::vector<float> makeMultibandTargetTrace(const MultibandEffect& effect,
                                             std::size_t binCount,
                                             float minHz = 20.0f,
-                                            float maxHz = 20000.0f);
+                                            float maxHz = 20000.0f,
+                                            double sampleRateHz = 48000.0);
 
 std::vector<float> makeMultibandGainChangeTrace(const MultibandEffect& effect,
                                                 const std::vector<float>& reductionsDb,
                                                 std::size_t binCount,
                                                 float minHz = 20.0f,
-                                                float maxHz = 20000.0f);
+                                                float maxHz = 20000.0f,
+                                                double sampleRateHz = 48000.0);
 
 std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
                                                  float reductionDb,
                                                  std::size_t binCount,
                                                  float minHz = 20.0f,
-                                                 float maxHz = 20000.0f);
+                                                 float maxHz = 20000.0f,
+                                                 double sampleRateHz = 48000.0);
 
 // In-place forms, for callers that rebuild a trace every UI tick: they resize
 // `out` to binCount and reuse its existing capacity, so a steady-size trace
@@ -34,14 +40,16 @@ void fillMultibandGainChangeTrace(const MultibandEffect& effect,
                                   std::size_t binCount,
                                   std::vector<float>& out,
                                   float minHz = 20.0f,
-                                  float maxHz = 20000.0f);
+                                  float maxHz = 20000.0f,
+                                  double sampleRateHz = 48000.0);
 
 void fillDeEsserGainReductionTrace(const DeEsserEffect& effect,
                                    float reductionDb,
                                    std::size_t binCount,
                                    std::vector<float>& out,
                                    float minHz = 20.0f,
-                                   float maxHz = 20000.0f);
+                                   float maxHz = 20000.0f,
+                                   double sampleRateHz = 48000.0);
 
 class LevelHistory final {
 public:

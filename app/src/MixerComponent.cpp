@@ -16,9 +16,10 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     deviceControl.setTitle(output.name);
     if (bus) {
         // A bus has no device or clock; the same header shows its name and
-        // what the strip is.
+        // what the strip is. Right-click renames (DeviceControl has no
+        // double-click path); the tooltip says exactly that.
         deviceControl.setDeviceName("sum of sends");
-        deviceControl.setTooltip("Double-click to rename this bus");
+        deviceControl.setBusMode(true);
     } else {
         const auto deviceState = audioEngine.getOutputDeviceState(output.id);
         deviceControl.setDeviceName(deviceState.deviceName);
@@ -77,14 +78,18 @@ MixerComponent::OutputStrip::OutputStrip(AudioEngine::Output& outputState,
     deviceControl.setOnRename([this] {
         juce::Component::SafePointer<MixerComponent::OutputStrip> safe(this);
         StripDialog::show(bus ? "Rename bus" : "Rename output", output.name, output.colourHue,
-                          [safe](const juce::String& newName, float newHue) {
-            if (safe == nullptr) return;
-            safe->audioEngine.setOutputName(safe->output.id, newName);
+                          [safe](const juce::String& newName, float newHue) -> juce::String {
+            if (safe == nullptr) return {};
+            const auto error = safe->audioEngine.renameOutput(safe->output.id, newName);
+            if (error.isNotEmpty()) return error;
             safe->audioEngine.setOutputColourHue(safe->output.id, newHue);
-            safe->deviceControl.setTitle(newName);
+            // Title from the engine (safe->output is a live engine reference),
+            // so it can only show a name the scene actually holds.
+            safe->deviceControl.setTitle(safe->output.name);
             safe->refreshColour();
             safe->repaint();
             if (safe->onRenamed) safe->onRenamed();
+            return {};
         });
     });
     addAndMakeVisible(deviceControl);

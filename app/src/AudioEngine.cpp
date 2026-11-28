@@ -10,6 +10,7 @@
 #include <pluginrack/AudioDeviceProbe.h>
 #include <pluginrack/ChainOrder.h>
 #include <pluginrack/ClockFailover.h>
+#include <pluginrack/DspMath.h>
 #include <pluginrack/InputBufferPolicy.h>
 #include <pluginrack/InputFollowPolicy.h>
 #include <pluginrack/RenderSlicer.h>
@@ -84,6 +85,23 @@ constexpr int kClockOpenAttempts = 2;
 constexpr int kClockRetryDelayMs = 150;
 // Prefix of the error shown for an assigned device that is not enumerated.
 const juce::String kNoSuchDevice = "No such device: ";
+// Single rename rule for setChannelName/setOutputName: trim first, then
+// refuse empty, case-insensitive duplicates within the strip family, and
+// names longer than 48 characters. The setters stay void (their
+// ChannelStrip/RackView callers cannot be re-signed in this change), so a
+// refused rename leaves the old name in place.
+constexpr int kMaxStripNameChars = 48;
+
+template <typename Strip>
+bool isStripNameTaken(const std::vector<std::unique_ptr<Strip>>& strips,
+                      std::uint32_t selfId, const juce::String& trimmed) {
+    for (const auto& strip : strips) {
+        if (strip != nullptr && strip->id != selfId
+            && strip->name.trim().equalsIgnoreCase(trimmed))
+            return true;
+    }
+    return false;
+}
 // A clock callback that has not run for this long is treated as dead. Large
 // driver buffers still call back far more often than this; the grace only has
 // to absorb a busy machine or a sleep/resume hiccup.
@@ -1041,6 +1059,12 @@ void AudioEngine::render(int frames) {
         channel->peakR = meter.peakR;
         channel->rmsL = meter.rmsL;
         channel->rmsR = meter.rmsR;
+
+        // Momentary loudness for the LUFS readout: the same block through the
+        // BS.1770 K-weighting, averaged over 400 ms.
+        channel->lufs = channel->loudnessMeter.process(
+            channel->buffer.getReadPointer(0), channel->buffer.getReadPointer(1), frames,
+            currentSampleRate);
     }
 
 
@@ -1680,6 +1704,9 @@ void AudioEngine::moveOutput(std::uint32_t outputId, int targetIndex) {
 void AudioEngine::addChannel() {
     if (isOpeningDevices()) return;
     const juce::ScopedLock lock(stateLock);
+    // The validator caps channels; a strip created past the cap made the whole
+    // scene unsaveable, so refuse here where the user can see it is not added.
+    if (channels.size() >= pluginrack::kMaxChannels) return;
     auto channel = std::make_unique<Channel>();
     channel->id = nextChannelId++;
     channel->name = "Channel " + juce::String(channel->id);
@@ -1739,6 +1766,7 @@ for (const auto& e : channel->feedbackSuppressorEffects) { pluginrack::FeedbackS
 void AudioEngine::addOutput() {
     if (isOpeningDevices()) return;
     const juce::ScopedLock lock(stateLock);
+    if (outputs.size() >= pluginrack::kMaxOutputs) return;
     auto output = std::make_unique<Output>();
     output->id = nextOutputId++;
     if (output->id <= 5) output->name = "A" + juce::String(output->id);
@@ -2792,12 +2820,22 @@ void AudioEngine::setChannelPan(std::uint32_t channelId, float pan) {
     }
 }
 
-void AudioEngine::setChannelName(std::uint32_t channelId, const juce::String& name) {
+juce::String AudioEngine::renameChannel(std::uint32_t channelId, const juce::String& name) {
     const juce::ScopedLock lock(stateLock);
+    const auto trimmed = name.trim();
+    if (trimmed.isEmpty()) return "Enter a name.";
+    if (trimmed.length() > kMaxStripNameChars)
+        return "At most " + juce::String(kMaxStripNameChars) + " characters.";
+    if (isStripNameTaken(channels, channelId, trimmed)) return "That name is already used.";
     if (auto* channel = findChannel(channelId)) {
-        channel->name = name;
+        channel->name = trimmed;
         bumpStructureRevision();
     }
+    return {};
+}
+
+void AudioEngine::setChannelName(std::uint32_t channelId, const juce::String& name) {
+    renameChannel(channelId, name);
 }
 
 void AudioEngine::setChannelMuted(std::uint32_t channelId, bool muted) {
@@ -2829,10 +2867,11 @@ void AudioEngine::setChannelLayout(std::uint32_t channelId, pluginrack::ChannelL
         refreshAllSideChainCachesLocked();
     }
     // Re-assign the device so the shared capture is re-opened (or widened)
-    // for the new layout; silent channels keep nothing to reopen.
+    // for the new layout; silent channels keep nothing to reopen. The open runs
+    // on the device worker, never on this thread.
     if (!isSilentDeviceName(deviceName)) {
         // No bump inside: the whole edit is counted once, below.
-        reassignChannelInputDevice(channelId, deviceName);
+        reopenInputsAsync();
     }
     bumpStructureRevision();
 }
@@ -2850,7 +2889,7 @@ void AudioEngine::setChannelInputChannels(std::uint32_t channelId, const std::ve
     }
     if (!isSilentDeviceName(deviceName)) {
         // No bump inside: the whole edit is counted once, below.
-        reassignChannelInputDevice(channelId, deviceName);
+        reopenInputsAsync();
     }
     bumpStructureRevision();
 }
@@ -2868,7 +2907,7 @@ void AudioEngine::setChannelMapping(std::uint32_t channelId, pluginrack::Channel
     }
     if (!isSilentDeviceName(deviceName)) {
         // No bump inside: the whole edit is counted once, below.
-        reassignChannelInputDevice(channelId, deviceName);
+        reopenInputsAsync();
     }
     bumpStructureRevision();
 }
@@ -2960,12 +2999,26 @@ void AudioEngine::setOutputMuted(std::uint32_t outputId, bool muted) {
     }
 }
 
-void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name) {
+juce::String AudioEngine::renameOutput(std::uint32_t outputId, const juce::String& name) {
     const juce::ScopedLock lock(stateLock);
+    const auto trimmed = name.trim();
+    // Outputs and buses share the id space (addBus uses nextOutputId), so
+    // they are one duplicate-check family; channels are the other.
+    if (trimmed.isEmpty()) return "Enter a name.";
+    if (trimmed.length() > kMaxStripNameChars)
+        return "At most " + juce::String(kMaxStripNameChars) + " characters.";
+    if (isStripNameTaken(outputs, outputId, trimmed)
+        || isStripNameTaken(buses, outputId, trimmed))
+        return "That name is already used.";
     if (auto* output = findOutput(outputId)) {
-        output->name = name;
+        output->name = trimmed;
         bumpStructureRevision();
     }
+    return {};
+}
+
+void AudioEngine::setOutputName(std::uint32_t outputId, const juce::String& name) {
+    renameOutput(outputId, name);
 }
 
 void AudioEngine::setOutputLayout(std::uint32_t outputId, pluginrack::ChannelLayout layout) {
@@ -2985,6 +3038,68 @@ void AudioEngine::setOutputFlipped(std::uint32_t outputId, bool flipped) {
     }
 }
 
+void AudioEngine::setOutputFirstChannel(std::uint32_t outputId, int firstChannel) {
+    // The pair starts on any device channel, like an input mapping: a device
+    // that numbers its outputs 1, 2, 3, ... can host a pair on 3/4.
+    const int snapped = juce::jmax(0, firstChannel);
+    juce::String deviceName;
+    juce::String label;
+    {
+        const juce::ScopedLock lock(stateLock);
+        auto* output = findOutput(outputId);
+        // findOutput also resolves buses; a bus id shares the id space but
+        // owns no device, so only a physical output takes the pair.
+        const bool physical =
+            output != nullptr &&
+            std::any_of(outputs.begin(), outputs.end(),
+                        [outputId](const auto& o) { return o->id == outputId; });
+        if (!physical || output->firstChannel == snapped) return;
+        output->firstChannel = snapped;
+        deviceName = output->outputDeviceName;
+        label = output->name;
+        bumpStructureRevision();
+    }
+    // The pair only takes effect on a live stream, so reopen this output
+    // alone on the background opener. The clock is untouched unless this
+    // output is the clock: the job reopens by device name and only promotes
+    // on failure. A silent output just stores the pair for its next open.
+    if (deviceName.isNotEmpty() && !isSilentDeviceName(deviceName) && !isOpeningDevices()) {
+        ReloadableDevice device;
+        device.label = label.isNotEmpty() ? label : juce::String("output ") + juce::String((int) outputId);
+        device.deviceName = deviceName;
+        device.stripId = outputId;
+        device.isInput = false;
+        reloadDeviceAsync(device);
+    }
+}
+
+int AudioEngine::getOutputFirstChannel(std::uint32_t outputId) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& output : outputs) {
+        if (output->id == outputId) return output->firstChannel;
+    }
+    return 0;
+}
+
+int AudioEngine::getOutputDeviceChannelCount(std::uint32_t outputId) const {
+    const juce::ScopedLock lock(stateLock);
+    for (const auto& output : outputs) {
+        if (output->id == outputId && output->output != nullptr)
+            return output->output->getNumDeviceOutputChannels();
+    }
+    return 0;
+}
+
+// The scene validator accepts only 12, 24 or 48 dB/oct. A slope of 36 once
+// slipped out of the EQ window, which made every autosave fail validation and
+// silently stopped all saving. Keep the engine state legal instead of trusting
+// every caller to spell the three values correctly.
+static void snapEqBandSlopes(std::vector<pluginrack::EqBand>& bands) {
+    for (auto& band : bands)
+        band.slopeDbPerOct =
+            band.slopeDbPerOct >= 36 ? 48 : (band.slopeDbPerOct >= 18 ? 24 : 12);
+}
+
 void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<pluginrack::EqBand>& bands) {
     // Message thread: stateLock serializes the band copy and the coefficient
     // rebuild against render()'s taps (mirrors core's EqState mutex). Bypass
@@ -2992,6 +3107,7 @@ void AudioEngine::setChannelEq(std::uint32_t channelId, const std::vector<plugin
     const juce::ScopedLock lock(stateLock);
     if (auto* channel = findChannel(channelId)) {
         channel->eqBands = bands;
+        snapEqBandSlopes(channel->eqBands);
         channel->eq.setBands(channel->eqBands);
         bumpStructureRevision();
     }
@@ -3112,6 +3228,7 @@ void AudioEngine::setOutputEq(std::uint32_t outputId,
     const juce::ScopedLock lock(stateLock);
     if (auto* output = findOutput(outputId)) {
         output->eqBands = bands;
+        snapEqBandSlopes(output->eqBands);
         output->eq.setBands(output->eqBands);
         bumpStructureRevision();
     }
@@ -3658,6 +3775,7 @@ pluginrack::Scene AudioEngine::makeScene(bool includePluginState) const {
             // therefore stays OutputKind::Physical.
             savedOutput.deviceId = output->outputDeviceName.toStdString();
             savedOutput.flipped = output->flipped.get();
+            savedOutput.firstChannel = output->firstChannel;
             outputHosts.push_back(
                 copyInserts(output->inserts, savedOutput.inserts, includePluginState));
             scene.outputs.push_back(std::move(savedOutput));
@@ -3960,6 +4078,7 @@ juce::String AudioEngine::prepareSceneRestore(const pluginrack::Scene& scene, bo
         output->name = savedOutput.name;
         output->layout = savedOutput.layout;
         output->flipped = savedOutput.flipped;
+        output->firstChannel = savedOutput.firstChannel;
         output->gainDb = savedOutput.gainDb;
         output->muted = savedOutput.muted;
         output->buffer.setSize(2, bufferSize);
@@ -4238,6 +4357,169 @@ bool AudioEngine::loadNextPendingInsert() {
     return true;
 }
 
+std::uint32_t AudioEngine::carryOverSceneDevicesLocked(
+    std::vector<std::unique_ptr<Output>>& oldOutputs,
+    const std::vector<std::unique_ptr<Channel>>& oldChannels,
+    std::vector<OutputPlayback*>& oldPlaybacks) {
+    // Requires stateLock; runs on the message thread inside
+    // commitSceneRestore, after the strip swap. Nothing here touches a JUCE
+    // device object — streams only change owners — so no close can block on
+    // an in-flight callback while the lock is held. Anything not carried
+    // joins retiredOutputs_/oldPlaybacks exactly like before, and the caller
+    // closes those after releasing the lock.
+    const double liveRate = currentSampleRate;
+    const int liveBuffer = juce::jmax(1, currentBufferSize);
+    const int requestedOut = requestedOutputBufferSize_;
+    const int requestedIn = requestedInputBufferSize_.load(std::memory_order_relaxed);
+    const int capacityReserve = juce::jmax(currentBufferSize, kProbeRenderBlockFrames);
+    const std::uint32_t oldClockId = clockOutputId;
+    const bool clockDuplex = duplexActive_.load(std::memory_order_acquire);
+    const juce::String clockDuplexDevice = duplexDeviceName_;
+    std::uint32_t carriedClockId = 0;
+
+    const auto layoutChannels = [](pluginrack::ChannelLayout layout) {
+        return layout == pluginrack::ChannelLayout::Mono ? 1 : 2;
+    };
+
+    // Pool every still-open playback by device name. A second strip may name
+    // the same endpoint, so the pool is a list and each entry is consumed once.
+    struct PooledPlayback {
+        juce::String deviceName;
+        pluginrack::ChannelLayout layout;
+        // The pair is part of the open format: a carried stream plays the
+        // offset it opened with, so a remapped pair must reopen.
+        int firstChannel = 0;
+        juce::String deviceType;
+        std::uint32_t oldId = 0;
+        std::unique_ptr<OutputPlayback> playback;
+    };
+    std::vector<PooledPlayback> pool;
+    for (auto& o : oldOutputs) {
+        if (o->output == nullptr) continue;
+        if (o->outputDeviceName.isEmpty() || isSilentDeviceName(o->outputDeviceName)) continue;
+        if (o->output->getSampleRate() <= 0.0) continue; // closed/failed: never carry
+        pool.push_back({o->outputDeviceName, o->layout, o->firstChannel, o->outputDeviceType,
+                        o->id, std::move(o->output)});
+    }
+
+    // Hand each fresh output the live playback when it names the same device
+    // at the same open format. A carried playback keeps its device, FIFO and
+    // render hook, so audio never drops on an unchanged rig.
+    for (auto& out : outputs) {
+        juce::String wanted;
+        if (restoreJob_ != nullptr) {
+            const auto f = restoreJob_->desiredOutputDevices.find(out->id);
+            if (f != restoreJob_->desiredOutputDevices.end()) wanted = f->second;
+        }
+        if (wanted.isEmpty() || isSilentDeviceName(wanted)) continue;
+        for (auto it = pool.begin(); it != pool.end(); ++it) {
+            if (it->deviceName != wanted || it->layout != out->layout ||
+                it->firstChannel != out->firstChannel)
+                continue; // a remapped pair reopens (correctness over speed)
+            const auto* pb = it->playback.get();
+            if (pb->getSampleRate() != liveRate) continue; // rate moved: reopen
+            if (pb->getNumDeviceOutputChannels() < layoutChannels(out->layout)) continue;
+            if (it->oldId == oldClockId) {
+                // The clock defined the engine block: only an identical buffer
+                // keeps the render ceiling valid without a re-prepare.
+                if (pb->getBufferSize() != liveBuffer) continue;
+            } else if (requestedOut != 0 && pb->getBufferSize() != requestedOut) {
+                continue; // the user asked for another size: reopen
+            }
+            out->output = std::move(it->playback);
+            out->outputDeviceType = it->deviceType;
+            out->outputError.clear();
+            if (it->oldId == oldClockId) {
+                // The clock device survived: keep the role on the strip that
+                // inherited its stream, and re-arm the hook the swap parked
+                // above. The duplex capture hook stays installed on the
+                // carried playback, so only the channel flags need re-pointing.
+                carriedClockId = out->id;
+                out->output->setRenderActive(true);
+                if (clockDuplex && clockDuplexDevice == wanted
+                    && out->output->getDuplexInputChannels() > 0) {
+                    const int available = out->output->getDuplexInputChannels();
+                    const auto& wantInputs = restoreJob_->desiredInputDevices;
+                    for (auto& c : channels) {
+                        const auto f = wantInputs.find(c->id);
+                        if (f == wantInputs.end() || f->second != wanted) continue;
+                        c->input.reset();
+                        c->duplexInput = true;
+                        c->duplexInputChannels = available;
+                    }
+                }
+            }
+            pool.erase(it);
+            break;
+        }
+    }
+    // Whatever the new scene no longer needs (or names at another format)
+    // retires exactly like before: kept alive for the lock-free silence
+    // snapshot, closed by the caller once the lock is released.
+    for (auto& p : pool) {
+        oldPlaybacks.push_back(p.playback.get());
+        retiredOutputs_.push_back(std::move(p.playback));
+    }
+
+    // Capture carry-over: hand the live ring to the fresh channels when the
+    // device and the open format match. The channel-to-capture mapping is
+    // part of the format: when the new scene maps different physical inputs
+    // into the same device, prefer reopening that capture (correctness over
+    // speed) instead of feeding the wrong channels.
+    for (auto& [name, entry] : inputCaptures_) {
+        if (entry.capture == nullptr || entry.capture->getSampleRate() <= 0.0) continue;
+        std::vector<std::vector<int>> oldMap, newMap;
+        int needed = 2;
+        for (const auto& c : oldChannels) {
+            if (c->input == entry.capture) oldMap.push_back(c->inputChannels);
+        }
+        bool anyNew = false;
+        if (restoreJob_ != nullptr) {
+            for (const auto& c : channels) {
+                if (c->duplexInput.get()) continue; // fed by the clock callback
+                const auto f = restoreJob_->desiredInputDevices.find(c->id);
+                if (f == restoreJob_->desiredInputDevices.end() || f->second != name) continue;
+                anyNew = true;
+                newMap.push_back(c->inputChannels);
+                for (const int index : c->inputChannels) {
+                    needed = juce::jmax(needed, index + 1);
+                }
+            }
+        }
+        if (!anyNew) continue; // the retire pass below closes it
+        std::sort(oldMap.begin(), oldMap.end());
+        std::sort(newMap.begin(), newMap.end());
+        if (oldMap != newMap) continue;
+        if (entry.capture->getSampleRate() != liveRate) continue;
+        if (entry.requestedChannels < needed) continue;
+        if (entry.requestedBufferSize != requestedIn) continue;
+        if (entry.renderBlockFrames < capacityReserve) continue;
+        for (auto& c : channels) {
+            if (c->duplexInput.get()) continue;
+            const auto f = restoreJob_->desiredInputDevices.find(c->id);
+            if (f == restoreJob_->desiredInputDevices.end() || f->second != name) continue;
+            c->input = entry.capture;
+            c->duplexInput = false;
+            c->duplexInputChannels = 0;
+        }
+    }
+
+    if (carriedClockId != 0) {
+        clockOutputId = carriedClockId;
+        // Pin the choice for the reclaim tick: only a reload may move it.
+        preferredClockOutputId = carriedClockId;
+    } else {
+        // The clock device is gone or changed format: drop the duplex capture
+        // path with it, or channels would wait on a callback that no longer runs.
+        clockOutputId = 0;
+        duplexActive_.store(false, std::memory_order_release);
+        duplexDeviceName_.clear();
+        duplexInputBuffers_ = nullptr;
+        duplexInputBufferCount_ = 0;
+    }
+    return carriedClockId;
+}
+
 juce::String AudioEngine::commitSceneRestore() {
     if (restoreJob_ == nullptr) return {};
     auto& job = *restoreJob_;
@@ -4346,14 +4628,11 @@ juce::String AudioEngine::commitSceneRestore() {
         meters.setTargets(job.channelIds.data(), job.channelIds.size(),
                           job.outputIds.data(), job.outputIds.size(),
                           job.busIds.data(), job.busIds.size());
-        // Keep the old playbacks alive for the lock-free silence snapshot,
-        // but close their devices once the lock is released.
-        for (auto& output : oldOutputs) {
-            if (output->output != nullptr) {
-                oldPlaybacks.push_back(output->output.get());
-                retiredOutputs_.push_back(std::move(output->output));
-            }
-        }
+        // Carry over every stream the new scene still names at the same open
+        // format; only genuinely retired streams land in oldPlaybacks for the
+        // close below. A carried playback keeps its device, FIFO and render
+        // hook, so a scene switch on unchanged hardware never drops audio.
+        carryOverSceneDevicesLocked(oldOutputs, oldChannels, oldPlaybacks);
         publishRenderOutputsLocked();
         nextInsertId = juce::jmax(nextInsertId, job.maxInsertId);
         nextChannelId = juce::jmax(nextChannelId, job.maxChannelId);
@@ -4399,7 +4678,8 @@ juce::String AudioEngine::commitSceneRestore() {
     // caller at startup) opens them in parallel and reports any refusal.
     {
         const juce::ScopedLock lock(stateLock);
-        clockOutputId = 0;
+        // Device names only: the clock role was already settled by the
+        // carry-over above (kept when its device survived, 0 otherwise).
         for (const auto& [id, name] : job.desiredInputDevices) {
             if (auto* channel = findChannel(id)) {
                 channel->inputDeviceName = name;
@@ -4471,6 +4751,18 @@ juce::String AudioEngine::setChannelInputDevice(std::uint32_t channelId, const j
     const auto error = reassignChannelInputDevice(channelId, deviceName);
     if (error.isEmpty()) bumpStructureRevision();
     return error;
+}
+
+void AudioEngine::assignChannelInputDevice(std::uint32_t channelId, const juce::String& deviceName) {
+    // State only: the capture is opened by the worker pass the caller queues.
+    const juce::ScopedLock lock(stateLock);
+    auto* channel = findChannel(channelId);
+    if (channel == nullptr) return;
+    channel->inputDeviceName = deviceName;
+    channel->sourceDeviceId = deviceName.toStdString();
+    channel->inputError.clear();
+    channel->duplexInput = false;
+    channel->duplexInputChannels = 0;
 }
 
 juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, const juce::String& deviceName,
@@ -4565,7 +4857,18 @@ juce::String AudioEngine::setChannelInputDeviceImpl(std::uint32_t channelId, con
         channel->input = reuse;
         channel->inputDeviceName = deviceName;
         channel->sourceDeviceId = deviceName.toStdString();
-        channel->inputError = reuse->getInputError();
+        // The capture may have been opened for a wider mapping on this device
+        // (or refused inputs it does not have). Report the error for this
+        // strip's own mapping, so narrowing it back clears the message.
+        const int availableInputs = juce::jmax(1, reuse->availableInputCount());
+        juce::StringArray missing;
+        for (int index : channel->inputChannels) {
+            if (index >= availableInputs) missing.add(juce::String(index + 1));
+        }
+        channel->inputError = missing.isEmpty()
+            ? juce::String()
+            : "Missing input" + (missing.size() > 1 ? juce::String("s ") : juce::String(" "))
+                  + missing.joinIntoString(", ");
         pruneUnusedCaptures();
         return {};
     }
@@ -4818,7 +5121,7 @@ int AudioEngine::retargetInputsToClockDevice(
 }
 
 juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce::String& deviceName,
-                                              double engineRate) {
+                                              double engineRate, bool forceReopen) {
     AudioEngine::Output* out = findOutput(outputId);
     // findOutput also resolves buses; only a physical output can take a device.
     // The physical-existence scan reads `outputs`, which moveOutput reorders on
@@ -4899,6 +5202,31 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     }
 
     std::unique_ptr<OutputPlayback> prevOutput;
+    // The strip's pair travels with the new stream: the open below requests
+    // room for it, and a changed pair defeats the same-device fast path.
+    int pairOffset = 0;
+    {
+        const juce::ScopedLock sl(stateLock);
+        pairOffset = juce::jmax(0, out->firstChannel);
+    }
+    if (!forceReopen) {
+        // The commit above may already have carried this exact stream over:
+        // it already runs at the wanted format, so reopening it here would
+        // put the seconds of silence back. A stale error or a format change
+        // still falls through to the open below.
+        const juce::ScopedLock sl(stateLock);
+        if (!missing && out->output != nullptr && out->outputError.isEmpty()
+            && out->outputDeviceName == deviceName
+            && out->output->getSampleRate() > 0.0
+            && out->output->getSampleRate() == (engineRate > 0.0 ? engineRate : currentSampleRate)
+            && (requestedOutputBufferSize_ == 0
+                || out->output->getBufferSize() == requestedOutputBufferSize_)
+            && out->output->getNumDeviceOutputChannels()
+                   >= (out->layout == pluginrack::ChannelLayout::Mono ? 1 : 2)
+            && out->output->getFirstChannel() == pairOffset) {
+            return {};
+        }
+    }
     {
         // Move the live playback under stateLock: render() dereferences
         // out->output while holding it, so handing it off outside the lock
@@ -4919,6 +5247,7 @@ juce::String AudioEngine::setOutputDeviceImpl(std::uint32_t outputId, const juce
     // store instead of a live closure assignment.
     newPlayback->setRenderHook([this](int n) { this->render(n); });
     newPlayback->setRenderActive(false);
+    newPlayback->setFirstChannel(pairOffset);
 
     juce::String err;
     const auto openName = isSystemDefaultName(deviceName) ? juce::String() : deviceName;
@@ -5217,7 +5546,7 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
         if (output->outputDeviceName.isNotEmpty() &&
             !isSilentDeviceName(output->outputDeviceName)) {
             const auto e = setOutputDeviceImpl(output->id, output->outputDeviceName,
-                                                currentSampleRate);
+                                                currentSampleRate, /*forceReopen=*/true);
             if (firstError.isEmpty() && e.isNotEmpty()) firstError = e;
         }
     }
@@ -5226,7 +5555,8 @@ juce::String AudioEngine::setOutputBufferSize(int size) {
         for (auto& output : outputs) {
             if (output->outputDeviceName.isNotEmpty() &&
                 !isSilentDeviceName(output->outputDeviceName)) {
-                setOutputDeviceImpl(output->id, output->outputDeviceName, currentSampleRate);
+                setOutputDeviceImpl(output->id, output->outputDeviceName, currentSampleRate,
+                                    /*forceReopen=*/true);
             }
         }
         return "The output device refused the new buffer size; kept the previous one.\n"
@@ -5832,7 +6162,7 @@ int spectralDenoiserLatencySamples(const Strip& strip) {
     for (const auto& effect : strip.spectralDenoiserEffects) {
         const pluginrack::ChainItem item{pluginrack::ChainItemType::SpectralDenoiser, effect.id};
         const bool inChain = std::find(strip.chain.begin(), strip.chain.end(), item) != strip.chain.end();
-        if (inChain) samples += pluginrack::kSpectralDenoiserLatencySamples;
+        if (inChain) samples += pluginrack::spectralDenoiserLatencySamples(effect);
     }
     return samples;
 }
@@ -6177,8 +6507,8 @@ private:
     std::function<void(const std::function<bool()>&)> job;
 };
 
-void AudioEngine::startDeviceJob(std::function<void(const std::function<bool()>&)> job) {
-    if (openingDevices_.exchange(true)) return;
+bool AudioEngine::startDeviceJob(std::function<void(const std::function<bool()>&)> job) {
+    if (openingDevices_.exchange(true)) return false;
     {
         const juce::ScopedLock lock(deviceOpenErrorsLock_);
         deviceOpenErrors_.clear();
@@ -6196,6 +6526,40 @@ void AudioEngine::startDeviceJob(std::function<void(const std::function<bool()>&
     }
     deviceOpenThread_ = std::make_unique<DeviceOpenThread>(std::move(job));
     deviceOpenThread_->startThread();
+    return true;
+}
+
+void AudioEngine::reopenInputsAsync() {
+    // The channel state already holds the new mapping; this only reopens the
+    // shared capture (or widens it) for it. A capture open is a driver call
+    // that can block for seconds, so it runs on the device worker. When a job
+    // is already running, flag a second input pass for when it finishes
+    // rather than dropping the edit.
+    const auto job = [this](const std::function<bool()>& shouldExit) {
+        juce::ignoreUnused(shouldExit);
+        // A mapping edit that lands while this pass is already reading the
+        // channel state only sets the flag (startDeviceJob refuses a second
+        // worker), so keep going until no edit is pending.
+        do {
+            inputsReopenPending_.store(false, std::memory_order_acq_rel);
+            prepareInputs();
+        } while (inputsReopenPending_.load(std::memory_order_acquire));
+
+        clearDeviceOpens();
+        deviceOpenFinished_.store(true, std::memory_order_release);
+        openingDevices_.store(false, std::memory_order_release);
+
+        // Close the gap between the last check and releasing the worker slot:
+        // an edit there saw the worker busy, so its pass would otherwise wait
+        // for an unrelated device operation.
+        if (inputsReopenPending_.exchange(false, std::memory_order_acq_rel)) {
+            prepareInputs();
+            clearDeviceOpens();
+            deviceOpenFinished_.store(true, std::memory_order_release);
+        }
+    };
+    if (!startDeviceJob(job))
+        inputsReopenPending_.store(true, std::memory_order_release);
 }
 
 void AudioEngine::openStripsDevicesAsync() {
@@ -6211,6 +6575,9 @@ void AudioEngine::openStripsDevicesNow(const std::function<bool()>& shouldExit, 
     const auto errors = openAllDevicesPass(shouldExit, forceInputs);
     modeCacheBypass_.store(false, std::memory_order_relaxed);
     clearDeviceOpens();
+    // A mapping edit arrived while this pass was running: the pass may have
+    // read the old channel state, so reopen the captures once more.
+    if (inputsReopenPending_.exchange(false, std::memory_order_acq_rel)) prepareInputs();
     juce::Logger::writeToLog(errors.isNotEmpty() ? "audio: devices open with errors\n" + errors
                                                  : juce::String("audio: devices open"));
 
@@ -6593,7 +6960,7 @@ void AudioEngine::reloadDevicesAsync(const std::vector<ReloadableDevice>& device
                                    ? setChannelInputDeviceImpl(device.stripId, device.deviceName,
                                                                /*forceReopen=*/true)
                                    : setOutputDeviceImpl(device.stripId, device.deviceName,
-                                                         currentSampleRate);
+                                                         currentSampleRate, /*forceReopen=*/true);
             if (!device.quiet) endDeviceOpen(status);
             if (error.isNotEmpty() && !device.quiet)
                 failures.add(device.label + ": " + error);
@@ -6635,6 +7002,9 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     // while openingDevices_ is set, so the strips stay valid for this run.
     std::vector<Request> outputsWanted, inputsWanted;
     double openRate = 48000.0;
+    // Index of the clock in outputsWanted: normally the first strip, or the
+    // carried live clock a scene restore kept. Set under stateLock below.
+    std::size_t clockRequestIdx = 0;
     {
         const juce::ScopedLock lock(stateLock);
         for (const auto& output : outputs) {
@@ -6656,24 +7026,43 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         openRate = currentSampleRate;
         // Claim the clock role before the parallel open: the first output in
         // the strip list defines the engine rate, and no other stream may take
-        // over. Reordering the strips and reloading moves the clock.
+        // over. Reordering the strips and reloading moves the clock. A scene
+        // restore may have carried a live clock into its strip: keep it (and
+        // its FIFO) instead of moving the role and reopening a working device.
+        clockRequestIdx = 0;
         if (!outputsWanted.empty()) {
-            clockOutputId = outputsWanted.front().id;
-            // Pin the choice for the reclaim tick: only a reload may move it.
-            preferredClockOutputId = clockOutputId;
+            bool carriedClockAlive = false;
+            for (const auto& output : outputs) {
+                if (output->id == clockOutputId && output->output != nullptr
+                    && output->output->getSampleRate() > 0.0) {
+                    carriedClockAlive = true;
+                    break;
+                }
+            }
+            if (!carriedClockAlive) {
+                clockOutputId = outputsWanted.front().id;
+                // Pin the choice for the reclaim tick: only a reload may move it.
+                preferredClockOutputId = clockOutputId;
+            }
+            for (std::size_t i = 0; i < outputsWanted.size(); ++i) {
+                if (outputsWanted[i].id == clockOutputId) {
+                    clockRequestIdx = i;
+                    break;
+                }
+            }
         }
     }
 
     deviceOpenTotal_.store((int) (outputsWanted.size() + inputsWanted.size()));
     juce::String errors;
 
-    // Open the clock (first output) first, on its own. ASIO is single-client:
+    // Open the clock first, on its own. ASIO is single-client:
     // an input probe that grabs the endpoint first makes the clock fail with
     // "No such device" while Force ASIO (which opens the clock synchronously
     // first) works. Releasing any separate capture on the clock device before
     // the clock reopens is what lets Apply do in one pass what Force ASIO did.
     if (!outputsWanted.empty())
-        releaseDeviceInputsForClock(outputsWanted.front().name);
+        releaseDeviceInputsForClock(outputsWanted[clockRequestIdx].name);
 
     // Only a single-client ASIO clock, or an input capturing from the clock
     // endpoint, needs the outputs fully open before any input starts. On WASAPI
@@ -6681,7 +7070,7 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     // slowest endpoint — not their sum — set the startup time.
     bool serializeForClock = false;
     if (!outputsWanted.empty()) {
-        const auto& clockName = outputsWanted.front().name;
+        const auto& clockName = outputsWanted[clockRequestIdx].name;
         const auto asioNames = DeviceEnumeration::asioDevices();
         // Any ASIO output is single-client, so an input probe can block it —
         // not only the clock. "System Default" resolves to the first type that
@@ -6777,25 +7166,25 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     // Retry the clock a bounded number of times before any input opens, which
     // is exactly the recovery pressing Force ASIO performs by hand.
     if (!shouldExit() && !outputResults.empty() && !outputsWanted.empty()) {
-        const auto firstError = outputResults.front();
+        const auto firstError = outputResults[clockRequestIdx];
         for (int attempt = 2;
-             attempt <= kClockOpenAttempts && outputResults.front().isNotEmpty();
+             attempt <= kClockOpenAttempts && outputResults[clockRequestIdx].isNotEmpty();
              ++attempt) {
             // Only a driver-busy refusal is worth retrying; a rejected buffer
             // size or a missing endpoint would fail the same way again.
-            if (!isNoSuchDeviceError(outputResults.front())) break;
+            if (!isNoSuchDeviceError(outputResults[clockRequestIdx])) break;
             juce::Thread::sleep(kClockRetryDelayMs);
-            const auto status = "output \"" + outputsWanted.front().label + "\" - "
-                              + outputsWanted.front().name + " (retry "
+            const auto status = "output \"" + outputsWanted[clockRequestIdx].label + "\" - "
+                              + outputsWanted[clockRequestIdx].name + " (retry "
                               + juce::String(attempt) + ")";
             beginDeviceOpen(status);
-            const auto retryError = setOutputDeviceImpl(outputsWanted.front().id,
-                                                        outputsWanted.front().name, openRate);
+            const auto retryError = setOutputDeviceImpl(outputsWanted[clockRequestIdx].id,
+                                                        outputsWanted[clockRequestIdx].name, openRate);
             endDeviceOpen(status);
             juce::Logger::writeToLog("audio: clock retry " + juce::String(attempt)
                                      + (retryError.isEmpty() ? juce::String(" ok")
                                                              : " failed: " + retryError));
-            if (retryError.isEmpty()) outputResults.front().clear();
+            if (retryError.isEmpty()) outputResults[clockRequestIdx].clear();
         }
 
         // A single-client ASIO driver can keep refusing while the open runs on
@@ -6806,8 +7195,8 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
         // is interruptible: quitting must not leave the message thread blocked
         // in stopDeviceOpenThread() while this worker waits for it to dispatch
         // the reopen.
-        if (!shouldExit() && outputResults.front().isNotEmpty()
-            && isNoSuchDeviceError(outputResults.front())
+        if (!shouldExit() && outputResults[clockRequestIdx].isNotEmpty()
+            && isNoSuchDeviceError(outputResults[clockRequestIdx])
             && !juce::MessageManager::existsAndIsCurrentThread()) {
             struct ClockReopen {
                 std::uint32_t id = 0;
@@ -6817,8 +7206,8 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
                 juce::WaitableEvent done{false};
             };
             auto state = std::make_shared<ClockReopen>();
-            state->id = outputsWanted.front().id;
-            state->name = outputsWanted.front().name;
+            state->id = outputsWanted[clockRequestIdx].id;
+            state->name = outputsWanted[clockRequestIdx].name;
             state->rate = openRate;
             auto alive = prepareAliveToken_;
             juce::MessageManager::callAsync([this, alive, state] {
@@ -6833,14 +7222,14 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
                 if (shouldExit()) break;
             }
             if (!shouldExit()) {
-                outputResults.front() = state->result;
+                outputResults[clockRequestIdx] = state->result;
                 juce::Logger::writeToLog("audio: clock reopened on the message thread: "
-                                         + (outputResults.front().isEmpty()
+                                         + (outputResults[clockRequestIdx].isEmpty()
                                                 ? juce::String("ok")
-                                                : outputResults.front()));
+                                                : outputResults[clockRequestIdx]));
             }
         }
-        if (outputResults.front().isNotEmpty()) outputResults.front() = firstError;
+        if (outputResults[clockRequestIdx].isNotEmpty()) outputResults[clockRequestIdx] = firstError;
     }
 
     if (serializeForClock && !shouldExit()) {
@@ -6859,13 +7248,16 @@ juce::String AudioEngine::openAllDevicesPass(const std::function<bool()>& should
     // promote a live one or fall back to the internal clock before reporting.
     const bool clockRecovered = checkClockHealth();
 
-    // Every stream was attempted exactly once. Report each refusal against the
-    // strip it belongs to; the failing device is already closed and silent.
+    // Every stream the new rig still needs was attempted exactly once, except
+    // the ones the restore carried over: those already run at the wanted
+    // format, so setOutputDeviceImpl leaves them alone. Report each refusal
+    // against the strip it belongs to; the failing device is already closed
+    // and silent.
     for (std::size_t i = 0; i < outputResults.size(); ++i) {
         if (outputResults[i].isEmpty()) continue;
         const auto label = "Output \"" + outputsWanted[i].label + "\" ("
                          + outputsWanted[i].name + ")";
-        if (i == 0) {
+        if (i == clockRequestIdx) {
             errors += label + " could not be opened as the clock";
             if (clockRecovered)
                 errors += "; playback continues on " + getClockDescription();

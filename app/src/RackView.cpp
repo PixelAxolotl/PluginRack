@@ -225,6 +225,11 @@ RackView::RackView(AudioEngine& engine) : audioEngine(engine), sideChainBar(engi
     outputHeader.setFont(theme::ui::itemFont());
     outputHeader.setColour(juce::Label::textColourId, theme::amber());
     addAndMakeVisible(outputHeader);
+    outputHolder.setOpaque(false);
+    outputHolder.setWantsKeyboardFocus(false);
+    outputViewport.setViewedComponent(&outputHolder, false);
+    outputViewport.setScrollBarsShown(true, false);
+    addAndMakeVisible(outputViewport);
     addAndMakeVisible(sourceList);
 
     emptyLabel.setText("No chains yet - add a channel or output in the Mixer view.",
@@ -3111,12 +3116,13 @@ void RackView::refreshOutputButtons() {
             const bool on = b->getToggleState();
             audioEngine.setSendGain((std::uint32_t)selectedId, outId, on ? 0.0f : -60.0f);
         };
-        addAndMakeVisible(*btn);
+        outputHolder.addAndMakeVisible(*btn);
     }
     // disable when output selected
     const bool isChannel = (currentChannel() != nullptr);
     for (auto* b : outputButtons) b->setEnabled(isChannel);
     for (auto* b : outputButtons) b->setVisible(isChannel);
+    outputViewport.setVisible(isChannel);
     sourceList.setVisible(!isChannel && selectedId >= 0);
     repaint();
 }
@@ -3143,6 +3149,7 @@ void RackView::rebuild() {
     slotViewport.setVisible(hasChain);
     editorViewport.setVisible(hasChain);
     outputHeader.setVisible(hasChain);
+    outputViewport.setVisible(hasChain);
     for (auto* b : outputButtons) b->setVisible(hasChain);
     sourceList.setVisible(false);
 
@@ -3334,13 +3341,16 @@ void RackView::resized() {
     outputHeader.setBounds(ra.removeFromTop(20));
     ra.removeFromTop(theme::ui::kSpace1);
     sourceList.setBounds(ra);
-    int y = ra.getY();
+    outputViewport.setBounds(ra);
+    int y = 0;
     const int btnH = 26;
     const int btnGap = theme::ui::kSpace1;
+    const int outW = ra.getWidth();
     for (auto* b : outputButtons) {
-        b->setBounds(ra.getX(), y, ra.getWidth(), btnH);
+        b->setBounds(0, y, outW, btnH);
         y += btnH + btnGap;
     }
+    outputHolder.setSize(outW, outputButtons.isEmpty() ? 0 : y - btnGap);
 }
 
 void RackView::paintOverChildren(juce::Graphics& g) {
@@ -3430,19 +3440,22 @@ void RackView::renameSelectedChain() {
 
     juce::Component::SafePointer<RackView> safe(this);
     StripDialog::show("Rename", currentName, currentHue,
-                      [safe, selected, isOut](const juce::String& newName, float newHue) {
-        if (safe == nullptr || newName.trim().isEmpty()) return;
+                      [safe, selected, isOut](const juce::String& newName, float newHue) -> juce::String {
+        if (safe == nullptr) return {};
+        const auto id = static_cast<std::uint32_t>(selected);
+        const auto error = isOut ? safe->audioEngine.renameOutput(id, newName)
+                                 : safe->audioEngine.renameChannel(id, newName);
+        if (error.isNotEmpty()) return error;
         if (!isOut) {
-            safe->audioEngine.setChannelName(static_cast<std::uint32_t>(selected), newName);
-            safe->audioEngine.setChannelColourHue(static_cast<std::uint32_t>(selected), newHue);
+            safe->audioEngine.setChannelColourHue(id, newHue);
         } else {
-            safe->audioEngine.setOutputName(static_cast<std::uint32_t>(selected), newName);
-            safe->audioEngine.setOutputColourHue(static_cast<std::uint32_t>(selected), newHue);
+            safe->audioEngine.setOutputColourHue(id, newHue);
         }
         safe->rebuild();
         // The rename can change the identity colour too, which the mixer
         // strips derive from the engine; tell the mirrored views.
         safe->notifyInsertsChanged();
+        return {};
     });
 }
 

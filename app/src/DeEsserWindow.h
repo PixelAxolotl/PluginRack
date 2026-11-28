@@ -77,5 +77,6 @@ private:
     float detS1L = 0.0f, detS2L = 0.0f, detS1R = 0.0f, detS2R = 0.0f;
     void syncControls();
     void applyPreset(int id);
+    void syncPresetLabel();
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DeEsserWindow)
 };

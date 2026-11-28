@@ -382,10 +382,12 @@ FeedbackSuppressorWindow::FeedbackSuppressorWindow(const juce::String& title,
       sampleRateHz(initialSampleRateHz > 0.0 ? initialSampleRateHz : 48000.0),
       analyzerFft(std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder)) {
     setResizable(true, true);
-    setResizeLimits(400, 400, 1600, 1000);
+    // The design size is the minimum: below it the knobs collapse to a few
+    // pixels, so the window may grow but never shrink.
+    setResizeLimits(kWidth, kHeight, 1600, 1000);
     setContentOwned(&content, false);
     setUsingNativeTitleBar(true);
-    centreWithSize(kWidth, kHeight);
+    theme::ui::placeEffectWindow(*this, kWidth, kHeight);
 
     hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
     for (int i = 0; i < kAnalyzerFftSize; ++i) {

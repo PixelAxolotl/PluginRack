@@ -265,6 +265,28 @@ juce::String SceneBridge::takeSaveFailureNote() {
     return note;
 }
 
+juce::File SceneBridge::getCleanExitMarkerFile() {
+    return getScenesDirectory().getChildFile("clean-exit.txt");
+}
+
+void SceneBridge::writeCleanExitMarker() {
+    const auto directoryResult = getScenesDirectory().createDirectory();
+    if (directoryResult.failed()) return;
+    getCleanExitMarkerFile().replaceWithText(juce::String(juce::Time::currentTimeMillis()));
+}
+
+bool SceneBridge::hasUncleanAutosave() {
+    // No marker (first run, or an install from before the marker existed) is
+    // treated as a clean state: assuming a crash there would prompt on every
+    // upgrade. The only cost is a crash before the first clean exit on the new
+    // version restores silently.
+    const auto marker = getCleanExitMarkerFile();
+    if (!marker.existsAsFile()) return false;
+    const auto last = getLastSceneFile();
+    if (!last.existsAsFile()) return false;
+    return last.getLastModificationTime() > marker.getLastModificationTime();
+}
+
 std::optional<pluginrack::Scene> SceneBridge::load(juce::String& errorMessage) {
     return load(getSceneFile(), errorMessage);
 }

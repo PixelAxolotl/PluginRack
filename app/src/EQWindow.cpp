@@ -88,7 +88,7 @@ EQWindow::EQWindow(const juce::String& title,
     stereoTag.setJustificationType(juce::Justification::centred);
     stereoTag.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
     stereoTag.setColour(juce::Label::textColourId, theme::dim());
-    stereoTag.setTooltip("Stereo processing - visual only in v1");
+    stereoTag.setTooltip("Both channels processed with the same linked EQ settings");
     Component::addAndMakeVisible(stereoTag);
     bypassButton.setFontSize(9.0f);
     soloButton.setFontSize(9.0f);
@@ -139,7 +139,7 @@ EQWindow::EQWindow(const juce::String& title,
     lpfButton.setClickAction([this] { toggleFilterBand(kLowPassBandIndex); });
     Component::addAndMakeVisible(lpfButton);
 
-    for (auto* label : { &freqLabel, &gainLabel, &qLabel, &delayLabel }) {
+    for (auto* label : { &freqLabel, &gainLabel, &qLabel, &delayLabel, &slopeLabel }) {
         label->setJustificationType(juce::Justification::centred);
         label->setFont(juce::Font(juce::FontOptions(11.0f)));
         label->setColour(juce::Label::textColourId, theme::dim());
@@ -234,6 +234,26 @@ EQWindow::EQWindow(const juce::String& title,
     Component::addAndMakeVisible(delayKnob);
     delayKnob.setName("Delay");
 
+    // HP/LP steepness. The engine stacks 1, 2 or 4 identical biquads at the
+    // band's own cutoff and Q, so 12 dB/oct is exactly the old single stage.
+    // Bells and shelves have no slope: the combo disables itself for them.
+    slopeCombo.addItem("12 dB/oct", 1);
+    slopeCombo.addItem("24 dB/oct", 2);
+    slopeCombo.addItem("48 dB/oct", 3);
+    slopeCombo.setTooltip("High-pass / low-pass slope in dB per octave");
+    slopeCombo.onChange = [this] {
+        const int id = slopeCombo.getSelectedId();
+        auto bands = curve.getBands();
+        const int sel = curve.getSelectedBand();
+        if (id < 1 || sel < 0 || sel >= static_cast<int>(bands.size())) return;
+        // The combo's IDs are 1, 2, 3; the engine's values are 12, 24, 48.
+        bands[static_cast<std::size_t>(sel)].slopeDbPerOct = id == 3 ? 48 : 12 * id;
+        markPresetCustom();
+        commitBands(std::move(bands));
+    };
+    Component::addAndMakeVisible(slopeCombo);
+    slopeCombo.setName("Slope");
+
     syncControls();
 
     // --- analyzer (Task 6): one FFT per open window, everything allocated
@@ -298,7 +318,7 @@ EQWindow::EQWindow(const juce::String& title,
     setRtaOffsetDb(initialRtaOffsetDb);
 
     if (!embedded) {
-        centreWithSize(kWidth, kHeight);
+        theme::ui::placeEffectWindow(*this, kWidth, kHeight);
         setVisible(true);
     } else {
         setSize(kWidth, kHeight);
@@ -546,6 +566,13 @@ void EQWindow::syncControls() {
     const bool isFilterPoint = isHighPass || isLowPass;
     gainKnob.setEnabled(!isFilterPoint);
     qKnob.setEnabled(!isFilterPoint);
+    // The slope picker is the filter points' own control: only it and Freq
+    // mean anything for them, so it is hidden entirely on a bell or shelf
+    // (a disabled combo reading "12 dB/oct" looked like a stuck setting).
+    slopeCombo.setVisible(isFilterPoint);
+    slopeLabel.setVisible(isFilterPoint);
+    const int slopeId = band.slopeDbPerOct == 48 ? 3 : (band.slopeDbPerOct == 24 ? 2 : 1);
+    slopeCombo.setSelectedId(slopeId, juce::dontSendNotification);
 
     // Point mode: a bell reads "BAND", a shelf reads "SHELF". The filter
     // points are not switchable here (their type would stop being a filter).
@@ -634,6 +661,10 @@ void EQWindow::resized() {
     soloButton.setBounds(right.removeFromTop(22));
     right.removeFromTop(4);
     flipButton.setBounds(right.removeFromTop(22));
+    // Slope picker under the buttons: label then combo, inside the column.
+    right.removeFromTop(6);
+    slopeLabel.setBounds(right.removeFromTop(12));
+    slopeCombo.setBounds(right.removeFromTop(22));
 
     // Four label+knob slots across the remaining middle (bands, then delay).
     // Every knob shares the same size rule as De-esser/Multiband/Limiter/Dynamics

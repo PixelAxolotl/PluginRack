@@ -29,7 +29,7 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
       sampleRateHz(initialSampleRateHz > 0.0 ? initialSampleRateHz : 48000.0),
       analyzerFft(std::make_unique<juce::dsp::FFT>(analyzer::kFftOrder)) {
     setResizable(false, false); setContentOwned(&content, false); setUsingNativeTitleBar(true);
-    centreWithSize(kWidth, kHeight);
+    theme::ui::placeEffectWindow(*this, kWidth, kHeight);
 
     hannCoeffs.resize(static_cast<std::size_t>(kAnalyzerFftSize));
     for (int i = 0; i < kAnalyzerFftSize; ++i) {
@@ -61,7 +61,7 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
     content.addAndMakeVisible(modeButton);
     modeButton.onClick = [this] {
         effect.mode = effect.mode == DeEsserMode::Split ? DeEsserMode::Wideband : DeEsserMode::Split;
-        modeButton.setButtonText(effect.mode == DeEsserMode::Split ? "Split" : "Wideband"); apply(effect, false);
+        modeButton.setButtonText(effect.mode == DeEsserMode::Split ? "Split" : "Wideband"); apply(effect, false); syncPresetLabel();
     };
     content.addAndMakeVisible(presetCombo);
     presetCombo.addItem("Custom", 1); presetCombo.addItem("Default", 2); presetCombo.addItem("Gentle", 3); presetCombo.addItem("Harsh", 4);
@@ -124,12 +124,12 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
         label->setFont(juce::Font(juce::FontOptions(11.0f)));
         label->setColour(juce::Label::textColourId, theme::dim());
     }
-    freq.onValueChange = [this] { effect.freqHz = (float)freq.getValue(); apply(effect, false); };
-    q.onValueChange = [this] { effect.q = (float)q.getValue(); apply(effect, false); };
-    threshold.onValueChange = [this] { effect.thresholdDb = (float)threshold.getValue(); apply(effect, false); };
-    range.onValueChange = [this] { effect.rangeDb = (float)range.getValue(); apply(effect, false); };
-    attack.onValueChange = [this] { effect.attackMs = (float)attack.getValue(); apply(effect, false); };
-    release.onValueChange = [this] { effect.releaseMs = (float)release.getValue(); apply(effect, false); };
+    freq.onValueChange = [this] { effect.freqHz = (float)freq.getValue(); apply(effect, false); syncPresetLabel(); };
+    q.onValueChange = [this] { effect.q = (float)q.getValue(); apply(effect, false); syncPresetLabel(); };
+    threshold.onValueChange = [this] { effect.thresholdDb = (float)threshold.getValue(); apply(effect, false); syncPresetLabel(); };
+    range.onValueChange = [this] { effect.rangeDb = (float)range.getValue(); apply(effect, false); syncPresetLabel(); };
+    attack.onValueChange = [this] { effect.attackMs = (float)attack.getValue(); apply(effect, false); syncPresetLabel(); };
+    release.onValueChange = [this] { effect.releaseMs = (float)release.getValue(); apply(effect, false); syncPresetLabel(); };
     graph.setMode(TraceGraphMode::Frequency);
     graph.setOverlayPainter([this](juce::Graphics& g, juce::Rectangle<float> graphBounds) {
         const auto freqToX = [graphBounds](float frequency) {
@@ -143,6 +143,7 @@ DeEsserWindow::DeEsserWindow(const juce::String& title, const DeEsserEffect& ini
         g.drawVerticalLine(juce::roundToInt(freqToX(effect.freqHz)), graphBounds.getY(), graphBounds.getBottom());
     });
     syncControls();
+    syncPresetLabel();
     setVisible(true);
     startTimer(33);
 }
@@ -178,10 +179,32 @@ void DeEsserWindow::syncControls() {
 }
 
 void DeEsserWindow::applyPreset(int id) {
+    if (id == 1) return; // Custom: nothing to write
     if (id == 2) effect = makeDefaultDeEsserEffect();
     if (id == 3) { effect.freqHz = 6500; effect.q = 2; effect.thresholdDb = -36; effect.rangeDb = 8; }
     if (id == 4) { effect.freqHz = 5500; effect.q = 4; effect.thresholdDb = -24; effect.rangeDb = 18; }
-    syncControls(); apply(effect, false);
+    syncControls(); syncPresetLabel(); apply(effect, false);
+}
+
+void DeEsserWindow::syncPresetLabel() {
+    // Default compares every DSP field (id/bypassed excluded: the header
+    // preset describes the curve, not the enable state). Gentle/Harsh only
+    // rewrite freq/q/threshold/range, so attack/release/mode are ignored for
+    // those two (inexact by construction — see report).
+    int match = 1;
+    auto def = makeDefaultDeEsserEffect(effect.id);
+    def.bypassed = effect.bypassed;
+    if (effect == def) {
+        match = 2;
+    } else if (effect.freqHz == 6500.0f && effect.q == 2.0f && effect.thresholdDb == -36.0f
+               && effect.rangeDb == 8.0f) {
+        match = 3;
+    } else if (effect.freqHz == 5500.0f && effect.q == 4.0f && effect.thresholdDb == -24.0f
+               && effect.rangeDb == 18.0f) {
+        match = 4;
+    }
+    // Notification off: re-entrant onChange would re-apply a preset, as in EQWindow.
+    presetCombo.setSelectedId(match, juce::dontSendNotification);
 }
 
 void DeEsserWindow::setBypassed(bool b) { effect.bypassed = b; enableButton.setToggleState(!b, juce::dontSendNotification); }
@@ -230,7 +253,8 @@ void DeEsserWindow::timerCallback() {
     // targetDb stays empty (no target curve on this panel).
     frequencyTrace.activityDb.assign(spectrumAvg.begin(), spectrumAvg.end());
     frequencyTrace.reductionDb =
-        makeDeEsserGainReductionTrace(effect, gainReductionDb, spectrumAvg.size());
+        makeDeEsserGainReductionTrace(effect, gainReductionDb, spectrumAvg.size(),
+                                      20.0f, 20000.0f, sampleRateHz);
     frequencyTrace.spectrumSampleRateHz = sampleRateHz;
     frequencyTrace.spectrumDisplayOffsetDb = spectrumOffsetDb;
     frequencyTrace.spectrumWeighting = weighting;

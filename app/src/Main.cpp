@@ -10,6 +10,7 @@
 #include "PluginHostIpc.h"
 #include "PluginLibrary.h"
 #include "RestrictedHost.h"
+#include "SceneBridge.h"
 #include "SliderTouch.h"
 
 #include <cmath>
@@ -424,7 +425,6 @@ public:
                 if (tok.isEmpty()) continue;
                 if (tok == "mixer") shotView = AppView::Mixer;
                 else if (tok == "rack" || tok == "racks") shotView = AppView::Rack;
-                else if (tok == "routing") shotView = AppView::Routing;
                 else if (tok == "io" || tok == "i/o") shotView = AppView::IO;
                 else if (tok == "saves") shotView = AppView::Saves;
                 else if (tok == "settings") shotView = AppView::Settings;
@@ -1019,7 +1019,17 @@ public:
         // DLLs faults in the same place. The scene is saved and the log is
         // written line by line, so the reliable way to close is to end the
         // process without running any of that.
+        // The endpoint default format is a machine-wide setting this process
+        // rewrote to open the device; put it back before the process ends.
+        // TerminateProcess below skips every destructor, so this is the only
+        // point the restore can run.
+        DeviceStream::restoreOriginalEndpointFormats();
         juce::Logger::writeToLog("shutdown: exiting without tearing plugins down");
+        // Crash-recovery marker, written after the exit autosave and the
+        // endpoint restore, immediately before the process ends. A crash or a
+        // kill skips it by definition, so a newer last-scene file on the next
+        // launch means the exit was unclean.
+        SceneBridge::writeCleanExitMarker();
 #if JUCE_WINDOWS
         ::TerminateProcess(::GetCurrentProcess(), 0);
 #else

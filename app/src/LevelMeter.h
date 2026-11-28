@@ -18,7 +18,8 @@ public:
                juce::Atomic<float>& leftPeakSource,
                juce::Atomic<float>& rightPeakSource,
                juce::Atomic<float>& leftRmsSource,
-               juce::Atomic<float>& rightRmsSource);
+               juce::Atomic<float>& rightRmsSource,
+               juce::Atomic<float>* loudnessSource = nullptr);
 
     void paint(juce::Graphics& g) override;
     void setStereo(bool stereo);
@@ -38,6 +39,12 @@ public:
     static void setPeakHoldMs(int ms);
     // Text for one interval in the Settings picker ("250 ms", "1 s").
     static juce::String peakHoldLabel(int ms);
+
+    // Which level the second readout row shows. Loudness falls back to RMS on
+    // meters without a loudness source (output and bus strips).
+    enum class Readout { Rms = 0, Lufs = 1 };
+    static Readout readoutMode() { return static_cast<Readout>(readoutModeValue.load()); }
+    static void setReadoutMode(Readout mode) { readoutModeValue.store(static_cast<int>(mode)); }
 
 private:
     void timerCallback() override;
@@ -64,22 +71,27 @@ private:
     juce::Atomic<float>& rightPeakSource;
     juce::Atomic<float>& leftRmsSource;
     juce::Atomic<float>& rightRmsSource;
+    // Null on strips without a loudness feed: the LUFS row is then not drawn.
+    juce::Atomic<float>* loudnessSource = nullptr;
 
     float displayedPeakL = 0.0f;
     float displayedPeakR = 0.0f;
     float displayedRmsL = 0.0f;
     float displayedRmsR = 0.0f;
+    float displayedLoudness = -70.0f;
     float heldPeakL = 0.0f;
     float heldPeakR = 0.0f;
     juce::uint32 holdStartL = 0;
     juce::uint32 holdStartR = 0;
     bool stereo = true;
 
-    // Paint cache for the two numeric readouts (see ValueGlyphs above).
+    // Paint cache for the numeric readouts (see ValueGlyphs above).
     ValueGlyphs peakGlyphs;
     ValueGlyphs rmsGlyphs;
+    ValueGlyphs lufsGlyphs;
 
     inline static std::atomic<int> peakHoldMsValue{500};
+    inline static std::atomic<int> readoutModeValue{0};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LevelMeter)
 };

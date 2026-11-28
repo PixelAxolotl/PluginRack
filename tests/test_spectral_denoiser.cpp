@@ -51,13 +51,12 @@ void processInBlocks(pluginrack::SpectralDenoiserProcessor& processor, std::vect
 } // namespace
 
 TEST_CASE("spectral denoiser reports one frame of latency") {
-    REQUIRE(pluginrack::SpectralDenoiserProcessor::latencySamples() == 512);
-
     auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
     effect.reductionDb = 0.0f;
     pluginrack::SpectralDenoiserProcessor processor;
     processor.prepare(kSampleRate);
     processor.setEffect(effect);
+    REQUIRE(processor.latencySamples() == 512);
 
     auto input = noise(8192);
     auto left = input;
@@ -297,6 +296,40 @@ TEST_CASE("spectral denoiser learns a noise profile") {
         total += bin;
     }
     REQUIRE(total > 0.0);
+    REQUIRE_FALSE(processor.takeLearnedProfile(profile, profileRate));
+}
+
+TEST_CASE("spectral denoiser learns again after an untaken or cleared profile") {
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+
+    auto left = noise(static_cast<std::size_t>(kSampleRate * 1.5), 0x51ee7u);
+    for (auto& sample : left) {
+        sample *= 0.05f;
+    }
+    auto right = left;
+
+    processor.startLearning();
+    processInBlocks(processor, left, right);
+    REQUIRE_FALSE(processor.isLearning());
+    REQUIRE(processor.learnProgress() == Catch::Approx(1.0f));
+
+    // The window never took the first profile (or the profile was cleared).
+    // A second Learn must start from zero instead of reporting the stale
+    // result as already finished.
+    processor.startLearning();
+    REQUIRE(processor.learnProgress() == Catch::Approx(0.0f));
+    REQUIRE(processor.isLearning());
+    processInBlocks(processor, left, right);
+    REQUIRE_FALSE(processor.isLearning());
+
+    std::vector<float> profile;
+    double profileRate = 0.0;
+    REQUIRE(processor.takeLearnedProfile(profile, profileRate));
+    REQUIRE(profileRate == Catch::Approx(kSampleRate));
     REQUIRE_FALSE(processor.takeLearnedProfile(profile, profileRate));
 }
 
@@ -903,4 +936,108 @@ TEST_CASE("spectral denoiser forgets its adaptive estimate on reset") {
     const double late = rmsBounded(left, size - 36000, size);
     const double reference = rmsBounded(input, size - 36000, size);
     REQUIRE(late > reference * 0.8);
+}
+
+TEST_CASE("spectral denoiser runs at every fft size") {
+    for (const int fftSize : pluginrack::kSpectralDenoiserFftSizes) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.fftSize = fftSize;
+        effect.reductionDb = 24.0f;
+        effect.mode = pluginrack::SpectralDenoiserMode::Adaptive;
+        pluginrack::SpectralDenoiserProcessor processor;
+        processor.prepare(kSampleRate);
+        processor.setEffect(effect);
+        REQUIRE(processor.latencySamples() == fftSize);
+
+        // A steady sine must stay finite at every size.
+        const auto toneSize = static_cast<std::size_t>(kSampleRate);
+        auto toneLeft = tone1k(toneSize);
+        auto toneRight = toneLeft;
+        processInBlocks(processor, toneLeft, toneRight);
+        for (float sample : toneLeft) {
+            REQUIRE(std::isfinite(sample));
+        }
+        for (float sample : toneRight) {
+            REQUIRE(std::isfinite(sample));
+        }
+        processor.reset();
+
+        // And steady noise must still be reduced, after the one-frame ramp.
+        auto noisy = noise(static_cast<std::size_t>(kSampleRate * 2.0),
+                           0x51ee0000u + static_cast<std::uint32_t>(fftSize));
+        for (auto& sample : noisy) {
+            sample *= 0.1f;
+        }
+        auto left = noisy;
+        auto right = noisy;
+        processInBlocks(processor, left, right);
+        const float inputLevel = rms(noisy, static_cast<std::size_t>(kSampleRate));
+        const float outputLevel = rms(left, static_cast<std::size_t>(kSampleRate));
+        REQUIRE(outputLevel < inputLevel * 0.5f);
+    }
+}
+
+TEST_CASE("spectral denoiser default fft size keeps the original block") {
+    pluginrack::SpectralDenoiserEffect defaults;
+    REQUIRE(defaults.fftSize == 512);
+    REQUIRE(pluginrack::spectralDenoiserLatencySamples(defaults) == 512);
+
+    auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+    effect.bypassed = true;
+    pluginrack::SpectralDenoiserProcessor processor;
+    processor.prepare(kSampleRate);
+    processor.setEffect(effect);
+    REQUIRE(processor.latencySamples() == 512);
+
+    const auto input = noise(8192, 0x51ee7u);
+    auto left = input;
+    auto right = input;
+    processInBlocks(processor, left, right);
+    for (std::size_t i = 1024; i < input.size(); ++i) {
+        REQUIRE(left[i] == Catch::Approx(input[i - 512]).margin(1.0e-4f));
+    }
+}
+
+TEST_CASE("spectral denoiser switching fft size mid-stream starts clean") {
+    const auto makeEffect = [](int fftSize) {
+        auto effect = pluginrack::makeDefaultSpectralDenoiserEffect();
+        effect.fftSize = fftSize;
+        effect.reductionDb = 24.0f;
+        effect.mode = pluginrack::SpectralDenoiserMode::Adaptive;
+        return effect;
+    };
+
+    const auto input = noise(static_cast<std::size_t>(kSampleRate * 2.0), 0x0ff51234u);
+    const auto split = static_cast<std::size_t>(kSampleRate);
+
+    pluginrack::SpectralDenoiserProcessor switched;
+    switched.prepare(kSampleRate);
+    switched.setEffect(makeEffect(512));
+    auto warmLeft = std::vector<float>(input.begin(), input.begin() + split);
+    auto warmRight = warmLeft;
+    processInBlocks(switched, warmLeft, warmRight);
+
+    // The new size reallocates and resets, so the stream continues exactly
+    // like a processor that was just built at that size.
+    switched.setEffect(makeEffect(2048));
+    REQUIRE(switched.latencySamples() == 2048);
+
+    pluginrack::SpectralDenoiserProcessor fresh;
+    fresh.prepare(kSampleRate);
+    fresh.setEffect(makeEffect(2048));
+
+    auto tailLeft = std::vector<float>(input.begin() + split, input.end());
+    auto tailRight = tailLeft;
+    auto referenceLeft = tailLeft;
+    auto referenceRight = referenceLeft;
+    processInBlocks(switched, tailLeft, tailRight);
+    processInBlocks(fresh, referenceLeft, referenceRight);
+
+    for (std::size_t i = 0; i < tailLeft.size(); ++i) {
+        REQUIRE(std::isfinite(tailLeft[i]));
+        REQUIRE(tailLeft[i] == Catch::Approx(referenceLeft[i]).margin(1.0e-6f));
+    }
+    // After the new size's one-frame ramp the effect is denoising again; the
+    // switch left no stale frame of the old size behind.
+    REQUIRE(rms(tailLeft, 4096) > 1.0e-4f);
 }

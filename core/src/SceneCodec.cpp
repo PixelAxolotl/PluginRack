@@ -157,6 +157,9 @@ void to_json(nlohmann::json& j, const EqBand& band) {
         {"q", band.q},
         {"enabled", band.enabled},
         {"solo", band.solo},
+        // Schema 13: HP/LP steepness in dB per octave. Files written before
+        // this have no key and load as 12 (from_json's default).
+        {"slopeDbPerOct", band.slopeDbPerOct},
     };
 }
 
@@ -168,6 +171,7 @@ void from_json(const nlohmann::json& j, EqBand& band) {
     band.q = j.value("q", 0.707f);
     band.enabled = j.value("enabled", true);
     band.solo = j.value("solo", false);
+    band.slopeDbPerOct = j.value("slopeDbPerOct", 12);
 }
 
 void to_json(nlohmann::json& j, MultibandMode mode) {
@@ -337,6 +341,9 @@ void to_json(nlohmann::json& j, const SpectralDenoiserEffect& effect) {
     if (effect.stereoLinkPercent != kSpectralDenoiserMaxStereoLinkPercent) {
         j["stereoLinkPercent"] = effect.stereoLinkPercent;
     }
+    if (effect.fftSize != kSpectralDenoiserDefaultFftSize) {
+        j["fftSize"] = effect.fftSize;
+    }
 }
 
 void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
@@ -353,6 +360,8 @@ void from_json(const nlohmann::json& j, SpectralDenoiserEffect& effect) {
     effect.speed = j.value("speed", effect.speed);
     effect.learnSeconds = j.value("learnSeconds", effect.learnSeconds);
     effect.stereoLinkPercent = j.value("stereoLinkPercent", effect.stereoLinkPercent);
+    // Absent in v14 and earlier: the default is the original 512-sample frame.
+    effect.fftSize = j.value("fftSize", effect.fftSize);
     // Listen is monitor-only and deliberately never restored from a scene.
     effect.listen = false;
 }
@@ -376,7 +385,11 @@ void to_json(nlohmann::json& j, const DynamicsEffect& effect) {
                        {"thresholdDb", effect.thresholdDb}, {"ratio", effect.ratio},
                        {"attackMs", effect.attackMs}, {"releaseMs", effect.releaseMs},
                        {"makeupDb", effect.makeupDb}, {"inputGainDb", effect.inputGainDb},
-                       {"kneeDb", effect.kneeDb}};
+                       {"kneeDb", effect.kneeDb}, {"holdMs", effect.holdMs},
+                       {"hysteresisDb", effect.hysteresisDb},
+                       {"sidechainHz", effect.sidechainHz},
+                       {"rmsDetector", effect.rmsDetector},
+                       {"mixPercent", effect.mixPercent}};
 }
 
 void from_json(const nlohmann::json& j, DynamicsEffect& effect) {
@@ -391,6 +404,13 @@ void from_json(const nlohmann::json& j, DynamicsEffect& effect) {
     effect.makeupDb = j.value("makeupDb", effect.makeupDb);
     effect.inputGainDb = j.value("inputGainDb", effect.inputGainDb);
     effect.kneeDb = j.value("kneeDb", effect.kneeDb);
+    // Absent in v13 and earlier: the defaults above are the pre-v14 gate and
+    // the fully processed compressor.
+    effect.holdMs = j.value("holdMs", effect.holdMs);
+    effect.hysteresisDb = j.value("hysteresisDb", effect.hysteresisDb);
+    effect.sidechainHz = j.value("sidechainHz", effect.sidechainHz);
+    effect.rmsDetector = j.value("rmsDetector", effect.rmsDetector);
+    effect.mixPercent = j.value("mixPercent", effect.mixPercent);
 }
 
 void to_json(nlohmann::json& j, const InsertSlot& slot) {
@@ -602,6 +622,7 @@ void to_json(nlohmann::json& j, const Output& output) {
     j["kind"] = output.kind;
     j["deviceId"] = output.deviceId;
     j["flipped"] = output.flipped;
+    j["firstChannel"] = output.firstChannel;
 }
 
 void from_json(const nlohmann::json& j, Output& output) {
@@ -613,7 +634,10 @@ void from_json(const nlohmann::json& j, Output& output) {
     output.deviceId = j.value("deviceId", std::string{});
     // Scenes written before the stream-output class was retired still carry
     // "streamOutput"; unknown keys are ignored, so they load as monitors.
+    // Scenes written before the pair picker existed carry no key; they load
+    // on 1/2, which is what they always played.
     output.flipped = j.value("flipped", false);
+    output.firstChannel = j.value("firstChannel", 0);
 }
 
 void to_json(nlohmann::json& j, const Bus& bus) {

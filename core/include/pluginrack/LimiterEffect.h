@@ -30,6 +30,12 @@ public:
     void reset() noexcept;
     float gainReductionDb() const noexcept { return reductionDb_; }
 
+    // True-peak detector: four interpolated sub-samples per input frame over
+    // the last kTruePeakTaps frames. Detector only: the audio path and the
+    // reported look-ahead latency are unchanged.
+    static constexpr int kTruePeakPhases = 4;
+    static constexpr int kTruePeakTaps = 8;
+
 private:
     double sampleRate_ = 48000.0;
     LimiterEffect effect_;
@@ -39,7 +45,14 @@ private:
     int delayWrite_ = 0;
     float gain_ = 1.0f;
     float reductionDb_ = 0.0f;
+    // Windowed-sinc interpolation kernels the true-peak detector reads.
+    float historyL_[kTruePeakTaps] = {};
+    float historyR_[kTruePeakTaps] = {};
+    int historyWrite_ = 0;
+    float truePeakKernel_[kTruePeakPhases][kTruePeakTaps] = {};
+    bool truePeakKernelReady_ = false;
     void ensureDelay();
+    void designTruePeakKernel();
     int lookaheadSamples() const noexcept;
 };
 

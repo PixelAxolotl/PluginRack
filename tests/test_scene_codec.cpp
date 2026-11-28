@@ -5,7 +5,7 @@
 
 TEST_CASE("scene survives a JSON round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "roundtrip";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -146,7 +146,7 @@ TEST_CASE("v2 scene with output inserts round-trips") {
     REQUIRE(loaded.scene.has_value());
     // Old files auto-migrate: loading keeps the file's version, saving writes today's.
     pluginrack::Scene expected = original;
-    expected.schemaVersion = 11;
+    expected.schemaVersion = pluginrack::kSchemaVersion;
     REQUIRE(*loaded.scene == expected);
     REQUIRE(loaded.scene->outputs.front().inserts.size() == 2);
     REQUIRE(loaded.scene->outputs.front().inserts[0].pluginPath == "/plugins/echo.dll");
@@ -185,7 +185,7 @@ TEST_CASE("v1 scene loads with empty output racks and no errors") {
 
 TEST_CASE("slot plugin state is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "state";
 
     pluginrack::Channel channel;
@@ -231,7 +231,7 @@ TEST_CASE("slot plugin state is optional and survives a round trip") {
 
 TEST_CASE("slot plugin class id is optional and survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "class-id";
 
     pluginrack::Channel channel;
@@ -330,7 +330,7 @@ TEST_CASE("unknown fields are ignored on load and dropped on save") {
 
 TEST_CASE("inputChannels round-trips with the channel layout") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "mapping";
 
     pluginrack::Channel mono;
@@ -397,12 +397,14 @@ TEST_CASE("a v2 file loads at its own version and saves at today's") {
     REQUIRE(loaded.scene->schemaVersion == 2);
     // Defaults for a file that predates a field are covered by the v1 case; this
     // one pins the version handoff only.
-    REQUIRE(pluginrack::toJson(*loaded.scene).find("\"schemaVersion\":11") != std::string::npos);
+    REQUIRE(pluginrack::toJson(*loaded.scene)
+                .find("\"schemaVersion\":" + std::to_string(pluginrack::kSchemaVersion)) !=
+            std::string::npos);
 }
 
 TEST_CASE("scene v3 round-trip preserves eq bands") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "eq";
     original.sampleRate = 48000;
     original.bufferFrames = 256;
@@ -440,7 +442,8 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     original.routes.push_back(route);
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":11") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":" + std::to_string(pluginrack::kSchemaVersion)) !=
+            std::string::npos);
     REQUIRE(json.find("eqBands") != std::string::npos);
 
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
@@ -460,9 +463,69 @@ TEST_CASE("scene v3 round-trip preserves eq bands") {
     REQUIRE(loaded.scene->outputs.front().eqRtaWeighting == 1);
 }
 
+TEST_CASE("scene round-trip preserves the eq slope") {
+    pluginrack::Scene original;
+    original.name = "slopes";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.eqEnabled = true;
+    channel.eqBands = pluginrack::defaultEqBands();
+    channel.eqBands[0].slopeDbPerOct = 48;
+    channel.eqBands[6].slopeDbPerOct = 24;
+    channel.eqBands[6].enabled = true;
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    original.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"slopeDbPerOct\":48") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->channels.front().eqBands[0].slopeDbPerOct == 48);
+    REQUIRE(loaded.scene->channels.front().eqBands[6].slopeDbPerOct == 24);
+    REQUIRE(loaded.scene->channels.front().eqBands[1].slopeDbPerOct == 12);
+}
+
+TEST_CASE("a v12 scene without the slope field loads 12 dB/oct") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 12,)"
+                             R"("name": "pre-slope",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1, "name": "mic", "eqBands": [)"
+                             R"({"type": "HighPass", "freqHz": 80, "gainDb": 0, "q": 0.707, "enabled": true, "solo": false},)"
+                             R"({"type": "LowPass", "freqHz": 12000, "gainDb": 0, "q": 0.707, "enabled": false, "solo": false})"
+                             R"(]}],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": [])"
+                             R"(})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+
+    const auto& bands = loaded.scene->channels.front().eqBands;
+    REQUIRE(bands.size() == 2);
+    REQUIRE(bands[0].slopeDbPerOct == 12);
+    REQUIRE(bands[1].slopeDbPerOct == 12);
+}
+
 TEST_CASE("scene audio settings round-trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "tuned";
 
     pluginrack::AudioSettings audio;
@@ -490,7 +553,7 @@ TEST_CASE("scene audio settings round-trip") {
 
 TEST_CASE("scene v6 audio hardening round-trips") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "hardened";
 
     pluginrack::AudioSettings audio;
@@ -512,14 +575,15 @@ TEST_CASE("scene v6 audio hardening round-trips") {
 
 TEST_CASE("scene v7 audio probe cap round-trips") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     pluginrack::AudioSettings audio;
     audio.wasapiProbeCapEnabled = true;
     audio.wasapiProbeCapChannels = 16;
     original.audio = audio;
 
     const std::string json = pluginrack::toJson(original);
-    REQUIRE(json.find("\"schemaVersion\":11") != std::string::npos);
+    REQUIRE(json.find("\"schemaVersion\":" + std::to_string(pluginrack::kSchemaVersion)) !=
+            std::string::npos);
     REQUIRE(json.find("\"wasapiProbeCapChannels\":16") != std::string::npos);
     const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
     REQUIRE(loaded.errors.empty());
@@ -615,7 +679,7 @@ TEST_CASE("legacy ladder-recovery and preview-mode keys still load") {
 
 TEST_CASE("v5 scenes keep their tuning without the legacy opt-in gate") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     pluginrack::AudioSettings audio;
     audio.lowLatencyInput = true;
     audio.lowLatencyOutputs = true;
@@ -645,7 +709,7 @@ TEST_CASE("a scene written with the retired stream class still loads") {
     CHECK(loaded.scene->outputs[0].name == "mains");
 
     pluginrack::Scene fresh;
-    fresh.schemaVersion = 11;
+    fresh.schemaVersion = pluginrack::kSchemaVersion;
     pluginrack::Output output;
     output.id = 1;
     output.name = "mains";
@@ -662,7 +726,7 @@ TEST_CASE("a scene without an audio block leaves the tuning unset") {    const p
 
 TEST_CASE("a split left and right send survives a round trip") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.name = "split-send";
 
     pluginrack::Channel channel;
@@ -694,7 +758,7 @@ TEST_CASE("a split left and right send survives a round trip") {
 
 TEST_CASE("a matched send stores one level and stays compact") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
     original.channels.push_back(pluginrack::Channel{});
     original.outputs.push_back(pluginrack::Output{});
     pluginrack::Route route;
@@ -714,7 +778,7 @@ TEST_CASE("a matched send stores one level and stays compact") {
 
 TEST_CASE("side-chain routing and aux buses round-trip at schema 8") {
     pluginrack::Scene original;
-    original.schemaVersion = 11;
+    original.schemaVersion = pluginrack::kSchemaVersion;
 
     pluginrack::Channel channel;
     channel.id = 1;
@@ -852,4 +916,170 @@ TEST_CASE("an item tap carries its chain row type and older taps stay id-only") 
     REQUIRE(legacy.scene.has_value());
     REQUIRE_FALSE(legacy.scene->routes.front().tap.hasItemType);
     REQUIRE(legacy.scene->routes.front().tap.itemId == 1u);
+}
+
+TEST_CASE("output firstChannel survives a round trip") {
+    pluginrack::Scene original;
+    original.schemaVersion = pluginrack::kSchemaVersion;
+    original.name = "pair";
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    output.firstChannel = 2;
+    original.outputs.push_back(output);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"firstChannel\":2") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    REQUIRE(loaded.scene->outputs.front().firstChannel == 2);
+}
+
+TEST_CASE("outputs saved before the pair picker load on 1/2") {
+    // A v11 file carries no firstChannel key; it played 1/2 then and must
+    // keep playing 1/2 now.
+    const std::string json = R"({)"
+                             R"("schemaVersion": 11,)"
+                             R"("name": "legacy",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1, "name": "mic"}],)"
+                             R"("outputs": [{"id": 1, "name": "mains", "deviceId": "out-1"}],)"
+                             R"("routes": [{"channelId": 1, "outputId": 1}]})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->outputs.front().firstChannel == 0);
+}
+
+TEST_CASE("dynamics depth settings round-trip at schema 14") {
+    pluginrack::Scene original;
+    original.schemaVersion = pluginrack::kSchemaVersion;
+    original.name = "depth";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+
+    pluginrack::DynamicsEffect effect;
+    effect.id = 1;
+    effect.holdMs = 250.0f;
+    effect.hysteresisDb = 6.0f;
+    effect.sidechainHz = 120.0f;
+    effect.rmsDetector = true;
+    effect.mixPercent = 37.5f;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.effects = {effect};
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    original.outputs.push_back(output);
+
+    pluginrack::Route route;
+    route.channelId = 1;
+    route.outputId = 1;
+    original.routes.push_back(route);
+
+    const std::string json = pluginrack::toJson(original);
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+
+    const pluginrack::DynamicsEffect& restored = loaded.scene->channels.front().effects.front();
+    REQUIRE(restored.holdMs == 250.0f);
+    REQUIRE(restored.hysteresisDb == 6.0f);
+    REQUIRE(restored.sidechainHz == 120.0f);
+    REQUIRE(restored.rmsDetector);
+    REQUIRE(restored.mixPercent == 37.5f);
+}
+
+TEST_CASE("a v13 scene loads the pre-v14 dynamics defaults") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 13,)"
+                             R"("name": "pre-v14",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1, "name": "mic", "effects": [)"
+                             R"({"id": 1, "type": "Compressor"},)"
+                             R"({"id": 2, "type": "Gate"})"
+                             R"(]}],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": [{"channelId": 1, "outputId": 1}]})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    const auto& effects = loaded.scene->channels.front().effects;
+    REQUIRE(effects.size() == 2);
+    REQUIRE(effects[0].holdMs == 0.0f);
+    REQUIRE(effects[0].hysteresisDb == 0.0f);
+    REQUIRE(effects[0].sidechainHz == 0.0f);
+    REQUIRE(effects[0].rmsDetector == false);
+    REQUIRE(effects[0].mixPercent == 100.0f);
+    // The gate shares the same absent-field defaults.
+    REQUIRE(effects[1].holdMs == 0.0f);
+    REQUIRE(effects[1].hysteresisDb == 0.0f);
+    REQUIRE(effects[1].sidechainHz == 0.0f);
+}
+
+TEST_CASE("spectral denoiser fft size round-trips at schema 15") {
+    pluginrack::Scene original;
+    original.schemaVersion = pluginrack::kSchemaVersion;
+    original.name = "denoiser fft";
+    original.sampleRate = 48000;
+    original.bufferFrames = 256;
+
+    pluginrack::SpectralDenoiserEffect effect =
+        pluginrack::makeDefaultSpectralDenoiserEffect(4);
+    effect.mode = pluginrack::SpectralDenoiserMode::Learn;
+    effect.fftSize = 2048;
+
+    pluginrack::Channel channel;
+    channel.id = 1;
+    channel.spectralDenoiserEffects = {effect};
+    channel.chain = {{pluginrack::ChainItemType::SpectralDenoiser, 4}};
+    original.channels.push_back(channel);
+
+    pluginrack::Output output;
+    output.id = 1;
+    output.name = "mains";
+    original.outputs.push_back(output);
+
+    const std::string json = pluginrack::toJson(original);
+    REQUIRE(json.find("\"fftSize\":2048") != std::string::npos);
+
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(*loaded.scene == original);
+    const auto& restored = loaded.scene->channels.front().spectralDenoiserEffects.front();
+    REQUIRE(restored.fftSize == 2048);
+}
+
+TEST_CASE("a v14 scene loads the 512-sample denoiser frame") {
+    const std::string json = R"({)"
+                             R"("schemaVersion": 14,)"
+                             R"("name": "pre-v15",)"
+                             R"("sampleRate": 48000,)"
+                             R"("bufferFrames": 256,)"
+                             R"("channels": [{"id": 1, "name": "mic",)"
+                             R"("spectralDenoiserEffects": [)"
+                             R"({"id": 1, "mode": "Adaptive", "reductionDb": 12.0,)"
+                             R"("profileSampleRate": 0.0, "noiseProfile": []})"
+                             R"(]}],)"
+                             R"("outputs": [{"id": 1, "name": "mains"}],)"
+                             R"("routes": [{"channelId": 1, "outputId": 1}]})";
+    const pluginrack::SceneLoadResult loaded = pluginrack::fromJson(json);
+    REQUIRE(loaded.errors.empty());
+    REQUIRE(loaded.scene.has_value());
+    REQUIRE(loaded.scene->schemaVersion == 14);
+    const auto& effects = loaded.scene->channels.front().spectralDenoiserEffects;
+    REQUIRE(effects.size() == 1);
+    REQUIRE(effects.front().fftSize == 512);
 }

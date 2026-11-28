@@ -36,7 +36,8 @@ std::size_t bandForFrequency(const MultibandEffect& effect, float frequency) {
 std::vector<float> makeMultibandTargetTrace(const MultibandEffect& effect,
                                             std::size_t binCount,
                                             float minHz,
-                                            float maxHz) {
+                                            float maxHz,
+                                            double sampleRateHz) {
     std::vector<float> trace(binCount, 0.0f);
     if (binCount == 0 || effect.bands.empty()) return trace;
 
@@ -47,12 +48,16 @@ std::vector<float> makeMultibandTargetTrace(const MultibandEffect& effect,
         const float frequency = logFrequency(position, minHz, maxHz);
         const auto bandIndex = bandForFrequency(effect, frequency);
         const auto& band = effect.bands[bandIndex];
-        const float amplitude = std::clamp(
-            0.8f + std::abs(finiteOr(band.makeupDb, 0.0f)) * 0.15f
-                + std::max(0.0f, finiteOr(band.ratio, 1.0f) - 1.0f) * 0.35f
-                + std::max(0.0f, finiteOr(band.kneeDb, 0.0f)) * 0.04f,
-            0.5f, 8.0f);
-        trace[bin] = clampGraphDb(amplitude);
+        // The band's real LR4 split magnitude at this bin plus its trims. The
+        // static curve is evaluated at the band's threshold, where it is
+        // exactly 0 dB, so the target is the shape the audio path produces
+        // rather than a per-band level.
+        const float magnitude = multibandBandMagnitude(effect, bandIndex, frequency, sampleRateHz);
+        const float gainDb = dsp::gainToDb(std::max(magnitude, 1.0e-6f))
+            + finiteOr(band.inputGainDb, 0.0f)
+            + finiteOr(band.makeupDb, 0.0f)
+            + multibandStaticGainDb(finiteOr(band.thresholdDb, -18.0f), band);
+        trace[bin] = clampGraphDb(gainDb);
     }
     return trace;
 }
@@ -62,7 +67,8 @@ void fillMultibandGainChangeTrace(const MultibandEffect& effect,
                                   std::size_t binCount,
                                   std::vector<float>& out,
                                   float minHz,
-                                  float maxHz) {
+                                  float maxHz,
+                                  double sampleRateHz) {
     out.assign(binCount, 0.0f);
     if (binCount == 0 || effect.bands.empty()) return;
 
@@ -75,7 +81,10 @@ void fillMultibandGainChangeTrace(const MultibandEffect& effect,
         const float reduction = bandIndex < reductionsDb.size()
             ? std::abs(finiteOr(reductionsDb[bandIndex], 0.0f))
             : 0.0f;
-        out[bin] = clampGraphDb(-reduction);
+        // The band only reduces where it has signal: weight the meter value by
+        // the split's power response at this bin.
+        const float magnitude = multibandBandMagnitude(effect, bandIndex, frequency, sampleRateHz);
+        out[bin] = clampGraphDb(-reduction * magnitude * magnitude);
     }
 }
 
@@ -83,9 +92,10 @@ std::vector<float> makeMultibandGainChangeTrace(const MultibandEffect& effect,
                                                 const std::vector<float>& reductionsDb,
                                                 std::size_t binCount,
                                                 float minHz,
-                                                float maxHz) {
+                                                float maxHz,
+                                                double sampleRateHz) {
     std::vector<float> trace;
-    fillMultibandGainChangeTrace(effect, reductionsDb, binCount, trace, minHz, maxHz);
+    fillMultibandGainChangeTrace(effect, reductionsDb, binCount, trace, minHz, maxHz, sampleRateHz);
     return trace;
 }
 
@@ -94,19 +104,30 @@ void fillDeEsserGainReductionTrace(const DeEsserEffect& effect,
                                    std::size_t binCount,
                                    std::vector<float>& out,
                                    float minHz,
-                                   float maxHz) {
+                                   float maxHz,
+                                   double sampleRateHz) {
     out.assign(binCount, 0.0f);
     const float reduction = std::abs(finiteOr(reductionDb, 0.0f));
-    const float center = std::clamp(finiteOr(effect.freqHz, 6000.0f), minHz, maxHz);
-    const float q = std::max(0.1f, finiteOr(effect.q, 2.0f));
+    const auto band = deEsserBandCoefficients(effect, sampleRateHz);
+    // Split mode leaves everything outside the band alone and scales the band
+    // by g: y = in + band*(g - 1), so the steady-state gain at a bin is
+    // 1 + (g - 1)*H, H the band-pass response. Wideband mode scales the whole
+    // signal, i.e. flat.
+    const bool split = effect.mode == DeEsserMode::Split;
+    const float gain = std::pow(10.0f, -reduction / 20.0f);
     for (std::size_t bin = 0; bin < binCount; ++bin) {
         const float position = binCount > 1
             ? static_cast<float>(bin) / static_cast<float>(binCount - 1)
             : 0.5f;
         const float frequency = logFrequency(position, minHz, maxHz);
-        const float distance = std::log2(std::max(1.0f, frequency) / center);
-        const float width = 0.85f / q;
-        out[bin] = clampGraphDb(-reduction * std::exp(-0.5f * (distance / width) * (distance / width)));
+        float binDb = -reduction;
+        if (split) {
+            const auto bandResponse = dsp::biquadResponse(band, frequency, sampleRateHz);
+            const float re = 1.0f + (gain - 1.0f) * bandResponse.re;
+            const float im = (gain - 1.0f) * bandResponse.im;
+            binDb = dsp::gainToDb(std::sqrt(re * re + im * im));
+        }
+        out[bin] = clampGraphDb(binDb);
     }
 }
 
@@ -114,9 +135,10 @@ std::vector<float> makeDeEsserGainReductionTrace(const DeEsserEffect& effect,
                                                  float reductionDb,
                                                  std::size_t binCount,
                                                  float minHz,
-                                                 float maxHz) {
+                                                 float maxHz,
+                                                 double sampleRateHz) {
     std::vector<float> trace;
-    fillDeEsserGainReductionTrace(effect, reductionDb, binCount, trace, minHz, maxHz);
+    fillDeEsserGainReductionTrace(effect, reductionDb, binCount, trace, minHz, maxHz, sampleRateHz);
     return trace;
 }
 

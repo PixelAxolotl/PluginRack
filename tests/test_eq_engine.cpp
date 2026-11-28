@@ -372,6 +372,140 @@ TEST_CASE("extreme shelf settings stay finite") {
     }
 }
 
+TEST_CASE("eq shelf Q above one changes the shape and stays finite") {
+    // The shelf clamped its RBJ slope at Q 1, so every Q above 1 drew and
+    // sounded identical. The slope now folds past 1 as 1/Q: Q 3 and Q 20 must
+    // both differ from Q 1 and stay finite at a normal +9 dB shelf.
+    auto shelfBands = [](float q) {
+        auto bands = defaultEqBands();
+        for (auto& band : bands) {
+            band.enabled = false;
+            band.solo = false;
+        }
+        bands[1].enabled = true;
+        bands[1].type = EqType::LowShelf;
+        bands[1].freqHz = 200.0f;
+        bands[1].gainDb = 9.0f;
+        bands[1].q = q;
+        return bands;
+    };
+    auto render = [&shelfBands](float q) {
+        EqEngine engine;
+        engine.prepare(48000.0);
+        engine.setBands(shelfBands(q));
+        constexpr int kFrames = 1024;
+        std::vector<float> L(static_cast<std::size_t>(kFrames));
+        std::vector<float> R(static_cast<std::size_t>(kFrames));
+        fillSignal(L.data(), R.data(), kFrames);
+        engine.process(L.data(), R.data(), kFrames);
+        return L;
+    };
+
+    const std::vector<float> unitQ = render(1.0f);
+    const std::vector<float> q3 = render(3.0f);
+    const std::vector<float> q20 = render(20.0f);
+
+    bool differs3 = false;
+    bool differs20 = false;
+    for (std::size_t i = 0; i < unitQ.size(); ++i) {
+        REQUIRE(std::isfinite(q3[i]));
+        REQUIRE(std::isfinite(q20[i]));
+        if (std::fabs(q3[i] - unitQ[i]) > 1e-6f) differs3 = true;
+        if (std::fabs(q20[i] - unitQ[i]) > 1e-6f) differs20 = true;
+    }
+    REQUIRE(differs3);
+    REQUIRE(differs20);
+}
+
+TEST_CASE("eq 24 and 48 dB/oct slopes attenuate more than 12") {
+    // One soloed filter point, a tone on the stop side, tail RMS only. Each
+    // extra stage repeats the same biquad, so the stop band must keep dropping.
+    const auto tailRms = [](EqType type, float cutoffHz, int slopeDbPerOct, double toneHz) {
+        auto bands = defaultEqBands();
+        for (auto& band : bands) {
+            band.enabled = false;
+            band.solo = false;
+        }
+        bands[0].enabled = true;
+        bands[0].solo = true;
+        bands[0].type = type;
+        bands[0].freqHz = cutoffHz;
+        bands[0].slopeDbPerOct = slopeDbPerOct;
+
+        EqEngine engine;
+        engine.prepare(48000.0);
+        engine.setBands(bands);
+
+        constexpr int kFrames = 8192;
+        std::vector<float> L(static_cast<std::size_t>(kFrames));
+        std::vector<float> R(static_cast<std::size_t>(kFrames));
+        for (int i = 0; i < kFrames; ++i) {
+            const double t = static_cast<double>(i) / 48000.0;
+            const float v = static_cast<float>(
+                0.5 * std::sin(2.0 * 3.14159265358979323846 * toneHz * t));
+            L[static_cast<std::size_t>(i)] = v;
+            R[static_cast<std::size_t>(i)] = v;
+        }
+        engine.process(L.data(), R.data(), kFrames);
+
+        double sum = 0.0;
+        for (int i = kFrames / 2; i < kFrames; ++i) {
+            const double sample = L[static_cast<std::size_t>(i)];
+            REQUIRE(std::isfinite(sample));
+            sum += sample * sample;
+        }
+        return std::sqrt(sum / (kFrames / 2));
+    };
+
+    // High-pass at 1 kHz, 250 Hz tone: every extra stage cuts deeper.
+    const double hp12 = tailRms(EqType::HighPass, 1000.0f, 12, 250.0);
+    const double hp24 = tailRms(EqType::HighPass, 1000.0f, 24, 250.0);
+    const double hp48 = tailRms(EqType::HighPass, 1000.0f, 48, 250.0);
+    REQUIRE(hp24 < hp12);
+    REQUIRE(hp48 < hp24);
+
+    // Low-pass at 1 kHz, 4 kHz tone: same rule on the other side.
+    const double lp12 = tailRms(EqType::LowPass, 1000.0f, 12, 4000.0);
+    const double lp24 = tailRms(EqType::LowPass, 1000.0f, 24, 4000.0);
+    const double lp48 = tailRms(EqType::LowPass, 1000.0f, 48, 4000.0);
+    REQUIRE(lp24 < lp12);
+    REQUIRE(lp48 < lp24);
+}
+
+TEST_CASE("eq 12 dB/oct is the single-stage filter") {
+    // 12 dB/oct must stay bit-identical to one RBJ biquad, which is what every
+    // scene before the slope field was written against.
+    auto bands = defaultEqBands();
+    for (auto& band : bands) {
+        band.enabled = false;
+    }
+    bands[0].enabled = true;
+    bands[0].solo = true;
+    bands[0].slopeDbPerOct = 12;
+
+    EqEngine engine;
+    engine.prepare(48000.0);
+    engine.setBands(bands);
+
+    constexpr int kFrames = 512;
+    std::vector<float> L(static_cast<std::size_t>(kFrames));
+    std::vector<float> R(static_cast<std::size_t>(kFrames));
+    fillSignal(L.data(), R.data(), kFrames);
+    const std::vector<float> refL = L;
+    const std::vector<float> refR = R;
+    engine.process(L.data(), R.data(), kFrames);
+
+    const dsp::Biquad c = dsp::highPass(bands[0].freqHz, 48000.0, dsp::kButterworthQ);
+    std::vector<float> directL = refL;
+    std::vector<float> directR = refR;
+    float s1L = 0.0f, s2L = 0.0f, s1R = 0.0f, s2R = 0.0f;
+    dsp::applyBiquad(directL.data(), kFrames, c, s1L, s2L);
+    dsp::applyBiquad(directR.data(), kFrames, c, s1R, s2R);
+
+    REQUIRE(L == directL);
+    REQUIRE(R == directR);
+}
+
 TEST_CASE("eq prepare resets biquad states") {
     // A sample-rate change re-prepares every strip. Stale biquad state from
     // the old rate used to leak into the first block after prepare(); the

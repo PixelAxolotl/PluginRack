@@ -36,7 +36,8 @@ public:
 private:
     class SaveRowComponent final : public juce::Component {
     public:
-        SaveRowComponent(const juce::String& name, bool isDefault, bool isSelected);
+        SaveRowComponent(const juce::String& displayName, const juce::File& file, bool isDefault,
+                         bool isSelected, bool readOnly);
 
         void setDefaultActive(bool isDefault);
         void setSelected(bool isSelected);
@@ -46,6 +47,7 @@ private:
         void resized() override;
         void paint(juce::Graphics& g) override;
         void mouseUp(const juce::MouseEvent& event) override;
+        bool keyPressed(const juce::KeyPress& key) override;
 
         std::function<void()> onSelect;
         std::function<void()> onLoad;
@@ -57,6 +59,7 @@ private:
         juce::String saveName;
         bool isDefault = false;
         bool isSelected = false;
+        bool isReadOnly = false;
 
         juce::Label nameLabel;
         juce::Label metaLabel;
@@ -68,10 +71,17 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SaveRowComponent)
     };
 
+    // A named save, or the previous session's autosave shown read-only.
+    struct Entry {
+        juce::String name;
+        juce::File file;
+        bool readOnly = false;
+    };
+
     void layoutRows();
     void updateSelection();
     void setLoading(bool isLoading);
-    void loadSave(const juce::String& name);
+    void loadSave(const Entry& entry);
     void promptRename(const juce::String& oldName);
     void confirmDelete(const juce::String& name);
 
@@ -84,7 +94,9 @@ private:
     juce::Viewport viewport;
     juce::Component content;
     std::vector<std::unique_ptr<SaveRowComponent>> rows;
+    std::vector<Entry> entries;
     int selectedRow = -1;
+    juce::String selectedName;
     std::atomic<bool> loading_{false};
 
     static constexpr int kRowHeight = 64;

@@ -25,6 +25,10 @@ struct DeEsserEffect {
 DeEsserEffect makeDefaultDeEsserEffect(std::uint32_t id = 1);
 std::vector<DeEsserEffect> defaultDeEsserEffects();
 float deEsserStaticGainDb(float levelDb, const DeEsserEffect& effect);
+// Sibilance-band coefficients: the one filter the processor, the level meter
+// and the drawn reduction curve all run. A non-finite frequency or Q returns
+// the identity biquad.
+dsp::Biquad deEsserBandCoefficients(const DeEsserEffect& effect, double sampleRateHz) noexcept;
 // Sibilance-band level (dBFS peak) for a UI tick: runs the same band-pass
 // the audio processor uses on a copy of the tap, measures the band peak,
 // and returns its level. The card and editor GR bars were fed broadband

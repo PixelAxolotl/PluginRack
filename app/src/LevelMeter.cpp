@@ -25,6 +25,13 @@ juce::String intervalText(int ms) {
     return ms >= 1000 ? juce::String(ms / 1000) + " s" : juce::String(ms) + " ms";
 }
 
+// Loudness arrives in LUFS already (dB relative to full scale), so unlike the
+// peak/RMS rows there is no linear-to-dB step.
+juce::String loudnessText(float lufs) {
+    if (lufs <= -69.5f) return juce::String("-inf");
+    return juce::String(lufs, 1);
+}
+
 // Below this the meter is silent: a decayed bar approaches zero but never
 // reaches it, and a value this small is far under one pixel and under the
 // 0.1 dB step of the readouts. Snapping it to 0 lets a quiet meter stop
@@ -56,6 +63,11 @@ const TextArrangement& rmsNameLabel() {
     return label;
 }
 
+const TextArrangement& lufsNameLabel() {
+    static const TextArrangement label = makeLabel("LUFS");
+    return label;
+}
+
 int yForLevel(juce::Rectangle<int> bar, float proportion) {
     return juce::jlimit(bar.getY(), bar.getBottom(),
                         juce::roundToInt(static_cast<float>(bar.getBottom())
@@ -78,19 +90,22 @@ juce::Rectangle<int> LevelMeter::faderValueBounds(juce::Slider& fader) {
 
 LevelMeter::LevelMeter(juce::Slider& faderToFollow, juce::Atomic<float>& leftPeak,
                        juce::Atomic<float>& rightPeak, juce::Atomic<float>& leftRms,
-                       juce::Atomic<float>& rightRms)
+                       juce::Atomic<float>& rightRms, juce::Atomic<float>* loudness)
     : fader(faderToFollow),
       leftPeakSource(leftPeak),
       rightPeakSource(rightPeak),
       leftRmsSource(leftRms),
-      rightRmsSource(rightRms) {
+      rightRmsSource(rightRms),
+      loudnessSource(loudness) {
     // The strip may be built while audio is already running; start from the
     // live values instead of an empty bar.
     displayedPeakL = heldPeakL = leftPeakSource.get();
     displayedPeakR = heldPeakR = rightPeakSource.get();
     displayedRmsL = leftRmsSource.get();
     displayedRmsR = rightRmsSource.get();
-    setTooltip("Peak, RMS and the held peak (interval is set in Settings)");
+    if (loudnessSource != nullptr) displayedLoudness = loudnessSource->get();
+    setTooltip("Peak, RMS, momentary loudness (LUFS) and the held peak "
+               "(interval is set in Settings)");
     startTimerHz(30);
 }
 
@@ -153,11 +168,16 @@ void LevelMeter::paint(juce::Graphics& g) {
     }
     const int barHeight = barBottom - barTop;
 
-    const int readoutHeight = juce::jmin(22, barTop - well.getY() - 1);
+    const int readoutHeight = juce::jmin(33, barTop - well.getY() - 1);
     if (readoutHeight >= 16) {
         auto readouts = juce::Rectangle<int>(well.getX() + 2, barTop - readoutHeight - 1,
                                              well.getWidth() - 4, readoutHeight);
-        auto peakRow = readouts.removeFromTop(readoutHeight / 2);
+        const bool loudnessMode =
+            loudnessSource != nullptr && readoutMode() == Readout::Lufs;
+        // Two rows in both modes: peak on top, then RMS or momentary loudness.
+        // Allocating three rows left a blank gap in LUFS mode.
+        const int rowHeight = readoutHeight / 2;
+        auto peakRow = readouts.removeFromTop(rowHeight);
         // Glyphs are drawn at their natural size and placed by their own
         // bounds: a fixed rect either squeezes a wide value or clips its last
         // digit on this narrow meter. Both arrangements are cached — the label
@@ -183,7 +203,13 @@ void LevelMeter::paint(juce::Graphics& g) {
         refreshValueGlyphs(peakGlyphs, dbText(loudestPeak));
         refreshValueGlyphs(rmsGlyphs, dbText(loudestRms));
         drawReadout(peakRow, peakGlyphs, peakNameLabel());
-        drawReadout(readouts, rmsGlyphs, rmsNameLabel());
+        auto rmsRow = readouts.removeFromTop(rowHeight);
+        if (loudnessMode) {
+            refreshValueGlyphs(lufsGlyphs, loudnessText(displayedLoudness));
+            drawReadout(rmsRow, lufsGlyphs, lufsNameLabel());
+        } else {
+            drawReadout(rmsRow, rmsGlyphs, rmsNameLabel());
+        }
     }
 
     constexpr int gap = 2;
@@ -274,6 +300,7 @@ void LevelMeter::timerCallback() {
     const float previousRmsR = displayedRmsR;
     const float previousHeldL = heldPeakL;
     const float previousHeldR = heldPeakR;
+    const float previousLoudness = displayedLoudness;
 
     // A decayed bar approaches zero asymptotically; snap it to true silence so
     // a meter with no signal stops repainting instead of redrawing forever.
@@ -290,6 +317,10 @@ void LevelMeter::timerCallback() {
 
     displayedRmsL = snapSilent(smoothedRms(displayedRmsL, juce::jmax(0.0f, leftRmsSource.get())));
     displayedRmsR = snapSilent(smoothedRms(displayedRmsR, juce::jmax(0.0f, rightRmsSource.get())));
+    // The engine already averages loudness over 400 ms, so the readout takes
+    // the published value as it is.
+    if (loudnessSource != nullptr)
+        displayedLoudness = juce::jlimit(-70.0f, 6.0f, loudnessSource->get());
 
     // The held peak tracks the loudest value and, once its interval is up,
     // drops back to whatever the live peak is now and holds that for the next
@@ -312,6 +343,7 @@ void LevelMeter::timerCallback() {
     };
     if (moved(displayedPeakL, previousPeakL) || moved(displayedPeakR, previousPeakR)
         || moved(displayedRmsL, previousRmsL) || moved(displayedRmsR, previousRmsR)
-        || moved(heldPeakL, previousHeldL) || moved(heldPeakR, previousHeldR))
+        || moved(heldPeakL, previousHeldL) || moved(heldPeakR, previousHeldR)
+        || std::abs(displayedLoudness - previousLoudness) >= 0.05f)
         repaint();
 }

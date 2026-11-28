@@ -54,7 +54,7 @@ and a DAW does not offer this routing surface.
 
 Confirmed by the implementation and its design spec:
 
-- Per-strip insert chain of up to six slots, hosted in-process, ordered with built-in effects.
+- Per-strip insert chain of up to 64 VST3 slots, hosted in-process, ordered with built-in effects.
 - Channel processing: six-band EQ with delay, a compressor and a gate, plus
   Multiband Comp, De-esser, and Limiter. The compressor and the gate share one
   `Dynamics` editor and are drawn as one `Dynamics` card with a bypass switch
@@ -64,7 +64,8 @@ Confirmed by the implementation and its design spec:
 - Many-to-many routing matrix; each channel→output cell is a send with its own
   level. Outputs can be added and removed at runtime.
 - Mono and stereo channels; mono is upmixed to stereo for processing.
-- VST3 required; VST2 best-effort behind the same host interface.
+- VST3 only. The host interface follows JUCE's AudioPluginInstance, so a VST2
+  build would slot in, but the shipped build has VST2 hosting disabled.
 - Real-time constraints are binding: the audio thread must not allocate, and UI
   work must never cost audio. Meter, analyzer and graph meters read from
   lock-free taps.

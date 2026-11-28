@@ -36,16 +36,22 @@ constexpr std::size_t kMaxEffects = 4;
 // VST inserts are deliberately unbounded per strip; the engine owns the real
 // cap so a scene validator can never disagree with a live strip about how
 // many inserts it holds.
+// A chain row is one insert or one built-in effect, so the row ceiling must
+// leave room for every insert the engine allows plus the built-ins.
 constexpr std::size_t kMaxInserts = 64;
-constexpr std::size_t kMaxChainItems = 16;
-constexpr std::size_t kMaxChannels = 64;
-constexpr std::size_t kMaxOutputs = 32;
+constexpr std::size_t kMaxChainItems = kMaxInserts + 16;
 constexpr std::size_t kMaxWatchedDevices = 64;
 // Buffer sizes the device layer negotiates; anything outside this is a sign of
 // a hand-edited or foreign file, not a real session. 32 is the lowest block an
 // ASIO interface offers (M-Audio M-Track), so a session can legitimately save
 // and restore at that size.
 constexpr int kMinBufferFrames = 32;
+// A device pair offset must name two real channels, so it is even and
+// non-negative. The ceiling only rejects impossible files: the device may
+// open narrower than the save (fewer physical channels), and the runtime
+// falls back to 1/2 there instead of going silent. 62 covers pairs up to
+// 63/64 on large multichannel interfaces.
+constexpr int kMaxOutputFirstChannel = 62;
 constexpr int kMaxBufferFrames = 8192;
 constexpr float kMinDynamicsMakeupDb = -24.0f;
 constexpr float kMaxDynamicsMakeupDb = 24.0f;
@@ -81,27 +87,68 @@ void validateEffects(const char* kind, std::uint32_t id,
     std::unordered_set<std::uint32_t> effectIds;
     effectIds.reserve(effects.size() * 2 + 1);
     for (const auto& effect : effects) {
-        if (effect.id == 0 || !std::isfinite(effect.thresholdDb) ||
-            effect.thresholdDb < kMinDynamicsThresholdDb ||
-            effect.thresholdDb > kMaxDynamicsThresholdDb ||
-            !std::isfinite(effect.ratio) || effect.ratio < 1.0f ||
-            effect.ratio > kMaxDynamicsRatio ||
-            !std::isfinite(effect.attackMs) || effect.attackMs <= 0.0f ||
-            effect.attackMs > kMaxDynamicsAttackMs ||
-            !std::isfinite(effect.releaseMs) || effect.releaseMs <= 0.0f ||
-            effect.releaseMs > kMaxDynamicsReleaseMs ||
-            !std::isfinite(effect.makeupDb) ||
-            effect.makeupDb < kMinDynamicsMakeupDb ||
-            effect.makeupDb > kMaxDynamicsMakeupDb ||
-            !std::isfinite(effect.inputGainDb) ||
-            effect.inputGainDb < kMinDynamicsInputGainDb ||
-            effect.inputGainDb > kMaxDynamicsInputGainDb ||
-            !std::isfinite(effect.kneeDb) ||
-            effect.kneeDb < kMinDynamicsKneeDb ||
-            effect.kneeDb > kMaxDynamicsKneeDb) {
+        // Name the field that failed: one generic message left a user with a
+        // 10-parameter editor no clue which knob the scene rejected.
+        const std::string where = std::string(kind) + " " + std::to_string(id) +
+                                  " dynamics effect " + std::to_string(effect.id);
+        const auto flag = [&](const char* field, const char* range) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, id,
-                                  std::string(kind) + " " + std::to_string(id) +
-                                  " has invalid dynamics effect parameters"});
+                              where + " " + field + " out of range " + range});
+        };
+        if (effect.id == 0) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " dynamics effect id must not be zero"});
+        }
+        if (!std::isfinite(effect.thresholdDb) ||
+            effect.thresholdDb < kMinDynamicsThresholdDb ||
+            effect.thresholdDb > kMaxDynamicsThresholdDb) {
+            flag("thresholdDb", "[-60, 0]");
+        }
+        if (!std::isfinite(effect.ratio) || effect.ratio < 1.0f ||
+            effect.ratio > kMaxDynamicsRatio) {
+            flag("ratio", "[1, 80]");
+        }
+        if (!std::isfinite(effect.attackMs) || effect.attackMs <= 0.0f ||
+            effect.attackMs > kMaxDynamicsAttackMs) {
+            flag("attackMs", "(0, 200]");
+        }
+        if (!std::isfinite(effect.releaseMs) || effect.releaseMs <= 0.0f ||
+            effect.releaseMs > kMaxDynamicsReleaseMs) {
+            flag("releaseMs", "(0, 1000]");
+        }
+        if (!std::isfinite(effect.makeupDb) ||
+            effect.makeupDb < kMinDynamicsMakeupDb ||
+            effect.makeupDb > kMaxDynamicsMakeupDb) {
+            flag("makeupDb", "[-24, 24]");
+        }
+        if (!std::isfinite(effect.inputGainDb) ||
+            effect.inputGainDb < kMinDynamicsInputGainDb ||
+            effect.inputGainDb > kMaxDynamicsInputGainDb) {
+            flag("inputGainDb", "[-24, 24]");
+        }
+        if (!std::isfinite(effect.kneeDb) || effect.kneeDb < kMinDynamicsKneeDb ||
+            effect.kneeDb > kMaxDynamicsKneeDb) {
+            flag("kneeDb", "[0, 24]");
+        }
+        if (!std::isfinite(effect.holdMs) || effect.holdMs < kDynamicsMinHoldMs ||
+            effect.holdMs > kDynamicsMaxHoldMs) {
+            flag("holdMs", "[0, 2000]");
+        }
+        if (!std::isfinite(effect.hysteresisDb) ||
+            effect.hysteresisDb < kDynamicsMinHysteresisDb ||
+            effect.hysteresisDb > kDynamicsMaxHysteresisDb) {
+            flag("hysteresisDb", "[0, 24]");
+        }
+        if (!std::isfinite(effect.sidechainHz) ||
+            effect.sidechainHz < kDynamicsMinSidechainHz ||
+            effect.sidechainHz > kDynamicsMaxSidechainHz) {
+            flag("sidechainHz", "[0, 1000]");
+        }
+        if (!std::isfinite(effect.mixPercent) ||
+            effect.mixPercent < kDynamicsMinMixPercent ||
+            effect.mixPercent > kDynamicsMaxMixPercent) {
+            flag("mixPercent", "[0, 100]");
         }
         // The chain refers to effects by id, so a duplicate makes the lookup
         // ambiguous and the strip would run the wrong row.
@@ -204,6 +251,11 @@ void validateSpectralDenoisers(const char* kind, std::uint32_t id,
                               std::string(kind) + " " + std::to_string(id) +
                                   " has an unknown spectral denoiser mode"});
         }
+        if (!isSpectralDenoiserFftSizeSupported(e.fftSize)) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              std::string(kind) + " " + std::to_string(id) +
+                                  " spectral denoiser fftSize out of range [512, 1024, 2048, 4096]"});
+        }
         if (!std::isfinite(e.reductionDb) || e.reductionDb < kSpectralDenoiserMinReductionDb ||
             e.reductionDb > kSpectralDenoiserMaxReductionDb) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, id,
@@ -263,7 +315,7 @@ void validateSpectralDenoisers(const char* kind, std::uint32_t id,
         if (!hasProfile) {
             continue;
         }
-        if (e.noiseProfile.size() != static_cast<std::size_t>(kSpectralDenoiserBinCount) ||
+        if (!isSpectralDenoiserProfileSize(e.noiseProfile.size()) ||
             !std::isfinite(e.profileSampleRate) || e.profileSampleRate <= 0.0) {
             errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                               std::string(kind) + " " + std::to_string(id) +
@@ -314,7 +366,8 @@ void validateChain(const char* kind, std::uint32_t id, const std::vector<ChainIt
     if (chain.size() > kMaxChainItems) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                           std::string(kind) + " " + std::to_string(id) + " chain has " +
-                              std::to_string(chain.size()) + " items, expected at most 16"});
+                              std::to_string(chain.size()) + " items, expected at most " +
+                              std::to_string(kMaxChainItems)});
     }
     std::unordered_set<std::uint32_t> insertIds;
     for (const InsertSlot& slot : inserts) insertIds.insert(slot.id);
@@ -420,6 +473,11 @@ void validateEqBands(const char* kind, std::uint32_t id, const std::vector<EqBan
             errors.push_back({SceneErrorCode::ValueOutOfRange, id,
                               where + " q out of range [0.1, 20]"});
         }
+        if (band.slopeDbPerOct != 12 && band.slopeDbPerOct != 24 &&
+            band.slopeDbPerOct != 48) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, id,
+                              where + " slopeDbPerOct must be 12, 24 or 48 dB/oct"});
+        }
     }
 }
 
@@ -496,12 +554,12 @@ std::vector<SceneError> validate(const Scene& scene) {
     }
     // Caps keep a hand-edited file from reserving an unbounded number of
     // strips and routes in prepare().
-    if (scene.channels.size() > kMaxChannels) {
+    if (scene.channels.size() > pluginrack::kMaxChannels) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
                           "scene has " + std::to_string(scene.channels.size()) +
                               " channels, expected at most 64"});
     }
-    if (scene.outputs.size() > kMaxOutputs) {
+    if (scene.outputs.size() > pluginrack::kMaxOutputs) {
         errors.push_back({SceneErrorCode::ValueOutOfRange, 0,
                           "scene has " + std::to_string(scene.outputs.size()) +
                               " outputs, expected at most 32"});
@@ -585,6 +643,13 @@ std::vector<SceneError> validate(const Scene& scene) {
         if (!outputIds.insert(output.id).second) {
             errors.push_back({SceneErrorCode::DuplicateOutputId, output.id,
                               "duplicate output id " + std::to_string(output.id)});
+        }
+        if (output.firstChannel < 0 || output.firstChannel > kMaxOutputFirstChannel) {
+            errors.push_back({SceneErrorCode::ValueOutOfRange, output.id,
+                              "output " + std::to_string(output.id) + " firstChannel " +
+                                  std::to_string(output.firstChannel) +
+                                  " must be a channel offset from 0 to " +
+                                  std::to_string(kMaxOutputFirstChannel)});
         }
         validateStrip("output", output, errors);
     }

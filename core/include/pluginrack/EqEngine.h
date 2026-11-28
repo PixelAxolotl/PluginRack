@@ -18,8 +18,18 @@ struct EqBand {
     float q;
     bool enabled;
     bool solo;
+    // Steepness of a high-pass/low-pass point in dB per octave: 12, 24 or 48.
+    // The engine runs 1, 2 or 4 identical biquads at the band's cutoff and Q,
+    // so 12 is exactly the single-stage filter scenes used before schema 13.
+    // Defaults to 12, so old files and every other type keep today's shape.
+    int slopeDbPerOct = 12;
     bool operator==(const EqBand&) const = default;
 };
+
+// Cascade stages a band's slope asks for: 1 (12 dB/oct), 2 (24) or 4 (48).
+// Any other value (only reachable from a hand-edited scene the validator would
+// reject) runs as 12, and non-filter bands always run one stage.
+int eqBandStageCount(const EqBand& band) noexcept;
 
 // HP 80 Hz, low shelf 200 Hz, peaks 500 Hz / 1 kHz / 3 kHz, high shelf 8 kHz,
 // low-pass 12 kHz. All 0 dB, Q 0.707, none solo and all enabled except the
@@ -40,10 +50,12 @@ int eqLatencySamples(bool eqEnabled, bool eqBypassed, float eqDelayMs,
 
 // Fixed seven-band stereo parametric EQ, DF-II transposed biquads, one state
 // per band per channel, followed by an optional delay line (0..kMaxDelayMs)
-// for time-aligning a channel or output. Coefficients are recomputed in
-// prepare()/setBands() only (message thread); process() is a multiply-add
-// loop over preallocated state and never allocates. Non-finite band
-// parameters bypass their band.
+// for time-aligning a channel or output. A high-pass/low-pass band can stack
+// 2 or 4 identical biquads for 24 or 48 dB/oct (see EqBand::slopeDbPerOct);
+// every other band and the 12 dB/oct default run a single stage. Coefficients
+// are recomputed in prepare()/setBands() only (message thread); process() is a
+// multiply-add loop over preallocated state and never allocates. Non-finite
+// band parameters bypass their band.
 // Solo rule: if any band has solo == true, only soloed and enabled bands run.
 class EqEngine {
 public:
@@ -67,15 +79,22 @@ public:
 
 private:
     static constexpr int kNumBands = 7;
+    // Longest cascade a band can ask for: 48 dB/oct runs four biquads, each
+    // with its own state pair per channel and the same coefficients.
+    static constexpr int kMaxStages = 4;
 
     struct BandFilter {
         dsp::Biquad coeffs;
-        float s1L = 0.0f, s2L = 0.0f;
-        float s1R = 0.0f, s2R = 0.0f;
+        int stages = 1;
+        float s1L[kMaxStages]{};
+        float s2L[kMaxStages]{};
+        float s1R[kMaxStages]{};
+        float s2R[kMaxStages]{};
     };
 
     void rebuild();
     static void computeCoeffs(const EqBand& band, double sampleRate, BandFilter& out) noexcept;
+    static void clearState(BandFilter& filter) noexcept;
 
     bool delayActive() const noexcept;
     void ensureDelayLine();
